@@ -1,0 +1,118 @@
+name: ci
+
+on:
+  push:
+    branches: [main, '001-telegram-shop-mvp']
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: shop
+          POSTGRES_PASSWORD: shop_local_only
+          POSTGRES_DB: shop
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U shop -d shop"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 20
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: postgres://shop:shop_local_only@localhost:5432/shop
+      TELEGRAM_BOT_TOKEN: '000000000:TEST_PLACEHOLDER_TOKEN_DO_NOT_USE'
+      TELEGRAM_WEBHOOK_SECRET: local-dev-webhook-secret-change-me
+      SEPAY_WEBHOOK_HMAC_SECRET: local-dev-sepay-hmac-secret-change-me
+      SEPAY_MERCHANT_ACCOUNT_ID: LOCAL-TEST-ACCOUNT
+      VIETQR_BANK_BIN: '970422'
+      VIETQR_ACCOUNT_NUMBER: '0000000000'
+      VIETQR_ACCOUNT_NAME: SHOP DIGITAL
+      VIETQR_BANK_NAME: MB Bank
+      ADMIN_TELEGRAM_USER_ID: '0'
+      VAULT_DRIVER: memory
+      SUPPLIER_DRIVER: fixture
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Prepare test evidence directory
+        run: mkdir -p test-results
+
+      - name: Build compiled artifacts
+        run: npm run build
+
+      - name: Verify Docker runtime for Testcontainers
+        run: docker info
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Secret scan
+        run: npm run secret-scan
+
+      - name: Dependency audit
+        run: npm run audit
+
+      - name: Unit / contract / property / security tests
+        run: npm run test:unit -- --reporter=default --reporter=junit --outputFile.junit=test-results/unit.xml
+
+      - name: Security tests
+        run: npm run test:security -- --reporter=default --reporter=junit --outputFile.junit=test-results/security.xml
+
+      - name: Integration tests
+        run: npm run test:integration -- --reporter=default --reporter=junit --outputFile.junit=test-results/integration.xml
+
+      - name: Acceptance tests
+        run: npm run test:acceptance -- --reporter=default --reporter=junit --outputFile.junit=test-results/acceptance.xml
+
+      - name: Performance tests
+        run: npm run test:performance -- --reporter=default --reporter=junit --outputFile.junit=test-results/performance.xml
+
+      - name: Compiled production migration smoke
+        run: npm run migrate:prod
+
+      - name: Built entrypoint smoke (main + worker resolve, fail closed)
+        run: npx vitest run tests/acceptance/runtime-entrypoints.test.ts --reporter=default --reporter=junit --outputFile.junit=test-results/runtime-entrypoints.xml
+
+      - name: Migration CLI smoke
+        run: npm run migrate:prod
+        env:
+          DATABASE_URL: postgres://shop:shop_local_only@localhost:5432/shop
+
+      - name: Publish test evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test-results/*.xml
+          if-no-files-found: error
+          retention-days: 30

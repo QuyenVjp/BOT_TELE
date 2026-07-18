@@ -1,0 +1,354 @@
+import { sql } from "kysely";
+import type { Db, Executor } from "../../infrastructure/db/transaction.js";
+import { withTransaction } from "../../infrastructure/db/transaction.js";
+import { appendAuditEvent } from "../../modules/identity/audit.js";
+import {
+  isDurableAdminCommandRef,
+  type AdminConfirmationService,
+  type AtomicExecuteResult,
+  type DurableAdminAction,
+} from "../../modules/identity/admin-confirmation.js";
+import type { IdentityTelemetry } from "../../modules/identity/telemetry.js";
+import type { RootActor, RootAdminConfig } from "../../modules/identity/root-admin.js";
+import { guardRootAction } from "../middleware/root-admin.js";
+
+/**
+ * Allowlisted owner callbacks (T097, FR-021–FR-023).
+ *
+ * The owner surface is a FIXED allowlist of operational verbs — catalog
+ * activation/deactivation (kill-switch), discrepancy resolution, and read-only
+ * inspection. There is deliberately no identity-granting verb (FR-022). Low-risk
+ * verbs execute immediately with an audit; high-risk verbs require an expiring,
+ * action-bound confirmation before the effect is applied.
+ */
+
+export const OWNER_COMMANDS = [
+  "catalog.activate",
+  "catalog.deactivate",
+  "discrepancy.resolve",
+  "discrepancy.list",
+  "order.inspect",
+] as const;
+
+export type OwnerCommand = (typeof OWNER_COMMANDS)[number];
+
+export function isOwnerCommand(command: string): command is OwnerCommand {
+  return (OWNER_COMMANDS as readonly string[]).includes(command);
+}
+
+export interface AdminCallbackDeps {
+  db: Db;
+  rootConfig: RootAdminConfig;
+  /** The channel_identity row id for the configured owner (audit + confirmation binding). */
+  rootChannelIdentityId: string;
+  confirmation: AdminConfirmationService;
+  telemetry?: IdentityTelemetry;
+}
+
+export interface HandleInput {
+  command: string;
+  actor: RootActor;
+  targetId: string;
+  reason: string;
+  resolutionCode?: string;
+  correlationId: string;
+}
+
+export type HandleResult =
+  | { ok: true; needsConfirmation: false }
+  | {
+      ok: true;
+      needsConfirmation: true;
+      confirmationId: string;
+      challenge: string;
+      expiresAt: string;
+    }
+  | {
+      ok: false;
+      code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "UNKNOWN_COMMAND" | "INVALID_REASON" | "NOT_FOUND";
+      message: string;
+    };
+
+export interface ConfirmActionInput {
+  confirmationId: string;
+  challenge: string;
+  actor: RootActor;
+  correlationId: string;
+}
+
+export type ConfirmActionResult =
+  | { ok: true }
+  | {
+      ok: false;
+      code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "CONFIRM_FAILED" | "NOT_FOUND";
+      message: string;
+    };
+
+interface PendingAction {
+  command: "discrepancy.resolve";
+  targetId: string;
+  reason: string;
+  resolutionCode?: string;
+  actorId: string;
+}
+
+class InvalidDurableAdminActionError extends Error {}
+
+export interface AdminCallbacks {
+  handle(input: HandleInput): Promise<HandleResult>;
+  confirm(input: ConfirmActionInput): Promise<ConfirmActionResult>;
+}
+
+function fingerprintFor(command: string, targetId: string, resolutionCode?: string): string {
+  return `${command}:${targetId}:${resolutionCode ?? ""}`;
+}
+
+function targetTypeFor(command: OwnerCommand): "ProductVariant" | "Discrepancy" | "Order" {
+  if (command.startsWith("catalog.")) return "ProductVariant";
+  if (command.startsWith("discrepancy.")) return "Discrepancy";
+  return "Order";
+}
+
+function pendingActionFrom(action: DurableAdminAction): PendingAction {
+  const payload = action.payloadRedacted;
+  const targetId = payload.targetId;
+  const reason = payload.reason;
+  const actorId = payload.actorId;
+  const resolutionCode = payload.resolutionCode;
+  if (
+    action.commandRef !== "discrepancy.resolve" ||
+    typeof targetId !== "string" ||
+    targetId.length === 0 ||
+    targetId.length > 128 ||
+    typeof reason !== "string" ||
+    reason.trim().length === 0 ||
+    reason.length > 500 ||
+    typeof actorId !== "string" ||
+    !/^\d{1,20}$/.test(actorId) ||
+    (resolutionCode !== undefined &&
+      (typeof resolutionCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(resolutionCode)))
+  ) {
+    throw new InvalidDurableAdminActionError("durable admin action payload is invalid");
+  }
+  const result: PendingAction = {
+    command: action.commandRef,
+    targetId,
+    reason: reason.trim(),
+    actorId,
+  };
+  if (typeof resolutionCode === "string") result.resolutionCode = resolutionCode;
+  return result;
+}
+
+export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
+  const { db, rootConfig, rootChannelIdentityId, confirmation, telemetry } = deps;
+
+  async function applyLowRisk(input: HandleInput, command: OwnerCommand): Promise<HandleResult> {
+    switch (command) {
+      case "catalog.activate":
+      case "catalog.deactivate": {
+        const active = command === "catalog.activate";
+        const updated = await withTransaction(db, async (trx) => {
+          const res = await sql<{ id: string }>`
+            update product_variant
+            set is_active = ${active}, updated_at = now(), version = version + 1
+            where id = ${input.targetId}
+            returning id
+          `.execute(trx);
+          if (res.rows.length === 0) return false;
+          await appendAuditEvent(trx, {
+            actorType: "ROOT_ADMIN",
+            actorId: String(input.actor.numericUserId),
+            action: command,
+            targetType: "ProductVariant",
+            targetId: input.targetId,
+            reason: input.reason,
+            correlationId: input.correlationId,
+            metadataRedacted: { active },
+          });
+          return true;
+        });
+        if (!updated) {
+          return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy biến thể." };
+        }
+        return { ok: true, needsConfirmation: false };
+      }
+      case "discrepancy.list":
+      case "order.inspect": {
+        // Read-only inspection is audited but has no mutation.
+        await appendAuditEvent(db, {
+          actorType: "ROOT_ADMIN",
+          actorId: String(input.actor.numericUserId),
+          action: command,
+          targetType: command === "discrepancy.list" ? "Discrepancy" : "Order",
+          targetId: input.targetId,
+          reason: input.reason,
+          correlationId: input.correlationId,
+        });
+        return { ok: true, needsConfirmation: false };
+      }
+      default:
+        return { ok: false, code: "UNKNOWN_COMMAND", message: "Lệnh không được hỗ trợ." };
+    }
+  }
+
+  async function executeHighRisk(
+    exec: Executor,
+    action: PendingAction,
+    correlationId: string,
+  ): Promise<boolean> {
+    switch (action.command) {
+      case "discrepancy.resolve": {
+        const res = await sql<{ id: string }>`
+          update discrepancy
+          set status = 'RESOLVED',
+              resolution_code = ${action.resolutionCode ?? "MANUAL_RESOLVE"},
+              resolved_at = now()
+          where id = ${action.targetId} and status = 'OPEN'
+          returning id
+        `.execute(exec);
+        if (res.rows.length === 0) return false;
+        await appendAuditEvent(exec, {
+          actorType: "ROOT_ADMIN",
+          actorId: action.actorId,
+          action: "discrepancy.resolve",
+          targetType: "Discrepancy",
+          targetId: action.targetId,
+          reason: action.reason,
+          correlationId,
+          metadataRedacted: { resolutionCode: action.resolutionCode ?? "MANUAL_RESOLVE" },
+        });
+        return true;
+      }
+      default:
+        return false;
+    }
+  }
+
+  return {
+    async handle(input) {
+      if (!isOwnerCommand(input.command)) {
+        return { ok: false, code: "UNKNOWN_COMMAND", message: "Lệnh không được hỗ trợ." };
+      }
+      if (
+        input.reason.trim().length === 0 ||
+        input.reason.length > 500 ||
+        input.targetId.length === 0 ||
+        input.targetId.length > 128 ||
+        (input.resolutionCode !== undefined && !/^[A-Z0-9_]{1,64}$/.test(input.resolutionCode))
+      ) {
+        return { ok: false, code: "INVALID_REASON", message: "Cần nêu lý do." };
+      }
+
+      const gate = await guardRootAction(
+        db,
+        {
+          actor: input.actor,
+          config: rootConfig,
+          correlationId: input.correlationId,
+          action: input.command,
+          targetType: targetTypeFor(input.command),
+          targetId: input.targetId,
+        },
+        telemetry,
+      );
+      if (!gate.ok) {
+        return { ok: false, code: gate.reason, message: "Không được phép." };
+      }
+
+      if (isDurableAdminCommandRef(input.command)) {
+        const fingerprint = fingerprintFor(input.command, input.targetId, input.resolutionCode);
+        const payloadRedacted: Record<string, unknown> = {
+          targetId: input.targetId,
+          reason: input.reason.trim(),
+          actorId: String(input.actor.numericUserId),
+        };
+        if (input.resolutionCode !== undefined) {
+          payloadRedacted.resolutionCode = input.resolutionCode;
+        }
+        const issued = await confirmation.issue({
+          rootChannelIdentityId,
+          actionFingerprint: fingerprint,
+          correlationId: input.correlationId,
+          allowlistedCommandRef: input.command,
+          payloadRedacted,
+        });
+        if (!issued.ok) {
+          return { ok: false, code: "NOT_FOUND", message: "Không tạo được xác nhận." };
+        }
+        return {
+          ok: true,
+          needsConfirmation: true,
+          confirmationId: issued.confirmationId,
+          challenge: issued.challenge,
+          expiresAt: issued.expiresAt,
+        };
+      }
+
+      return applyLowRisk(input, input.command);
+    },
+
+    async confirm(input) {
+      const gate = await guardRootAction(
+        db,
+        {
+          actor: input.actor,
+          config: rootConfig,
+          correlationId: input.correlationId,
+          action: "admin.confirm",
+          targetType: "AdminConfirmation",
+          targetId: input.confirmationId,
+        },
+        telemetry,
+      );
+      if (!gate.ok) {
+        return { ok: false, code: gate.reason, message: "Không được phép." };
+      }
+
+      let executed: AtomicExecuteResult;
+      try {
+        executed = await confirmation.executeAtomically({
+          confirmationId: input.confirmationId,
+          rootChannelIdentityId,
+          challenge: input.challenge,
+          execute: async (trx, durableAction) => {
+            const action = pendingActionFrom(durableAction);
+            if (
+              action.actorId !== String(input.actor.numericUserId) ||
+              fingerprintFor(action.command, action.targetId, action.resolutionCode) !==
+                durableAction.actionFingerprint
+            ) {
+              throw new InvalidDurableAdminActionError("durable admin action binding is invalid");
+            }
+            return executeHighRisk(trx, action, durableAction.correlationId);
+          },
+        });
+      } catch (error) {
+        if (error instanceof InvalidDurableAdminActionError) {
+          telemetry?.recordFailedConfirmation({
+            code: "ACTION_MISMATCH",
+            actionFingerprint: input.confirmationId,
+          });
+          return { ok: false, code: "CONFIRM_FAILED", message: "Xác nhận thất bại." };
+        }
+        throw error;
+      }
+      if (!executed.ok) {
+        telemetry?.recordFailedConfirmation({
+          code: executed.code,
+          actionFingerprint: input.confirmationId,
+        });
+        if (executed.code === "NOT_FOUND" || executed.code === "TARGET_NOT_FOUND") {
+          return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy mục cần xử lý." };
+        }
+        return { ok: false, code: "CONFIRM_FAILED", message: "Xác nhận thất bại." };
+      }
+
+      if (!executed.alreadyConsumed) {
+        const action = pendingActionFrom(executed.action);
+        telemetry?.recordHighRiskAction({ action: action.command, targetId: action.targetId });
+      }
+      return { ok: true };
+    },
+  };
+}

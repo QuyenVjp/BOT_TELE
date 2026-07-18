@@ -1,0 +1,68 @@
+{
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.5",
+  "metadata": {
+    "timestamp": "2026-07-16T11:16:54.959Z",
+    "component": {
+      "type": "application",
+      "name": "telegram-shop-digital-mvp",
+      "version": "0.1.0"
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "name": "@opentelemetry/api",
+      "version": "1.9.1",
+      "purl": "pkg:npm/@opentelemetry/api@1.9.1"
+    },
+    {
+      "type": "library",
+      "name": "dotenv",
+      "version": "17.4.2",
+      "purl": "pkg:npm/dotenv@17.4.2"
+    },
+    {
+      "type": "library",
+      "name": "fastify",
+      "version": "5.10.0",
+      "purl": "pkg:npm/fastify@5.10.0"
+    },
+    {
+      "type": "library",
+      "name": "grammy",
+      "version": "1.44.0",
+      "purl": "pkg:npm/grammy@1.44.0"
+    },
+    {
+      "type": "library",
+      "name": "kysely",
+      "version": "0.29.3",
+      "purl": "pkg:npm/kysely@0.29.3"
+    },
+    {
+      "type": "library",
+      "name": "pg",
+      "version": "8.22.0",
+      "purl": "pkg:npm/pg@8.22.0"
+    },
+    {
+      "type": "library",
+      "name": "pino",
+      "version": "10.3.1",
+      "purl": "pkg:npm/pino@10.3.1"
+    },
+    {
+      "type": "library",
+      "name": "ulid",
+      "version": "3.0.2",
+      "purl": "pkg:npm/ulid@3.0.2"
+    },
+    {
+      "type": "library",
+      "name": "zod",
+      "version": "4.4.3",
+      "purl": "pkg:npm/zod@4.4.3"
+    }
+  ]
+}

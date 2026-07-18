@@ -1,0 +1,139 @@
+import { describe, expect, it, vi } from "vitest";
+import { createSePayApiPort, SePayApiError } from "../../src/modules/payments/sepay-api.js";
+import { isVerifiedSePayEvidence } from "../../src/modules/payments/sepay-ingress.js";
+
+const API_CREDENTIAL_FIXTURE = "test-only-sepay-api-credential";
+
+describe("official SePay API v2 reconciliation adapter", () => {
+  it("uses bounded official query parameters and mints verified API evidence", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "success",
+          data: [
+            {
+              id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+              transaction_date: "2026-07-17T10:30:00+07:00",
+              account_number: "0123456789",
+              va: null,
+              transfer_type: "in",
+              amount_in: 150000,
+              amount_out: 0,
+              accumulated: 500000,
+              transaction_content: "ORDABC123",
+              reference_number: "FT26069ABC",
+              code: "ORDABC123",
+              bank_brand_name: "ACB",
+              bank_account_id: "f9e8d7c6-b5a4-4210-8edc-ba0987654321",
+              va_id: null,
+              webhook_success: 1,
+            },
+          ],
+          meta: {
+            pagination: {
+              total: 1,
+              per_page: 1,
+              current_page: 1,
+              last_page: 1,
+              has_more: false,
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const port = createSePayApiPort({
+      baseUrl: "https://userapi.sepay.vn/v2",
+      token: API_CREDENTIAL_FIXTURE,
+      fetchImpl,
+    });
+
+    const rows = await port.listTransactions(1_768_500_000, 1_768_503_600, 1);
+
+    expect(rows).toHaveLength(1);
+    expect(isVerifiedSePayEvidence(rows[0])).toBe(true);
+    expect(rows[0]).toMatchObject({
+      provider: "sepay",
+      providerTransactionId: "api:a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      direction: "IN",
+      merchantAccountId: "0123456789",
+      amountVnd: 150000,
+      content: "ORDABC123",
+      reference: "FT26069ABC",
+    });
+    const [request, init] = fetchImpl.mock.calls[0]!;
+    const url = new URL(String(request));
+    expect(url.origin + url.pathname).toBe("https://userapi.sepay.vn/v2/transactions");
+    expect(url.searchParams.get("per_page")).toBe("1");
+    expect(url.searchParams.get("timestamp_format")).toBe("iso8601");
+    expect(new Headers(init?.headers).get("authorization")).toBe(
+      `Bearer ${API_CREDENTIAL_FIXTURE}`,
+    );
+  });
+
+  it("fails closed on malformed responses and reports 429 without echoing the token", async () => {
+    const malformed = createSePayApiPort({
+      baseUrl: "https://userapi.sepay.vn/v2",
+      token: API_CREDENTIAL_FIXTURE,
+      fetchImpl: () => Promise.resolve(new Response('{"status":"success","data":[{}]}')),
+    });
+    await expect(malformed.listTransactions(1, 2, 10)).rejects.toThrow("schema");
+
+    const throttled = createSePayApiPort({
+      baseUrl: "https://userapi.sepay.vn/v2",
+      token: API_CREDENTIAL_FIXTURE,
+      fetchImpl: () =>
+        Promise.resolve(
+          new Response("rate limited", { status: 429, headers: { "retry-after": "17" } }),
+        ),
+    });
+    const error = await throttled.listTransactions(1, 2, 10).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(SePayApiError);
+    expect(error).toMatchObject({ code: "RATE_LIMITED", retryAfterSeconds: 17 });
+    expect(String(error)).not.toContain(API_CREDENTIAL_FIXTURE);
+  });
+
+  it("supports official pagination and since_id cursors without changing the evidence namespace", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "success",
+          data: [],
+          meta: {
+            pagination: { total: 0, per_page: 100, current_page: 3, last_page: 3, has_more: false },
+          },
+        }),
+        { status: 200 },
+      ),
+    );
+    const port = createSePayApiPort({
+      baseUrl: "https://userapi.sepay.vn/v2",
+      token: API_CREDENTIAL_FIXTURE,
+      fetchImpl,
+    });
+    await port.listTransactions(1, 2, 100, { page: 3, sinceId: "api:cursor-1" });
+    const [request] = fetchImpl.mock.calls[0]!;
+    const url = new URL(String(request));
+    expect(url.searchParams.get("page")).toBe("3");
+    expect(url.searchParams.get("per_page")).toBe("100");
+    expect(url.searchParams.get("since_id")).toBe("api:cursor-1");
+  });
+
+  it("normalizes provider timeout as a redacted retryable API error", async () => {
+    const port = createSePayApiPort({
+      baseUrl: "https://userapi.sepay.vn/v2",
+      token: API_CREDENTIAL_FIXTURE,
+      timeoutMs: 100,
+      fetchImpl: (_input, init) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () =>
+            reject(Object.assign(new Error("aborted"), { name: "AbortError" })),
+          );
+        }),
+    });
+    const error = await port.listTransactions(1, 2, 10).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(SePayApiError);
+    expect(error).toMatchObject({ code: "HTTP_ERROR" });
+    expect(String(error)).not.toContain(API_CREDENTIAL_FIXTURE);
+  });
+});

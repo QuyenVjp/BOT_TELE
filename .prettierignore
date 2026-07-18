@@ -1,0 +1,10 @@
+dist
+node_modules
+coverage
+work
+outputs
+package-lock.json
+*.md
+.git
+.specify
+.github/workflows

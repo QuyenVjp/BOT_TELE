@@ -1,0 +1,56 @@
+{
+  "name": "telegram-shop-digital-mvp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Telegram shop digital MVP: catalog → Buy Now → VietQR → SePay → secure delivery",
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "packageManager": "npm@10",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run tests/property tests/security tests/contract",
+    "test:security": "vitest run tests/security",
+    "test:integration": "vitest run tests/integration",
+    "test:acceptance": "vitest run tests/acceptance",
+    "test:performance": "vitest run tests/performance",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
+    "start": "node dist/main.js",
+    "start:worker": "node dist/worker.js",
+    "dev": "tsx src/main.ts",
+    "dev:worker": "tsx src/worker.ts",
+    "migrate": "tsx src/infrastructure/db/migrate.ts",
+    "migrate:prod": "node dist/infrastructure/db/migrate.js",
+    "secret-scan": "node scripts/secret-scan.mjs",
+    "audit": "npm audit --omit=dev --audit-level=high"
+  },
+  "dependencies": {
+    "@opentelemetry/api": "^1.9.1",
+    "dotenv": "^17.4.2",
+    "fastify": "^5.10.0",
+    "grammy": "^1.44.0",
+    "kysely": "^0.29.3",
+    "pg": "^8.22.0",
+    "pino": "^10.3.1",
+    "ulid": "^3.0.2",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.21",
+    "@types/pg": "^8.15.4",
+    "eslint": "^9.39.1",
+    "fast-check": "^4.9.0",
+    "prettier": "^3.9.5",
+    "testcontainers": "^10.28.0",
+    "tsx": "^4.20.5",
+    "typescript": "~5.9.3",
+    "typescript-eslint": "^8.46.0",
+    "vitest": "^4.1.10"
+  }
+}
