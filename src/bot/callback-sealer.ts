@@ -22,6 +22,10 @@ export async function sealPresentedMessageCallbacks(
   for (const row of message.buttons) {
     const sealedRow: PresentedMessage["buttons"][number] = [];
     for (const button of row) {
+      if (button.callbackData.startsWith("admin:")) {
+        sealedRow.push(button);
+        continue;
+      }
       if (button.callbackData.startsWith("buy:") || button.callbackData.startsWith("cb:")) {
         sealedRow.push(button);
         continue;

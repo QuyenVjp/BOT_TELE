@@ -56,3 +56,40 @@ export function activeCorrelationId(): string | undefined {
   const ctx = span.spanContext();
   return ctx.traceId || undefined;
 }
+
+/** Minimal in-process latency/error metrics; intentionally no exporter or labels with secrets. */
+export interface LatencyMetricSnapshot {
+  count: number;
+  totalMs: number;
+  valuesMs: number[];
+  errors: number;
+}
+
+export interface LatencyMetrics {
+  observe(name: string, durationMs: number, error?: boolean): void;
+  snapshot(): Record<string, LatencyMetricSnapshot>;
+  reset(): void;
+}
+
+export function createLatencyMetrics(): LatencyMetrics {
+  const metrics = new Map<string, LatencyMetricSnapshot>();
+  return {
+    observe(name, durationMs, error = false) {
+      if (!Number.isFinite(durationMs) || durationMs < 0) return;
+      const current = metrics.get(name) ?? { count: 0, totalMs: 0, valuesMs: [], errors: 0 };
+      current.count += 1;
+      current.totalMs += durationMs;
+      current.valuesMs.push(durationMs);
+      if (error) current.errors += 1;
+      metrics.set(name, current);
+    },
+    snapshot() {
+      return Object.fromEntries(
+        [...metrics.entries()].map(([name, value]) => [name, { ...value, valuesMs: [...value.valuesMs] }]),
+      );
+    },
+    reset() {
+      metrics.clear();
+    },
+  };
+}

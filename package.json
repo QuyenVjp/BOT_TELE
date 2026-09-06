@@ -33,17 +33,19 @@
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
     "dotenv": "^17.4.2",
-    "fastify": "^5.10.0",
+    "fastify": "^5.12.1",
     "grammy": "^1.44.0",
     "kysely": "^0.29.3",
     "pg": "^8.22.0",
     "pino": "^10.3.1",
+    "qrcode": "^1.5.4",
     "ulid": "^3.0.2",
     "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",
     "@types/pg": "^8.15.4",
+    "@types/qrcode": "^1.5.6",
     "eslint": "^9.39.1",
     "fast-check": "^4.9.0",
     "prettier": "^3.9.5",

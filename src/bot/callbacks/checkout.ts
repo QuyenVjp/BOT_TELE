@@ -106,7 +106,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     if (!presented.ok) return errorMessage("Không tạo được mã thanh toán. Vui lòng thử lại.");
     lastOrderNumber = presented.presentation.orderNumber;
     lastTransferContent = presented.presentation.transferContent;
-    return presentPaymentScreen(presented.presentation);
+    return await presentPaymentScreen(presented.presentation);
   };
 
   return {
@@ -183,7 +183,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       }
       lastOrderNumber = presented.presentation.orderNumber;
       lastTransferContent = presented.presentation.transferContent;
-      return presentPaymentScreen(presented.presentation);
+      return await presentPaymentScreen(presented.presentation);
     },
 
     async reopen(orderNumber, customerId) {

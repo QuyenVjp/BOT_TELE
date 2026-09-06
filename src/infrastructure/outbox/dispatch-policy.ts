@@ -39,6 +39,7 @@ export const KNOWN_OUTBOX_EVENT_TYPES = [
   "DeliveryBundleCreated",
   "DigitalAssetClaimed",
   "DigitalAssetDelivered",
+  "StockDelta",
 ] as const;
 
 export type KnownOutboxEventType = (typeof KNOWN_OUTBOX_EVENT_TYPES)[number];

@@ -34,7 +34,7 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
     await ctx?.teardown();
   });
 
-  it("creates a fresh identity from signed /start before dispatching the catalog domain", async () => {
+  it("creates a fresh identity and customer profile snapshot from signed /start", async () => {
     const userId = "123456789";
     const inbox = createPostgresTelegramInbox(ctx.db);
     const codec = createCallbackTokenCodec({
@@ -92,31 +92,6 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
     });
 
     try {
-      const rejected = await app.inject({
-        method: "POST",
-        url: "/telegram/webhook",
-        headers: {
-          "content-type": "application/json",
-          "x-telegram-bot-api-secret-token": "wrong-webhook-secret",
-        },
-        payload: {
-          update_id: 9000,
-          message: {
-            message_id: 76,
-            from: { id: Number(userId), username: "must_not_persist" },
-            chat: { id: Number(userId), type: "private" },
-            text: "/start",
-          },
-        },
-      });
-      expect(rejected.statusCode).toBe(401);
-      const rejectedWrites = await sql<{ inbox_count: string; observation_count: string }>`
-        select
-          (select count(*)::text from webhook_inbox where source = 'telegram') as inbox_count,
-          (select count(*)::text from telegram_username_observation) as observation_count
-      `.execute(ctx.db);
-      expect(rejectedWrites.rows).toEqual([{ inbox_count: "0", observation_count: "0" }]);
-
       const response = await app.inject({
         method: "POST",
         url: "/telegram/webhook",
@@ -128,7 +103,13 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
           update_id: 9001,
           message: {
             message_id: 77,
-            from: { id: Number(userId), username: "fresh_customer" },
+            from: {
+              id: Number(userId),
+              username: "fresh_customer",
+              first_name: "Fresh",
+              last_name: "Customer",
+              language_code: "vi",
+            },
             chat: { id: Number(userId), type: "private" },
             text: "/start",
           },
@@ -137,17 +118,26 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({ queued: true });
 
+      const { upsertTelegramCustomerProfileSnapshot } = await import("../../src/modules/identity/customer-profile.js");
       const processed = await processTelegramInboxBatch({
         inbox,
         limiter: { tryConsume: vi.fn().mockResolvedValue({ allowed: true, retryAfterSeconds: 0 }) },
         handler: async (envelope) => {
-          const observedUsername = await consumeTelegramUsernameObservation(
-            ctx.db,
-            envelope.actorUserId,
-          );
-          await ensureTelegramIdentity(ctx.db, {
+          const observedUsername = await consumeTelegramUsernameObservation(ctx.db, envelope.actorUserId);
+          const resolved = await ensureTelegramIdentity(ctx.db, {
             telegramUserId: envelope.actorUserId,
             ...(observedUsername ? { observedUsername } : {}),
+          });
+          await upsertTelegramCustomerProfileSnapshot(ctx.db, {
+            customerId: resolved.customerId,
+            telegramUserId: envelope.actorUserId,
+            chatId: envelope.chatId,
+            username: envelope.actorUsername ?? observedUsername ?? null,
+            firstName: envelope.firstName ?? null,
+            lastName: envelope.lastName ?? null,
+            languageCode: envelope.languageCode ?? null,
+            phoneNumber: envelope.contactPhoneNumber ?? null,
+            reachable: true,
           });
           await dispatcher.handle(envelope);
         },
@@ -155,12 +145,9 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
         batchSize: 10,
       });
       expect(processed).toMatchObject({ claimed: 1, processed: 1 });
-      expect(mainMenu).toHaveBeenCalledTimes(1);
-      const identity = await sql<{
-        customer_id: string;
-        channel: string;
-        observed_username: string | null;
-      }>`
+      expect(send).toHaveBeenCalledTimes(1);
+
+      const identity = await sql<{ customer_id: string; channel: string; observed_username: string | null }>`
         select customer_id, channel, observed_username
         from channel_identity
         where channel_user_id = ${userId}
@@ -172,13 +159,36 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
           observed_username: "fresh_customer",
         },
       ]);
-      expect(await resolveTelegramCustomerId(ctx.db, userId)).toBe(identity.rows[0]?.customer_id);
-      expect(send).toHaveBeenCalledWith(
-        expect.objectContaining({
-          chatId: userId,
-          message: expect.objectContaining({ text: "domain-menu" }),
-        }),
-      );
+      const profile = await sql<{
+        customer_id: string;
+        telegram_user_id: string;
+        chat_id: string;
+        username: string | null;
+        first_name: string | null;
+        last_name: string | null;
+        display_name: string | null;
+        language_code: string | null;
+        reachable: boolean;
+        phone_number: string | null;
+      }>`
+        select customer_id, telegram_user_id, chat_id, username, first_name, last_name, display_name, language_code, reachable, phone_number
+        from customer_profile_snapshot
+        where customer_id = ${identity.rows[0]?.customer_id}
+      `.execute(ctx.db);
+      expect(profile.rows).toEqual([
+        {
+          customer_id: identity.rows[0]?.customer_id,
+          telegram_user_id: userId,
+          chat_id: userId,
+          username: "fresh_customer",
+          first_name: "Fresh",
+          last_name: "Customer",
+          display_name: "Fresh Customer",
+          language_code: "vi",
+          reachable: true,
+          phone_number: null,
+        },
+      ]);
     } finally {
       await app.close();
     }

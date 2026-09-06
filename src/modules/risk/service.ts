@@ -70,6 +70,7 @@ export type TelegramRateLimitAction =
   | "SUPPORT"
   | "ADMIN"
   | "PAID_ORDER_RECOVERY"
+  | "WALLET"
   | "UNKNOWN";
 
 export interface DistributedRateLimitResult {
@@ -96,6 +97,7 @@ export const DEFAULT_TELEGRAM_RATE_LIMIT_POLICIES = {
   SUPPORT: { capacity: 10, refillPerSecond: 0.1 },
   ADMIN: { capacity: 10, refillPerSecond: 0.1 },
   PAID_ORDER_RECOVERY: { capacity: 30, refillPerSecond: 0.5 },
+  WALLET: { capacity: 5, refillPerSecond: 0.1 },
   UNKNOWN: { capacity: 5, refillPerSecond: 0.1 },
 } as const satisfies Record<TelegramRateLimitAction, { capacity: number; refillPerSecond: number }>;
 

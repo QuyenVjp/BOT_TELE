@@ -19,7 +19,13 @@ export interface TelegramCommandEnvelope {
   action: TelegramInboxAction;
   callbackData?: string;
   command?: string;
+  messageText?: string;
   searchQuery?: string;
+  firstName?: string;
+  lastName?: string;
+  languageCode?: string;
+  contactPhoneNumber?: string;
+  contactSharedAt?: string;
 }
 
 export interface AcceptTelegramInput {

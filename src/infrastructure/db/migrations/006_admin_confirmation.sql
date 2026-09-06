@@ -18,7 +18,7 @@ begin
       add constraint admin_confirmation_command_ref_ck
       check (
         allowlisted_command_ref is null
-        or allowlisted_command_ref in ('discrepancy.resolve')
+        or allowlisted_command_ref in ('discrepancy.resolve', 'wallet.refund')
       );
   end if;
 end

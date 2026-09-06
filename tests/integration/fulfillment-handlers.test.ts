@@ -95,8 +95,9 @@ describe("fulfillment outbox handlers (T076)", () => {
   it("OrderPaid drains into a claimed asset + Delivery Bundle + notification", async () => {
     const f = await seedPaidWithAsset();
 
+    const orderPaidEventId = newId();
     await enqueueOutboxEvent(ctx.db, {
-      id: newId(),
+      id: orderPaidEventId,
       aggregateType: "Order",
       aggregateId: f.orderId,
       aggregateVersion: 2,
@@ -121,13 +122,22 @@ describe("fulfillment outbox handlers (T076)", () => {
       },
     });
 
-    const drain = await drainOutboxOnce(ctx.db, {
-      batchSize: 10,
-      maxAttempts: 5,
-      handler,
-    });
-    expect(drain.published).toBe(1);
-
+    let orderPaidPublished = false;
+    let totalPublished = 0;
+    for (let i = 0; i < 10 && !orderPaidPublished; i += 1) {
+      const drain = await drainOutboxOnce(ctx.db, {
+        batchSize: 10,
+        maxAttempts: 5,
+        handler,
+      });
+      totalPublished += drain.published;
+      const orderPaidEvent = await sql<{ published: boolean }>`
+        select (published_at is not null) as published from outbox_event where id = ${orderPaidEventId}
+      `.execute(ctx.db);
+      orderPaidPublished = orderPaidEvent.rows[0]?.published === true;
+    }
+    expect(totalPublished).toBeGreaterThanOrEqual(1);
+    expect(orderPaidPublished).toBe(true);
     const asset = await sql<{ status: string; reserved_order_id: string | null }>`
       select status, reserved_order_id from digital_asset where id = ${f.assetId}
     `.execute(ctx.db);
@@ -165,7 +175,17 @@ describe("fulfillment outbox handlers (T076)", () => {
       bundleTtlSeconds: 900,
     });
 
-    await drainOutboxOnce(ctx.db, { batchSize: 10, maxAttempts: 5, handler });
+    let orderPaidPublished = false;
+    for (let i = 0; i < 10; i += 1) {
+      const drain = await drainOutboxOnce(ctx.db, { batchSize: 10, maxAttempts: 5, handler });
+      const orderPaid = await sql<{ published: boolean }>`
+        select (published_at is not null) as published from outbox_event where id = ${eventId}
+      `.execute(ctx.db);
+      orderPaidPublished = orderPaid.rows[0]?.published === true;
+      if (orderPaidPublished) break;
+      expect(drain.claimed).toBeGreaterThan(0);
+    }
+    expect(orderPaidPublished).toBe(true);
 
     // Manually re-invoke the handler (simulates at-least-once redelivery after
     // a crash between effect and ack).

@@ -14,7 +14,6 @@ import {
 const MAX_REQUEST_BYTES = 16 * 1024;
 const MAX_RESPONSE_BYTES = 64 * 1024;
 const MAX_SECRET_BYTES = 8 * 1024;
-const NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$/;
 
 const AvailabilitySchema = z
   .object({

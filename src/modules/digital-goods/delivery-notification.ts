@@ -518,7 +518,10 @@ export async function cleanupDeliveryNotificationCapabilitiesBatch(
   if (!Number.isInteger(options.retentionSeconds) || options.retentionSeconds < 0) {
     throw new Error("Invalid delivery capability retention");
   }
-  const now = options.now ?? new Date();
+  const clock = options.now
+    ? { now: options.now }
+    : (await sql<{ now: Date | string }>`select now() as now`.execute(db)).rows[0]!;
+  const now = new Date(clock.now);
   const cutoff = new Date(now.getTime() - options.retentionSeconds * 1000);
   let succeeded = 0;
   let failed = 0;

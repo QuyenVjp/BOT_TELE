@@ -1164,7 +1164,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     `.execute(ctx.db);
     const ref = terminal.rows[0]!.capability_ref;
     controlled.failingDeleteRefs.add(ref);
-    const now = new Date("2026-07-18T01:00:00.000Z");
+    const now = new Date();
     const first = await cleanupDeliveryNotificationCapabilitiesBatch(ctx.db, controlled.vault, {
       batchSize: 1,
       retentionSeconds: 0,

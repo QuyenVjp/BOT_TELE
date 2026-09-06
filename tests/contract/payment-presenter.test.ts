@@ -42,8 +42,8 @@ function allText(msg: {
 }
 
 describe("payment screen presenter (FR-008)", () => {
-  it("shows exact amount, transfer content, and expiry", () => {
-    const msg = presentPaymentScreen(PRESENTATION);
+  it("shows exact amount, transfer content, and expiry", async () => {
+    const msg = await presentPaymentScreen(PRESENTATION);
     expect(msg.text).toContain("199.000");
     expect(msg.text).toContain(PRESENTATION.transferContent);
     expect(msg.text).toContain(PRESENTATION.accountNumber);
@@ -51,30 +51,30 @@ describe("payment screen presenter (FR-008)", () => {
     expect(msg.text).toMatch(/2026/);
   });
 
-  it("explicitly says no receipt screenshot is required", () => {
-    const msg = presentPaymentScreen(PRESENTATION);
+  it("explicitly says no receipt screenshot is required", async () => {
+    const msg = await presentPaymentScreen(PRESENTATION);
     const text = msg.text.toLowerCase();
     expect(text).toContain("không cần");
     expect(text).toMatch(/ảnh|chụp|screenshot|biên lai/);
   });
 
-  it("never instructs the user to send a screenshot", () => {
-    const msg = presentPaymentScreen(PRESENTATION);
+  it("never instructs the user to send a screenshot", async () => {
+    const msg = await presentPaymentScreen(PRESENTATION);
     // Imperative "please send a screenshot" is forbidden; the negation
     // "không cần gửi ảnh" is the required copy and must stay allowed.
     expect(allText(msg)).not.toMatch(/(?:vui lòng|hãy)\s+gửi.*(ảnh|biên lai|screenshot)/);
     expect(allText(msg)).not.toMatch(/(?<!không\s)cần\s+gửi.*(ảnh|biên lai|screenshot)/);
   });
 
-  it("offers status refresh and cancel actions bound to the order", () => {
-    const msg = presentPaymentScreen(PRESENTATION);
+  it("offers status refresh and cancel actions bound to the order", async () => {
+    const msg = await presentPaymentScreen(PRESENTATION);
     const data = msg.buttons.flat().map((b) => b.callbackData);
     expect(data.some((d) => d.startsWith("pay:refresh:"))).toBe(true);
     expect(data.some((d) => d.startsWith("pay:cancel:"))).toBe(true);
   });
 
-  it("does not assert settlement on the payment screen", () => {
-    const msg = presentPaymentScreen(PRESENTATION);
+  it("does not assert settlement on the payment screen", async () => {
+    const msg = await presentPaymentScreen(PRESENTATION);
     expect(msg.text.toLowerCase()).not.toContain("đã thanh toán");
   });
 });

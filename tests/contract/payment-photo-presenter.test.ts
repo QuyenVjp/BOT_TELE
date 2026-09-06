@@ -34,15 +34,16 @@ describe("formatExpiryVietnam", () => {
 });
 
 describe("presentPaymentScreen", () => {
-  it("shows the bank display name and Vietnam-local expiry", () => {
-    const msg = presentPaymentScreen(presentation);
+  it("shows the bank display name and Vietnam-local expiry", async () => {
+    const msg = await presentPaymentScreen(presentation);
     expect(msg.text).toContain("MB Bank");
     expect(msg.text).toContain("19:15");
     expect(msg.text).not.toContain("UTC");
+    expect(msg.photo).toBeInstanceOf(Buffer);
   });
 
-  it("still shows exact amount, account, and content, and never asserts settlement", () => {
-    const msg = presentPaymentScreen(presentation);
+  it("still shows exact amount, account, and content, and never asserts settlement", async () => {
+    const msg = await presentPaymentScreen(presentation);
     expect(msg.text).toContain("0123456789");
     expect(msg.text).toContain("ORDABC123");
     const lower = msg.text.toLowerCase();

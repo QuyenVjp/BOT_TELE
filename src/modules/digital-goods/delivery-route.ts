@@ -203,7 +203,7 @@ export function verifyTelegramMiniAppInitData(
     const hash = params.get("hash") ?? "";
     if (!/^[a-f0-9]{64}$/.test(hash)) return null;
     const check = entries
-      .filter(([key]) => key !== "hash" && key !== "signature")
+      .filter(([key]) => key !== "hash")
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([key, value]) => `${key}=${value}`)
       .join("\n");

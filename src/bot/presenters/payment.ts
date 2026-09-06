@@ -1,4 +1,5 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
+import { toBuffer } from "qrcode";
 import type { PaymentPresentation } from "../../modules/payments/vietqr.js";
 import type { InlineButton, PresentedMessage } from "./catalog.js";
 
@@ -68,7 +69,7 @@ export function formatExpiryVietnam(iso: string): string {
  * the no-screenshot line. Callbacks bind to the order number so the checkout
  * layer can re-resolve the live intent without smuggling state in the message.
  */
-export function presentPaymentScreen(presentation: PaymentPresentation): PresentedMessage {
+export async function presentPaymentScreen(presentation: PaymentPresentation): Promise<PresentedMessage> {
   const amount = formatVnd(makeVnd(presentation.amountVnd));
   const bankLine = presentation.bankName
     ? `${PAYMENT_COPY.accountLabel}: ${presentation.accountNumber} — ${presentation.bankName} (${presentation.accountName})`
@@ -88,19 +89,10 @@ export function presentPaymentScreen(presentation: PaymentPresentation): Present
 
   return {
     text,
+    photo: await toBuffer(presentation.payload, { type: "png", errorCorrectionLevel: "M" }),
     buttons: [
-      [
-        {
-          text: PAYMENT_COPY.refresh,
-          callbackData: `pay:refresh:${presentation.orderNumber}`,
-        },
-      ],
-      [
-        {
-          text: PAYMENT_COPY.cancel,
-          callbackData: `pay:cancel:${presentation.orderNumber}`,
-        },
-      ],
+      [{ text: PAYMENT_COPY.refresh, callbackData: `pay:refresh:${presentation.orderNumber}` }],
+      [{ text: PAYMENT_COPY.cancel, callbackData: `pay:cancel:${presentation.orderNumber}` }],
       ...navButtons(presentation.orderNumber),
     ],
   };

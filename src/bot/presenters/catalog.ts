@@ -35,11 +35,33 @@ export const CATALOG_COPY = {
 export interface InlineButton {
   text: string;
   callbackData: string;
+  webAppUrl?: string;
+}
+export interface ReplyKeyboardButton {
+  text: string;
+  requestContact?: boolean;
+}
+
+export interface ReplyKeyboard {
+  buttons: ReplyKeyboardButton[][];
+  persistent?: boolean;
+  resizeKeyboard?: boolean;
 }
 
 export interface PresentedMessage {
   text: string;
   buttons: InlineButton[][];
+  replyKeyboard?: ReplyKeyboard;
+  /** Optional binary photo media, currently used only by payment QR screens. */
+  photo?: Buffer;
+  /** Optional document media, used for paid ZIP delivery. */
+  document?:
+    | string
+    | {
+        kind: "file_path" | "file_id";
+        value: string;
+        filename?: string;
+      };
 }
 
 const STOCK_OUTCOME_COPY: Readonly<Record<StockOutcomeCode, string>> = Object.freeze({

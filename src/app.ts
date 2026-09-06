@@ -5,6 +5,7 @@ import type { Vault } from "./infrastructure/vault/port.js";
 import { registerTelegramWebhook, type UpdateInbox } from "./bot/webhook.js";
 import { registerDeliveryRoute } from "./modules/digital-goods/delivery-route.js";
 import type { DeliverySessionCodecConfig } from "./modules/digital-goods/delivery-session.js";
+import { registerMiniApp } from "./modules/miniapp/index.js";
 
 /**
  * HTTP application composition (T118, FR-024, SR-004).
@@ -52,6 +53,7 @@ export interface CreateAppDeps {
     session: DeliverySessionCodecConfig;
     miniApp?: { botToken: string; path: string; maxAgeSeconds: number };
   };
+  miniApp?: { botToken: string; path?: string; maxAgeSeconds: number };
   bodyLimitBytes: number;
   logger?: { level: "silent" | "info" | "error" } | false;
 }
@@ -120,6 +122,7 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
       ...(deps.delivery.miniApp !== undefined ? { miniApp: deps.delivery.miniApp } : {}),
     });
   }
+  if (deps.miniApp) await registerMiniApp(app, { db: deps.db, ...deps.miniApp });
 
   await app.ready();
   return app;

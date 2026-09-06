@@ -1,14 +1,46 @@
-# VietQR Sales Bot — Pre-code Design Pack
+# VietQR Sales Bot
 
-Thư mục này là bộ tài liệu nguồn sự thật trước khi viết code cho **shop digital tự động trong Telegram dành cho khách Việt**: tìm sản phẩm, mua ngay, thanh toán VietQR, SePay xác minh, giao hàng bảo mật, lịch sử đơn và hỗ trợ.
+Telegram digital-goods shop implemented as a TypeScript modular monolith. The HTTP process durably accepts Telegram and SePay webhooks into PostgreSQL; the worker processes independent Telegram, payment, delivery/outbox, and recovery lanes.
 
-## Trạng thái
+## Runtime status
 
-- Giai đoạn: research + domain/architecture design.
-- Chưa có application source code.
-- Workspace đã được khởi tạo bằng GitHub Spec Kit 0.12.16 cho Codex; feature source of truth nằm tại `specs/001-telegram-shop-mvp/`.
-- Các quyết định trong `docs/adr/` đang ở trạng thái `proposed` cho tới khi product owner chấp nhận.
-- `docs/` là tài liệu canonical; `outputs/` là bản xuất để đọc/chia sẻ.
+- Source code and tests are present under `src/` and `tests/`.
+- PostgreSQL is the authoritative store for orders, payments, inventory, inboxes, outbox, and audit records.
+- Telegram callback updates return `answerCallbackQuery` in the webhook response after durable enqueue; business dispatch remains asynchronous.
+- Payment screens render the canonical VietQR payload locally to PNG and deliver it as Telegram photo media.
+- Navigation edits the bot-owned message when Telegram permits; only expected edit failures fall back to a new message.
+- Worker lanes retain bounded polling fallback and durable lease/generation fencing. LISTEN/NOTIFY is not required by the current implementation.
+
+## Local setup
+
+```sh
+npm ci
+cp .env.example .env
+docker compose up -d postgres
+# compose maps PostgreSQL to localhost:5433; set DATABASE_URL accordingly.
+npm run migrate
+npm run dev                 # terminal 1
+npm run dev:worker          # terminal 2
+```
+
+Use a valid-format Telegram bot token for worker startup. Local defaults use the memory vault, fixture supplier, deterministic search, and disabled AI. Redis is optional.
+
+Production requires HTTPS, real Telegram/SePay credentials and webhook configuration, an approved external vault and supplier, allowlists, backups/restore drills, and completion of `docs/06-operations/DEPLOYMENT_RUNBOOK.md` launch gates.
+
+## Checks
+
+```sh
+npm run lint
+npm run typecheck
+npm test
+npm run build
+```
+
+Database-backed tests require a working Docker/Testcontainers runtime.
+
+## Design documents
+
+The canonical product and security documents remain in `docs/` and `specs/001-telegram-shop-mvp/`.
 
 ## Spec-driven workflow
 

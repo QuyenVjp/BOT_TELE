@@ -197,7 +197,7 @@ function validateConfig(config: SePayIngressConfig): void {
   ) {
     throw new Error("SEPAY_REPLAY_WINDOW_SECONDS must be between 1 and 900");
   }
-  if (config.ipAllowlist.length === 0 || config.ipAllowlist.some((ip) => !normalizeIp(ip))) {
+  if (config.ipAllowlist.length > 0 && config.ipAllowlist.some((ip) => !normalizeIp(ip))) {
     throw new Error("SEPAY_IP_ALLOWLIST must contain valid IP addresses");
   }
   if (config.trustedProxyIps.some((ip) => !normalizeIp(ip))) {

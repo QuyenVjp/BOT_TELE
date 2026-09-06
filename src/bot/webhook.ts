@@ -4,47 +4,68 @@ import type {
   AcceptTelegramResult,
   TelegramCommandEnvelope,
 } from "../infrastructure/inbox/telegram.js";
+import type { LatencyMetrics } from "../infrastructure/observability/tracing.js";
 import { verifyTelegramSecret } from "./middleware/security.js";
 import { peekCallbackAction } from "./callback-codec.js";
 
-/**
- * Telegram webhook ingress (telegram-ux.md Ingress; SR-004, FR-010, FR-024).
- *
- * Processing order is deliberate and fail-closed:
- *   1. verify the secret token (constant time) — reject 401 before any parse of
- *      business meaning;
- *   2. dedupe by `update_id` — a replayed update acks 200 but never re-runs the
- *      handler (FR-010 idempotency);
- *   3. per-user rate budget — throttle 429 while leaving other users unaffected
- *      (FR-024 abuse control);
- *   4. dispatch to the business handler.
- *
- * Body-size limits are enforced by Fastify's `bodyLimit` (413) before the route
- * body runs, so oversized payloads never reach this handler.
- */
+/** Telegram webhook ingress (telegram-ux.md Ingress; SR-004, FR-010, FR-024). */
 
 const SECRET_HEADER = "x-telegram-bot-api-secret-token";
 
-/** Minimal shape of a Telegram update we rely on at the ingress boundary. */
 export interface TelegramUpdate {
   update_id: number;
   message?: {
     message_id?: number;
-    from?: { id: number; is_bot?: boolean; username?: string };
-    chat?: { id: number; type?: string };
+    from?: {
+      id: number;
+      is_bot?: boolean;
+      username?: string;
+      first_name?: string;
+      last_name?: string;
+      language_code?: string;
+    };
+    chat?: {
+      id: number;
+      type?: string;
+      username?: string;
+      first_name?: string;
+      last_name?: string;
+    };
+    contact?: {
+      phone_number?: string;
+      first_name?: string;
+      last_name?: string;
+      user_id?: number;
+      vcard?: string;
+    };
     text?: string;
+    entities?: Array<{ type?: string; offset?: number; length?: number }>;
   };
   callback_query?: {
     id: string;
-    from?: { id: number; username?: string };
+    from?: {
+      id: number;
+      username?: string;
+      first_name?: string;
+      last_name?: string;
+      language_code?: string;
+    };
     data?: string;
-    message?: { chat?: { id: number; type?: string }; message_id?: number };
+    message?: {
+      chat?: {
+        id: number;
+        type?: string;
+        username?: string;
+        first_name?: string;
+        last_name?: string;
+      };
+      message_id?: number;
+    };
   };
 }
 
 export type UpdateHandler = (update: TelegramUpdate) => Promise<void>;
 
-/** Dedupe port: records/queries whether an update_id was already accepted. */
 export interface UpdateInbox {
   accept(input: {
     sourceEventId: string;
@@ -53,11 +74,6 @@ export interface UpdateInbox {
   }): Promise<AcceptTelegramResult>;
 }
 
-/**
- * In-memory dedupe inbox for tests/dev. Production uses the durable
- * `webhook_inbox` table (unique on (source, source_event_id)); this port keeps
- * the same "claim once" contract.
- */
 export function createInMemoryUpdateInbox(): UpdateInbox {
   const seen = new Map<string, { id: string; rawHash: string }>();
   return {
@@ -79,13 +95,67 @@ export interface TelegramWebhookOptions {
   path: string;
   secretToken: string;
   inbox: UpdateInbox;
+  metrics?: LatencyMetrics;
 }
 
-/** Derive the rate-limit principal from an update (numeric user id, never username). */
-/**
- * Coerce the Fastify body (string | object | unknown) into a TelegramUpdate.
- * Returns undefined for non-JSON / non-object payloads so the caller can ack.
- */
+export async function registerTelegramWebhook(
+  app: FastifyInstance,
+  options: TelegramWebhookOptions,
+): Promise<void> {
+  const { path, secretToken, inbox } = options;
+
+  app.post(path, async (request, reply) => {
+    const presented = request.headers[SECRET_HEADER];
+    const headerValue = Array.isArray(presented) ? presented[0] : presented;
+    if (!verifyTelegramSecret(headerValue, secretToken)) {
+      return reply.code(401).send({ ok: false });
+    }
+
+    const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body);
+    const update = coerceUpdate(rawBody);
+    const normalized = update ? normalizeTelegramUpdate(update) : null;
+    if (!update || !normalized) {
+      return reply.code(200).send({ ok: true });
+    }
+
+    try {
+      const accepted = await inbox.accept({
+        sourceEventId: String(update.update_id),
+        rawHash: createHash("sha256").update(rawBody, "utf8").digest("hex"),
+        envelope: normalized,
+      });
+      if (accepted.kind === "DUPLICATE") {
+        if (update.callback_query?.id) {
+          return reply
+            .code(200)
+            .send({ method: "answerCallbackQuery", callback_query_id: update.callback_query.id });
+        }
+        return reply.code(200).send({ ok: true, duplicate: true });
+      }
+      if (accepted.kind === "MUTATION") {
+        if (update.callback_query?.id) {
+          return reply.code(200).send({
+            method: "answerCallbackQuery",
+            callback_query_id: update.callback_query.id,
+            text: "Yêu cầu không hợp lệ, vui lòng mở lại menu.",
+            show_alert: true,
+          });
+        }
+        return reply.code(200).send({ ok: false, discrepancy: true });
+      }
+      if (update.callback_query?.id) {
+        return reply
+          .code(200)
+          .send({ method: "answerCallbackQuery", callback_query_id: update.callback_query.id });
+      }
+      return reply.code(200).send({ ok: true, queued: true });
+    } catch {
+      reply.header("retry-after", "1");
+      return reply.code(503).send({ ok: false, retryable: true });
+    }
+  });
+}
+
 function coerceUpdate(body: unknown): TelegramUpdate | undefined {
   if (body === null || body === undefined) return undefined;
   if (typeof body === "string") {
@@ -102,77 +172,39 @@ function coerceUpdate(body: unknown): TelegramUpdate | undefined {
   return undefined;
 }
 
-export async function registerTelegramWebhook(
-  app: FastifyInstance,
-  options: TelegramWebhookOptions,
-): Promise<void> {
-  const { path, secretToken, inbox } = options;
-
-  app.post(path, async (request, reply) => {
-    // 1. Secret token (constant-time) before anything else.
-    const presented = request.headers[SECRET_HEADER];
-    const headerValue = Array.isArray(presented) ? presented[0] : presented;
-    if (!verifyTelegramSecret(headerValue, secretToken)) {
-      return reply.code(401).send({ ok: false });
-    }
-
-    // The app-level content-type parser preserves the raw body as a string so
-    // SePay HMAC verification can sign exact bytes. Parse here for Telegram.
-    const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body);
-    const update = coerceUpdate(rawBody);
-    const normalized = update ? normalizeTelegramUpdate(update) : null;
-    if (!update || !normalized) {
-      // Malformed shape — ack 200 so Telegram stops retrying a poison update,
-      // but do nothing (nothing to dedupe or dispatch).
-      return reply.code(200).send({ ok: true });
-    }
-
-    try {
-      const accepted = await inbox.accept({
-        sourceEventId: String(update.update_id),
-        rawHash: createHash("sha256").update(rawBody, "utf8").digest("hex"),
-        envelope: normalized,
-      });
-      if (accepted.kind === "DUPLICATE") {
-        return reply.code(200).send({ ok: true, duplicate: true });
-      }
-      if (accepted.kind === "MUTATION") {
-        return reply.code(200).send({ ok: false, discrepancy: true });
-      }
-      return reply.code(200).send({ ok: true, queued: true });
-    } catch {
-      reply.header("retry-after", "1");
-      return reply.code(503).send({ ok: false, retryable: true });
-    }
-  });
-}
-
 function normalizeTelegramUpdate(update: TelegramUpdate): TelegramCommandEnvelope | null {
   if (
     !Number.isSafeInteger(update.update_id) ||
     update.update_id < 0 ||
     update.update_id > 0x7fffffff
-  ) {
+  )
     return null;
-  }
   const actor = update.message?.from ?? update.callback_query?.from;
   const actorId = actor?.id;
-  if (!actorId || !Number.isSafeInteger(actorId) || actorId <= 0 || update.message?.from?.is_bot) {
+  if (!actorId || !Number.isSafeInteger(actorId) || actorId <= 0 || update.message?.from?.is_bot)
     return null;
-  }
   const chat = update.message?.chat ?? update.callback_query?.message?.chat;
   const chatId = chat?.id ?? actorId;
-  if (!Number.isSafeInteger(chatId) || chatId === 0 || (chat?.type ?? "private") !== "private") {
+  if (!Number.isSafeInteger(chatId) || chatId === 0 || (chat?.type ?? "private") !== "private")
     return null;
-  }
   const callbackData = update.callback_query?.data;
   if (callbackData && Buffer.byteLength(callbackData, "utf8") > 64) return null;
+
   const text = update.message?.text ?? "";
-  const command = text.startsWith("/") ? text.split(/\s+/, 1)[0]!.toLowerCase() : undefined;
-  const searchQuery =
-    command === "/search" ? normalizeSearchQuery(text.slice(command.length)) : null;
+  const commandInfo = extractTelegramCommand(text, update.message?.entities);
+  const command = commandInfo?.command;
+  const searchQuery = commandInfo
+    ? normalizeCommandArgument(command, text.slice(commandInfo.rawLength))
+    : null;
+  const messageText = normalizeSafeMessageText(text, command);
   const action = classifyAction(callbackData, command);
   const actorUsername = normalizeUsernameMetadata(actor.username);
+  const contact = update.message?.contact;
+  const contactPhoneNumber =
+    contact && contact.user_id === actorId && typeof contact.phone_number === "string"
+      ? contact.phone_number
+      : undefined;
+
   return {
     actorUserId: String(actorId),
     ...(actorUsername ? { actorUsername } : {}),
@@ -186,8 +218,32 @@ function normalizeTelegramUpdate(update: TelegramUpdate): TelegramCommandEnvelop
     action,
     ...(callbackData ? { callbackData } : {}),
     ...(command ? { command } : {}),
+    ...(messageText ? { messageText } : {}),
+    ...(actor.first_name ? { firstName: actor.first_name } : {}),
+    ...(actor.last_name ? { lastName: actor.last_name } : {}),
+    ...(actor.language_code ? { languageCode: actor.language_code } : {}),
+    ...(contactPhoneNumber ? { contactPhoneNumber } : {}),
+    ...(contactPhoneNumber ? { contactSharedAt: new Date().toISOString() } : {}),
     ...(searchQuery ? { searchQuery } : {}),
   };
+}
+
+function extractTelegramCommand(
+  text: string,
+  entities: Array<{ type?: string; offset?: number; length?: number }> | undefined,
+): { command: string; rawLength: number } | undefined {
+  const commandEntity = entities?.find(
+    (entity) => entity.type === "bot_command" && entity.offset === 0,
+  );
+  const rawCommand = commandEntity
+    ? text.slice(0, commandEntity.length)
+    : text.startsWith("/")
+      ? text.split(/\s+/, 1)[0]!
+      : "";
+  if (!rawCommand.startsWith("/")) return undefined;
+  const bare = rawCommand.slice(1).split("@", 1)[0]?.trim().toLowerCase();
+  if (!bare) return undefined;
+  return { command: `/${bare}`, rawLength: rawCommand.length };
 }
 
 function normalizeUsernameMetadata(value: unknown): string | null {
@@ -209,9 +265,8 @@ function classifyAction(
       action === "SUPPORT_MENU" ||
       action === "SUPPORT_REASON" ||
       action === "SUPPORT_TICKET_VIEW"
-    ) {
+    )
       return "SUPPORT";
-    }
     if (action === "ADMIN_COMMAND") return "ADMIN";
     if (action) return "CATALOG";
     return "UNKNOWN";
@@ -222,16 +277,46 @@ function classifyAction(
   if (callbackData?.startsWith("admin:")) return "ADMIN";
   if (callbackData?.startsWith("order:recover:")) return "PAID_ORDER_RECOVERY";
   if (command === "/support") return "SUPPORT";
+  if (command === "/admin") return "ADMIN";
+  if (command === "/cancel") return "CANCEL";
   if (command === "/start" || command === "/catalog" || command === "/search") return "CATALOG";
+  if (command === "/account" || command === "/topup" || command === "/pay") return "WALLET";
   return "UNKNOWN";
 }
 
-function normalizeSearchQuery(value: string): string | null {
+const SAFE_MESSAGE_TEXT: Record<string, true> = {
+  "🔔 Báo có hàng": true,
+  "🔔 Cài đặt thông báo": true,
+  "🛍 Tắt cập nhật sản phẩm": true,
+  "📣 Tắt hoạt động mua hàng": true,
+  "🌐 Mở cửa hàng": true,
+  "👤 Tài khoản": true,
+  "💰 Nạp ví": true,
+  "↩️ Quay lại": true,
+  "🧾 Đơn hàng": true,
+  "🛟 Hỗ trợ": true,
+};
+
+function normalizeCommandArgument(command: string | undefined, value: string): string | null {
+  if (
+    command !== "/search" &&
+    command !== "/pay" &&
+    command !== "/customer" &&
+    command !== "/message_customer"
+  )
+    return null;
+  const maxLength = command === "/message_customer" ? 1100 : 80;
   const normalized = value
     .normalize("NFC")
-    .replace(/[^\p{L}\p{N}\s._-]/gu, " ")
+    .replace(/[\p{Cc}\p{Cf}]/gu, " ")
     .replace(/\s+/g, " ")
     .trim()
-    .slice(0, 80);
+    .slice(0, maxLength);
   return normalized.length > 0 ? normalized : null;
+}
+
+function normalizeSafeMessageText(text: string, command: string | undefined): string | null {
+  if (!text || command) return null;
+  const normalized = text.normalize("NFC").trim();
+  return SAFE_MESSAGE_TEXT[normalized] ? normalized : null;
 }

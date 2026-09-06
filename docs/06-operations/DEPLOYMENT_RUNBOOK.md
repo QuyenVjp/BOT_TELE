@@ -1,5 +1,33 @@
 # Deployment, Health, Migration, Rollback, Worker-Drain Runbook
 
+## Current architecture and runtime prerequisites
+
+This is a TypeScript modular monolith. PostgreSQL is the authoritative store; the HTTP
+process durably accepts Telegram and SePay webhooks, while the worker drains independent
+Telegram, payment, delivery/outbox, and recovery lanes. VietQR generates payment-initiation
+payloads/images only; verified SePay evidence is required before settlement or delivery.
+
+Production requires Node.js >=24, npm 10, PostgreSQL with `DATABASE_URL`, configured Telegram
+bot token/webhook secret, SePay credentials, vault endpoint/credentials, supplier credentials,
+and a non-zero `ADMIN_TELEGRAM_USER_ID`. Production must not use `memory` or `fixture` drivers.
+Docker/OrbStack is needed only for container-backed integration/migration tests; it is not
+needed for local pure-path checks.
+
+## Local benchmark (no external services)
+
+Run the reproducible local seams benchmark:
+
+```bash
+BENCHMARK_ITERATIONS=100 npm exec tsx scripts/local-benchmark.ts
+```
+
+It reports p50/p95/p99 for local VietQR payload + PNG presentation and worker scheduler lane
+dispatch. These measurements intentionally exclude PostgreSQL, Telegram, SePay, supplier,
+network, and outbox effects; they are not production SLOs. End-to-end/payment or migration
+benchmarks are unavailable unless those services are provisioned. The existing
+`npm run test:performance` suite includes PostgreSQL-container tests and therefore requires
+Docker/OrbStack.
+
 ## Pre-deploy checklist
 
 - [ ] `npm ci` installs from the lockfile (CI does this).
@@ -12,13 +40,13 @@
 
 ## Health and readiness
 
-| Endpoint / signal | Meaning |
-|---|---|
-| Process alive (main) | HTTP server accepting Telegram / SePay / delivery routes |
-| Process alive (worker) | Outbox poller interval running |
-| DB connectivity | Migration head applied; a trivial `select 1` succeeds |
-| Outbox lag | Pending outbox count and oldest age under the alert threshold |
-| Vault reachability | External vault endpoint answers (production driver) |
+| Endpoint / signal      | Meaning                                                       |
+| ---------------------- | ------------------------------------------------------------- |
+| Process alive (main)   | HTTP server accepting Telegram / SePay / delivery routes      |
+| Process alive (worker) | Outbox poller interval running                                |
+| DB connectivity        | Migration head applied; a trivial `select 1` succeeds         |
+| Outbox lag             | Pending outbox count and oldest age under the alert threshold |
+| Vault reachability     | External vault endpoint answers (production driver)           |
 
 Do not route traffic to a replica that has not finished migrations.
 
@@ -36,41 +64,24 @@ All schema lives in `src/infrastructure/db/migrations/*.sql` and is applied by `
 ## Deploy steps (pilot)
 
 ```bash
-# 1. Install + build
 npm ci
 npm run build
-
-# 2. Migrate (against the target DATABASE_URL)
 npm run migrate
-
-# 3. Restart worker first so outbox drain continues during the cutover
 npm run start:worker
-
-# 4. Restart the HTTP process
 npm run start
 ```
 
 ## Worker drain
 
-Before a rolling restart or scale-in:
-
-1. Stop accepting new outbox work (stop the poller interval / SIGTERM the worker).
-2. Wait until in-flight handlers finish (outbox rows move to `PROCESSED` or stay `PENDING` for the
-   next worker — never partially-applied domain effects; handlers are idempotent).
-3. Confirm no handler is mid-transaction (process exit after the current tick).
-4. Start the new worker.
-
-Handlers are designed for at-least-once delivery + domain unique keys = exactly-once effects
-(settled bank transaction, claimed asset, active delivery bundle).
+Before a rolling restart or scale-in, stop accepting new outbox work, wait for in-flight handlers
+to finish, confirm no handler is mid-transaction, then start the new worker. Handlers are designed
+for at-least-once delivery plus domain unique keys = exactly-once effects.
 
 ## Rollback
 
-1. Prefer **forward fix**. If a code rollback is required, redeploy the previous build artifact.
-2. Schema rollback: only if the new migration is expandable; otherwise leave the expanded schema
-   and roll the code back to a dual-write/dual-read version.
-3. Never restore a production database from backup as a "quick rollback" without an incident
-   decision — that is a restore drill (`evidence/restore.md`), not a deploy step.
-4. After rollback, re-drain the outbox and re-check health signals.
+Prefer a forward fix. If code rollback is required, redeploy the previous build artifact. Leave an
+expanded schema in place when necessary; never restore production backup as a quick rollback.
+After rollback, re-drain the outbox and re-check health signals.
 
 ## Post-deploy
 

@@ -254,6 +254,9 @@ export const CALLBACK_ACTION_CODES = {
   SUPPORT_REASON: 13,
   ADMIN_COMMAND: 14,
   SUPPORT_TICKET_VIEW: 15,
+  RESTOCK_SUBSCRIBE: 16,
+  RESTOCK_UNSUBSCRIBE: 17,
+  RESTOCK_LIST: 18,
 } as const;
 
 export type CallbackAction = keyof typeof CALLBACK_ACTION_CODES;
@@ -439,6 +442,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
         : option;
     }
   }
+  throw new Error("Unsupported callback action");
 }
 
 function decodeActionPayload(

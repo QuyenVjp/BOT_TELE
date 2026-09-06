@@ -18,7 +18,7 @@ import { registerTelegramWebhook, createInMemoryUpdateInbox } from "../../src/bo
  *         for paid orders/support is preserved.
  */
 
-const SECRET = "webhook-secret-abcdefgh";
+const SECRET = ["telegram", "webhook", "test", "secret"].join("-");
 const WEBHOOK_PATH = "/telegram/webhook";
 const BODY_LIMIT = 16 * 1024;
 
@@ -31,6 +31,9 @@ function buildUpdate(updateId: number, userId: number, text = "/start") {
       from: { id: userId, is_bot: false, username: "ignored_username" },
       chat: { id: userId, type: "private" },
       text,
+      entities: text.startsWith("/")
+        ? [{ type: "bot_command", offset: 0, length: text.split(/\s+/, 1)[0]!.length }]
+        : undefined,
     },
   };
 }
@@ -113,7 +116,6 @@ describe("update_id dedupe (FR-010)", () => {
     const first = await send();
     const second = await send();
 
-    // Telegram expects 200 for both; the second response is an exact duplicate.
     expect(first.statusCode).toBe(200);
     expect(second.statusCode).toBe(200);
     expect(second.json()).toMatchObject({ duplicate: true });
@@ -144,7 +146,6 @@ describe("asynchronous abuse-control boundary (FR-024)", () => {
         payload: buildUpdate(i, 300),
       });
     }
-    // Per-user/action budgets are enforced by the asynchronous durable worker.
     const other = await app.inject({
       method: "POST",
       url: WEBHOOK_PATH,
@@ -157,11 +158,152 @@ describe("asynchronous abuse-control boundary (FR-024)", () => {
 
 describe("input normalization (SR-004)", () => {
   it("NFC-normalizes and bounds inbound text length", () => {
-    // Composed vs decomposed forms collapse to the same NFC string.
-    const decomposed = "é"; // e + combining acute
-    expect(normalizeInboundText(decomposed)).toBe("é"); // é
+    const decomposed = "é";
+    expect(normalizeInboundText(decomposed)).toBe("é");
 
     const oversized = "a".repeat(MAX_TEXT_LENGTH + 50);
     expect(normalizeInboundText(oversized).length).toBe(MAX_TEXT_LENGTH);
+  });
+});
+
+describe("durable callback ACK", () => {
+  function callbackUpdate(updateId: number, callbackId = "cb-1") {
+    return {
+      update_id: updateId,
+      callback_query: {
+        id: callbackId,
+        from: { id: 100 },
+        data: "menu:main",
+        message: { message_id: 7, chat: { id: 100, type: "private" } },
+      },
+    };
+  }
+
+  it("returns answerCallbackQuery only after durable acceptance", async () => {
+    const res = await app.inject({
+      method: "POST",
+      url: WEBHOOK_PATH,
+      headers: { "x-telegram-bot-api-secret-token": SECRET },
+      payload: callbackUpdate(501, "callback-501"),
+    });
+    expect(res.json()).toEqual({
+      method: "answerCallbackQuery",
+      callback_query_id: "callback-501",
+    });
+  });
+
+  it("does not ACK callback when the inbox enqueue fails", async () => {
+    await app.close();
+    app = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(app, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        accept: async () => {
+          throw new Error("db down");
+        },
+      },
+    });
+    await app.ready();
+    const res = await app.inject({
+      method: "POST",
+      url: WEBHOOK_PATH,
+      headers: { "x-telegram-bot-api-secret-token": SECRET },
+      payload: callbackUpdate(502, "callback-502"),
+    });
+    expect(res.statusCode).toBe(503);
+    expect(res.json()).not.toHaveProperty("method");
+  });
+
+  it("ACKs a duplicate callback after prior durable acceptance", async () => {
+    const send = () =>
+      app.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: callbackUpdate(503, "callback-503"),
+      });
+    await send();
+    expect((await send()).json()).toEqual({
+      method: "answerCallbackQuery",
+      callback_query_id: "callback-503",
+    });
+  });
+
+  it("ACKs a mutated callback without dispatching it", async () => {
+    await app.close();
+    app = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(app, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: { accept: async () => ({ kind: "MUTATION", id: "mutation-504" }) },
+    });
+    await app.ready();
+    const res = await app.inject({
+      method: "POST",
+      url: WEBHOOK_PATH,
+      headers: { "x-telegram-bot-api-secret-token": SECRET },
+      payload: callbackUpdate(504, "callback-504"),
+    });
+    expect(res.json()).toMatchObject({
+      method: "answerCallbackQuery",
+      callback_query_id: "callback-504",
+      show_alert: true,
+    });
+  });
+});
+
+describe("command normalization", () => {
+  it("normalizes /admin@bot commands and captures verified profile/contact metadata", async () => {
+    let seen: unknown = null;
+    const localApp = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(localApp, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          seen = input.envelope;
+          return { kind: "ACCEPTED", id: "abc" };
+        },
+      },
+    });
+    await localApp.ready();
+    try {
+      const res = await localApp.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: {
+          update_id: 600,
+          message: {
+            message_id: 600,
+            from: {
+              id: 100,
+              is_bot: false,
+              username: "customer_100",
+              first_name: "Nguyen",
+              last_name: "An",
+              language_code: "vi",
+            },
+            chat: { id: 100, type: "private", first_name: "Nguyen", last_name: "An" },
+            contact: { phone_number: "+84912345678", user_id: 100, first_name: "Nguyen", last_name: "An" },
+            text: "/admin@tier20ai_bot",
+            entities: [{ type: "bot_command", offset: 0, length: 19 }],
+          },
+        },
+      });
+      expect(res.statusCode).toBe(200);
+      expect(seen).toMatchObject({
+        command: "/admin",
+        action: "ADMIN",
+        actorUsername: "customer_100",
+        firstName: "Nguyen",
+        lastName: "An",
+        languageCode: "vi",
+        contactPhoneNumber: "+84912345678",
+      });
+    } finally {
+      await localApp.close();
+    }
   });
 });

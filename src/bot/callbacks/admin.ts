@@ -1,5 +1,5 @@
 import { sql } from "kysely";
-import type { Db, Executor } from "../../infrastructure/db/transaction.js";
+import type { Db, Trx } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { appendAuditEvent } from "../../modules/identity/audit.js";
 import {
@@ -10,7 +10,9 @@ import {
 } from "../../modules/identity/admin-confirmation.js";
 import type { IdentityTelemetry } from "../../modules/identity/telemetry.js";
 import type { RootActor, RootAdminConfig } from "../../modules/identity/root-admin.js";
+import type { Vault } from "../../infrastructure/vault/port.js";
 import { guardRootAction } from "../middleware/root-admin.js";
+import { refundWalletCredit } from "../../modules/wallet/refund.js";
 
 /**
  * Allowlisted owner callbacks (T097, FR-021–FR-023).
@@ -28,6 +30,8 @@ export const OWNER_COMMANDS = [
   "discrepancy.resolve",
   "discrepancy.list",
   "order.inspect",
+  "inventory.import",
+  "wallet.refund",
 ] as const;
 
 export type OwnerCommand = (typeof OWNER_COMMANDS)[number];
@@ -35,13 +39,14 @@ export type OwnerCommand = (typeof OWNER_COMMANDS)[number];
 export function isOwnerCommand(command: string): command is OwnerCommand {
   return (OWNER_COMMANDS as readonly string[]).includes(command);
 }
-
 export interface AdminCallbackDeps {
   db: Db;
   rootConfig: RootAdminConfig;
   /** The channel_identity row id for the configured owner (audit + confirmation binding). */
   rootChannelIdentityId: string;
   confirmation: AdminConfirmationService;
+  vault?: Vault;
+  inventoryImport?: (input: { actor: RootActor; input: string; reason: string; correlationId: string }) => Promise<{ imported: number; duplicates: number; invalid: number }>;
   telemetry?: IdentityTelemetry;
 }
 
@@ -52,10 +57,10 @@ export interface HandleInput {
   reason: string;
   resolutionCode?: string;
   correlationId: string;
+  input?: string;
 }
-
 export type HandleResult =
-  | { ok: true; needsConfirmation: false }
+  | { ok: true; needsConfirmation: false; inventorySummary?: { imported: number; duplicates: number; invalid: number } }
   | {
       ok: true;
       needsConfirmation: true;
@@ -85,7 +90,7 @@ export type ConfirmActionResult =
     };
 
 interface PendingAction {
-  command: "discrepancy.resolve";
+  command: "discrepancy.resolve" | "wallet.refund";
   targetId: string;
   reason: string;
   resolutionCode?: string;
@@ -116,7 +121,7 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
   const actorId = payload.actorId;
   const resolutionCode = payload.resolutionCode;
   if (
-    action.commandRef !== "discrepancy.resolve" ||
+    (action.commandRef !== "discrepancy.resolve" && action.commandRef !== "wallet.refund") ||
     typeof targetId !== "string" ||
     targetId.length === 0 ||
     targetId.length > 128 ||
@@ -145,6 +150,18 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
 
   async function applyLowRisk(input: HandleInput, command: OwnerCommand): Promise<HandleResult> {
     switch (command) {
+      case "inventory.import": {
+        if (!deps.inventoryImport || input.input === undefined) {
+          return { ok: false, code: "INVALID_REASON", message: "Thiếu dữ liệu nhập kho." };
+        }
+        const summary = await deps.inventoryImport({
+          actor: input.actor,
+          input: input.input,
+          reason: input.reason,
+          correlationId: input.correlationId,
+        });
+        return { ok: true, needsConfirmation: false, inventorySummary: summary };
+      }
       case "catalog.activate":
       case "catalog.deactivate": {
         const active = command === "catalog.activate";
@@ -193,7 +210,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
   }
 
   async function executeHighRisk(
-    exec: Executor,
+    exec: Trx,
     action: PendingAction,
     correlationId: string,
   ): Promise<boolean> {
@@ -217,6 +234,25 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           reason: action.reason,
           correlationId,
           metadataRedacted: { resolutionCode: action.resolutionCode ?? "MANUAL_RESOLVE" },
+        });
+        return true;
+      }
+      case "wallet.refund": {
+        const refunded = await refundWalletCredit(exec, {
+          orderId: action.targetId,
+          correlationId,
+          approvedBy: action.actorId,
+        });
+        if (!refunded.ok) return false;
+        await appendAuditEvent(exec, {
+          actorType: "ROOT_ADMIN",
+          actorId: action.actorId,
+          action: "wallet.refund",
+          targetType: "Order",
+          targetId: action.targetId,
+          reason: action.reason,
+          correlationId,
+          metadataRedacted: { result: refunded.kind },
         });
         return true;
       }
