@@ -91,6 +91,7 @@ export const envSchema = z.object({
 
   PAYMENT_INTENT_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   DELIVERY_BUNDLE_TTL_SECONDS: z.coerce.number().int().positive().default(86400),
+  PRIVATE_ARTIFACT_ROOT: z.string().default(""),
 
   VAULT_DRIVER: z.enum(["memory", "external"]).default("memory"),
   VAULT_ENDPOINT: z.string().optional().default(""),

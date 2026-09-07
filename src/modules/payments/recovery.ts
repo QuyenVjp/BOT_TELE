@@ -5,10 +5,15 @@ import {
   validateRecoveryBatchSize,
   type RecoveryTelemetry,
 } from "../recovery-result.js";
-import { reconcileSePay, type SePayReconciliationPort } from "./reconciliation.js";
+import {
+  createPostgresSePayReconciliationCursorStore,
+  reconcileSePay,
+  type SePayReconciliationPort,
+} from "./reconciliation.js";
 import type { RateLimiter } from "../risk/service.js";
 
 const SEPAY_RECOVERY_ADVISORY_LOCK = 7_021_680_412;
+const SEPAY_RECOVERY_OVERLAP_SECONDS = 300;
 
 export async function recoverSePayBatch(
   db: Db,
@@ -44,14 +49,53 @@ export async function recoverSePayBatch(
       const fromSec = Math.floor(
         (oldest instanceof Date ? oldest.getTime() : new Date(oldest ?? now).getTime()) / 1000,
       );
+      const cursorStore = createPostgresSePayReconciliationCursorStore(db);
+      const proposedToSec = Math.floor(now.getTime() / 1000);
+      const proposedFromSec = Math.min(
+        fromSec,
+        Math.max(0, proposedToSec - SEPAY_RECOVERY_OVERLAP_SECONDS),
+      );
+      const cursor = await cursorStore.claim(
+        "sepay",
+        proposedFromSec,
+        proposedToSec,
+        Math.min(options.batchSize, 100),
+      );
       const summary = await reconcileSePay(db, {
         port: options.port,
-        windowFromSec: fromSec,
-        windowToSec: Math.floor(now.getTime() / 1000),
-        maxTransactions: options.batchSize,
+        windowFromSec: cursor.windowFromSec,
+        windowToSec: cursor.windowToSec,
+        maxTransactions: cursor.perPage,
+        page: cursor.page,
         now,
         ...(options.rateLimiter ? { rateLimiter: options.rateLimiter } : {}),
       });
+      if (summary.windowComplete) {
+        const remainingOldest = await sql<{ created_at: Date | string | null }>`
+          select min(pi.created_at) as created_at
+          from payment_intent pi
+          join "order" o on o.id = pi.order_id
+          where pi.status in ('CREATED','PRESENTED')
+            and o.status = 'PENDING_PAYMENT'
+        `.execute(connection);
+        const oldestPending = remainingOldest.rows[0]?.created_at;
+        const overlapFromSec = Math.max(0, cursor.windowToSec - SEPAY_RECOVERY_OVERLAP_SECONDS);
+        const oldestPendingSec = oldestPending
+          ? Math.floor(
+              (oldestPending instanceof Date
+                ? oldestPending.getTime()
+                : new Date(oldestPending).getTime()) / 1000,
+            )
+          : overlapFromSec;
+        await cursorStore.completeWindow(
+          cursor,
+          Math.min(overlapFromSec, oldestPendingSec),
+          proposedToSec,
+          Math.min(options.batchSize, 100),
+        );
+      } else if (summary.pageComplete) {
+        await cursorStore.advancePage(cursor);
+      }
       return {
         claimed: candidates.rows.length,
         succeeded: summary.scanned - summary.errors,

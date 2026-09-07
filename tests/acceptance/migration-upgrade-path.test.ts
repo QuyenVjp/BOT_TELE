@@ -48,4 +48,24 @@ describe("Feature 001 migration upgrade path (T183/T186)", () => {
     expect(migration).toMatch(/capability_ref\s+text\s+not null\s+unique/i);
     expect(migration).toMatch(/cleanup_after\s+timestamptz\s+not null/i);
   });
+
+  it("extends durable admin confirmation commands in a forward migration", async () => {
+    const files = await listMigrationFiles(migrationsDir);
+    expect(files).toContain("036_support_replacement_confirmation.sql");
+
+    const frozen = await readFile(join(migrationsDir, "006_admin_confirmation.sql"), "utf8");
+    expect(frozen).toMatch(/admin_confirmation_command_ref_ck/i);
+    expect(frozen).not.toMatch(/support\.replacement\.approve/i);
+
+    const migration = await readFile(
+      join(migrationsDir, "036_support_replacement_confirmation.sql"),
+      "utf8",
+    );
+    expect(migration).toMatch(/drop constraint if exists admin_confirmation_command_ref_ck/i);
+    expect(migration).toMatch(/add constraint admin_confirmation_command_ref_ck/i);
+    expect(migration).toMatch(/discrepancy\.resolve/i);
+    expect(migration).toMatch(/wallet\.refund/i);
+    expect(migration).toMatch(/manual_fulfillment\.complete/i);
+    expect(migration).toMatch(/support\.replacement\.approve/i);
+  });
 });

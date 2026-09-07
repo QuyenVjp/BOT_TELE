@@ -85,7 +85,10 @@ export function createLatencyMetrics(): LatencyMetrics {
     },
     snapshot() {
       return Object.fromEntries(
-        [...metrics.entries()].map(([name, value]) => [name, { ...value, valuesMs: [...value.valuesMs] }]),
+        [...metrics.entries()].map(([name, value]) => [
+          name,
+          { ...value, valuesMs: [...value.valuesMs] },
+        ]),
       );
     },
     reset() {

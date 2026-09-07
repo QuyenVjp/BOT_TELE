@@ -4,9 +4,10 @@ import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
-import { findOrderById, transitionOrder } from "../commerce/repository.js";
+import { findOrderById, findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
 import { markAssetDelivered } from "./repository.js";
 import { hashDeliverySessionNonce, type DeliverySessionClaims } from "./delivery-session.js";
+import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfillment-type.js";
 
 /**
  * Secure Delivery Bundle issue / reveal / reissue (T073, FR-017, SR-003,
@@ -41,6 +42,53 @@ export type IssueResult =
 export type RevealResult =
   | { ok: true; secret: string; bundleId: string }
   | { ok: false; code: "UNAVAILABLE"; message: string };
+
+interface StoredInventorySecret {
+  schemaVersion: "inventory-fields.v1";
+  values: Array<{ name: string; value: string }>;
+}
+
+function inventoryFieldsFromSummary(value: unknown): InventoryField[] {
+  if (value === null || typeof value !== "object") return [];
+  const fields = (value as { inventoryFields?: unknown }).inventoryFields;
+  const parsed = INVENTORY_FIELDS_SCHEMA.safeParse(fields);
+  return parsed.success ? parsed.data : [];
+}
+
+function parseStructuredSecret(value: string): StoredInventorySecret | null | "LEGACY" {
+  if (!value.trim().startsWith("{")) return "LEGACY";
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(value);
+  } catch {
+    return null;
+  }
+  if (decoded === null || typeof decoded !== "object") return null;
+  const secret = decoded as { schemaVersion?: unknown; values?: unknown };
+  if (secret.schemaVersion !== "inventory-fields.v1" || !Array.isArray(secret.values)) return null;
+  const values: StoredInventorySecret["values"] = [];
+  for (const item of secret.values) {
+    if (item === null || typeof item !== "object") return null;
+    const entry = item as { name?: unknown; value?: unknown };
+    if (typeof entry.name !== "string" || typeof entry.value !== "string") return null;
+    values.push({ name: entry.name, value: entry.value });
+  }
+  return { schemaVersion: "inventory-fields.v1", values };
+}
+
+function renderVisibleSecret(raw: string, fields: InventoryField[]): string | null {
+  const parsed = parseStructuredSecret(raw);
+  if (parsed === "LEGACY") return fields.length === 0 ? raw : null;
+  if (!parsed) return null;
+  const values = new Map(parsed.values.map((value) => [value.name, value.value]));
+  const visible = fields
+    .filter((field) => field.customerVisible)
+    .map((field) => ({ label: field.label, value: values.get(field.name) ?? "" }))
+    .filter((field) => field.value.length > 0);
+  if (visible.length === 0) return null;
+  if (visible.length === 1) return visible[0]!.value;
+  return visible.map((field) => `${field.label}: ${field.value}`).join("\n");
+}
 
 export type ReissueResult =
   | { ok: true; bundleId: string; token: string; expiresAt: string; reissueOfId: string }
@@ -116,6 +164,12 @@ interface BundleRow {
   version: number;
 }
 
+function bundleExpiresAtMs(bundle: Pick<BundleRow, "expires_at">): number {
+  return bundle.expires_at instanceof Date
+    ? bundle.expires_at.getTime()
+    : new Date(bundle.expires_at).getTime();
+}
+
 async function findActiveBundleByOrder(exec: Executor, orderId: string): Promise<BundleRow | null> {
   const result = await sql<BundleRow>`
     select id, order_id, customer_id, asset_id, status, expires_at, token_hash, version
@@ -123,8 +177,92 @@ async function findActiveBundleByOrder(exec: Executor, orderId: string): Promise
     where order_id = ${orderId}
       and status in ('CREATED','AVAILABLE','VIEWED')
     limit 1
+    for update
   `.execute(exec);
   return result.rows[0] ?? null;
+}
+
+async function findActiveBundleByOrderAndAsset(
+  exec: Executor,
+  orderId: string,
+  assetId: string,
+): Promise<BundleRow | null> {
+  const result = await sql<BundleRow>`
+    select id, order_id, customer_id, asset_id, status, expires_at, token_hash, version
+    from delivery_bundle
+    where order_id = ${orderId}
+      and asset_id = ${assetId}
+      and status in ('CREATED','AVAILABLE','VIEWED')
+    limit 1
+    for update
+  `.execute(exec);
+  return result.rows[0] ?? null;
+}
+
+export async function issueReplacementDeliveryBundleInTransaction(
+  exec: Executor,
+  input: IssueInput,
+): Promise<IssueResult> {
+  const order = await findOrderByIdForUpdate(exec, input.orderId);
+  if (!order || order.customerId !== input.customerId) {
+    return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
+  }
+
+  const existing = await findActiveBundleByOrderAndAsset(exec, input.orderId, input.assetId);
+  if (existing && !(existing.status !== "VIEWED" && Date.now() > bundleExpiresAtMs(existing))) {
+    return {
+      ok: true,
+      bundleId: existing.id,
+      token: recoverToken(existing, input.deliveryTokenKeys),
+      expiresAt: new Date(bundleExpiresAtMs(existing)).toISOString(),
+      reused: true,
+    };
+  }
+  if (existing) {
+    await sql`
+      update delivery_bundle
+      set status = 'EXPIRED', version = version + 1
+      where id = ${existing.id} and version = ${existing.version} and status in ('CREATED','AVAILABLE')
+    `.execute(exec);
+  }
+
+  const asset = await sql<{ status: string; reserved_order_id: string | null }>`
+    select status, reserved_order_id from digital_asset where id = ${input.assetId}
+  `.execute(exec);
+  const a = asset.rows[0];
+  if (!a) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy tài khoản." };
+  if (a.reserved_order_id !== input.orderId || (a.status !== "READY" && a.status !== "RESERVED")) {
+    return { ok: false, code: "ASSET_NOT_READY", message: "Tài khoản chưa sẵn sàng để giao." };
+  }
+
+  const bundleId = newId();
+  const token = mintToken(bundleId, input.deliveryTokenKeys);
+  const tokenHash = hashToken(token);
+  const expiresAt = new Date(Date.now() + input.ttlSeconds * 1000);
+  await sql`
+    insert into delivery_bundle
+      (id, order_id, customer_id, asset_id, token_hash, status, expires_at)
+    values
+      (${bundleId}, ${input.orderId}, ${input.customerId}, ${input.assetId},
+       ${tokenHash}, 'AVAILABLE', ${expiresAt.toISOString()})
+  `.execute(exec);
+
+  await enqueueOutboxEvent(exec, {
+    id: newId(),
+    aggregateType: "DeliveryBundle",
+    aggregateId: bundleId,
+    aggregateVersion: 1,
+    eventType: "DeliveryBundleCreated",
+    payloadRedacted: {
+      bundleId,
+      orderId: input.orderId,
+      customerId: input.customerId,
+      assetId: input.assetId,
+      correlationId: input.correlationId,
+    },
+  });
+
+  return { ok: true, bundleId, token, expiresAt: expiresAt.toISOString(), reused: false };
 }
 
 /**
@@ -133,13 +271,15 @@ async function findActiveBundleByOrder(exec: Executor, orderId: string): Promise
  */
 export async function issueDeliveryBundle(db: Db, input: IssueInput): Promise<IssueResult> {
   return withTransaction(db, async (trx) => {
-    // Reuse an existing active bundle (idempotent issue).
+    const order = await findOrderByIdForUpdate(trx, input.orderId);
+    if (!order || order.customerId !== input.customerId) {
+      return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
+    }
+
+    // Reuse an existing active bundle unless it is an unviewed expired row.
     const existing = await findActiveBundleByOrder(trx, input.orderId);
-    if (existing) {
-      const expiresAt =
-        existing.expires_at instanceof Date
-          ? existing.expires_at.toISOString()
-          : new Date(existing.expires_at).toISOString();
+    if (existing && !(existing.status !== "VIEWED" && Date.now() > bundleExpiresAtMs(existing))) {
+      const expiresAt = new Date(bundleExpiresAtMs(existing)).toISOString();
       return {
         ok: true,
         bundleId: existing.id,
@@ -147,6 +287,13 @@ export async function issueDeliveryBundle(db: Db, input: IssueInput): Promise<Is
         expiresAt,
         reused: true,
       };
+    }
+    if (existing) {
+      await sql`
+        update delivery_bundle
+        set status = 'EXPIRED', version = version + 1
+        where id = ${existing.id} and version = ${existing.version} and status in ('CREATED','AVAILABLE')
+      `.execute(trx);
     }
 
     // Confirm the asset is READY (or RESERVED) and bound to this order.
@@ -265,8 +412,8 @@ export async function revealDeliveryBundle(db: Db, input: RevealInput): Promise<
       `.execute(trx);
     }
 
-    const assetRow = await sql<{ vault_ref: string; version: number }>`
-      select vault_ref, version from digital_asset where id = ${bundle.asset_id}
+    const assetRow = await sql<{ vault_ref: string; validation_summary: unknown; version: number }>`
+      select vault_ref, validation_summary, version from digital_asset where id = ${bundle.asset_id}
     `.execute(trx);
     const asset = assetRow.rows[0];
     if (!asset) return null;
@@ -277,6 +424,7 @@ export async function revealDeliveryBundle(db: Db, input: RevealInput): Promise<
       customerId: bundle.customer_id,
       assetId: bundle.asset_id,
       vaultRef: asset.vault_ref,
+      inventoryFields: inventoryFieldsFromSummary(asset.validation_summary),
     };
   });
 
@@ -290,12 +438,17 @@ export async function revealDeliveryBundle(db: Db, input: RevealInput): Promise<
   try {
     secret = await input.vault.reveal(prepared.vaultRef);
   } catch {
-    // Do not consume; surface a safe error so the customer can retry the link.
+    return { ok: false, code: "UNAVAILABLE", message: SAFE_REVEAL_ERROR };
+  }
+
+  const visibleSecret = renderVisibleSecret(secret, prepared.inventoryFields);
+  if (!visibleSecret) {
     return { ok: false, code: "UNAVAILABLE", message: SAFE_REVEAL_ERROR };
   }
 
   // Phase 2: consume the link + mark asset delivered atomically. If a concurrent
   // reveal already consumed it, the guarded update affects 0 rows and we return
+  // the safe single-use error.
   // the secret we already fetched (the winning caller also returns it) — the
   // link is single-use and the customer who holds the token gets the secret.
   let consumed: boolean;
@@ -374,7 +527,7 @@ export async function revealDeliveryBundle(db: Db, input: RevealInput): Promise<
     return { ok: false, code: "UNAVAILABLE", message: SAFE_REVEAL_ERROR };
   }
 
-  return { ok: true, secret, bundleId: prepared.bundleId };
+  return { ok: true, secret: visibleSecret, bundleId: prepared.bundleId };
 }
 
 /**

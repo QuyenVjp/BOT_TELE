@@ -1,21 +1,24 @@
 import type { CategoryId, ProductId, ProductVariantId } from "../../shared/ids/index.js";
-
+import { FulfillmentTypeSchema, type FulfillmentType } from "./fulfillment-type.js";
 /**
  * Catalog domain types + sellability rules (data-model.md Catalog).
  *
- * The sellability invariant is the single authority for whether a variant may
+ * The visibility invariant is the single authority for whether a variant may
  * be shown or bought: product + category + variant active, price positive,
- * resale evidence present (SR-007), and a Feature 001 allowlisted stock policy. Repository
- * queries and Buy Now both defer to `isVariantSellable` so there is one rule,
- * not two drifting copies.
+ * resale evidence present (SR-007), and a stock-policy/fulfillment-type route
+ * the checkout can validate. Repository queries and Buy Now both defer here so
+ * there is one rule, not two drifting copies.
  */
 
 export type DeliveryType = "INVITE" | "LICENSE" | "ACTIVATION_KEY" | "CREDENTIAL" | "MANUAL_REVIEW";
 
 export type StockPolicy = "LOCAL_ONLY" | "SUPPLIER_ONLY" | "LOCAL_THEN_SUPPLIER" | "PAUSED";
 
+export type CatalogFulfillmentType = FulfillmentType;
+
 export const FEATURE_001_SELLABLE_STOCK_POLICIES = [
   "LOCAL_ONLY",
+  "SUPPLIER_ONLY",
   "LOCAL_THEN_SUPPLIER",
 ] as const satisfies readonly StockPolicy[];
 
@@ -25,19 +28,31 @@ const FEATURE_001_SELLABLE_STOCK_POLICY_SET: ReadonlySet<unknown> = new Set(
 
 export type Feature001SellableStockPolicy = (typeof FEATURE_001_SELLABLE_STOCK_POLICIES)[number];
 
-/** Feature 001 fails closed until a policy has a safe pre-payment capacity hold. */
+/** Feature 001 fails closed until a policy/fulfillment route is supported. */
 export function isFeature001SellablePolicy(
   policy: unknown,
 ): policy is Feature001SellableStockPolicy {
   return FEATURE_001_SELLABLE_STOCK_POLICY_SET.has(policy);
 }
 
-/**
- * Reservation semantics stay a named decision boundary even though every
- * Feature 001 sellable policy currently draws on finite local stock.
- */
-export function requiresLocalReservation(policy: unknown): policy is Feature001SellableStockPolicy {
-  return isFeature001SellablePolicy(policy);
+export function isSupportedCatalogRoute(input: {
+  stockPolicy: unknown;
+  fulfillmentType: unknown;
+}): input is {
+  stockPolicy: Feature001SellableStockPolicy;
+  fulfillmentType: CatalogFulfillmentType;
+} {
+  if (!isFeature001SellablePolicy(input.stockPolicy)) return false;
+  if (!FulfillmentTypeSchema.safeParse(input.fulfillmentType).success) return false;
+  if (input.stockPolicy === "SUPPLIER_ONLY") return input.fulfillmentType === "SUPPLIER_API";
+  return input.fulfillmentType !== "SUPPLIER_API";
+}
+
+/** Local policies need a pre-payment readiness/reservation check. */
+export function requiresLocalReservation(
+  policy: unknown,
+): policy is "LOCAL_ONLY" | "LOCAL_THEN_SUPPLIER" {
+  return policy === "LOCAL_ONLY" || policy === "LOCAL_THEN_SUPPLIER";
 }
 
 export interface Category {
@@ -81,12 +96,13 @@ export interface SellabilityContext {
   priceVnd: bigint;
   resaleEvidenceId: string | null;
   stockPolicy: StockPolicy;
+  fulfillmentType: CatalogFulfillmentType;
 }
 
 /**
- * The single sellability rule. A variant is sellable only when every gate holds.
- * Unknown, PAUSED, and SUPPLIER_ONLY policies fail closed; an absent resale
- * evidence id blocks selling (SR-007 — no unauthorized resale).
+ * A variant is visible/payable only when every catalog gate holds. PAUSED,
+ * unsupported supplier legacy combinations, and absent resale evidence fail
+ * closed (SR-007 — no unauthorized resale).
  */
 export function isVariantSellable(ctx: SellabilityContext): boolean {
   return (
@@ -96,6 +112,6 @@ export function isVariantSellable(ctx: SellabilityContext): boolean {
     ctx.priceVnd > 0n &&
     ctx.resaleEvidenceId !== null &&
     ctx.resaleEvidenceId.length > 0 &&
-    isFeature001SellablePolicy(ctx.stockPolicy)
+    isSupportedCatalogRoute({ stockPolicy: ctx.stockPolicy, fulfillmentType: ctx.fulfillmentType })
   );
 }

@@ -4,6 +4,7 @@ import { newId } from "../../src/shared/ids/index.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
 import {
   issueDeliveryBundle,
+  issueReplacementDeliveryBundleInTransaction,
   revealDeliveryBundle,
   reissueDeliveryBundle,
 } from "../../src/modules/digital-goods/delivery.js";
@@ -134,6 +135,67 @@ describe("delivery bundle security (FR-017 / SR-003)", () => {
       select count(*)::text as count from delivery_bundle where order_id = ${f.orderId}
     `.execute(ctx.db);
     expect(Number(count.rows[0]?.count)).toBe(1);
+  });
+
+  it("refreshes an expired unconsumed bundle on issue retry", async () => {
+    const f = await seedReadyAsset();
+    const first = await issueDeliveryBundle(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      assetId: f.assetId,
+      ttlSeconds: 900,
+      correlationId: "issue-1",
+    });
+    if (!first.ok) throw new Error("issue failed");
+
+    await sql`
+      update delivery_bundle set expires_at = now() - interval '1 minute'
+      where id = ${first.bundleId}
+    `.execute(ctx.db);
+
+    const retry = await issueDeliveryBundle(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      assetId: f.assetId,
+      ttlSeconds: 900,
+      correlationId: "issue-2",
+    });
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.reused).toBe(false);
+    expect(retry.bundleId).not.toBe(first.bundleId);
+
+    const vault = { reveal: async (ref: string) => (ref === f.vaultRef ? f.secret : "WRONG") };
+    const oldReveal = await revealDeliveryBundle(ctx.db, {
+      token: first.token,
+      customerId: f.customerId,
+      correlationId: "old-issue-token",
+      vault,
+    });
+    expect(oldReveal.ok).toBe(false);
+
+    const freshReveal = await revealDeliveryBundle(ctx.db, {
+      token: retry.token,
+      customerId: f.customerId,
+      correlationId: "fresh-issue-token",
+      vault,
+    });
+    expect(freshReveal.ok).toBe(true);
+    if (freshReveal.ok) expect(freshReveal.secret).toBe(f.secret);
+
+    const rows = await sql<{ expired_count: string; bundle_count: string; asset_count: string }>`
+      select
+        count(*) filter (where id = ${first.bundleId} and status = 'EXPIRED')::text as expired_count,
+        count(*)::text as bundle_count,
+        (select count(*)::text from digital_asset where reserved_order_id = ${f.orderId}) as asset_count
+      from delivery_bundle
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(rows.rows[0]).toMatchObject({
+      expired_count: "1",
+      bundle_count: "2",
+      asset_count: "1",
+    });
   });
 
   it("reveals the secret exactly once to the owning customer", async () => {
@@ -318,6 +380,78 @@ describe("delivery bundle security (FR-017 / SR-003)", () => {
       where order_id = ${f.orderId} and status in ('CREATED','AVAILABLE','VIEWED')
     `.execute(ctx.db);
     expect(Number(active.rows[0]?.count)).toBe(1);
+  });
+
+  it("refreshes an expired unconsumed replacement bundle on retry without reusing the old token", async () => {
+    const f = await seedReadyAsset();
+    const first = await issueReplacementDeliveryBundleInTransaction(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      assetId: f.assetId,
+      ttlSeconds: 900,
+      correlationId: "replacement-1",
+    });
+    if (!first.ok) throw new Error("replacement issue failed");
+
+    await sql`
+      update delivery_bundle set expires_at = now() - interval '1 minute'
+      where id = ${first.bundleId}
+    `.execute(ctx.db);
+
+    const retry = await issueReplacementDeliveryBundleInTransaction(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      assetId: f.assetId,
+      ttlSeconds: 900,
+      correlationId: "replacement-2",
+    });
+    expect(retry.ok).toBe(true);
+    if (!retry.ok) return;
+    expect(retry.reused).toBe(false);
+    expect(retry.bundleId).not.toBe(first.bundleId);
+    expect(retry.token).not.toBe(first.token);
+
+    const vault = { reveal: async (ref: string) => (ref === f.vaultRef ? f.secret : "WRONG") };
+    const oldReveal = await revealDeliveryBundle(ctx.db, {
+      token: first.token,
+      customerId: f.customerId,
+      correlationId: "old-token",
+      vault,
+    });
+    expect(oldReveal.ok).toBe(false);
+
+    const freshReveal = await revealDeliveryBundle(ctx.db, {
+      token: retry.token,
+      customerId: f.customerId,
+      correlationId: "fresh-token",
+      vault,
+    });
+    expect(freshReveal.ok).toBe(true);
+    if (freshReveal.ok) expect(freshReveal.secret).toBe(f.secret);
+
+    const rows = await sql<{
+      expired_count: string;
+      active_count: string;
+      bundle_count: string;
+      asset_count: string;
+      outbox_count: string;
+    }>`
+      select
+        count(*) filter (where b.id = ${first.bundleId} and b.status = 'EXPIRED')::text as expired_count,
+        count(*) filter (where b.order_id = ${f.orderId} and b.status in ('CREATED','AVAILABLE','VIEWED','CONSUMED'))::text as active_count,
+        count(*)::text as bundle_count,
+        (select count(*)::text from digital_asset where reserved_order_id = ${f.orderId}) as asset_count,
+        (select count(*)::text from outbox_event where aggregate_type = 'DeliveryBundle' and aggregate_id in (${first.bundleId}, ${retry.bundleId})) as outbox_count
+      from delivery_bundle b
+      where b.order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(rows.rows[0]).toMatchObject({
+      expired_count: "1",
+      active_count: "1",
+      bundle_count: "2",
+      asset_count: "1",
+      outbox_count: "3",
+    });
   });
 
   it("refuses to reissue when a live bundle still exists (no silent second token)", async () => {

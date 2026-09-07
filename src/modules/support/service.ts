@@ -4,6 +4,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { newId } from "../../shared/ids/index.js";
 import { findOrderById } from "../commerce/repository.js";
+import { openReplacementCase } from "../digital-goods/replacement.js";
 import {
   isSupportReasonCode,
   slaDueAt,
@@ -33,7 +34,7 @@ export interface SupportTicket {
 }
 
 export type OpenTicketResult =
-  | { ok: true; ticketId: string; status: SupportTicketStatus }
+  | { ok: true; ticketId: string; status: SupportTicketStatus; replacementCaseId?: string }
   | {
       ok: false;
       code: "INVALID_REASON" | "ORDER_NOT_FOUND" | "ORDER_NOT_OWNED" | "EMPTY_SUMMARY";
@@ -172,6 +173,18 @@ export function createSupportService(db: Db): SupportService {
         });
         return createdTicketId;
       });
+
+      if (input.orderId && input.reasonCode === "ASSET_NOT_WORKING") {
+        const replacement = await openReplacementCase(db, {
+          orderId: input.orderId,
+          customerId: input.customerId,
+          reasonCode: "INVALID_CREDENTIAL",
+          requestRefund: false,
+          correlationId: input.correlationId,
+        });
+        if (replacement.ok)
+          return { ok: true, ticketId, status: "OPEN", replacementCaseId: replacement.caseId };
+      }
 
       return { ok: true, ticketId, status: "OPEN" };
     },

@@ -68,7 +68,9 @@ function setup() {
   const send = vi.fn().mockResolvedValue(undefined);
   const walletTopup = vi.fn().mockResolvedValue({ text: "wallet topup", buttons: [] });
   const walletPay = vi.fn().mockResolvedValue({ text: "wallet pay", buttons: [] });
-  const presentAdminCustomerDetail = vi.fn().mockResolvedValue({ text: "customer detail", buttons: [] });
+  const presentAdminCustomerDetail = vi
+    .fn()
+    .mockResolvedValue({ text: "customer detail", buttons: [] });
   const sendAdminCustomerMessage = vi.fn().mockResolvedValue({ text: "message sent", buttons: [] });
   const adminConfirm = vi.fn().mockResolvedValue({ text: "confirmed", buttons: [] });
   const broadcastCompose = vi.fn().mockResolvedValue({ text: "choose audience", buttons: [] });
@@ -77,7 +79,56 @@ function setup() {
   const broadcastConfirm = vi.fn().mockResolvedValue({ text: "status", buttons: [] });
   const broadcastCancel = vi.fn().mockResolvedValue({ text: "cancelled", buttons: [] });
   const broadcastStatus = vi.fn().mockResolvedValue({ text: "status", buttons: [] });
+  const adminCustomers = vi.fn().mockResolvedValue({ text: "customers", buttons: [] });
+  const adminCustomerState = vi.fn().mockResolvedValue({ text: "customer state", buttons: [] });
+  const adminCustomerSearch = vi.fn().mockResolvedValue({ text: "customer search", buttons: [] });
+  const adminCustomerMessagePrompt = vi
+    .fn()
+    .mockResolvedValue({ text: "message prompt", buttons: [] });
+  const adminOrders = vi.fn().mockResolvedValue({ text: "orders", buttons: [] });
+  const adminOrderState = vi.fn().mockResolvedValue({ text: "order state", buttons: [] });
+  const adminOrderSearch = vi.fn().mockResolvedValue({ text: "order search", buttons: [] });
+  const adminOrderMessagePrompt = vi.fn().mockResolvedValue({ text: "order message", buttons: [] });
+  const adminOrderText = vi.fn().mockResolvedValue(null);
+  const adminManualTasks = vi.fn().mockResolvedValue({ text: "manual tasks", buttons: [] });
+  const adminManualTask = vi.fn().mockResolvedValue({
+    text: "manual detail",
+    buttons: [[{ text: "confirm", callbackData: "admin:manual:complete:state-1" }]],
+  });
+  const adminManualComplete = vi.fn().mockResolvedValue({ text: "challenge", buttons: [] });
+  const adminCustomerText = vi.fn().mockResolvedValue(null);
+  const importDocument = vi.fn().mockResolvedValue({
+    text: "file preview",
+    buttons: [[{ text: "activate", callbackData: "admin:inventory:file-confirm:state-1" }]],
+  });
+  const importFileConfirm = vi.fn().mockResolvedValue({ text: "file activated", buttons: [] });
+  const importTemplate = vi.fn().mockResolvedValue({ text: "csv template", buttons: [] });
+  const quantityAdjustPreview = vi.fn().mockResolvedValue({ text: "qty preview", buttons: [] });
+  const quantityAdjustConfirm = vi.fn().mockResolvedValue({ text: "qty done", buttons: [] });
+  const quantityAdjustText = vi.fn().mockResolvedValue(null);
+  const stockAnnouncementPreview = vi
+    .fn()
+    .mockResolvedValue({ text: "stock preview", buttons: [] });
+  const adminVariantCreatePrompt = vi
+    .fn()
+    .mockResolvedValue({ text: "variant create", buttons: [] });
+  const adminVariantEditPrompt = vi.fn().mockResolvedValue({ text: "variant edit", buttons: [] });
+  const workflowVariantText = vi.fn().mockResolvedValue(null);
   const supportReasonMenu = vi.fn().mockReturnValue({ text: "support menu", buttons: [] });
+  const adminSupport = vi.fn().mockResolvedValue({ text: "support queue", buttons: [] });
+  const adminSupportApprove = vi
+    .fn()
+    .mockResolvedValue({ text: "replacement challenge", buttons: [] });
+  const notificationSettings = vi
+    .fn()
+    .mockResolvedValue({ text: "notification settings", buttons: [] });
+  const notificationToggle = vi.fn().mockResolvedValue({ text: "toggled", buttons: [] });
+  const notificationSubscriptions = vi
+    .fn()
+    .mockResolvedValue({ text: "subscriptions", buttons: [] });
+  const restockSubscribe = vi.fn().mockResolvedValue({ text: "subscribed", buttons: [] });
+  const restockUnsubscribe = vi.fn().mockResolvedValue({ text: "unsubscribed", buttons: [] });
+  const restockList = vi.fn().mockResolvedValue({ text: "restock list", buttons: [] });
 
   const dispatcher = createTelegramDomainDispatcher({
     codec,
@@ -108,6 +159,16 @@ function setup() {
     support: { reasonMenu: supportReasonMenu, open: vi.fn(), list: vi.fn() },
     walletTopup,
     walletPay,
+    notification: {
+      settings: notificationSettings,
+      toggle: notificationToggle,
+      subscriptions: notificationSubscriptions,
+    },
+    restock: {
+      subscribe: restockSubscribe,
+      unsubscribe: restockUnsubscribe,
+      list: restockList,
+    },
     admin: {
       handleToken: vi.fn().mockResolvedValue({
         text: "token",
@@ -117,13 +178,37 @@ function setup() {
       dashboard: adminDashboard,
       products: adminProducts,
       productDetail: adminProductDetail,
+      variantCreatePrompt: adminVariantCreatePrompt,
+      variantEditPrompt: adminVariantEditPrompt,
       inventory: adminInventory,
+      stockAnnouncementPreview,
+      customers: adminCustomers,
+      customerState: adminCustomerState,
+      customerSearch: adminCustomerSearch,
+      customerMessagePrompt: adminCustomerMessagePrompt,
+      customerText: adminCustomerText,
+      orders: adminOrders,
+      orderState: adminOrderState,
+      orderSearch: adminOrderSearch,
+      orderMessagePrompt: adminOrderMessagePrompt,
+      orderText: adminOrderText,
       presentAdminCustomerDetail,
       sendAdminCustomerMessage,
       confirm: adminConfirm,
+      manualTasks: adminManualTasks,
+      manualTask: adminManualTask,
+      manualComplete: adminManualComplete,
+      support: adminSupport,
+      supportApprove: adminSupportApprove,
       importPreview: vi.fn(),
       importConfirm: vi.fn(),
       importCancel: vi.fn(),
+      importDocument,
+      importFileConfirm,
+      importTemplate,
+      quantityAdjustPreview,
+      quantityAdjustConfirm,
+      quantityAdjustText,
       marketing: vi.fn().mockResolvedValue({ text: "marketing", buttons: [] }),
       broadcastCompose,
       broadcastAudience,
@@ -132,6 +217,7 @@ function setup() {
       broadcastCancel,
       broadcastStatus,
       workflow: {
+        variantText: workflowVariantText,
         messageText: workflowMessageText,
         start: vi.fn().mockResolvedValue({ text: "start", buttons: [] }),
         category: vi.fn(),
@@ -165,7 +251,38 @@ function setup() {
     broadcastConfirm,
     broadcastCancel,
     broadcastStatus,
+    adminCustomers,
+    adminCustomerState,
+    adminVariantCreatePrompt,
+    adminVariantEditPrompt,
+    workflowVariantText,
+    adminCustomerSearch,
+    adminCustomerMessagePrompt,
+    adminOrders,
+    adminOrderState,
+    adminOrderSearch,
+    adminOrderMessagePrompt,
+    adminOrderText,
+    importTemplate,
+    adminCustomerText,
+    adminManualTasks,
+    adminManualTask,
+    adminManualComplete,
+    adminSupport,
+    adminSupportApprove,
+    importDocument,
+    importFileConfirm,
+    quantityAdjustPreview,
+    quantityAdjustConfirm,
+    quantityAdjustText,
+    stockAnnouncementPreview,
     supportReasonMenu,
+    notificationSettings,
+    notificationToggle,
+    notificationSubscriptions,
+    restockSubscribe,
+    restockUnsubscribe,
+    restockList,
     send,
     order,
   };
@@ -258,8 +375,77 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
 
     expect(walletTopup).toHaveBeenCalledTimes(1);
     expect(mainMenu).not.toHaveBeenCalled();
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ message: { text: "wallet topup", buttons: [] } }));
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ message: { text: "wallet topup", buttons: [] } }),
+    );
     await app.close();
+  });
+  it("routes visible notification reply labels to their existing toggles", async () => {
+    const { dispatcher, notificationToggle, send } = setup();
+
+    for (const [messageText, kind] of [
+      ["🛍 Cập nhật sản phẩm", "shop"],
+      ["📣 Hoạt động mua hàng", "activity"],
+    ] as const) {
+      await dispatcher.handle({
+        actorUserId: USER,
+        chatId: USER,
+        chatType: "private",
+        messageId: `toggle-${kind}`,
+        action: "UNKNOWN",
+        messageText,
+      });
+    }
+
+    expect(notificationToggle).toHaveBeenNthCalledWith(1, CUSTOMER, "shop");
+    expect(notificationToggle).toHaveBeenNthCalledWith(2, CUSTOMER, "activity");
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes signed restock subscribe and unsubscribe callbacks for the actor only", async () => {
+    const { codec, dispatcher, restockSubscribe, restockUnsubscribe, send } = setup();
+    const variantId = newId();
+    const subscribe = codec.issue({
+      action: "RESTOCK_SUBSCRIBE",
+      resourceId: variantId,
+      telegramUserId: USER,
+    });
+    const unsubscribe = codec.issue({
+      action: "RESTOCK_UNSUBSCRIBE",
+      resourceId: variantId,
+      telegramUserId: USER,
+    });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "restock-subscribe",
+      action: "UNKNOWN",
+      callbackData: subscribe,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "restock-unsubscribe",
+      action: "UNKNOWN",
+      callbackData: unsubscribe,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "restock-tampered",
+      action: "UNKNOWN",
+      callbackData: subscribe.slice(0, -1) + (subscribe.endsWith("A") ? "B" : "A"),
+    });
+
+    expect(restockSubscribe).toHaveBeenCalledWith(CUSTOMER, variantId);
+    expect(restockSubscribe).toHaveBeenCalledTimes(1);
+    expect(restockUnsubscribe).toHaveBeenCalledWith(CUSTOMER, variantId);
+    expect(restockUnsubscribe).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls.at(-1)![0].message.text).toContain("không hợp lệ");
   });
 
   it("routes the customer back reply keyboard label to the home screen", async () => {
@@ -356,6 +542,241 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(send).toHaveBeenCalledTimes(1);
     const sent = send.mock.calls[0]![0] as { message: { text: string } };
     expect(sent.message.text).toContain("dashboard");
+  });
+
+  it("routes manual fulfillment callbacks through list, detail, and confirmation request", async () => {
+    const { dispatcher, adminManualTasks, adminManualTask, adminManualComplete, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "manual-1",
+      action: "ADMIN",
+      callbackData: "admin:manual",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "manual-2",
+      action: "ADMIN",
+      callbackData: "admin:manual:view:task-1",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "manual-3",
+      action: "ADMIN",
+      callbackData: "admin:manual:complete:state-1",
+    });
+
+    expect(adminManualTasks).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      correlationId: "telegram:manual-1",
+    });
+    expect(adminManualTask).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      taskId: "task-1",
+      correlationId: "telegram:manual-2",
+    });
+    expect(adminManualComplete).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      stateId: "state-1",
+      correlationId: "telegram:manual-3",
+    });
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it("routes admin support queue and replacement approval callbacks", async () => {
+    const { dispatcher, adminSupport, adminSupportApprove, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "support-list",
+      action: "ADMIN",
+      callbackData: "admin:support",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "support-approve",
+      action: "ADMIN",
+      callbackData: "admin:support:approve:case-1",
+    });
+
+    expect(adminSupport).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      correlationId: "telegram:support-list",
+    });
+    expect(adminSupportApprove).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      caseId: "case-1",
+      correlationId: "telegram:support-approve",
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes independent product variant create and edit callbacks", async () => {
+    const { dispatcher, adminVariantCreatePrompt, adminVariantEditPrompt, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "variant-add",
+      action: "ADMIN",
+      callbackData: "admin:products:variant-add:product-1",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "variant-edit",
+      action: "ADMIN",
+      callbackData: "admin:products:variant-edit:variant-1",
+    });
+
+    expect(adminVariantCreatePrompt).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      productId: "product-1",
+      chatType: "private",
+      correlationId: "telegram:variant-add",
+    });
+    expect(adminVariantEditPrompt).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      variantId: "variant-1",
+      chatType: "private",
+      correlationId: "telegram:variant-edit",
+    });
+    expect(send).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes variant state text before the generic product wizard", async () => {
+    const { dispatcher, workflowVariantText, workflowMessageText, send } = setup();
+    workflowVariantText.mockResolvedValueOnce({ text: "variant saved", buttons: [] });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "variant-text",
+      action: "UNKNOWN",
+      messageText: "state-1|SKU2|Premium 2|99000|CUSTOM|0|1",
+    });
+
+    expect(workflowVariantText).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      text: "state-1|SKU2|Premium 2|99000|CUSTOM|0|1",
+      chatType: "private",
+      correlationId: "telegram:variant-text",
+    });
+    expect(workflowMessageText).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes quantity stock adjustment callbacks and reason text", async () => {
+    const { dispatcher, quantityAdjustPreview, quantityAdjustConfirm, quantityAdjustText, send } =
+      setup();
+    quantityAdjustText.mockResolvedValueOnce({ text: "qty reason preview", buttons: [] });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "qty-add",
+      action: "ADMIN",
+      callbackData: "admin:inventory:qty:variant-1:1:64",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "qty-confirm",
+      action: "ADMIN",
+      callbackData: "admin:inventory:qty-confirm:state-1",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "qty-reason",
+      action: "UNKNOWN",
+      messageText: "cycle count correction",
+    });
+
+    expect(quantityAdjustPreview).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      variantId: "variant-1",
+      delta: 1,
+      expectedStockVersion: 64,
+      chatType: "private",
+      correlationId: "telegram:qty-add",
+    });
+    expect(quantityAdjustConfirm).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      stateId: "state-1",
+      chatType: "private",
+      correlationId: "telegram:qty-confirm",
+    });
+    expect(quantityAdjustText).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      text: "cycle count correction",
+      chatType: "private",
+      correlationId: "telegram:qty-reason",
+    });
+    expect(send).toHaveBeenCalledTimes(3);
+  });
+
+  it("routes stock announcement preview from variant inventory", async () => {
+    const { dispatcher, stockAnnouncementPreview, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "stock-announce",
+      action: "ADMIN",
+      callbackData: "admin:inventory:announce:variant-1",
+    });
+
+    expect(stockAnnouncementPreview).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      variantId: "variant-1",
+      chatType: "private",
+      correlationId: "telegram:stock-announce",
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes selected inventory template callbacks", async () => {
+    const { dispatcher, importTemplate, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "inventory-template",
+      action: "ADMIN",
+      callbackData: "admin:inventory:template:variant-1",
+    });
+
+    expect(importTemplate).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      variantId: "variant-1",
+      chatType: "private",
+      correlationId: "telegram:inventory-template",
+    });
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it("routes the live visible admin callbacks without placeholder text", async () => {
@@ -473,6 +894,67 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(base.send.mock.calls[0]![0].message.text).toBe("import preview");
   });
 
+  it("routes Telegram document envelopes to file import before storefront fallback", async () => {
+    const { dispatcher, importDocument, mainMenu, send } = setup();
+    const document = {
+      fileId: "AgACAgUAAxkBAAIBfileid123",
+      fileUniqueId: "unique_file_id",
+      filename: "guide.pdf",
+      mimeType: "application/pdf",
+      fileSize: 12,
+    };
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "file-doc-1",
+      action: "UNKNOWN",
+      document,
+    });
+
+    expect(importDocument).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      document,
+      chatType: "private",
+      correlationId: "telegram:file-doc-1",
+    });
+    expect(mainMenu).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({
+        message: {
+          text: "file preview",
+          buttons: [[{ text: "activate", callbackData: "admin:inventory:file-confirm:state-1" }]],
+        },
+      }),
+    );
+  });
+
+  it("routes file activation callbacks through bound state ids", async () => {
+    const { dispatcher, importFileConfirm, send } = setup();
+    const callbackData = "admin:inventory:file-confirm:state-1";
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "file-confirm-1",
+      action: "ADMIN",
+      callbackData,
+    });
+
+    expect(callbackData.length).toBeLessThanOrEqual(64);
+    expect(importFileConfirm).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      stateId: "state-1",
+      correlationId: "telegram:file-confirm-1",
+    });
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ message: { text: "file activated", buttons: [] } }),
+    );
+  });
+
   it("lets /cancel win over active workflow text", async () => {
     const { dispatcher, workflowCancel, workflowMessageText } = setup();
     await dispatcher.handle({
@@ -507,7 +989,9 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       challenge: "abc123",
       correlationId: "telegram:confirm-1",
     });
-    expect(send).toHaveBeenCalledWith(expect.objectContaining({ message: { text: "confirmed", buttons: [] } }));
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ message: { text: "confirmed", buttons: [] } }),
+    );
   });
 
   it("normalizes Telegram /customer and /message_customer updates into admin handlers", async () => {
@@ -598,6 +1082,158 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     await app.close();
   });
 
+  it("routes admin customer list/search/state/message callbacks without leaking customer ids in buttons", async () => {
+    const {
+      dispatcher,
+      adminCustomers,
+      adminCustomerState,
+      adminCustomerSearch,
+      adminCustomerMessagePrompt,
+      send,
+    } = setup();
+    const stateId = newId();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "cust-list",
+      action: "ADMIN",
+      callbackData: "admin:customers",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "cust-filter",
+      action: "ADMIN",
+      callbackData: "admin:customers:filter:payment_review",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "cust-search",
+      action: "ADMIN",
+      callbackData: "admin:customers:search",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "cust-view",
+      action: "ADMIN",
+      callbackData: `admin:customers:view:${stateId}`,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "cust-msg",
+      action: "ADMIN",
+      callbackData: `admin:customers:message:${stateId}`,
+    });
+
+    expect(adminCustomers).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }));
+    expect(adminCustomers).toHaveBeenCalledWith(
+      expect.objectContaining({ filter: "payment_review" }),
+    );
+    expect(adminCustomerSearch).toHaveBeenCalledTimes(1);
+    expect(adminCustomerState).toHaveBeenCalledWith(expect.objectContaining({ stateId }));
+    expect(adminCustomerMessagePrompt).toHaveBeenCalledWith(expect.objectContaining({ stateId }));
+    expect(send).toHaveBeenCalledTimes(5);
+    for (const call of send.mock.calls) {
+      for (const button of call[0].message.buttons.flat())
+        expect(button.callbackData).not.toContain(CUSTOMER);
+    }
+  });
+
+  it("routes admin order list/filter/search/state/message callbacks through bounded state ids", async () => {
+    const {
+      dispatcher,
+      adminOrders,
+      adminOrderState,
+      adminOrderSearch,
+      adminOrderMessagePrompt,
+      adminOrderText,
+      adminCustomerText,
+      send,
+    } = setup();
+    const stateId = newId();
+    adminOrderText.mockResolvedValue({ text: "order text", buttons: [] });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "order-list",
+      action: "ADMIN",
+      callbackData: "admin:orders",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "order-filter",
+      action: "ADMIN",
+      callbackData: "admin:orders:filter:payment_review",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "order-search",
+      action: "ADMIN",
+      callbackData: "admin:orders:search",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "order-view",
+      action: "ADMIN",
+      callbackData: `admin:orders:view:${stateId}`,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "order-page",
+      action: "ADMIN",
+      callbackData: `admin:orders:page:${stateId}`,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "order-msg",
+      action: "ADMIN",
+      callbackData: `admin:orders:message:${stateId}`,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "order-text",
+      action: "UNKNOWN",
+      messageText: "Xin chào theo đơn",
+    });
+
+    expect(adminOrders).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }));
+    expect(adminOrders).toHaveBeenCalledWith(expect.objectContaining({ filter: "payment_review" }));
+    expect(adminOrderSearch).toHaveBeenCalledTimes(1);
+    expect(adminOrderState).toHaveBeenCalledWith(expect.objectContaining({ stateId }));
+    expect(adminOrderState).toHaveBeenCalledTimes(2);
+    expect(adminOrderMessagePrompt).toHaveBeenCalledWith(expect.objectContaining({ stateId }));
+    expect(adminOrderText).toHaveBeenCalledWith(
+      expect.objectContaining({ text: "Xin chào theo đơn" }),
+    );
+    expect(adminCustomerText).not.toHaveBeenCalledWith(
+      expect.objectContaining({ text: "Xin chào theo đơn" }),
+    );
+    expect(send).toHaveBeenCalledTimes(7);
+  });
+
   it("routes wallet commands and leaves support routed to support", async () => {
     const { dispatcher, walletTopup, walletPay, supportReasonMenu } = setup();
 
@@ -628,29 +1264,89 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     });
 
     expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }));
-    expect(walletPay).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), "ORD-1");
+    expect(walletPay).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: USER }),
+      "ORD-1",
+    );
     expect(supportReasonMenu).toHaveBeenCalledTimes(1);
     expect(walletTopup).toHaveBeenCalledTimes(1);
     expect(walletPay).toHaveBeenCalledTimes(1);
   });
 
   it("routes the marketing broadcast compose, root-safe preview, confirm, status, and cancel flow", async () => {
-    const { dispatcher, send, broadcastCompose, broadcastAudience, broadcastText, broadcastConfirm, broadcastStatus, broadcastCancel } = setup();
+    const {
+      dispatcher,
+      send,
+      broadcastCompose,
+      broadcastAudience,
+      broadcastText,
+      broadcastConfirm,
+      broadcastStatus,
+      broadcastCancel,
+    } = setup();
     broadcastText.mockResolvedValue({ text: "preview", buttons: [] });
 
-    await dispatcher.handle({ actorUserId: USER, chatId: USER, chatType: "private", messageId: "m1", action: "ADMIN", callbackData: "admin:marketing:compose" });
-    await dispatcher.handle({ actorUserId: USER, chatId: USER, chatType: "private", messageId: "m2", action: "ADMIN", callbackData: "admin:marketing:audience:root" });
-    await dispatcher.handle({ actorUserId: USER, chatId: USER, chatType: "private", messageId: "m3", action: "UNKNOWN", messageText: "Hello root" });
-    await dispatcher.handle({ actorUserId: USER, chatId: USER, chatType: "private", messageId: "m4", action: "ADMIN", callbackData: "admin:marketing:confirm:campaign-1" });
-    await dispatcher.handle({ actorUserId: USER, chatId: USER, chatType: "private", messageId: "m5", action: "ADMIN", callbackData: "admin:marketing:status:campaign-1" });
-    await dispatcher.handle({ actorUserId: USER, chatId: USER, chatType: "private", messageId: "m6", action: "ADMIN", callbackData: "admin:marketing:cancel:campaign-1" });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "m1",
+      action: "ADMIN",
+      callbackData: "admin:marketing:compose",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "m2",
+      action: "ADMIN",
+      callbackData: "admin:marketing:audience:root",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "m3",
+      action: "UNKNOWN",
+      messageText: "Hello root",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "m4",
+      action: "ADMIN",
+      callbackData: "admin:marketing:confirm:campaign-1",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "m5",
+      action: "ADMIN",
+      callbackData: "admin:marketing:status:campaign-1",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "m6",
+      action: "ADMIN",
+      callbackData: "admin:marketing:cancel:campaign-1",
+    });
 
     expect(broadcastCompose).toHaveBeenCalledTimes(1);
     expect(broadcastAudience).toHaveBeenCalledWith(expect.objectContaining({ audience: "root" }));
     expect(broadcastText).toHaveBeenCalledWith(expect.objectContaining({ text: "Hello root" }));
-    expect(broadcastConfirm).toHaveBeenCalledWith(expect.objectContaining({ campaignId: "campaign-1" }));
-    expect(broadcastStatus).toHaveBeenCalledWith(expect.objectContaining({ campaignId: "campaign-1" }));
-    expect(broadcastCancel).toHaveBeenCalledWith(expect.objectContaining({ campaignId: "campaign-1" }));
+    expect(broadcastConfirm).toHaveBeenCalledWith(
+      expect.objectContaining({ campaignId: "campaign-1" }),
+    );
+    expect(broadcastStatus).toHaveBeenCalledWith(
+      expect.objectContaining({ campaignId: "campaign-1" }),
+    );
+    expect(broadcastCancel).toHaveBeenCalledWith(
+      expect.objectContaining({ campaignId: "campaign-1" }),
+    );
     expect(send).toHaveBeenCalledTimes(6);
   });
 

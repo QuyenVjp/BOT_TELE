@@ -309,14 +309,18 @@ export function createCallbackTokenCodec(config: BuyNowCallbackCodecConfig): Cal
       const telegramUserId = normalizeTelegramUserId(input.telegramUserId);
       if (!telegramUserId) throw new Error("Invalid Telegram user id");
       const actionCode = CALLBACK_ACTION_CODES[input.action];
-      const actionPayload = encodeActionPayload(input);
+      const encodedAction = encodeActionPayload(input);
+      const actionPayload =
+        actionCode >= 16
+          ? Buffer.concat([Buffer.from([actionCode]), encodedAction])
+          : encodedAction;
       const nowSeconds = toUnixSeconds(input.now ?? new Date());
       const expiresAtSeconds = nowSeconds + config.ttlSeconds;
       if (nowSeconds < 0 || expiresAtSeconds > MAX_UINT32) {
         throw new Error("Callback timestamp is outside the supported range");
       }
       const payload = Buffer.alloc(5 + actionPayload.byteLength);
-      payload[0] = (actionCode << 4) | config.keyVersion;
+      payload[0] = (Math.min(actionCode, 15) << 4) | config.keyVersion;
       payload.writeUInt32BE(expiresAtSeconds, 1);
       actionPayload.copy(payload, 5);
       const signature = signUnified(key, telegramUserId, payload);
@@ -351,7 +355,9 @@ export function createCallbackTokenCodec(config: BuyNowCallbackCodecConfig): Cal
       }
       const keyVersion = payload[0]! & 0x0f;
       if (keyVersion !== config.keyVersion) return { ok: false, code: "UNKNOWN_KEY_VERSION" };
-      const action = ACTION_BY_CODE.get(payload[0]! >> 4);
+      const extended = payload[0]! >> 4 === 15 && payload.byteLength !== 21;
+      const action = ACTION_BY_CODE.get(extended ? payload[5]! : payload[0]! >> 4);
+      if (extended && payload[5]! < 16) return { ok: false, code: "WRONG_ACTION" };
       if (!action) return { ok: false, code: "WRONG_ACTION" };
       const expiresAtSeconds = payload.readUInt32BE(1);
       const nowSeconds = toUnixSeconds(input.now ?? new Date());
@@ -361,7 +367,7 @@ export function createCallbackTokenCodec(config: BuyNowCallbackCodecConfig): Cal
       if (expiresAtSeconds > nowSeconds + config.ttlSeconds + config.clockSkewSeconds) {
         return { ok: false, code: "NOT_YET_VALID" };
       }
-      const decoded = decodeActionPayload(action, payload.subarray(5));
+      const decoded = decodeActionPayload(action, payload.subarray(extended ? 6 : 5));
       if (!decoded) return { ok: false, code: "MALFORMED" };
       return {
         ok: true,
@@ -398,6 +404,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "MAIN_MENU":
     case "CATEGORY_LIST":
     case "ORDER_LIST":
+    case "RESTOCK_LIST":
       assertNoPayload(input);
       return Buffer.alloc(0);
     case "CATEGORY_VIEW":
@@ -408,6 +415,8 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "PAYMENT_CANCEL":
     case "PAYMENT_REOPEN":
     case "SUPPORT_TICKET_VIEW":
+    case "RESTOCK_SUBSCRIBE":
+    case "RESTOCK_UNSUBSCRIBE":
       assertOnlyResource(input);
       return encodeResourceId(input.resourceId!);
     case "CATALOG_PAGE":
@@ -449,7 +458,9 @@ function decodeActionPayload(
   action: CallbackAction,
   payload: Buffer,
 ): Omit<VerifiedCallbackToken, "action" | "expiresAt"> | null {
-  if (["SEARCH_PROMPT", "MAIN_MENU", "CATEGORY_LIST", "ORDER_LIST"].includes(action)) {
+  if (
+    ["SEARCH_PROMPT", "MAIN_MENU", "CATEGORY_LIST", "ORDER_LIST", "RESTOCK_LIST"].includes(action)
+  ) {
     return payload.byteLength === 0 ? {} : null;
   }
   if (
@@ -462,6 +473,8 @@ function decodeActionPayload(
       "PAYMENT_CANCEL",
       "PAYMENT_REOPEN",
       "SUPPORT_TICKET_VIEW",
+      "RESTOCK_SUBSCRIBE",
+      "RESTOCK_UNSUBSCRIBE",
     ].includes(action)
   ) {
     return payload.byteLength === 16 ? { resourceId: decodeUlid(payload) } : null;

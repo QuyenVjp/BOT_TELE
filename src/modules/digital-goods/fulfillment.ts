@@ -5,7 +5,7 @@ import { nextVersion } from "../../infrastructure/db/version.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
 import { newId } from "../../shared/ids/index.js";
-import { findOrderById, transitionOrder } from "../commerce/repository.js";
+import { findOrderById, findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
 import type { SupplierPort } from "../supplier/port.js";
 import { issueDeliveryBundle } from "./delivery.js";
 import {
@@ -13,6 +13,8 @@ import {
   findActiveAssetHoldByOrderForUpdate,
   markAssetReady,
 } from "./repository.js";
+import { createManualFulfillmentTaskForOrder, getManualTaskByOrder } from "./manual-fulfillment.js";
+import { provisionFromSupplier } from "../supplier/service.js";
 
 /**
  * Paid-Order fulfillment orchestrator (T071, FR-013–FR-017, SR-006).
@@ -41,17 +43,26 @@ export interface FulfillmentDeps {
 }
 
 export type FulfillErrorCode =
-  "NOT_FOUND" | "NOT_PAID" | "OUT_OF_STOCK" | "NEEDS_REVIEW" | "ISSUE_FAILED";
+  "NOT_FOUND" | "NOT_PAID" | "OUT_OF_STOCK" | "NEEDS_REVIEW" | "SUPPLIER_PENDING" | "ISSUE_FAILED";
 
 export type FulfillResult =
   | {
       ok: true;
+      kind: "DELIVERY_BUNDLE";
       orderId: string;
       customerId: string;
       assetId: string;
       bundleId: string;
       token: string;
       deliveryUrl: string;
+    }
+  | {
+      ok: true;
+      kind: "WAITING_MANUAL";
+      orderId: string;
+      customerId: string;
+      taskId: string;
+      fulfillmentType: "MANUAL_FULFILLMENT" | "UNLIMITED_SERVICE" | "QUANTITY_STOCK";
     }
   | { ok: false; code: FulfillErrorCode; message: string };
 
@@ -77,72 +88,210 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
     return { ok: false, code: "NOT_PAID", message: "Đơn hàng chưa được thanh toán." };
   }
 
-  // 2. Claim/promote the asset and append DigitalAssetClaimed in one unit of
-  // work. Existing pre-payment reservations are upgraded through the same path.
-  const prepared = await withTransaction(db, async (trx) => {
-    const claim = await claimLocalAssetInTransaction(trx, {
-      orderId,
-      variantId: order.variantId,
-      correlationId,
-    });
-    if (!claim.ok) return claim;
-
-    const held = await findActiveAssetHoldByOrderForUpdate(trx, orderId);
-    if (!held) {
-      throw new Error("claimed asset disappeared before fulfillment event append");
-    }
-    let eventVersion = held.version;
-    if (held.status === "RESERVED") {
-      if (!(await markAssetReady(trx, held.id, held.version))) {
-        throw new Error("claimed asset could not transition to READY");
+  if (
+    order.fulfillmentType === "MANUAL_FULFILLMENT" ||
+    order.fulfillmentType === "UNLIMITED_SERVICE" ||
+    order.fulfillmentType === "QUANTITY_STOCK"
+  ) {
+    const taskResult = await withTransaction(db, async (trx) => {
+      const live = await findOrderByIdForUpdate(trx, orderId);
+      if (
+        !live ||
+        (live.status !== "PAID" && live.status !== "PROCESSING" && live.status !== "COMPLETED")
+      ) {
+        return {
+          ok: false as const,
+          code: "NOT_PAID" as const,
+          message: "Đơn hàng chưa được thanh toán.",
+        };
       }
-      eventVersion = nextVersion(held.version);
-    }
-
-    // Re-entry repairs a historical READY row that predates this atomic path,
-    // while the asset row lock prevents concurrent duplicate repair.
-    const existingEvent = await sql<{ one: number }>`
-      select 1 as one from outbox_event
-      where aggregate_type = 'DigitalAsset'
-        and aggregate_id = ${held.id}
-        and event_type = 'DigitalAssetClaimed'
-      limit 1
-    `.execute(trx);
-    if (existingEvent.rows.length === 0) {
-      await enqueueOutboxEvent(trx, {
-        id: newId(),
-        aggregateType: "DigitalAsset",
-        aggregateId: held.id,
-        aggregateVersion: eventVersion,
-        eventType: "DigitalAssetClaimed",
-        payloadRedacted: {
-          assetId: held.id,
-          orderId,
-          vaultRef: held.vault_ref,
-          correlationId,
-        },
+      if (live.status === "COMPLETED") {
+        const existing = await getManualTaskByOrder(trx, orderId);
+        return existing
+          ? { ok: true as const, task: existing, inserted: false }
+          : {
+              ok: false as const,
+              code: "NOT_PAID" as const,
+              message: "Đơn hàng chưa được thanh toán.",
+            };
+      }
+      if (live.fulfillmentType === "QUANTITY_STOCK") {
+        const reserved = await sql<{ one: number }>`
+          select 1 as one
+          from quantity_stock_ledger
+          where order_id = ${orderId}
+            and variant_id = ${live.variantId}
+            and entry_type = 'RESERVE'
+            and released_at is null
+          limit 1
+          for update
+        `.execute(trx);
+        if (!reserved.rows[0]) {
+          return { ok: false as const, code: "OUT_OF_STOCK" as const };
+        }
+      }
+      const task = await createManualFulfillmentTaskForOrder(trx, {
+        orderId,
+        customerId: live.customerId,
+        variantId: live.variantId,
+        correlationId,
       });
-    }
-
-    return claim;
-  });
-
-  if (!prepared.ok) {
-    if (deps.supplier === null) {
+      if (!task.ok) return task;
+      if (live.status === "PAID") {
+        await transitionOrder(trx, live, "PROCESSING", "FULFILLMENT_STARTED", correlationId, {
+          type: "SYSTEM",
+          id: "fulfillment",
+        });
+      }
+      return task;
+    });
+    if (!taskResult.ok) {
+      if (taskResult.code === "NOT_PAID") return taskResult;
       return {
         ok: false,
         code: "OUT_OF_STOCK",
-        message: "Không còn tài khoản khả dụng cho sản phẩm này.",
+        message: "Chưa cấu hình xử lý thủ công cho sản phẩm này.",
       };
     }
     return {
-      ok: false,
-      code: "NEEDS_REVIEW",
-      message: "Hết hàng nội bộ; chờ đối soát nhà cung cấp.",
+      ok: true,
+      kind: "WAITING_MANUAL",
+      orderId,
+      customerId: order.customerId,
+      taskId: taskResult.task.id,
+      fulfillmentType: taskResult.task.fulfillmentType,
     };
   }
 
-  const assetId = prepared.assetId;
+  let assetId: string | null = null;
+  if (order.fulfillmentType === "SUPPLIER_API") {
+    if (!deps.supplier) {
+      return {
+        ok: false,
+        code: "NEEDS_REVIEW",
+        message: "Chưa cấu hình nhà cung cấp cho đơn hàng này.",
+      };
+    }
+    const supplierSku = await sql<{
+      supplier_id: string;
+      supplier_sku_id: string;
+      external_sku: string;
+      cost_vnd: string | number;
+      region: string | null;
+    }>`
+      select s.id as supplier_id, ss.id as supplier_sku_id, ss.external_sku, ss.cost_vnd, ss.region
+      from supplier_sku ss
+      join supplier s on s.id = ss.supplier_id
+      where ss.variant_id = ${order.variantId}
+        and (ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId}) or (select supplier_sku_id from product_variant where id = ${order.variantId}) is null)
+        and ss.is_active
+        and s.status = 'ACTIVE'
+      order by case when ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId}) then 0 else 1 end, ss.id asc
+    `.execute(db);
+    const sku = supplierSku.rows[0];
+    if (!sku) {
+      return {
+        ok: false,
+        code: "NEEDS_REVIEW",
+        message: "Không tìm thấy SKU nhà cung cấp đang hoạt động.",
+      };
+    }
+    const provision = await provisionFromSupplier(db, {
+      orderId,
+      supplierId: sku.supplier_id,
+      supplierSkuId: sku.supplier_sku_id,
+      externalSku: sku.external_sku,
+      costCeilingVnd: Number(sku.cost_vnd),
+      salePriceVnd: Number(order.priceVnd),
+      expectedSku: sku.external_sku,
+      deliveryType: order.deliveryType,
+      durationCode: order.durationCode,
+      region: sku.region,
+      correlationId,
+      port: deps.supplier,
+      vault: deps.vault,
+      idempotencyKey: `${orderId}:${sku.supplier_sku_id}`,
+    });
+    if (!provision.ok) return provision;
+    if (provision.kind === "UNKNOWN") {
+      return {
+        ok: false,
+        code: "SUPPLIER_PENDING",
+        message: "Nhà cung cấp đang xử lý; sẽ thử lại bằng truy vấn trạng thái.",
+      };
+    }
+    if (provision.kind === "REJECTED" || provision.kind === "NEEDS_REVIEW") {
+      return {
+        ok: false,
+        code: "NEEDS_REVIEW",
+        message: "Nhà cung cấp cần đối soát trước khi giao.",
+      };
+    }
+    assetId = provision.assetId;
+  }
+
+  // 2. Claim/promote the asset and append DigitalAssetClaimed in one unit of
+  // work. Existing pre-payment reservations are upgraded through the same path.
+  if (!assetId) {
+    const prepared = await withTransaction(db, async (trx) => {
+      const claim = await claimLocalAssetInTransaction(trx, {
+        orderId,
+        variantId: order.variantId,
+        correlationId,
+      });
+      if (!claim.ok) return claim;
+
+      const held = await findActiveAssetHoldByOrderForUpdate(trx, orderId);
+      if (!held) {
+        throw new Error("claimed asset disappeared before fulfillment event append");
+      }
+      let eventVersion = held.version;
+      if (held.status === "RESERVED") {
+        if (!(await markAssetReady(trx, held.id, held.version))) {
+          throw new Error("claimed asset could not transition to READY");
+        }
+        eventVersion = nextVersion(held.version);
+      }
+
+      const existingEvent = await sql<{ one: number }>`
+        select 1 as one from outbox_event
+        where aggregate_type = 'DigitalAsset'
+          and aggregate_id = ${held.id}
+          and event_type = 'DigitalAssetClaimed'
+        limit 1
+      `.execute(trx);
+      if (existingEvent.rows.length === 0) {
+        await enqueueOutboxEvent(trx, {
+          id: newId(),
+          aggregateType: "DigitalAsset",
+          aggregateId: held.id,
+          aggregateVersion: eventVersion,
+          eventType: "DigitalAssetClaimed",
+          payloadRedacted: { assetId: held.id, orderId, vaultRef: held.vault_ref, correlationId },
+        });
+      }
+
+      return claim;
+    });
+
+    if (!prepared.ok) {
+      if (deps.supplier === null) {
+        return {
+          ok: false,
+          code: "OUT_OF_STOCK",
+          message: "Không còn tài khoản khả dụng cho sản phẩm này.",
+        };
+      }
+      return {
+        ok: false,
+        code: "NEEDS_REVIEW",
+        message: "Hết hàng nội bộ; chờ đối soát nhà cung cấp.",
+      };
+    }
+    assetId = prepared.assetId;
+  }
+
+  if (!assetId) throw new Error("fulfillment did not produce an asset");
 
   // 4. Issue (or reuse) the Delivery Bundle.
   const issued = await issueDeliveryBundle(db, {
@@ -174,6 +323,7 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
 
   return {
     ok: true,
+    kind: "DELIVERY_BUNDLE",
     orderId,
     customerId: order.customerId,
     assetId,

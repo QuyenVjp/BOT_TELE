@@ -231,6 +231,9 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       },
     });
     if (!first.ok) throw new Error("fulfillment failed");
+    expect(first.kind).toBe("DELIVERY_BUNDLE");
+    if (first.kind !== "DELIVERY_BUNDLE")
+      throw new Error(`expected delivery bundle, got ${first.kind}`);
     expect(first.token).not.toBe("");
 
     // Process exited here: bundle/outbox committed, plaintext token disappeared,

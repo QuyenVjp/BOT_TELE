@@ -6,6 +6,7 @@
  * that moment — later catalog edits never rewrite it. State transitions are
  * explicit and recorded; unguarded jumps are rejected.
  */
+import type { FulfillmentType } from "../catalog/fulfillment-type.js";
 
 export type OrderStatus =
   | "DRAFT"
@@ -30,6 +31,7 @@ export interface OrderSnapshot {
   deliveryType: string;
   warrantyDays: number;
   supplierPolicySnapshot: string | null;
+  fulfillmentType: FulfillmentType;
 }
 
 export interface Order {
@@ -52,6 +54,7 @@ export interface Order {
   deliveryType: string;
   warrantyDays: number;
   supplierPolicySnapshot: string | null;
+  fulfillmentType: FulfillmentType;
 }
 
 /** Legal transitions for the MVP (data-model.md Commerce). */

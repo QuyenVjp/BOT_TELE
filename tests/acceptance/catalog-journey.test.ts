@@ -32,10 +32,16 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
-  await sql`truncate table product_variant, product_alias, product, category cascade`.execute(
+  await sql`truncate table digital_asset, product_variant, product_alias, product, category cascade`.execute(
     ctx.db,
   );
   await seedCatalog(ctx.db);
+  await sql`
+    insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+    select gen_random_uuid()::text, id, 'LOCAL', 'vault:' || id, 'fp-' || id, 'AVAILABLE'
+    from product_variant
+    where sku in ('NF-1M', 'NF-3M', 'SP-1M')
+  `.execute(ctx.db);
   callbacks = createCatalogCallbacks({
     db: ctx.db,
     parser: createSearchParser({ driver: "deterministic", timeoutMs: 100 }),

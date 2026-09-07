@@ -2,7 +2,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
-import { openReplacementCase } from "../../src/modules/digital-goods/replacement.js";
+import {
+  approveReplacementCase,
+  openReplacementCase,
+} from "../../src/modules/digital-goods/replacement.js";
+import { revealDeliveryBundle } from "../../src/modules/digital-goods/delivery.js";
 import { fulfillPaidOrder } from "../../src/modules/digital-goods/fulfillment.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -110,6 +114,69 @@ describe("replacement / refund-request (T078 / FR-020)", () => {
     expect(asset.rows[0]?.status).toBe("DELIVERED");
   });
 
+  it("reuses one nonterminal case for concurrent duplicate opens on the same original asset", async () => {
+    const f = await seedCompletedOrder();
+
+    const opened = await Promise.all(
+      Array.from({ length: 8 }, (_, n) =>
+        openReplacementCase(ctx.db, {
+          orderId: f.orderId,
+          customerId: f.customerId,
+          reasonCode: "INVALID_CREDENTIAL",
+          correlationId: `rep-race-${n}`,
+        }),
+      ),
+    );
+
+    expect(opened.every((result) => result.ok)).toBe(true);
+    const caseIds = new Set(opened.map((result) => (result.ok ? result.caseId : "")));
+    expect(caseIds.size).toBe(1);
+
+    const rows = await sql<{ count: string }>`
+      select count(*)::text as count
+      from replacement_case
+      where order_id = ${f.orderId} and original_asset_id = ${f.assetId}
+    `.execute(ctx.db);
+    expect(rows.rows[0]?.count).toBe("1");
+  });
+
+  it("escalates a duplicate open on the same case to refund review", async () => {
+    const f = await seedCompletedOrder();
+    const replacement = await openReplacementCase(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      reasonCode: "INVALID_CREDENTIAL",
+      correlationId: "rep-before-refund",
+    });
+    expect(replacement.ok).toBe(true);
+    if (!replacement.ok) return;
+
+    const refund = await openReplacementCase(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      reasonCode: "CUSTOMER_REQUEST",
+      requestRefund: true,
+      correlationId: "rep-duplicate-refund",
+    });
+    expect(refund).toMatchObject({
+      ok: true,
+      caseId: replacement.caseId,
+      status: "REFUND_REQUESTED",
+    });
+
+    const proof = await sql<{ case_count: string; order_status: string; transitions: string }>`
+      select
+        (select count(*)::text from replacement_case where order_id = ${f.orderId}) as case_count,
+        (select status from "order" where id = ${f.orderId}) as order_status,
+        (select count(*)::text from order_transition where order_id = ${f.orderId} and to_status = 'REFUND_PENDING') as transitions
+    `.execute(ctx.db);
+    expect(proof.rows[0]).toMatchObject({
+      case_count: "1",
+      order_status: "REFUND_PENDING",
+      transitions: "1",
+    });
+  });
+
   it("fulfillment re-entry selects a newer active hold, never the old delivered credential", async () => {
     const f = await seedCompletedOrder();
     const replacementAssetId = newId();
@@ -134,6 +201,9 @@ describe("replacement / refund-request (T078 / FR-020)", () => {
     });
     expect(fulfilled.ok).toBe(true);
     if (!fulfilled.ok) return;
+    expect(fulfilled.kind).toBe("DELIVERY_BUNDLE");
+    if (fulfilled.kind !== "DELIVERY_BUNDLE")
+      throw new Error(`expected delivery bundle, got ${fulfilled.kind}`);
     expect(fulfilled.assetId).toBe(replacementAssetId);
 
     const bundle = await sql<{ asset_id: string }>`
@@ -233,7 +303,11 @@ describe("replacement / refund-request (T078 / FR-020)", () => {
         },
       });
       expect(fulfilled.ok).toBe(true);
-      if (fulfilled.ok) expect(fulfilled.assetId).toBe(activeReplacementId);
+      if (!fulfilled.ok) return;
+      expect(fulfilled.kind).toBe("DELIVERY_BUNDLE");
+      if (fulfilled.kind !== "DELIVERY_BUNDLE")
+        throw new Error(`expected delivery bundle, got ${fulfilled.kind}`);
+      expect(fulfilled.assetId).toBe(activeReplacementId);
     },
   );
 
@@ -287,5 +361,190 @@ describe("replacement / refund-request (T078 / FR-020)", () => {
     });
     expect(late.ok).toBe(false);
     if (!late.ok) expect(late.code).toBe("WARRANTY_EXPIRED");
+  });
+
+  it("approves a replacement by reserving new stock and issuing a delivery bundle idempotently", async () => {
+    const f = await seedCompletedOrder();
+    const vault = createInMemoryVault();
+    const replacementAssetId = newId();
+    const replacementSecret = "REPLACEMENT-" + newId().slice(-6);
+    const replacementVaultRef = await vault.write(replacementSecret);
+    const oldBundleId = newId();
+    await sql`
+      insert into delivery_bundle (id, order_id, customer_id, asset_id, token_hash, status, expires_at)
+      values (${oldBundleId}, ${f.orderId}, ${f.customerId}, ${f.assetId}, ${"old-token-" + oldBundleId}, 'AVAILABLE', now() + interval '15 minutes')
+    `.execute(ctx.db);
+    await sql`
+      insert into digital_asset
+        (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+      values
+        (${replacementAssetId}, ${f.variantId}, 'LOCAL', ${replacementVaultRef},
+         ${"fp-" + replacementAssetId}, 'AVAILABLE')
+    `.execute(ctx.db);
+    const opened = await openReplacementCase(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      reasonCode: "INVALID_CREDENTIAL",
+      correlationId: "approve-open",
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    const approved = await approveReplacementCase(ctx.db, {
+      caseId: opened.caseId,
+      approvedBy: "root-admin",
+      correlationId: "approve-replacement",
+      deliveryBaseUrl: "https://delivery.example.test",
+      bundleTtlSeconds: 900,
+    });
+    expect(approved).toMatchObject({ ok: true, replacementAssetId, reused: false });
+    if (!approved.ok) return;
+
+    const rows = await sql<{
+      case_status: string;
+      replacement_asset_id: string | null;
+      original_status: string;
+      replacement_status: string;
+      bundle_asset_id: string;
+      old_bundle_status: string;
+    }>`
+      select rc.status as case_status, rc.replacement_asset_id,
+             old_asset.status as original_status,
+             new_asset.status as replacement_status,
+             db.asset_id as bundle_asset_id,
+             old_bundle.status as old_bundle_status
+      from replacement_case rc
+      join digital_asset old_asset on old_asset.id = rc.original_asset_id
+      join digital_asset new_asset on new_asset.id = rc.replacement_asset_id
+      join delivery_bundle db on db.id = ${approved.bundleId}
+      join delivery_bundle old_bundle on old_bundle.id = ${oldBundleId}
+      where rc.id = ${opened.caseId}
+    `.execute(ctx.db);
+    expect(rows.rows[0]).toMatchObject({
+      case_status: "REPLACED",
+      replacement_asset_id: replacementAssetId,
+      original_status: "DELIVERED",
+      replacement_status: "RESERVED",
+      bundle_asset_id: replacementAssetId,
+      old_bundle_status: "REVOKED",
+    });
+
+    const replay = await approveReplacementCase(ctx.db, {
+      caseId: opened.caseId,
+      approvedBy: "root-admin",
+      correlationId: "approve-replacement-replay",
+      deliveryBaseUrl: "https://delivery.example.test",
+      bundleTtlSeconds: 900,
+    });
+    expect(replay).toMatchObject({
+      ok: true,
+      replacementAssetId,
+      bundleId: approved.bundleId,
+      reused: true,
+    });
+
+    const revealed = await revealDeliveryBundle(ctx.db, {
+      token: approved.token,
+      customerId: f.customerId,
+      correlationId: "approve-replacement-reveal",
+      vault,
+    });
+    expect(revealed).toMatchObject({ ok: true, secret: replacementSecret });
+    await expect(
+      revealDeliveryBundle(ctx.db, {
+        token: approved.token,
+        customerId: f.customerId,
+        correlationId: "approve-replacement-reveal-replay",
+        vault,
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "UNAVAILABLE" });
+  });
+
+  it("does not allocate a second asset when approving legacy duplicate cases for one original asset", async () => {
+    const f = await seedCompletedOrder();
+    const vault = createInMemoryVault();
+    const firstCaseId = newId();
+    const secondCaseId = newId();
+    const firstReplacementAssetId = newId();
+    const secondReplacementAssetId = newId();
+    const firstVaultRef = await vault.write("FIRST-REPLACEMENT-" + newId().slice(-6));
+    const secondVaultRef = await vault.write("SECOND-REPLACEMENT-" + newId().slice(-6));
+    await sql`
+      insert into replacement_case (id, order_id, original_asset_id, reason_code, status)
+      values
+        (${firstCaseId}, ${f.orderId}, ${f.assetId}, 'INVALID_CREDENTIAL', 'OPEN'),
+        (${secondCaseId}, ${f.orderId}, ${f.assetId}, 'INVALID_CREDENTIAL', 'OPEN')
+    `.execute(ctx.db);
+    await sql`
+      insert into digital_asset
+        (id, variant_id, source_type, vault_ref, fingerprint_hash, status, created_at)
+      values
+        (${firstReplacementAssetId}, ${f.variantId}, 'LOCAL', ${firstVaultRef}, ${"fp-" + firstReplacementAssetId}, 'AVAILABLE', '2026-01-01T00:00:00Z'),
+        (${secondReplacementAssetId}, ${f.variantId}, 'LOCAL', ${secondVaultRef}, ${"fp-" + secondReplacementAssetId}, 'AVAILABLE', '2026-01-02T00:00:00Z')
+    `.execute(ctx.db);
+
+    const [first, second] = await Promise.all([
+      approveReplacementCase(ctx.db, {
+        caseId: firstCaseId,
+        approvedBy: "root-admin",
+        correlationId: "approve-legacy-duplicate-first",
+        deliveryBaseUrl: "https://delivery.example.test",
+        bundleTtlSeconds: 900,
+      }),
+      approveReplacementCase(ctx.db, {
+        caseId: secondCaseId,
+        approvedBy: "root-admin",
+        correlationId: "approve-legacy-duplicate-second",
+        deliveryBaseUrl: "https://delivery.example.test",
+        bundleTtlSeconds: 900,
+      }),
+    ]);
+    expect(first).toMatchObject({ ok: true, replacementAssetId: firstReplacementAssetId });
+    expect(second).toMatchObject({ ok: true, replacementAssetId: firstReplacementAssetId });
+    if (!first.ok || !second.ok) return;
+    expect(new Set([first.bundleId, second.bundleId]).size).toBe(1);
+    expect([first.reused, second.reused].filter(Boolean)).toHaveLength(1);
+
+    const proof = await sql<{
+      distinct_replacements: string;
+      reserved_replacements: string;
+      untouched_second: string;
+    }>`
+      select
+        count(distinct replacement_asset_id)::text as distinct_replacements,
+        (select count(*)::text from digital_asset where id in (${firstReplacementAssetId}, ${secondReplacementAssetId}) and status = 'RESERVED') as reserved_replacements,
+        (select status from digital_asset where id = ${secondReplacementAssetId}) as untouched_second
+      from replacement_case
+      where id in (${firstCaseId}, ${secondCaseId})
+    `.execute(ctx.db);
+    expect(proof.rows[0]).toMatchObject({
+      distinct_replacements: "1",
+      reserved_replacements: "1",
+      untouched_second: "AVAILABLE",
+    });
+  });
+  it("does not fake approval when replacement stock is unavailable", async () => {
+    const f = await seedCompletedOrder();
+    const opened = await openReplacementCase(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      reasonCode: "INVALID_CREDENTIAL",
+      correlationId: "approve-open-no-stock",
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    const approved = await approveReplacementCase(ctx.db, {
+      caseId: opened.caseId,
+      approvedBy: "root-admin",
+      correlationId: "approve-no-stock",
+      deliveryBaseUrl: "https://delivery.example.test",
+      bundleTtlSeconds: 900,
+    });
+    expect(approved).toMatchObject({ ok: false, code: "OUT_OF_STOCK" });
+    const row = await sql<{ status: string; replacement_asset_id: string | null }>`
+      select status, replacement_asset_id from replacement_case where id = ${opened.caseId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toMatchObject({ status: "OPEN", replacement_asset_id: null });
   });
 });

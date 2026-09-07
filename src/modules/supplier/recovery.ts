@@ -49,7 +49,8 @@ export async function recoverSupplierOrdersBatch(
         from supplier_order so
         join supplier_sku ss on ss.id = so.supplier_sku_id
         join "order" o on o.id = so.order_id
-        where so.status in ('UNKNOWN','PENDING')
+        where (so.status in ('UNKNOWN','PENDING')
+            or (so.status = 'SUBMITTED' and so.submitted_at <= ${new Date(now.getTime() - retryDelaySeconds * 1000).toISOString()}))
           and coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at, now())
               <= ${now.toISOString()}
         order by coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at) asc nulls first,
@@ -93,7 +94,7 @@ export async function recoverSupplierOrdersBatch(
   const remaining = await sql<{ backlog: number; oldest: Date | string | null }>`
     select count(*)::int as backlog, min(coalesce(submitted_at, last_queried_at)) as oldest
     from supplier_order
-    where status in ('UNKNOWN','PENDING')
+    where status in ('UNKNOWN','PENDING','SUBMITTED')
   `.execute(db);
   const row = remaining.rows[0];
   return {

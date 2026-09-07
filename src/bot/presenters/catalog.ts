@@ -1,7 +1,7 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import type { CatalogCategoryRow, CatalogVariantRow } from "../../modules/catalog/repository.js";
 import type { StockOutcomeCode } from "../../modules/commerce/buy-now.js";
-import { isFeature001SellablePolicy } from "../../modules/catalog/domain.js";
+import { isSupportedCatalogRoute } from "../../modules/catalog/domain.js";
 
 /**
  * Authoritative product-card presenters + Vietnamese state/error copy (FR-001–FR-003,
@@ -25,11 +25,8 @@ export const CATALOG_COPY = {
   emptySearch: "Không tìm thấy sản phẩm phù hợp. Thử từ khóa khác nhé.",
   rateLimited: "Bạn thao tác hơi nhanh. Vui lòng thử lại sau giây lát.",
   genericError: "Có lỗi xảy ra. Vui lòng thử lại hoặc liên hệ hỗ trợ.",
-  // Last-unit loser (FR-006b): truthful, no payment-success wording. Only
-  // actions that actually work are shown. A "notify when restocked" button is
-  // intentionally omitted until a durable restock subscription exists
-  // (Feature 003) — a dead callback is worse than no button.
   viewAlternatives: "🔎 Xem sản phẩm khác",
+  restockSubscribe: "🔔 Báo khi có hàng",
 } as const;
 
 export interface InlineButton {
@@ -54,12 +51,17 @@ export interface PresentedMessage {
   replyKeyboard?: ReplyKeyboard;
   /** Optional binary photo media, currently used only by payment QR screens. */
   photo?: Buffer;
-  /** Optional document media, used for paid ZIP delivery. */
+  /** Optional document media, used for paid ZIP delivery and admin CSV templates. */
   document?:
     | string
     | {
         kind: "file_path" | "file_id";
         value: string;
+        filename?: string;
+      }
+    | {
+        kind: "buffer";
+        value: Buffer;
         filename?: string;
       };
 }
@@ -146,6 +148,7 @@ export function presentVariantList(
 export function presentVariantDetail(
   variant: CatalogVariantRow,
   buyNowCallbackData?: string,
+  restockSubscribeCallbackData = `rst:sub:${variant.id}`,
 ): PresentedMessage {
   const price = formatVnd(makeVnd(BigInt(variant.price_vnd)));
   const text = [
@@ -155,14 +158,28 @@ export function presentVariantDetail(
     `Thời hạn: ${variant.duration_code ?? "—"}`,
     `Giao hàng: ${deliveryLabel(variant.delivery_type)}`,
     `Bảo hành: ${variant.warranty_days} ngày`,
-    `Tồn kho: ${stockLabel(variant.stock_policy)}`,
+    `Tồn kho: ${stockLabel(variant)}`,
     "",
-    "Nhấn Mua ngay để tạo đơn (1 gói = 1 đơn).",
+    variant.is_ready
+      ? "Nhấn Mua ngay để tạo đơn (1 gói = 1 đơn)."
+      : "Sản phẩm đang chờ bổ sung nguồn hàng.",
   ].join("\n");
 
   const buttons: InlineButton[][] = [];
-  if (isFeature001SellablePolicy(variant.stock_policy) && buyNowCallbackData !== undefined) {
+  if (
+    variant.is_ready &&
+    isSupportedCatalogRoute({
+      stockPolicy: variant.stock_policy,
+      fulfillmentType: variant.fulfillment_type,
+    }) &&
+    buyNowCallbackData !== undefined
+  ) {
     buttons.push([{ text: CATALOG_COPY.buyNow, callbackData: buyNowCallbackData }]);
+  }
+  if (!variant.is_ready && variant.fulfillment_type === "QUANTITY_STOCK") {
+    buttons.push([
+      { text: CATALOG_COPY.restockSubscribe, callbackData: restockSubscribeCallbackData },
+    ]);
   }
   buttons.push(
     [{ text: CATALOG_COPY.back, callbackData: "cat:list" }],
@@ -193,15 +210,7 @@ export function presentSearchResults(
  *
  * Shown when Buy Now cannot reserve a unit (empty shelf, race loss, or
  * contention timeout). Copy is truthful (no payment-success wording). Only
- * working recovery actions are offered:
- *   1. view alternative products (cat:list),
- *   2. main menu.
- *
- * A "notify when restocked" button is intentionally ABSENT until Feature 003
- * delivers a durable restock subscription (opt-in, opt-out, dedupe, restock
- * event, notification delivery). Shipping a dead `stock:notify` callback is
- * worse than no button.
- *
+ * working recovery actions are offered.
  */
 export function presentStockOutcome(code: StockOutcomeCode): PresentedMessage {
   return {
@@ -230,25 +239,20 @@ function deliveryLabel(type: string): string {
   }
 }
 
-function stockLabel(policy: string): string {
-  switch (policy) {
+function stockLabel(variant: CatalogVariantRow): string {
+  if (variant.fulfillment_type === "QUANTITY_STOCK") return `${variant.available_quantity ?? 0}`;
+  switch (variant.stock_policy) {
     case "LOCAL_ONLY":
-      // Honest: local stock is finite. The card does not claim "in stock" —
-      // Buy Now is the source of truth; a concurrent buyer can empty it.
-      return "Kho local";
+      return variant.is_ready ? "Kho local" : "Hết hàng";
     case "SUPPLIER_ONLY":
-      // Feature 001 MVP: SUPPLIER_ONLY is not sellable via Buy Now (no
-      // pre-payment capacity hold). Label makes that clear so the card is
-      // not advertised as purchasable.
-      return "Chưa mở bán (nhà cung cấp)";
+      return variant.fulfillment_type === "SUPPLIER_API" && variant.is_ready
+        ? "Nhà cung cấp"
+        : "Chưa mở bán (nhà cung cấp)";
     case "LOCAL_THEN_SUPPLIER":
-      // MVP collapses this to LOCAL_ONLY pre-payment (see data-model). Do not
-      // advertise "dự phòng" supplier capacity that the checkout path will not
-      // honour when local is empty.
-      return "Kho local";
+      return variant.is_ready ? "Kho local" : "Hết hàng";
     case "PAUSED":
       return "Tạm dừng";
     default:
-      return policy;
+      return variant.stock_policy;
   }
 }

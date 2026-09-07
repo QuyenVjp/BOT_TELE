@@ -28,7 +28,12 @@ export type ConfirmErrorCode =
   | "NOT_ACTIVE"
   | "NOT_ROOT";
 
-export const DURABLE_ADMIN_COMMAND_REFS = ["discrepancy.resolve", "wallet.refund"] as const;
+export const DURABLE_ADMIN_COMMAND_REFS = [
+  "discrepancy.resolve",
+  "wallet.refund",
+  "manual_fulfillment.complete",
+  "support.replacement.approve",
+] as const;
 export type DurableAdminCommandRef = (typeof DURABLE_ADMIN_COMMAND_REFS)[number];
 
 export interface DurableAdminAction {

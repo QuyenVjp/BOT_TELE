@@ -35,6 +35,8 @@ async function seed() {
   const netflixId = newId();
   const spotifyId = newId();
   const supplierId = newId();
+  const supplierOkId = newId();
+  const supplierSkuId = newId();
 
   await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${catId}, 'Giải trí', 'giai-tri', true, 1)`.execute(
     ctx.db,
@@ -43,7 +45,8 @@ async function seed() {
     insert into product (id, category_id, name_vi, slug, is_active, sort_order) values
       (${netflixId}, ${catId}, 'Netflix Premium', 'netflix', true, 1),
       (${spotifyId}, ${catId}, 'Spotify Family', 'spotify', true, 2),
-      (${supplierId}, ${catId}, 'Supplier Blocked', 'supplier-blocked', true, 3)
+      (${supplierId}, ${catId}, 'Supplier Blocked', 'supplier-blocked', true, 3),
+      (${supplierOkId}, ${catId}, 'Supplier Ready', 'supplier-ready', true, 4)
   `.execute(ctx.db);
 
   // Aliases are pre-normalized (fold form) at write time.
@@ -78,6 +81,22 @@ async function seed() {
     values
       (${newId()}, ${supplierId}, 'SUP-1', 'SUP-1', 180000, 'P1M', 'LICENSE', 30,
        'SUPPLIER_ONLY', 'RES-SUP', true, 4)
+  `.execute(ctx.db);
+  await sql`
+    insert into product_variant
+      (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
+       stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
+    values
+      (${newId()}, ${supplierOkId}, 'SUP-OK', 'SUP-OK', 180000, 'P1M', 'LICENSE', 30,
+       'SUPPLIER_ONLY', 'RES-SUP-OK', true, 5, 'SUPPLIER_API')
+  `.execute(ctx.db);
+  await sql`insert into supplier (id, name, adapter_type, credential_vault_ref, status) values (${supplierSkuId}, 'Primary', 'sandbox', 'vault:supplier', 'ACTIVE')`.execute(
+    ctx.db,
+  );
+  await sql`
+    insert into supplier_sku (id, supplier_id, variant_id, external_sku, cost_vnd, delivery_type, is_active)
+    select ${newId()}, ${supplierSkuId}, id, 'EXT-SUP-OK', 50000, 'LICENSE', true
+    from product_variant where sku = 'SUP-OK'
   `.execute(ctx.db);
 
   return { catId, netflixId, spotifyId };
@@ -116,7 +135,7 @@ describe("deterministic search (FR-004)", () => {
   it("applies a bounded price range filter", async () => {
     await seed();
     const midRange = await search({ minPriceVnd: 120000, maxPriceVnd: 180000 });
-    expect(midRange.items.map((v) => v.sku)).toEqual(["SP-1"]);
+    expect(midRange.items.map((v) => v.sku).sort()).toEqual(["SP-1", "SUP-OK"]);
   });
 
   it("applies a delivery-type filter", async () => {
@@ -131,16 +150,19 @@ describe("deterministic search (FR-004)", () => {
     expect(none.items).toHaveLength(0);
   });
 
-  it("excludes supplier-only variants from search", async () => {
+  it("returns configured supplier-only variants but still excludes legacy unconfigured supplier-only", async () => {
     await seed();
-    const supplier = await search({ query: "supplier blocked" });
-    expect(supplier.items).toHaveLength(0);
+    const ready = await search({ query: "supplier ready" });
+    expect(ready.items.map((v) => v.sku)).toEqual(["SUP-OK"]);
+
+    const blocked = await search({ query: "supplier blocked" });
+    expect(blocked.items).toHaveLength(0);
   });
 
   it("scopes by category id", async () => {
     const ids = await seed();
     const inCat = await search({ categoryId: ids.catId });
-    expect(inCat.items.length).toBe(3);
+    expect(inCat.items.map((v) => v.sku).sort()).toEqual(["NF-1", "NF-2", "SP-1", "SUP-OK"]);
     const otherCat = await search({ categoryId: newId() });
     expect(otherCat.items).toHaveLength(0);
   });

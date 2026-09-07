@@ -46,8 +46,12 @@ export async function unsubscribeRestock(
   customerId: string,
   variantId: string,
 ): Promise<boolean> {
-  const result = await sql<{ id: string }>`update restock_subscription set active = false, updated_at = now()
-    where customer_id = ${customerId} and variant_id = ${variantId} and active returning id`.execute(exec);
+  const result = await sql<{
+    id: string;
+  }>`update restock_subscription set active = false, updated_at = now()
+    where customer_id = ${customerId} and variant_id = ${variantId} and active returning id`.execute(
+    exec,
+  );
   return result.rows.length > 0;
 }
 

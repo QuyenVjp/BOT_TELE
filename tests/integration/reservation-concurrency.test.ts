@@ -16,12 +16,12 @@ import {
  * commits an atomic reservation. Every loser gets one typed stock outcome with
  * no Order, no Payment Intent, and no QR.
  *
- * This suite proves, against ONE AVAILABLE asset with 20 concurrent buyers:
+ * This suite proves, against ONE AVAILABLE asset with 100 concurrent buyers:
  *   - exactly one Order exists,
  *   - exactly one digital_asset is RESERVED and bound to that Order,
  *   - the winner can presentPaymentForOrder and gets exactly one Payment Intent
  *     with a real VietQR payload,
- *   - the 19 losers have no Order, no Payment Intent, and no QR.
+ *   - the 99 losers have no Order, no Payment Intent, and no QR.
  *
  * Requires Docker/Testcontainers. Skipped with an explicit reason when absent.
  */
@@ -43,14 +43,27 @@ describe.skipIf(!hasDocker)("atomic pre-payment reservation (T154)", () => {
     variantId: string;
     price: number;
     customerIds: string[];
-    assetId: string;
+    assetIds: string[];
+  }
+
+  async function seedAssets(variantId: string, count: number): Promise<string[]> {
+    const assetIds: string[] = [];
+    for (let i = 0; i < count; i++) {
+      const assetId = newId();
+      assetIds.push(assetId);
+      await sql`
+        insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+        values (${assetId}, ${variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId}, 'AVAILABLE')
+      `.execute(ctx.db);
+    }
+    return assetIds;
   }
 
   async function seedSingleAsset(buyerCount: number): Promise<Seed> {
     const categoryId = newId();
     const productId = newId();
     const variantId = newId();
-    const assetId = newId();
+    const assetIds: string[] = [];
     const price = 150000;
     const slug = categoryId.slice(-8);
 
@@ -69,11 +82,7 @@ describe.skipIf(!hasDocker)("atomic pre-payment reservation (T154)", () => {
          'LOCAL_ONLY', 'RES-1', true, 1)
     `.execute(ctx.db);
     // Exactly ONE available asset — the contested final unit.
-    await sql`
-      insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
-      values (${assetId}, ${variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId}, 'AVAILABLE')
-    `.execute(ctx.db);
-
+    assetIds.push(...(await seedAssets(variantId, 1)));
     const customerIds: string[] = [];
     for (let i = 0; i < buyerCount; i++) {
       const cid = newId();
@@ -83,7 +92,7 @@ describe.skipIf(!hasDocker)("atomic pre-payment reservation (T154)", () => {
       );
     }
 
-    return { variantId, price, customerIds, assetId };
+    return { variantId, price, customerIds, assetIds };
   }
 
   beforeEach(async () => {
@@ -102,8 +111,8 @@ describe.skipIf(!hasDocker)("atomic pre-payment reservation (T154)", () => {
     bankName: "MB Bank",
   };
 
-  it("20 concurrent buyers → 1 reservation + 1 Payment Intent/QR; 19 clean losers", async () => {
-    const buyerCount = 20;
+  it("100 concurrent buyers → 1 reservation + 1 Payment Intent/QR; 99 clean losers", async () => {
+    const buyerCount = 100;
     const seed = await seedSingleAsset(buyerCount);
 
     const results = await Promise.all(
@@ -141,7 +150,7 @@ describe.skipIf(!hasDocker)("atomic pre-payment reservation (T154)", () => {
     const winner = winners[0];
     if (!winner || !winner.ok) throw new Error("no winner");
     const reserved = await sql<{ status: string; reserved_order_id: string | null }>`
-      select status, reserved_order_id from digital_asset where id = ${seed.assetId}
+      select status, reserved_order_id from digital_asset where id = ${seed.assetIds[0]}
     `.execute(ctx.db);
     expect(reserved.rows[0]?.status).toBe("RESERVED");
     expect(reserved.rows[0]?.reserved_order_id).toBe(winner.order.id);
@@ -179,6 +188,65 @@ describe.skipIf(!hasDocker)("atomic pre-payment reservation (T154)", () => {
       where customer_id <> ${winner.order.customerId}
     `.execute(ctx.db);
     expect(loserOrders.rows[0]?.count).toBe("0");
+  });
+
+  it("100 concurrent buyers against 100 available assets all reserve unique orders and payment intents", async () => {
+    const buyerCount = 100;
+    const seed = await seedSingleAsset(buyerCount);
+    await seedAssets(seed.variantId, buyerCount - 1);
+
+    const results = await Promise.all(
+      seed.customerIds.map((customerId) =>
+        buyNow(ctx.db, {
+          customerId,
+          variantId: seed.variantId,
+          expectedPriceVnd: seed.price,
+          idempotencyKey: "buy-" + customerId,
+          correlationId: "corr-" + customerId.slice(-6),
+        }),
+      ),
+    );
+    const winners = results.filter((r) => r.ok);
+    expect(winners.length).toBe(buyerCount);
+
+    const presented = await Promise.all(
+      winners.map((winner, index) => {
+        if (!winner.ok) throw new Error("unexpected loser");
+        return presentPaymentForOrder(ctx.db, {
+          orderId: winner.order.id,
+          merchantAccountId: MERCHANT.merchantAccountId,
+          beneficiaryAccountNumber: MERCHANT.beneficiaryAccountNumber,
+          bankBin: MERCHANT.bankBin,
+          accountName: MERCHANT.accountName,
+          bankName: MERCHANT.bankName,
+          correlationId: `corr-present-${index}`,
+        });
+      }),
+    );
+    expect(presented.every((result) => result.ok)).toBe(true);
+
+    const rows = await sql<{
+      orders: string;
+      intents: string;
+      reserved: string;
+      unique_orders: string;
+      unique_assets: string;
+    }>`
+      select
+        (select count(*)::text from "order") as orders,
+        (select count(*)::text from payment_intent) as intents,
+        (select count(*)::text from digital_asset where status = 'RESERVED') as reserved,
+        (select count(distinct reserved_order_id)::text from digital_asset where status = 'RESERVED') as unique_orders,
+        (select count(distinct id)::text from digital_asset where status = 'RESERVED') as unique_assets
+    `.execute(ctx.db);
+
+    expect(rows.rows[0]).toEqual({
+      orders: "100",
+      intents: "100",
+      reserved: "100",
+      unique_orders: "100",
+      unique_assets: "100",
+    });
   });
 
   it("refuses presentPaymentForOrder for a hand-inserted order without a reservation", async () => {

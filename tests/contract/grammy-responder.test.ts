@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import { createGrammyResponder } from "../../src/bot/grammy-responder.js";
 import { presentAdminMenu } from "../../src/bot/presenters/admin.js";
-import { presentCustomerAccountPrompt, presentCustomerHome } from "../../src/bot/presenters/customer.js";
+import {
+  presentCustomerAccountPrompt,
+  presentCustomerHome,
+} from "../../src/bot/presenters/customer.js";
 
 const BOT_TOKEN = ["1234567890", "test-token-value-for-grammy-responder"].join(":");
 
@@ -63,12 +66,22 @@ describe("createGrammyResponder admin keyboards", () => {
     });
 
     const options = calls[0]?.at(-1) as {
-      reply_markup?: { keyboard?: Array<Array<{ text: string }>>; is_persistent?: boolean; resize_keyboard?: boolean };
+      reply_markup?: {
+        keyboard?: Array<Array<{ text: string }>>;
+        is_persistent?: boolean;
+        resize_keyboard?: boolean;
+      };
     };
     expect(options.reply_markup?.is_persistent).toBe(true);
     expect(options.reply_markup?.resize_keyboard).toBe(true);
     expect(options.reply_markup?.keyboard?.flat().map((button) => button.text)).toEqual(
-      expect.arrayContaining(["🛒 Mua hàng", "👤 Tài khoản", "🧾 Đơn hàng", "🛟 Hỗ trợ", "🌐 Mở cửa hàng"]),
+      expect.arrayContaining([
+        "🛒 Mua hàng",
+        "👤 Tài khoản",
+        "🧾 Đơn hàng",
+        "🛟 Hỗ trợ",
+        "🌐 Mở cửa hàng",
+      ]),
     );
   });
 
@@ -95,7 +108,9 @@ describe("createGrammyResponder admin keyboards", () => {
       reply_markup?: { keyboard?: Array<Array<{ text: string; request_contact?: boolean }>> };
     };
     const buttons = options.reply_markup?.keyboard?.flat() ?? [];
-    expect(buttons.find((button) => button.text === "📱 Chia sẻ số điện thoại")?.request_contact).toBe(true);
+    expect(
+      buttons.find((button) => button.text === "📱 Chia sẻ số điện thoại")?.request_contact,
+    ).toBe(true);
   });
 
   it("sends documents when the presented message carries a document", async () => {

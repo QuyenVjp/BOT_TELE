@@ -103,7 +103,7 @@ export interface ClaimOptions {
   /** Lease duration in seconds (default {@link DEFAULT_CLAIM_LEASE_SECONDS}). */
   leaseSeconds?: number;
   /** Do not chase events emitted by handlers during the same drain cycle. */
-  occurredBefore?: Date;
+  occurredBefore?: Date | string;
 }
 
 /**
@@ -130,7 +130,10 @@ export async function claimDueOutboxBatch(
   const batchSize = options.batchSize;
   const ownerId = options.ownerId ?? `worker-${newId().slice(-12)}`;
   const leaseSeconds = options.leaseSeconds ?? DEFAULT_CLAIM_LEASE_SECONDS;
-  const occurredBefore = options.occurredBefore?.toISOString() ?? null;
+  const occurredBefore =
+    options.occurredBefore instanceof Date
+      ? options.occurredBefore.toISOString()
+      : (options.occurredBefore ?? null);
 
   if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 100) {
     throw new RangeError("outbox batchSize must be an integer between 1 and 100");

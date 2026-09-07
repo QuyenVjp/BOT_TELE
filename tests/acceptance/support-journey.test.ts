@@ -66,6 +66,12 @@ async function seedTwoCustomers(): Promise<Seeded> {
       199000, 'P1M', 'CREDENTIAL', 'COMPLETED', now())
   `.execute(ctx.db);
   await sql`
+    insert into digital_asset
+      (id, variant_id, source_type, vault_ref, fingerprint_hash, status, delivered_order_id)
+    values
+      (${newId()}, ${variantId}, 'LOCAL', 'vault:alice-original', 'fp-alice-original', 'DELIVERED', ${aliceOrderId})
+  `.execute(ctx.db);
+  await sql`
     insert into "order" (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
       price_vnd, duration_code, delivery_type, status)
     values (${bobOrderId}, ${bobOrderNumber}, ${bobId}, ${variantId}, 'Netflix', 'Premium 1 tháng',
@@ -118,12 +124,20 @@ describe("US4 history → support journey", () => {
     expect(ticket.text).not.toContain("SHOULD-NOT-STORE");
 
     // 5. Ticket row is safe + owned.
-    const rows = await sql<{ customer_id: string; order_id: string | null; safe_summary: string }>`
-      select customer_id, order_id, safe_summary from support_ticket
+    const rows = await sql<{
+      customer_id: string;
+      order_id: string | null;
+      safe_summary: string;
+      replacement_case_id: string | null;
+    }>`
+      select st.customer_id, st.order_id, st.safe_summary, rc.id as replacement_case_id
+      from support_ticket st
+      left join replacement_case rc on rc.order_id = st.order_id
     `.execute(ctx.db);
     expect(rows.rows).toHaveLength(1);
     expect(rows.rows[0]?.customer_id).toBe(seed.aliceId);
     expect(rows.rows[0]?.order_id).toBe(seed.aliceOrderId);
     expect(rows.rows[0]?.safe_summary).not.toContain("SHOULD-NOT-STORE");
+    expect(rows.rows[0]?.replacement_case_id).toBeTruthy();
   });
 });

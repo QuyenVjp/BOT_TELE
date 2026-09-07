@@ -118,12 +118,16 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
       expect(response.statusCode).toBe(200);
       expect(response.json()).toMatchObject({ queued: true });
 
-      const { upsertTelegramCustomerProfileSnapshot } = await import("../../src/modules/identity/customer-profile.js");
+      const { upsertTelegramCustomerProfileSnapshot } =
+        await import("../../src/modules/identity/customer-profile.js");
       const processed = await processTelegramInboxBatch({
         inbox,
         limiter: { tryConsume: vi.fn().mockResolvedValue({ allowed: true, retryAfterSeconds: 0 }) },
         handler: async (envelope) => {
-          const observedUsername = await consumeTelegramUsernameObservation(ctx.db, envelope.actorUserId);
+          const observedUsername = await consumeTelegramUsernameObservation(
+            ctx.db,
+            envelope.actorUserId,
+          );
           const resolved = await ensureTelegramIdentity(ctx.db, {
             telegramUserId: envelope.actorUserId,
             ...(observedUsername ? { observedUsername } : {}),
@@ -147,7 +151,11 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
       expect(processed).toMatchObject({ claimed: 1, processed: 1 });
       expect(send).toHaveBeenCalledTimes(1);
 
-      const identity = await sql<{ customer_id: string; channel: string; observed_username: string | null }>`
+      const identity = await sql<{
+        customer_id: string;
+        channel: string;
+        observed_username: string | null;
+      }>`
         select customer_id, channel, observed_username
         from channel_identity
         where channel_user_id = ${userId}

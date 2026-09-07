@@ -47,6 +47,8 @@ export async function upsertTelegramCustomerProfileSnapshot(
 }
 
 function deriveDisplayName(firstName?: string | null, lastName?: string | null): string | null {
-  const parts = [firstName?.trim(), lastName?.trim()].filter((part): part is string => Boolean(part));
+  const parts = [firstName?.trim(), lastName?.trim()].filter((part): part is string =>
+    Boolean(part),
+  );
   return parts.length > 0 ? parts.join(" ") : null;
 }

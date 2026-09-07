@@ -2,7 +2,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createWalletLedgerService } from "../../src/modules/wallet/ledger.js";
-import { dockerAvailable, startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import {
+  dockerAvailable,
+  startPostgresContainer,
+  type PgTestContext,
+} from "../helpers/pg-container.js";
 
 const hasDocker = await dockerAvailable();
 let ctx: PgTestContext;
@@ -16,7 +20,9 @@ afterAll(async () => {
 });
 
 async function seedCustomer(customerId: string): Promise<void> {
-  await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi-VN')`.execute(ctx.db);
+  await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi-VN')`.execute(
+    ctx.db,
+  );
 }
 
 beforeEach(async () => {
@@ -28,10 +34,30 @@ describe.skipIf(!hasDocker)("wallet ledger service", () => {
     const service = createWalletLedgerService(ctx.db);
     const customerId = newId();
     await seedCustomer(customerId);
-    for (const [kind, amount, key] of [["credit", 500000n, "topup:test"], ["debit", 100000n, "purchase:test"], ["credit", 50000n, "refund:test"], ["credit", 25000n, "admin-adjustment:credit"], ["debit", 10000n, "admin-adjustment:debit"]] as const) {
-      expect((await service[kind]({ customerId, amountVnd: amount, idempotencyKey: key, correlationId: key, reason: key })).ok).toBe(true);
-      const rows = await sql<{ balanced: boolean }>`select a.balance_vnd=coalesce(sum(case when l.entry_type='CREDIT' then l.amount_vnd else -l.amount_vnd end),0) as balanced from wallet_account a left join wallet_ledger l on l.wallet_account_id=a.id group by a.id,a.balance_vnd`.execute(ctx.db);
-      expect(rows.rows.every(row => row.balanced)).toBe(true);
+    for (const [kind, amount, key] of [
+      ["credit", 500000n, "topup:test"],
+      ["debit", 100000n, "purchase:test"],
+      ["credit", 50000n, "refund:test"],
+      ["credit", 25000n, "admin-adjustment:credit"],
+      ["debit", 10000n, "admin-adjustment:debit"],
+    ] as const) {
+      expect(
+        (
+          await service[kind]({
+            customerId,
+            amountVnd: amount,
+            idempotencyKey: key,
+            correlationId: key,
+            reason: key,
+          })
+        ).ok,
+      ).toBe(true);
+      const rows = await sql<{
+        balanced: boolean;
+      }>`select a.balance_vnd=coalesce(sum(case when l.entry_type='CREDIT' then l.amount_vnd else -l.amount_vnd end),0) as balanced from wallet_account a left join wallet_ledger l on l.wallet_account_id=a.id group by a.id,a.balance_vnd`.execute(
+        ctx.db,
+      );
+      expect(rows.rows.every((row) => row.balanced)).toBe(true);
     }
     expect((await service.ensureAccount(customerId))?.balanceVnd).toBe(465000n);
   });

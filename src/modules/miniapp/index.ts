@@ -20,10 +20,12 @@ const NO_CACHE = {
   Expires: "0",
   "X-Content-Type-Options": "nosniff",
   "Referrer-Policy": "no-referrer",
-  "Content-Security-Policy": "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'",
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self' https://telegram.org; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'",
 } as const;
 
-const STYLE = "body{font:16px system-ui,sans-serif;max-width:760px;margin:auto;padding:1rem;background:#f6f7f9;color:#17202a}header{display:flex;justify-content:space-between;align-items:center}main{display:grid;gap:.75rem}.card{background:white;border-radius:12px;padding:1rem;box-shadow:0 1px 4px #0002}button{border:0;border-radius:8px;padding:.65rem 1rem;background:#1683d8;color:white;font-weight:600}button:disabled{opacity:.5}input{padding:.65rem;border:1px solid #ccd2d8;border-radius:8px;width:100%;box-sizing:border-box}.muted{color:#58636e}.error{color:#a21b1b}.actions{display:flex;gap:.5rem;flex-wrap:wrap}";
+const STYLE =
+  "body{font:16px system-ui,sans-serif;max-width:760px;margin:auto;padding:1rem;background:#f6f7f9;color:#17202a}header{display:flex;justify-content:space-between;align-items:center}main{display:grid;gap:.75rem}.card{background:white;border-radius:12px;padding:1rem;box-shadow:0 1px 4px #0002}button{border:0;border-radius:8px;padding:.65rem 1rem;background:#1683d8;color:white;font-weight:600}button:disabled{opacity:.5}input{padding:.65rem;border:1px solid #ccd2d8;border-radius:8px;width:100%;box-sizing:border-box}.muted{color:#58636e}.error{color:#a21b1b}.actions{display:flex;gap:.5rem;flex-wrap:wrap}";
 
 const APP_JS = String.raw`
 const statusEl = document.querySelector("#status");
@@ -72,7 +74,9 @@ function render(items) {
     const actions = document.createElement("div");
     actions.className = "actions";
     const buy = document.createElement("button");
+    const ready = x.isReady === true;
     buy.textContent = "Đặt hàng";
+    buy.disabled = !ready;
     buy.onclick = async () => {
       buy.disabled = true;
       setStatus("Đang tạo đơn…");
@@ -89,10 +93,16 @@ function render(items) {
         actions.append(walletButton(d.order));
       } catch (err) {
         setStatus(err.message, true);
-        buy.disabled = false;
+        buy.disabled = !ready;
       }
     };
     actions.append(buy);
+    if (!ready) {
+      const unavailable = document.createElement("span");
+      unavailable.className = "muted";
+      unavailable.textContent = "Tạm hết hàng";
+      actions.append(unavailable);
+    }
     e.append(h, p, actions);
     return e;
   }));
@@ -134,6 +144,26 @@ account.onclick = async () => {
   try {
     const d = await api("/api/account");
     setStatus("Số dư ví: " + money(d.balanceVnd) + " · Đơn hàng: " + text(d.orderCount));
+    const history = await api("/api/orders");
+    const heading = document.createElement("h2");
+    heading.textContent = "50 đơn hàng gần nhất";
+    const rows = history.items.map((order) => {
+      const row = document.createElement("article");
+      row.className = "card";
+      const title = document.createElement("h3");
+      title.textContent = text(order.order_number);
+      const detail = document.createElement("p");
+      detail.textContent = text(order.status) + " · " + money(order.price_vnd)
+        + " · " + new Date(order.created_at).toLocaleString("vi-VN");
+      row.append(title, detail);
+      return row;
+    });
+    if (!rows.length) {
+      const empty = document.createElement("p");
+      empty.textContent = "Bạn chưa có đơn hàng.";
+      rows.push(empty);
+    }
+    products.replaceChildren(heading, ...rows);
   } catch (err) {
     setStatus(err.message, true);
   }
@@ -160,12 +190,16 @@ function parseBody(body: unknown): Record<string, unknown> | null {
   if (typeof body === "string") {
     try {
       const parsed: unknown = JSON.parse(body);
-      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : null;
+      return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+        ? (parsed as Record<string, unknown>)
+        : null;
     } catch {
       return null;
     }
   }
-  return body !== null && typeof body === "object" && !Array.isArray(body) ? body as Record<string, unknown> : null;
+  return body !== null && typeof body === "object" && !Array.isArray(body)
+    ? (body as Record<string, unknown>)
+    : null;
 }
 
 function validKey(value: string): boolean {
@@ -184,6 +218,9 @@ function presentVariant(row: {
   warranty_days: number;
   stock_policy: string;
   sort_order: number;
+  fulfillment_type: string;
+  available_quantity: number | null;
+  is_ready: boolean;
 }) {
   return {
     id: row.id,
@@ -197,10 +234,17 @@ function presentVariant(row: {
     warrantyDays: row.warranty_days,
     stockPolicy: row.stock_policy,
     sortOrder: row.sort_order,
+    fulfillmentType: row.fulfillment_type,
+    availableQuantity: row.available_quantity,
+    isReady: row.is_ready,
+    canBuy: row.is_ready,
   };
 }
 
-export async function registerMiniApp(app: FastifyInstance, options: MiniAppOptions): Promise<void> {
+export async function registerMiniApp(
+  app: FastifyInstance,
+  options: MiniAppOptions,
+): Promise<void> {
   const path = options.path ?? "/shop";
   const walletPurchase = createWalletPurchaseService(options.db);
   app.get(path, async (_request, reply) => {
@@ -215,7 +259,10 @@ export async function registerMiniApp(app: FastifyInstance, options: MiniAppOpti
     setHeaders(reply);
     const query = request.query as { q?: string; cursor?: string };
     try {
-      const searchOptions = { limit: 24, ...(typeof query.cursor === "string" ? { cursor: query.cursor } : {}) };
+      const searchOptions = {
+        limit: 24,
+        ...(typeof query.cursor === "string" ? { cursor: query.cursor } : {}),
+      };
       const page = await searchCatalog(
         options.db,
         { query: typeof query.q === "string" ? query.q : undefined },
@@ -226,9 +273,16 @@ export async function registerMiniApp(app: FastifyInstance, options: MiniAppOpti
       return reply.code(400).send({ ok: false, error: "invalid_request" });
     }
   });
-  const authenticate = async (request: { headers: Record<string, string | string[] | undefined> }) => {
+  const authenticate = async (request: {
+    headers: Record<string, string | string[] | undefined>;
+  }) => {
     const raw = initDataFrom(request);
-    const verified = raw ? verifyTelegramMiniAppInitData(raw, { botToken: options.botToken, maxAgeSeconds: options.maxAgeSeconds }) : null;
+    const verified = raw
+      ? verifyTelegramMiniAppInitData(raw, {
+          botToken: options.botToken,
+          maxAgeSeconds: options.maxAgeSeconds,
+        })
+      : null;
     if (!verified) return null;
     return ensureTelegramIdentity(options.db, { telegramUserId: verified.telegramUserId });
   };
@@ -236,14 +290,29 @@ export async function registerMiniApp(app: FastifyInstance, options: MiniAppOpti
     setHeaders(reply);
     const identity = await authenticate(request);
     if (!identity) return reply.code(401).send({ ok: false, error: "unauthorized" });
-    const row = (await sql<{ balance_vnd: string; order_count: string }>`select coalesce((select balance_vnd from wallet_account where customer_id=${identity.customerId}),'0') balance_vnd, (select count(*) from "order" where customer_id=${identity.customerId}) order_count`.execute(options.db)).rows[0]!;
-    return reply.send({ ok: true, balanceVnd: row.balance_vnd, orderCount: Number(row.order_count) });
+    const row = (
+      await sql<{
+        balance_vnd: string;
+        order_count: string;
+      }>`select coalesce((select balance_vnd from wallet_account where customer_id=${identity.customerId}),'0') balance_vnd, (select count(*) from "order" where customer_id=${identity.customerId}) order_count`.execute(
+        options.db,
+      )
+    ).rows[0]!;
+    return reply.send({
+      ok: true,
+      balanceVnd: row.balance_vnd,
+      orderCount: Number(row.order_count),
+    });
   });
   app.get(`${path}/api/orders`, async (request, reply) => {
     setHeaders(reply);
     const identity = await authenticate(request);
     if (!identity) return reply.code(401).send({ ok: false, error: "unauthorized" });
-    const rows = (await sql`select id, order_number, status, price_vnd, created_at from "order" where customer_id=${identity.customerId} order by created_at desc, id desc limit 50`.execute(options.db)).rows;
+    const rows = (
+      await sql`select id, order_number, status, price_vnd, created_at from "order" where customer_id=${identity.customerId} order by created_at desc, id desc limit 50`.execute(
+        options.db,
+      )
+    ).rows;
     return reply.send({ ok: true, items: rows });
   });
   app.post(`${path}/api/orders`, async (request, reply) => {
@@ -254,8 +323,15 @@ export async function registerMiniApp(app: FastifyInstance, options: MiniAppOpti
     const variantId = typeof body?.variantId === "string" ? body.variantId : "";
     const key = typeof body?.idempotencyKey === "string" ? body.idempotencyKey : "";
     const price = typeof body?.expectedPriceVnd === "number" ? body.expectedPriceVnd : NaN;
-    if (!variantId || !validKey(key) || !Number.isSafeInteger(price) || price <= 0) return reply.code(400).send({ ok: false, error: "invalid_request" });
-    const result = await buyNow(options.db, { customerId: identity.customerId, variantId, expectedPriceVnd: price, idempotencyKey: key, correlationId: `miniapp-${identity.customerId}` });
+    if (!variantId || !validKey(key) || !Number.isSafeInteger(price) || price <= 0)
+      return reply.code(400).send({ ok: false, error: "invalid_request" });
+    const result = await buyNow(options.db, {
+      customerId: identity.customerId,
+      variantId,
+      expectedPriceVnd: price,
+      idempotencyKey: key,
+      correlationId: `miniapp-${identity.customerId}`,
+    });
     return reply.code(result.ok ? 200 : 409).send(result);
   });
   app.post(`${path}/api/orders/:orderId/wallet-pay`, async (request, reply) => {
@@ -265,8 +341,14 @@ export async function registerMiniApp(app: FastifyInstance, options: MiniAppOpti
     const params = request.params as { orderId?: string };
     const body = parseBody(request.body);
     const key = typeof body?.idempotencyKey === "string" ? body.idempotencyKey : "";
-    if (!params.orderId || !validKey(key)) return reply.code(400).send({ ok: false, error: "invalid_request" });
-    const result = await walletPurchase.purchase({ customerId: identity.customerId, orderId: params.orderId, idempotencyKey: `miniapp:${key}`, correlationId: `miniapp-${identity.customerId}` });
+    if (!params.orderId || !validKey(key))
+      return reply.code(400).send({ ok: false, error: "invalid_request" });
+    const result = await walletPurchase.purchase({
+      customerId: identity.customerId,
+      orderId: params.orderId,
+      idempotencyKey: `miniapp:${key}`,
+      correlationId: `miniapp-${identity.customerId}`,
+    });
     return reply.code(result.ok ? 200 : 409).send(result);
   });
 }

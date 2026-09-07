@@ -83,6 +83,7 @@ export function createSupportCallbacks(deps: SupportCallbackDeps): SupportCallba
         ticketId: result.ticketId,
         orderNumber: input.orderNumber ?? null,
         reasonCode: input.reasonCode,
+        ...(result.replacementCaseId ? { replacementCaseId: result.replacementCaseId } : {}),
       });
     },
 

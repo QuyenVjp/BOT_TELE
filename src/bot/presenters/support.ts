@@ -17,6 +17,7 @@ export const SUPPORT_COPY = {
   openedTitle: "✅ Đã tạo ticket hỗ trợ",
   openedBody:
     "Chúng tôi sẽ phản hồi trong thời gian sớm nhất. Vui lòng giữ mã tham chiếu bên dưới.",
+  replacementPending: "Yêu cầu thay thế đã được ghi nhận và đang chờ chủ shop duyệt.",
   listTitle: "📋 Ticket của bạn",
   empty: "Bạn chưa có ticket hỗ trợ nào.",
   mainMenu: "Menu chính",
@@ -60,6 +61,7 @@ export function presentTicketOpened(input: {
   ticketId: string;
   orderNumber?: string | null;
   reasonCode: SupportReasonCode;
+  replacementCaseId?: string;
 }): PresentedMessage {
   const lines = [
     SUPPORT_COPY.openedTitle,
@@ -69,6 +71,8 @@ export function presentTicketOpened(input: {
   ];
   if (input.orderNumber) lines.push(`Đơn: ${input.orderNumber}`);
   lines.push(`Mã ticket: ${input.ticketId}`);
+  if (input.replacementCaseId)
+    lines.push(SUPPORT_COPY.replacementPending, `Mã yêu cầu: ${input.replacementCaseId}`);
   return {
     text: lines.join("\n"),
     buttons: [[{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }]],

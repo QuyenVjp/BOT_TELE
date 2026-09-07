@@ -1,6 +1,20 @@
-import { Api, GrammyError, HttpError, InlineKeyboard, InputFile, InputMediaBuilder, Keyboard } from "grammy";
-import type { ForceReply, InlineKeyboardMarkup, ReplyKeyboardMarkup, ReplyKeyboardRemove } from "grammy/types";
+import {
+  Api,
+  GrammyError,
+  HttpError,
+  InlineKeyboard,
+  InputFile,
+  InputMediaBuilder,
+  Keyboard,
+} from "grammy";
+import type {
+  ForceReply,
+  InlineKeyboardMarkup,
+  ReplyKeyboardMarkup,
+  ReplyKeyboardRemove,
+} from "grammy/types";
 import type { PresentedMessage } from "./presenters/catalog.js";
+import type { TelegramDocumentSender } from "../modules/digital-goods/file-delivery.js";
 
 export interface TelegramResponder {
   send(input: {
@@ -13,7 +27,10 @@ export interface TelegramResponder {
 
 export class TelegramRetryableError extends Error {
   override name = "TelegramRetryableError";
-  constructor(message: string, readonly retryAfterSeconds: number | null = null) {
+  constructor(
+    message: string,
+    readonly retryAfterSeconds: number | null = null,
+  ) {
     super(message);
   }
 }
@@ -24,7 +41,12 @@ export class TelegramAmbiguousSendError extends Error {
 
 type TelegramApi = Pick<
   Api,
-  "answerCallbackQuery" | "editMessageMedia" | "editMessageText" | "sendDocument" | "sendPhoto" | "sendMessage"
+  | "answerCallbackQuery"
+  | "editMessageMedia"
+  | "editMessageText"
+  | "sendDocument"
+  | "sendPhoto"
+  | "sendMessage"
 >;
 
 type TelegramResponderTrace = {
@@ -34,7 +56,11 @@ type TelegramResponderTrace = {
 function classifyTelegramError(
   error: unknown,
 ): "message-not-modified" | "non-editable-or-missing" | "rate-limited" | "transient" | "permanent" {
-  if (error instanceof GrammyError && error.error_code === 400 && /message is not modified/i.test(error.description)) {
+  if (
+    error instanceof GrammyError &&
+    error.error_code === 400 &&
+    /message is not modified/i.test(error.description)
+  ) {
     return "message-not-modified";
   }
   if (error instanceof GrammyError && error.error_code === 400) return "non-editable-or-missing";
@@ -95,17 +121,24 @@ function summarizeTelegramResult(result: unknown): Record<string, unknown> {
   };
 }
 
-function traceTelegram(trace: TelegramResponderTrace | undefined, payload: Record<string, unknown>): void {
+function traceTelegram(
+  trace: TelegramResponderTrace | undefined,
+  payload: Record<string, unknown>,
+): void {
   trace?.info(payload, "telegram outbound payload");
 }
 
 function resolveDocument(document: PresentedMessage["document"]): string | InputFile {
   if (typeof document === "string") return document;
   if (!document) throw new Error("Presented document is missing");
-  return document.kind === "file_path" ? new InputFile(document.value, document.filename) : document.value;
+  if (document.kind === "file_path") return new InputFile(document.value, document.filename);
+  if (document.kind === "buffer") return new InputFile(document.value, document.filename);
+  return document.value;
 }
 
-function buildReplyKeyboard(replyKeyboard: NonNullable<PresentedMessage["replyKeyboard"]>): Keyboard {
+function buildReplyKeyboard(
+  replyKeyboard: NonNullable<PresentedMessage["replyKeyboard"]>,
+): Keyboard {
   const keyboard = Keyboard.from(
     replyKeyboard.buttons.map((row) =>
       row.map((button) =>
@@ -117,7 +150,8 @@ function buildReplyKeyboard(replyKeyboard: NonNullable<PresentedMessage["replyKe
   keyboard.persistent(replyKeyboard.persistent ?? true);
   return keyboard;
 }
-type SendReplyMarkup = InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | ForceReply;
+type SendReplyMarkup =
+  InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | ForceReply;
 type EditReplyMarkup = InlineKeyboardMarkup;
 
 function buildReplyMarkup(message: PresentedMessage): SendReplyMarkup {
@@ -135,6 +169,56 @@ function buildReplyMarkup(message: PresentedMessage): SendReplyMarkup {
 function buildEditReplyMarkup(replyMarkup: SendReplyMarkup): EditReplyMarkup {
   if ("inline_keyboard" in replyMarkup) return replyMarkup;
   return new InlineKeyboard();
+}
+
+function telegramFileIds(result: unknown): { fileId: string; fileUniqueId: string | null } {
+  if (!result || typeof result !== "object" || !("document" in result))
+    throw new Error("Telegram document response missing");
+  const document = result.document;
+  if (
+    !document ||
+    typeof document !== "object" ||
+    !("file_id" in document) ||
+    typeof document.file_id !== "string"
+  ) {
+    throw new Error("Telegram document file_id missing");
+  }
+  const unique = "file_unique_id" in document ? document.file_unique_id : null;
+  return {
+    fileId: document.file_id,
+    fileUniqueId: typeof unique === "string" ? unique : null,
+  };
+}
+
+export function createGrammyDocumentSender(
+  botToken: string,
+  api?: Pick<Api, "sendDocument">,
+  trace?: TelegramResponderTrace,
+): TelegramDocumentSender {
+  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(botToken)) {
+    throw new Error("Invalid Telegram bot token");
+  }
+  const telegramApi = api ?? new Api(botToken);
+  return {
+    async sendDocument(input) {
+      const source =
+        input.source.kind === "bytes"
+          ? new InputFile(input.source.bytes, input.filename)
+          : input.source.fileId;
+      const result = await callTelegram("sendDocument", () =>
+        telegramApi.sendDocument(input.chatId, source, {
+          caption: input.caption,
+        }),
+      );
+      const ids = telegramFileIds(result);
+      traceTelegram(trace, {
+        method: "sendDocument",
+        document_file_id: ids.fileId,
+        document_file_unique_id: ids.fileUniqueId,
+      });
+      return ids;
+    },
+  };
 }
 
 /** Real grammY API adapter for durable webhook-worker dispatch. */

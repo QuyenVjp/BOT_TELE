@@ -28,9 +28,20 @@ describe("decideTopupMatch", () => {
   });
 
   it("fails closed on account, amount, expired, and non-live mismatches", () => {
-    expect(decideTopupMatch(evidence({ merchantAccountId: "other" }), intent())).toEqual({ kind: "DISCREPANCY", reason: "WRONG_ACCOUNT" });
-    expect(decideTopupMatch(evidence({ amountVnd: 99_999 }), intent())).toEqual({ kind: "DISCREPANCY", reason: "UNDERPAYMENT" });
-    expect(decideTopupMatch(evidence({ transactedAt: new Date("2026-09-06T10:02:00Z") }), intent())).toEqual({ kind: "DISCREPANCY", reason: "LATE_PAYMENT" });
-    expect(decideTopupMatch(evidence(), intent({ status: "SUCCEEDED" }))).toEqual({ kind: "DISCREPANCY", reason: "NOT_LIVE" });
+    expect(decideTopupMatch(evidence({ merchantAccountId: "other" }), intent())).toEqual({
+      kind: "DISCREPANCY",
+      reason: "WRONG_ACCOUNT",
+    });
+    expect(decideTopupMatch(evidence({ amountVnd: 99_999 }), intent())).toEqual({
+      kind: "DISCREPANCY",
+      reason: "UNDERPAYMENT",
+    });
+    expect(
+      decideTopupMatch(evidence({ transactedAt: new Date("2026-09-06T10:02:00Z") }), intent()),
+    ).toEqual({ kind: "DISCREPANCY", reason: "LATE_PAYMENT" });
+    expect(decideTopupMatch(evidence(), intent({ status: "SUCCEEDED" }))).toEqual({
+      kind: "DISCREPANCY",
+      reason: "NOT_LIVE",
+    });
   });
 });

@@ -202,6 +202,34 @@ describe("Buy Now idempotency and callback safety (T158/T159/T160)", () => {
     expect(await counts()).toMatchObject({ orders: 2, reservations: 2, transitions: 2 });
   });
 
+  it("keeps independent nonce checkout free of stock-trigger deadlocks", async () => {
+    const s = await seed();
+    await sql`update product_variant set low_stock_threshold = 1 where id = ${s.variantId}`.execute(
+      ctx.db,
+    );
+
+    const [a, b] = await Promise.all([
+      buyNow(ctx.db, {
+        customerId: s.customerId,
+        variantId: s.variantId,
+        expectedPriceVnd: s.price,
+        idempotencyKey: "buy:v1:low-stock-deadlock-a",
+        correlationId: "low-stock-deadlock-a",
+      }),
+      buyNow(second.db, {
+        customerId: s.customerId,
+        variantId: s.variantId,
+        expectedPriceVnd: s.price,
+        idempotencyKey: "buy:v1:low-stock-deadlock-b",
+        correlationId: "low-stock-deadlock-b",
+      }),
+    ]);
+
+    expect(a.ok).toBe(true);
+    expect(b.ok).toBe(true);
+    expect(await counts()).toMatchObject({ orders: 2, reservations: 2, transitions: 2 });
+  });
+
   it("returns one live intent and identical transfer content under rapid presentation", async () => {
     const s = await seed();
     const order = await buyNow(ctx.db, {

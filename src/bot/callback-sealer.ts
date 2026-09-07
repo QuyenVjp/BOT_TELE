@@ -22,7 +22,7 @@ export async function sealPresentedMessageCallbacks(
   for (const row of message.buttons) {
     const sealedRow: PresentedMessage["buttons"][number] = [];
     for (const button of row) {
-      if (button.callbackData.startsWith("admin:")) {
+      if (button.callbackData.startsWith("admin:") && !/^admin:\d/.test(button.callbackData)) {
         sealedRow.push(button);
         continue;
       }
@@ -59,6 +59,8 @@ async function parseLegacyCallback(
     ["cat:view:", "CATEGORY_VIEW"],
     ["var:view:", "VARIANT_VIEW"],
     ["sup:view:", "SUPPORT_TICKET_VIEW"],
+    ["rst:sub:", "RESTOCK_SUBSCRIBE"],
+    ["rst:unsub:", "RESTOCK_UNSUBSCRIBE"],
   ] as const) {
     if (value.startsWith(prefix)) {
       const resourceId = value.slice(prefix.length);

@@ -1,7 +1,7 @@
 import { sql } from "kysely";
 import type { Executor } from "../../infrastructure/db/transaction.js";
 import type { CatalogVariantRow, Page } from "./repository.js";
-import { FEATURE_001_SELLABLE_STOCK_POLICIES, type DeliveryType } from "./domain.js";
+import type { DeliveryType } from "./domain.js";
 
 /**
  * Deterministic catalog search (FR-004).
@@ -151,16 +151,42 @@ export async function searchCatalog(
     select
       v.id, v.product_id, p.name_vi as product_name_vi, v.sku, v.name_vi,
       v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
-      v.stock_policy, v.sort_order
+      v.stock_policy, v.sort_order, v.fulfillment_type,
+      q.available_quantity::int as available_quantity,
+      case
+        when v.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then exists (
+          select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE'
+        )
+        when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0) > 0
+        when v.fulfillment_type = 'DIGITAL_FILE' then exists (
+          select 1 from variant_file_artifact f where f.variant_id = v.id and f.is_active
+        )
+        when v.fulfillment_type = 'SUPPLIER_API' then exists (
+          select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
+          where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
+        )
+        when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
+          select 1 from variant_service_fulfillment sf
+          where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
+        )
+        else false
+      end as is_ready
     from product_variant v
     join product p on p.id = v.product_id
     join category c on c.id = p.category_id
+    left join variant_quantity_stock q on q.variant_id = v.id
     where c.is_active
       and p.is_active
       and v.is_active
       and v.price_vnd > 0
       and v.resale_evidence_id is not null
-      and v.stock_policy in (${sql.join(FEATURE_001_SELLABLE_STOCK_POLICIES)})
+      and (
+        (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
+        or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
+          select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
+          where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
+        ))
+      )
       ${textFilter}
       ${categoryFilter}
       ${minPriceFilter}

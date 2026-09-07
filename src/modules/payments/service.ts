@@ -3,7 +3,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { newId } from "../../shared/ids/index.js";
 import { findOrderById, findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
-import { requiresLocalReservation } from "../catalog/domain.js";
+import { isSupportedCatalogRoute } from "../catalog/domain.js";
 import { orderHasActiveReservation } from "../digital-goods/repository.js";
 import { isVerifiedSePayEvidence, type VerifiedSePayEvidence } from "./sepay-ingress.js";
 import { decideMatch, LATE_PAYMENT_SKEW_MS } from "./domain.js";
@@ -96,13 +96,16 @@ export async function presentPaymentForOrder(
       return { ok: false, error: "order expired" };
     }
 
-    // T157 / FR-006a: a local-stock order must hold a VALID active reservation
-    // (bound to this order AND variant, RESERVED, not past reserved_until)
-    // before any Payment Intent/VietQR is minted. Without this gate a
-    // hand-inserted PENDING_PAYMENT row (or a future code path that skips
-    // BuyNow) could reintroduce the multi-customer final-stock race.
-    const policy = order.supplierPolicySnapshot;
-    if (!requiresLocalReservation(policy)) {
+    // T157 / FR-006a: every payable order must still match a supported route
+    // and pass its fulfillment readiness check before any Payment Intent/VietQR
+    // is minted. This keeps supplier/file/service orders payable while still
+    // blocking legacy unsupported policies and hand-inserted local-stock rows
+    // that skipped BuyNow's durable reservation.
+    const hasPayableRoute = isSupportedCatalogRoute({
+      stockPolicy: order.supplierPolicySnapshot,
+      fulfillmentType: order.fulfillmentType,
+    });
+    if (!hasPayableRoute) {
       return { ok: false, error: "policy blocked" };
     }
     const hasReservation = await orderHasActiveReservation(trx, order.id, order.variantId, now);

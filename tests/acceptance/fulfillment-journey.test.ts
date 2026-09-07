@@ -7,8 +7,12 @@ import {
   presentPaymentForOrder,
   applyPaymentEvidence,
 } from "../../src/modules/payments/service.js";
+import { importDigitalInventory } from "../../src/modules/digital-goods/inventory-import.js";
 import { fulfillPaidOrder } from "../../src/modules/digital-goods/fulfillment.js";
-import { revealDeliveryBundle } from "../../src/modules/digital-goods/delivery.js";
+import {
+  issueDeliveryBundle,
+  revealDeliveryBundle,
+} from "../../src/modules/digital-goods/delivery.js";
 import {
   presentDeliveryProcessing,
   presentDeliveryCompleted,
@@ -16,6 +20,13 @@ import {
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
 
+const ROOT_ID = 123456789;
+const rootActor = {
+  numericUserId: ROOT_ID,
+  chatType: "private" as const,
+  observedUsername: "Quyenvjp",
+};
+const rootConfig = { adminTelegramUserId: ROOT_ID, expectedUsername: "Quyenvjp" };
 /**
  * T064 — Paid-to-delivery acceptance for the local path (FR-013–FR-017, SC-004).
  *
@@ -166,6 +177,9 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
     });
     expect(fulfill.ok).toBe(true);
     if (!fulfill.ok) return;
+    expect(fulfill.kind).toBe("DELIVERY_BUNDLE");
+    if (fulfill.kind !== "DELIVERY_BUNDLE")
+      throw new Error(`expected delivery bundle, got ${fulfill.kind}`);
     expect(fulfill.assetId).toBe(cat.assetId);
     expect(fulfill.token.length).toBeGreaterThanOrEqual(32);
 
@@ -220,5 +234,185 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
     const totalMs = Date.now() - t0;
     // Whole journey (excluding container boot) is well under a minute.
     expect(totalMs).toBeLessThan(60_000);
+  });
+
+  it("imports field-configured account stock and reveals only customer-visible fields", async () => {
+    const customerId = newId();
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const orderId = newId();
+    const vault = createInMemoryVault();
+    const inventoryFields = [
+      {
+        name: "username",
+        label: "Tên đăng nhập",
+        required: true,
+        secret: false,
+        customerVisible: true,
+      },
+      { name: "password", label: "Mật khẩu", required: true, secret: true, customerVisible: true },
+      {
+        name: "note",
+        label: "Ghi chú nội bộ",
+        required: false,
+        secret: false,
+        customerVisible: false,
+      },
+    ];
+
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Accounts', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Account Pack', ${"acc-" + categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields)
+      values (${variantId}, ${productId}, ${"SKU-" + variantId}, 'Account', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', ${JSON.stringify(inventoryFields)}::jsonb)
+    `.execute(ctx.db);
+    const imported = await importDigitalInventory({
+      actor: rootActor,
+      config: rootConfig,
+      vault,
+      db: ctx.db,
+      input: `${variantId},alice:p@ss:private-note`,
+      reason: "visibility test",
+      correlationId: "visibility-import",
+    });
+    expect(imported).toMatchObject({ ok: true, summary: { imported: 1 } });
+    const toggledFields = inventoryFields.map((field) =>
+      field.name === "note" ? { ...field, customerVisible: true } : field,
+    );
+    await sql`update product_variant set inventory_fields = ${JSON.stringify(toggledFields)}::jsonb where id = ${variantId}`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into "order"
+        (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type, supplier_policy_snapshot, fulfillment_type, status)
+      values (${orderId}, ${"ORD-" + orderId}, ${customerId}, ${variantId}, 'Account Pack', 'Account', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', 'PAID')
+    `.execute(ctx.db);
+
+    const fulfilled = await fulfillPaidOrder(ctx.db, {
+      orderId,
+      correlationId: "visibility-fulfill",
+      deps: {
+        vault,
+        supplier: null,
+        deliveryBaseUrl: "https://shop.example/d",
+        bundleTtlSeconds: 900,
+      },
+    });
+    expect(fulfilled.ok).toBe(true);
+    if (!fulfilled.ok || fulfilled.kind !== "DELIVERY_BUNDLE") return;
+    const revealed = await revealDeliveryBundle(ctx.db, {
+      token: fulfilled.token,
+      customerId,
+      correlationId: "visibility-reveal",
+      vault,
+    });
+
+    expect(revealed).toMatchObject({ ok: true });
+    if (!revealed.ok) return;
+    expect(revealed.secret).toContain("Tên đăng nhập: alice");
+    expect(revealed.secret).toContain("Mật khẩu: p@ss");
+    expect(revealed.secret).not.toContain("private-note");
+    expect(revealed.secret).not.toContain("Ghi chú nội bộ");
+  });
+
+  it("reveals stock codes as copy-friendly plain text and fails closed on malformed structured payloads", async () => {
+    const customerId = newId();
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const orderId = newId();
+    const assetId = newId();
+    const vault = createInMemoryVault();
+    const codeFields = [
+      { name: "code", label: "Mã kích hoạt", required: true, secret: true, customerVisible: true },
+    ];
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Codes', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Code Pack', ${"code-" + categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields)
+      values (${variantId}, ${productId}, ${"SKU-" + variantId}, 'Code', 100000, 'P1M', 'ACTIVATION_KEY', 'LOCAL_ONLY', 'STOCK_CODE', ${JSON.stringify(codeFields)}::jsonb)
+    `.execute(ctx.db);
+    await sql`
+      insert into "order"
+        (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type, supplier_policy_snapshot, fulfillment_type, status)
+      values (${orderId}, ${"ORD-" + orderId}, ${customerId}, ${variantId}, 'Code Pack', 'Code', 100000, 'P1M', 'ACTIVATION_KEY', 'LOCAL_ONLY', 'STOCK_CODE', 'PAID')
+    `.execute(ctx.db);
+    const malformedRef = await vault.write("{not-json");
+    await sql`
+      insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status, reserved_order_id, validation_summary)
+      values (${assetId}, ${variantId}, 'LOCAL', ${malformedRef}, ${"fp-" + assetId}, 'READY', ${orderId}, ${JSON.stringify({ inventoryFields: codeFields })}::jsonb)
+    `.execute(ctx.db);
+    const bundle = await issueDeliveryBundle(ctx.db, {
+      orderId,
+      customerId,
+      assetId,
+      ttlSeconds: 900,
+      correlationId: "malformed-bundle",
+    });
+    expect(bundle.ok).toBe(true);
+    if (!bundle.ok) return;
+    await expect(
+      revealDeliveryBundle(ctx.db, {
+        token: bundle.token,
+        customerId,
+        correlationId: "malformed-reveal",
+        vault,
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "UNAVAILABLE" });
+
+    const imported = await importDigitalInventory({
+      actor: rootActor,
+      config: rootConfig,
+      vault,
+      db: ctx.db,
+      input: `${variantId},CODE-1234-ABCD`,
+      reason: "code visibility test",
+      correlationId: "code-import",
+    });
+    expect(imported).toMatchObject({ ok: true, summary: { imported: 1 } });
+    const codeOrderId = newId();
+    await sql`
+      insert into "order"
+        (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type, supplier_policy_snapshot, fulfillment_type, status)
+      values (${codeOrderId}, ${"ORD-" + codeOrderId}, ${customerId}, ${variantId}, 'Code Pack', 'Code', 100000, 'P1M', 'ACTIVATION_KEY', 'LOCAL_ONLY', 'STOCK_CODE', 'PAID')
+    `.execute(ctx.db);
+    const fulfilled = await fulfillPaidOrder(ctx.db, {
+      orderId: codeOrderId,
+      correlationId: "code-fulfill",
+      deps: {
+        vault,
+        supplier: null,
+        deliveryBaseUrl: "https://shop.example/d",
+        bundleTtlSeconds: 900,
+      },
+    });
+    expect(fulfilled).toMatchObject({ ok: true, kind: "DELIVERY_BUNDLE" });
+    if (!fulfilled.ok || fulfilled.kind !== "DELIVERY_BUNDLE") return;
+    const revealed = await revealDeliveryBundle(ctx.db, {
+      token: fulfilled.token,
+      customerId,
+      correlationId: "code-reveal",
+      vault,
+    });
+    expect(revealed).toMatchObject({ ok: true });
+    if (!revealed.ok) return;
+    expect(revealed.secret).toBe("CODE-1234-ABCD");
   });
 });

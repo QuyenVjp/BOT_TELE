@@ -26,6 +26,13 @@ export interface TelegramCommandEnvelope {
   languageCode?: string;
   contactPhoneNumber?: string;
   contactSharedAt?: string;
+  document?: {
+    fileId: string;
+    fileUniqueId?: string | null;
+    filename: string;
+    mimeType: string;
+    fileSize?: number;
+  };
 }
 
 export interface AcceptTelegramInput {
@@ -465,6 +472,35 @@ function validateAcceptInput(input: AcceptTelegramInput): void {
       /[^\p{L}\p{N}\s._-]/u.test(input.envelope.searchQuery))
   ) {
     throw new Error("Invalid Telegram search query");
+  }
+  if (input.envelope.document) {
+    const document = input.envelope.document;
+    if (!/^[A-Za-z0-9_-]{20,512}$/.test(document.fileId))
+      throw new Error("Invalid Telegram document file id");
+    if (
+      document.fileUniqueId !== undefined &&
+      document.fileUniqueId !== null &&
+      !/^[A-Za-z0-9_-]{4,256}$/.test(document.fileUniqueId)
+    )
+      throw new Error("Invalid Telegram document unique id");
+    if (
+      document.filename.length === 0 ||
+      document.filename.length > 255 ||
+      document.filename.includes("\0")
+    )
+      throw new Error("Invalid Telegram document filename");
+    if (
+      document.mimeType.length === 0 ||
+      document.mimeType.length > 127 ||
+      !document.mimeType.includes("/") ||
+      document.mimeType.includes("\0")
+    )
+      throw new Error("Invalid Telegram document mime type");
+    if (
+      document.fileSize !== undefined &&
+      (!Number.isSafeInteger(document.fileSize) || document.fileSize < 1)
+    )
+      throw new Error("Invalid Telegram document size");
   }
 }
 

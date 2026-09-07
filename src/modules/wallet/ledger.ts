@@ -12,7 +12,8 @@ export interface WalletAccount {
   updatedAt: string;
 }
 
-export type WalletLedgerErrorCode = "CUSTOMER_NOT_FOUND" | "INVALID_AMOUNT" | "INSUFFICIENT_FUNDS" | "IDEMPOTENCY_CONFLICT";
+export type WalletLedgerErrorCode =
+  "CUSTOMER_NOT_FOUND" | "INVALID_AMOUNT" | "INSUFFICIENT_FUNDS" | "IDEMPOTENCY_CONFLICT";
 
 export type WalletLedgerResult =
   | { ok: true; inserted: boolean; account: WalletAccount; entryId: string }
@@ -63,12 +64,19 @@ export function planWalletMutation(
   }
   const nextBalanceVnd = kind === "CREDIT" ? balanceVnd + amountVnd : balanceVnd - amountVnd;
   if (nextBalanceVnd < 0n) {
-    return { ok: false, code: "INSUFFICIENT_FUNDS", message: "Không đủ số dư ví để thực hiện giao dịch." };
+    return {
+      ok: false,
+      code: "INSUFFICIENT_FUNDS",
+      message: "Không đủ số dư ví để thực hiện giao dịch.",
+    };
   }
   return { ok: true, nextBalanceVnd };
 }
 
-export async function ensureWalletAccount(exec: Executor, customerId: string): Promise<WalletAccount | null> {
+export async function ensureWalletAccount(
+  exec: Executor,
+  customerId: string,
+): Promise<WalletAccount | null> {
   const customer = await sql<{ id: string }>`
     select id from customer where id = ${customerId} limit 1
   `.execute(exec);
@@ -131,7 +139,11 @@ async function applyMutation(
   const duplicate = await findLedgerByIdempotency(exec, current.id, input.idempotencyKey);
   if (duplicate) {
     if (duplicate.entry_type !== kind || BigInt(duplicate.amount_vnd) !== input.amountVnd) {
-      return { ok: false, code: "IDEMPOTENCY_CONFLICT", message: "Khóa giao dịch đã được sử dụng cho giao dịch khác." };
+      return {
+        ok: false,
+        code: "IDEMPOTENCY_CONFLICT",
+        message: "Khóa giao dịch đã được sử dụng cho giao dịch khác.",
+      };
     }
     const fresh = await lockAccount(exec, input.customerId);
     return {
@@ -171,7 +183,9 @@ async function applyMutation(
   return {
     ok: true,
     inserted: true,
-    account: fresh ? mapAccount(fresh) : { ...current, balanceVnd: plan.nextBalanceVnd, version: current.version + 1 },
+    account: fresh
+      ? mapAccount(fresh)
+      : { ...current, balanceVnd: plan.nextBalanceVnd, version: current.version + 1 },
     entryId,
   };
 }
@@ -187,7 +201,11 @@ async function lockAccount(exec: Executor, customerId: string): Promise<AccountR
   return result.rows[0] ?? null;
 }
 
-async function findLedgerByIdempotency(exec: Executor, walletAccountId: string, idempotencyKey: string): Promise<LedgerRow | null> {
+async function findLedgerByIdempotency(
+  exec: Executor,
+  walletAccountId: string,
+  idempotencyKey: string,
+): Promise<LedgerRow | null> {
   const result = await sql<LedgerRow>`
     select id, entry_type, amount_vnd
     from wallet_ledger

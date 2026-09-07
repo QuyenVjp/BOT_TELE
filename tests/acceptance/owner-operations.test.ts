@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createAdminCallbacks } from "../../src/bot/callbacks/admin.js";
+import { createSupportCallbacks } from "../../src/bot/callbacks/support.js";
+import { approveReplacementCaseInTransaction } from "../../src/modules/digital-goods/replacement.js";
 import { createAdminConfirmation } from "../../src/modules/identity/admin-confirmation.js";
 import { listAuditEvents } from "../../src/modules/identity/audit.js";
 import { createIdentityTelemetry } from "../../src/modules/identity/telemetry.js";
@@ -72,7 +74,8 @@ async function seed(): Promise<Seeded> {
 
 beforeEach(async () => {
   await sql`
-    truncate table admin_confirmation, audit_event, discrepancy, product_variant, product,
+    truncate table admin_confirmation, audit_event, discrepancy, replacement_case, support_ticket,
+      delivery_bundle, digital_asset, order_transition, "order", product_variant, product,
       category, channel_identity, customer cascade
   `.execute(ctx.db);
 });
@@ -213,5 +216,150 @@ describe("owner operations acceptance (US5)", () => {
     });
     expect(addAdmin.ok).toBe(false);
     if (!addAdmin.ok) expect(addAdmin.code).toBe("UNKNOWN_COMMAND");
+  });
+
+  it("refuses to activate a digital file variant until a real artifact is active", async () => {
+    const seeded = await seed();
+    const { callbacks } = buildCallbacks(seeded);
+    await sql`update product_variant set fulfillment_type = 'DIGITAL_FILE', delivery_type = 'MANUAL_REVIEW', is_active = false where id = ${seeded.variantId}`.execute(
+      ctx.db,
+    );
+
+    const blocked = await callbacks.handle({
+      command: "catalog.activate",
+      actor: { numericUserId: ROOT_ID, chatType: "private", observedUsername: "Quyenvjp" },
+      targetId: seeded.variantId,
+      reason: "Activate after setup",
+      correlationId: "digital-activate-blocked",
+    });
+    expect(blocked).toMatchObject({ ok: false, code: "DIGITAL_FILE_ARTIFACT_REQUIRED" });
+
+    await sql`
+      insert into variant_file_artifact (id, variant_id, version, filename, mime_type, size_bytes, sha256, storage_reference, is_active)
+      values (${newId()}, ${seeded.variantId}, 1, 'guide.pdf', 'application/pdf', 12, ${"a".repeat(64)}, '/private/artifacts/guide.pdf', true)
+    `.execute(ctx.db);
+    const activated = await callbacks.handle({
+      command: "catalog.activate",
+      actor: { numericUserId: ROOT_ID, chatType: "private", observedUsername: "Quyenvjp" },
+      targetId: seeded.variantId,
+      reason: "Real artifact ready",
+      correlationId: "digital-activate-ready",
+    });
+
+    expect(activated.ok).toBe(true);
+    await expect(
+      sql<{
+        is_active: boolean;
+      }>`select is_active from product_variant where id = ${seeded.variantId}`.execute(ctx.db),
+    ).resolves.toMatchObject({ rows: [{ is_active: true }] });
+  });
+
+  it("opens an asset-not-working case and root approval confirmation issues one replacement delivery", async () => {
+    const seeded = await seed();
+    const supportCustomerId = newId();
+    const otherCustomerId = newId();
+    const orderId = newId();
+    const orderNumber = "ORD-REPL-" + orderId.slice(-6);
+    const originalAssetId = newId();
+    const replacementAssetId = newId();
+    await sql`insert into customer (id, status, locale) values (${supportCustomerId}, 'ACTIVE', 'vi'), (${otherCustomerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into "order" (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
+        price_vnd, duration_code, delivery_type, status, paid_at)
+      values (${orderId}, ${orderNumber}, ${supportCustomerId}, ${seeded.variantId}, 'Netflix', 'Premium 1 tháng',
+        199000, 'P1M', 'CREDENTIAL', 'COMPLETED', now())
+    `.execute(ctx.db);
+    await sql`
+      insert into digital_asset
+        (id, variant_id, source_type, vault_ref, fingerprint_hash, status, delivered_order_id)
+      values
+        (${originalAssetId}, ${seeded.variantId}, 'LOCAL', 'vault:original', 'fp-original', 'DELIVERED', ${orderId}),
+        (${replacementAssetId}, ${seeded.variantId}, 'LOCAL', 'vault:replacement', 'fp-replacement', 'AVAILABLE', null)
+    `.execute(ctx.db);
+
+    const support = createSupportCallbacks({ db: ctx.db });
+    const denied = await support.open({
+      customerId: otherCustomerId,
+      reasonCode: "ASSET_NOT_WORKING",
+      orderNumber,
+      correlationId: "replacement-denied",
+    });
+    expect(denied.text).toMatch(/không sở hữu|Không tìm thấy|sở hữu/u);
+
+    const opened = await support.open({
+      customerId: supportCustomerId,
+      reasonCode: "ASSET_NOT_WORKING",
+      orderNumber,
+      description: "Không đăng nhập được",
+      correlationId: "replacement-open",
+    });
+    expect(opened.text).toContain("đang chờ chủ shop duyệt");
+    const pending = await sql<{ case_id: string; status: string }>`
+      select id as case_id, status from replacement_case where order_id = ${orderId}
+    `.execute(ctx.db);
+    expect(pending.rows).toHaveLength(1);
+    expect(pending.rows[0]?.status).toBe("OPEN");
+    const caseId = pending.rows[0]!.case_id;
+
+    const confirmation = createAdminConfirmation(ctx.db);
+    const callbacks = createAdminCallbacks({
+      db: ctx.db,
+      rootConfig: { adminTelegramUserId: ROOT_ID, expectedUsername: "Quyenvjp" },
+      rootChannelIdentityId: seeded.rootChannelIdentityId,
+      confirmation,
+      supportReplacementApprove: async (input) => {
+        const approved = await approveReplacementCaseInTransaction(input.exec, {
+          caseId: input.caseId,
+          approvedBy: input.actorId,
+          correlationId: input.correlationId,
+          deliveryBaseUrl: "https://shop.example.test/d",
+          bundleTtlSeconds: 900,
+        });
+        return { ok: approved.ok };
+      },
+    });
+    const group = await callbacks.handle({
+      command: "support.replacement.approve",
+      actor: { numericUserId: ROOT_ID, chatType: "group", observedUsername: "Quyenvjp" },
+      targetId: caseId,
+      reason: "group reject",
+      correlationId: "replacement-group",
+    });
+    expect(group.ok).toBe(false);
+
+    const request = await callbacks.handle({
+      command: "support.replacement.approve",
+      actor: { numericUserId: ROOT_ID, chatType: "private", observedUsername: "Quyenvjp" },
+      targetId: caseId,
+      reason: "Approve replacement after support review",
+      correlationId: "replacement-request",
+    });
+    expect(request.ok).toBe(true);
+    if (!request.ok || !request.needsConfirmation) return;
+    const confirmed = await callbacks.confirm({
+      confirmationId: request.confirmationId,
+      challenge: request.challenge,
+      actor: { numericUserId: ROOT_ID, chatType: "private", observedUsername: "Quyenvjp" },
+      correlationId: "replacement-confirm",
+    });
+    expect(confirmed.ok).toBe(true);
+    const rows = await sql<{
+      status: string;
+      replacement_asset_id: string | null;
+      bundle_count: string;
+    }>`
+      select rc.status, rc.replacement_asset_id, count(db.id)::text as bundle_count
+      from replacement_case rc
+      left join delivery_bundle db on db.order_id = rc.order_id and db.asset_id = rc.replacement_asset_id
+      where rc.id = ${caseId}
+      group by rc.status, rc.replacement_asset_id
+    `.execute(ctx.db);
+    expect(rows.rows[0]).toMatchObject({
+      status: "REPLACED",
+      replacement_asset_id: replacementAssetId,
+      bundle_count: "1",
+    });
   });
 });

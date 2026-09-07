@@ -12,10 +12,11 @@ import {
 import { isCancellableByCustomer, type Order, type OrderSnapshot } from "./order.js";
 import { voidLiveIntentsForOrder } from "../payments/repository.js";
 import {
-  reserveAvailableAssetForOrder,
-  releaseReservationForOrder,
+  releaseTypedStockForOrder,
+  reserveTypedStockForOrder,
 } from "../digital-goods/repository.js";
-import { isFeature001SellablePolicy, requiresLocalReservation } from "../catalog/domain.js";
+import type { TypedStockKind } from "../digital-goods/repository.js";
+import { isSupportedCatalogRoute } from "../catalog/domain.js";
 
 /**
  * BuyNow command (FR-006, FR-007, FR-008, FR-010).
@@ -86,6 +87,7 @@ interface LiveVariant {
   warranty_days: number;
   stock_policy: string;
   resale_evidence_id: string | null;
+  fulfillment_type: TypedStockKind;
   is_active: boolean;
   product_active: boolean;
   category_active: boolean;
@@ -117,7 +119,7 @@ async function loadLiveVariant(
         select
           v.id, v.product_id, p.name_vi as product_name_vi, v.name_vi,
           v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
-          v.stock_policy, v.resale_evidence_id, v.is_active,
+          v.stock_policy, v.fulfillment_type, v.resale_evidence_id, v.is_active,
           p.is_active as product_active, c.is_active as category_active
         from product_variant v
         join product p on p.id = v.product_id
@@ -129,7 +131,7 @@ async function loadLiveVariant(
         select
           v.id, v.product_id, p.name_vi as product_name_vi, v.name_vi,
           v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
-          v.stock_policy, v.resale_evidence_id, v.is_active,
+          v.stock_policy, v.fulfillment_type, v.resale_evidence_id, v.is_active,
           p.is_active as product_active, c.is_active as category_active
         from product_variant v
         join product p on p.id = v.product_id
@@ -144,16 +146,17 @@ function revalidate(live: LiveVariant, expectedPriceVnd: number): BuyNowErrorCod
     return "VARIANT_UNAVAILABLE";
   }
   if (live.stock_policy === "PAUSED") return "NO_STOCK";
-  if (!isFeature001SellablePolicy(live.stock_policy)) return "POLICY_BLOCKED";
-  if (!live.resale_evidence_id) {
+  if (
+    !isSupportedCatalogRoute({
+      stockPolicy: live.stock_policy,
+      fulfillmentType: live.fulfillment_type,
+    })
+  ) {
     return "POLICY_BLOCKED";
   }
-  if (Number(live.price_vnd) !== expectedPriceVnd) {
-    return "PRICE_CHANGED";
-  }
-  if (Number(live.price_vnd) <= 0) {
-    return "VARIANT_UNAVAILABLE";
-  }
+  if (!live.resale_evidence_id) return "POLICY_BLOCKED";
+  if (Number(live.price_vnd) !== expectedPriceVnd) return "PRICE_CHANGED";
+  if (Number(live.price_vnd) <= 0) return "VARIANT_UNAVAILABLE";
   return null;
 }
 
@@ -166,6 +169,7 @@ function toSnapshot(live: LiveVariant): OrderSnapshot {
     deliveryType: live.delivery_type,
     warrantyDays: live.warranty_days,
     supplierPolicySnapshot: live.stock_policy,
+    fulfillmentType: live.fulfillment_type,
   };
 }
 
@@ -245,8 +249,10 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
       const rejection = revalidate(live, input.expectedPriceVnd);
       if (rejection) return { kind: "REJECT", code: rejection };
 
-      const needsLocalReservation = requiresLocalReservation(live.stock_policy);
-
+      const needsReadinessHold = isSupportedCatalogRoute({
+        stockPolicy: live.stock_policy,
+        fulfillmentType: live.fulfillment_type,
+      });
       // Insert the Order first so the reservation can point at its id. If the
       // reserve fails we throw, rolling the Order insert back with the
       // transaction — the loser never leaves a PENDING_PAYMENT row behind.
@@ -269,11 +275,12 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
           : { kind: "REJECT", code: "IDEMPOTENCY_CONFLICT" };
       }
 
-      if (needsLocalReservation) {
-        const reserved = await reserveAvailableAssetForOrder(trx, {
+      if (needsReadinessHold) {
+        const reserved = await reserveTypedStockForOrder(trx, {
           variantId: input.variantId,
           orderId: order.id,
           reserveUntil: expiresAt,
+          fulfillmentType: order.fulfillmentType,
         });
         if (!reserved.ok) {
           // Typed abort so the Order insert rolls back and the caller can show
@@ -384,7 +391,7 @@ export async function cancelUnpaidOrder(db: Db, input: CancelInput): Promise<Buy
       },
     );
     await voidLiveIntentsForOrder(trx, order.id);
-    await releaseReservationForOrder(trx, order.id);
+    await releaseTypedStockForOrder(trx, order.id);
     return { ok: true, order: cancelled };
   });
 }
@@ -411,7 +418,7 @@ export async function expireOverdueOrders(db: Db, options: { now?: Date } = {}):
       // Same atomic void + release as cancel — an expired Order must not accept
       // settlement and must free its reserved unit for the next buyer.
       await voidLiveIntentsForOrder(trx, locked.id);
-      await releaseReservationForOrder(trx, locked.id);
+      await releaseTypedStockForOrder(trx, locked.id);
       return true;
     });
     if (expired) count += 1;

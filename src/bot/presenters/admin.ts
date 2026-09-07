@@ -1,5 +1,12 @@
 import type { InlineButton, PresentedMessage } from "./catalog.js";
+import type { FulfillmentType, InventoryField } from "../../modules/catalog/fulfillment-type.js";
+import { FULFILLMENT_TYPE_LABELS } from "../../modules/catalog/fulfillment-type.js";
 import type { AuditEvent } from "../../modules/identity/audit.js";
+import type {
+  AdminOrderDetail,
+  AdminOrderListPage,
+  AdminOrderStatusFilter,
+} from "../../modules/admin/order-operations.js";
 
 /**
  * Owner-safe Vietnamese admin presenters (T098, FR-021–FR-023).
@@ -33,6 +40,7 @@ export const ADMIN_COPY = {
   suppliers: "🚚 Nhà cung cấp",
   marketing: "📣 Tiếp thị",
   support: "💬 Hỗ trợ",
+  customers: "👥 Khách hàng",
   operations: "🛠 Vận hành",
   testing: "🧪 Kiểm thử",
   audit: "📜 Nhật ký",
@@ -48,18 +56,35 @@ export interface AdminNavItem {
 export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   { id: "products", label: ADMIN_COPY.products, callbackData: "admin:products", enabled: true },
   { id: "inventory", label: ADMIN_COPY.inventory, callbackData: "admin:inventory", enabled: true },
+  { id: "customers", label: ADMIN_COPY.customers, callbackData: "admin:customers", enabled: true },
   { id: "orders", label: ADMIN_COPY.orders, callbackData: "admin:orders", enabled: true },
   { id: "payments", label: ADMIN_COPY.payments, callbackData: "admin:payments", enabled: true },
   { id: "suppliers", label: ADMIN_COPY.suppliers, callbackData: "admin:suppliers", enabled: true },
   { id: "support", label: ADMIN_COPY.support, callbackData: "admin:support", enabled: true },
   { id: "dashboard", label: ADMIN_COPY.overview, callbackData: "admin:dashboard", enabled: false },
   { id: "marketing", label: ADMIN_COPY.marketing, callbackData: "admin:marketing", enabled: true },
-  { id: "operations", label: ADMIN_COPY.operations, callbackData: "admin:operations", enabled: false },
+  {
+    id: "operations",
+    label: ADMIN_COPY.operations,
+    callbackData: "admin:operations",
+    enabled: false,
+  },
   { id: "testing", label: ADMIN_COPY.testing, callbackData: "admin:testing", enabled: false },
   { id: "audit", label: ADMIN_COPY.audit, callbackData: "admin:audit", enabled: false },
 ] as const;
 
-export const ADMIN_VISIBLE_ROUTE_KEYS = ADMIN_NAV_ITEMS.filter((item) => item.enabled).map((item) => item.id) as Array<"products" | "inventory" | "orders" | "payments" | "suppliers" | "support" | "marketing">;
+export const ADMIN_VISIBLE_ROUTE_KEYS = ADMIN_NAV_ITEMS.filter((item) => item.enabled).map(
+  (item) => item.id,
+) as Array<
+  | "products"
+  | "inventory"
+  | "orders"
+  | "payments"
+  | "suppliers"
+  | "support"
+  | "marketing"
+  | "customers"
+>;
 
 const adminNav = (back: string): InlineButton[] => [
   { text: ADMIN_COPY.back, callbackData: back },
@@ -94,33 +119,272 @@ function presentAdminSection(
 }
 
 export function presentAdminProductsMenu(): PresentedMessage {
-  return presentAdminSection(ADMIN_COPY.products, "Quản lý sản phẩm và danh mục.");
+  return presentAdminSection(ADMIN_COPY.products, "Quản lý sản phẩm và danh mục.", [
+    [{ text: "➕ Tạo sản phẩm", callbackData: "admin:products:create" }],
+  ]);
 }
 export function presentAdminInventoryMenu(): PresentedMessage {
   return presentAdminSection(ADMIN_COPY.inventory, "Theo dõi và nhập dữ liệu tồn kho.");
 }
 export function presentAdminOrdersMenu(): PresentedMessage {
-  return presentAdminSection(ADMIN_COPY.orders, "Theo dõi đơn hàng và giao hàng.");
+  return presentAdminSection(ADMIN_COPY.orders, "Theo dõi đơn hàng và giao hàng.", [
+    [{ text: "Tất cả đơn", callbackData: "admin:orders:filter:all" }],
+    [
+      { text: "Chờ thanh toán", callbackData: "admin:orders:filter:pending_payment" },
+      { text: "Cần soát tiền", callbackData: "admin:orders:filter:payment_review" },
+    ],
+    [
+      { text: "Đang xử lý", callbackData: "admin:orders:filter:processing" },
+      { text: "Cần giao hàng", callbackData: "admin:orders:filter:fulfillment_review" },
+    ],
+    [{ text: "🔎 Tìm đơn/khách", callbackData: "admin:orders:search" }],
+    [{ text: "🛠 Xử lý thủ công", callbackData: "admin:manual" }],
+  ]);
+}
+const ADMIN_ORDER_STATUS_LABELS: Record<AdminOrderStatusFilter, string> = {
+  all: "Tất cả",
+  pending_payment: "Chờ thanh toán",
+  paid: "Đã thanh toán",
+  processing: "Đang xử lý",
+  completed: "Hoàn tất",
+  payment_review: "Cần soát tiền",
+  fulfillment_review: "Cần giao hàng",
+  refunds: "Hoàn tiền",
+};
+
+export function presentAdminOrders(page: AdminOrderListPage): PresentedMessage {
+  const lines = [
+    ADMIN_COPY.orders,
+    page.query ? `Tìm: ${page.query}` : `Lọc: ${ADMIN_ORDER_STATUS_LABELS[page.filter]}`,
+    "",
+    ...(page.items.length === 0
+      ? ["Không có đơn phù hợp."]
+      : page.items.map(
+          (order) =>
+            `• ${order.orderNumber} · ${order.status} · ${order.priceVnd.toLocaleString("vi-VN")} ₫ · ${order.displayName ?? order.telegramUserId ?? order.customerId}`,
+        )),
+  ];
+  return {
+    text: lines.join("\n"),
+    buttons: [
+      ...page.items.map((order) => [
+        {
+          text: `${order.orderNumber} · ${order.status}`,
+          callbackData: `admin:orders:view:${order.stateId}`,
+        },
+      ]),
+      [{ text: "🔎 Tìm đơn/khách", callbackData: "admin:orders:search" }],
+      [
+        { text: "Tất cả", callbackData: "admin:orders:filter:all" },
+        { text: "Chờ tiền", callbackData: "admin:orders:filter:pending_payment" },
+      ],
+      [
+        { text: "Cần soát tiền", callbackData: "admin:orders:filter:payment_review" },
+        { text: "Cần giao", callbackData: "admin:orders:filter:fulfillment_review" },
+      ],
+      ...(page.nextStateId
+        ? [[{ text: "Trang sau", callbackData: `admin:orders:page:${page.nextStateId}` }]]
+        : []),
+      [{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }],
+    ],
+  };
+}
+
+export function presentAdminOrderSearchPrompt(): PresentedMessage {
+  return {
+    text: "Nhập mã đơn ORD-... hoặc Telegram ID/chat ID số để tìm đơn.",
+    buttons: [[{ text: "Huỷ", callbackData: "admin:orders" }]],
+  };
+}
+
+export function presentAdminOrderDetail(order: AdminOrderDetail): PresentedMessage {
+  return {
+    text: [
+      "Chi tiết đơn hàng",
+      "",
+      `Mã: ${order.orderNumber}`,
+      `Trạng thái đơn: ${order.orderStatus}`,
+      `Khách: ${order.displayName ?? "chưa có"} · Telegram ${order.telegramUserId ?? "chưa có"}${order.username ? ` (@${order.username})` : ""}`,
+      `Có thể nhắn: ${order.reachable ? "có" : "không"}`,
+      `SĐT: ${order.phoneNumber ?? "chưa chia sẻ"}`,
+      `Sản phẩm: ${order.productName} · ${order.variantName}`,
+      `Giá: ${order.priceVnd.toLocaleString("vi-VN")} ₫`,
+      `Giao hàng: ${order.fulfillmentType} · ${order.deliveryType} · ${order.supplierPolicySnapshot ?? "không có"}`,
+      `Thanh toán: ${order.paymentStatus ?? "chưa có"}${order.paymentAmountVnd === null ? "" : ` · ${order.paymentAmountVnd.toLocaleString("vi-VN")} ₫`}`,
+      `Paid at: ${order.paidAt ?? "chưa có"}`,
+      `Settled at: ${order.paymentSettledAt ?? "chưa có"}`,
+      `Fulfillment: ${order.fulfillmentStatus ?? order.manualTaskStatus ?? "chưa có"}`,
+      `Completed at: ${order.completedAt ?? "chưa có"}`,
+      `Created at: ${order.createdAt}`,
+    ].join("\n"),
+    buttons: [
+      [{ text: "✉️ Nhắn khách", callbackData: `admin:orders:message:${order.messageStateId}` }],
+      [{ text: ADMIN_COPY.orders, callbackData: "admin:orders" }],
+      [{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }],
+    ],
+  };
 }
 export function presentAdminPaymentsMenu(): PresentedMessage {
   return presentAdminSection(ADMIN_COPY.payments, "Theo dõi thanh toán và đối soát.");
 }
-export function presentAdminSuppliersMenu(): PresentedMessage {
-  return presentAdminSection(ADMIN_COPY.suppliers, "Quản lý nhà cung cấp và nhập hàng.");
+export interface AdminSupplierOverview {
+  id: string;
+  name: string;
+  adapterType: string;
+  status: string;
+  activeMappings: number;
+  variantId?: string;
+  variantName?: string;
 }
+
+export interface AdminSupplierVariantMapping {
+  supplierSkuId: string;
+  supplierName: string;
+  externalSku: string;
+  costVnd: bigint;
+  region: string | null;
+  active: boolean;
+  selected: boolean;
+  lastVerifiedAt: string | null;
+}
+
+export function presentAdminSuppliersMenu(
+  suppliers: AdminSupplierOverview[] = [],
+): PresentedMessage {
+  if (suppliers.length === 0) {
+    return presentAdminSection(ADMIN_COPY.suppliers, "Chưa có nhà cung cấp đang hoạt động.");
+  }
+  const visible = suppliers.slice(0, 20);
+  return presentAdminSection(
+    ADMIN_COPY.suppliers,
+    [
+      "Nhà cung cấp đang cấu hình:",
+      ...visible.map(
+        (supplier) =>
+          `• ${supplier.name} — ${supplier.status} — ${supplier.activeMappings} mapping${supplier.variantName ? ` — ${supplier.variantName}` : ""}`,
+      ),
+    ].join("\n"),
+    visible.flatMap((supplier) =>
+      supplier.variantId
+        ? [
+            [
+              {
+                text: supplier.variantName ?? supplier.name,
+                callbackData: `admin:supv:${supplier.variantId}`,
+              },
+            ],
+          ]
+        : [],
+    ),
+  );
+}
+
+export function presentAdminSupplierVariant(input: {
+  variantId: string;
+  variantName: string;
+  sku: string;
+  mappings: AdminSupplierVariantMapping[];
+}): PresentedMessage {
+  const lines = [
+    ADMIN_COPY.suppliers,
+    `Biến thể: ${input.variantName}`,
+    `SKU: ${input.sku}`,
+    "",
+    ...(input.mappings.length
+      ? input.mappings.map(
+          (mapping) =>
+            `${mapping.selected ? "✓" : "•"} ${mapping.supplierName} / ${mapping.externalSku} — ${mapping.costVnd.toLocaleString("vi-VN")} ₫ — ${mapping.region ?? "mọi vùng"} — ${mapping.lastVerifiedAt ? `đã xác nhận ${mapping.lastVerifiedAt}` : "chưa xác nhận thủ công"}`,
+        )
+      : ["Chưa có mapping nhà cung cấp cho biến thể này."]),
+  ];
+  const buttons = input.mappings.flatMap((mapping): InlineButton[][] => [
+    [
+      {
+        text: `${mapping.selected ? "✓" : "Chọn"} ${mapping.externalSku}`,
+        callbackData: `admin:sups:${mapping.supplierSkuId}`,
+      },
+    ],
+    [
+      {
+        text: `Đánh dấu đã kiểm tra ${mapping.externalSku}`,
+        callbackData: `admin:supm:${mapping.supplierSkuId}`,
+      },
+    ],
+  ]);
+  if (input.mappings.some((mapping) => mapping.selected))
+    buttons.push([{ text: "Bỏ chọn mapping", callbackData: `admin:supc:${input.variantId}` }]);
+  return { text: lines.join("\n"), buttons: [...buttons, adminNav("admin:suppliers")] };
+}
+
+export function presentAdminSupplierActionDone(input: {
+  action: "select" | "clear" | "verify";
+  variantId: string;
+}): PresentedMessage {
+  const label =
+    input.action === "select"
+      ? "Đã chọn mapping nhà cung cấp"
+      : input.action === "clear"
+        ? "Đã bỏ chọn mapping nhà cung cấp"
+        : "Đã đánh dấu kiểm tra thủ công";
+  return {
+    text: ["✅ Nhà cung cấp", "", label, `Mã biến thể: ${input.variantId}`].join("\n"),
+    buttons: [
+      [{ text: ADMIN_COPY.suppliers, callbackData: `admin:supv:${input.variantId}` }],
+      adminNav("admin:suppliers"),
+    ],
+  };
+}
+
 export function presentAdminSupportMenu(): PresentedMessage {
   return presentAdminSection(ADMIN_COPY.support, "Xử lý yêu cầu hỗ trợ và sự cố.");
+}
+
+export interface AdminSupportReplacementRow {
+  caseId: string;
+  orderId: string;
+  orderNumber: string;
+  customerId: string;
+  reasonCode: string;
+  safeSummary: string | null;
+}
+
+export function presentAdminSupportQueue(rows: AdminSupportReplacementRow[]): PresentedMessage {
+  if (rows.length === 0) {
+    return {
+      text: [ADMIN_COPY.support, "", "Không có yêu cầu thay thế đang chờ duyệt."].join("\n"),
+      buttons: [[{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }]],
+    };
+  }
+  const lines = [ADMIN_COPY.support, "", "Yêu cầu thay thế chờ duyệt:"];
+  const buttons: InlineButton[][] = [];
+  for (const row of rows) {
+    lines.push(`• ${row.orderNumber} · ${row.reasonCode} · ${row.caseId.slice(-8)}`);
+    if (row.safeSummary) lines.push(`  ${row.safeSummary}`);
+    buttons.push([
+      { text: `Duyệt ${row.orderNumber}`, callbackData: `admin:support:approve:${row.caseId}` },
+    ]);
+  }
+  buttons.push([{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }]);
+  return { text: lines.join("\n"), buttons };
 }
 
 export type AdminBroadcastAudience = "all" | "shop" | "activity" | "root";
 
 const audienceLabel = (audience: AdminBroadcastAudience): string =>
-  audience === "all" ? "Tất cả khách nhận Telegram" : audience === "shop" ? "Khách bật cập nhật sản phẩm" : audience === "activity" ? "Khách bật hoạt động mua hàng" : "Chỉ chủ cửa hàng";
+  audience === "all"
+    ? "Tất cả khách nhận Telegram"
+    : audience === "shop"
+      ? "Khách bật cập nhật sản phẩm"
+      : audience === "activity"
+        ? "Khách bật hoạt động mua hàng"
+        : "Chỉ chủ cửa hàng";
 
 export function presentAdminMarketingMenu(): PresentedMessage {
-  return presentAdminSection(ADMIN_COPY.marketing, "Gửi thông báo marketing cho nhóm khách đã chọn.", [
-    [{ text: "📝 Soạn thông báo", callbackData: "admin:marketing:compose" }],
-  ]);
+  return presentAdminSection(
+    ADMIN_COPY.marketing,
+    "Gửi thông báo marketing cho nhóm khách đã chọn.",
+    [[{ text: "📝 Soạn thông báo", callbackData: "admin:marketing:compose" }]],
+  );
 }
 
 export function presentAdminBroadcastAudience(): PresentedMessage {
@@ -138,14 +402,29 @@ export function presentAdminBroadcastAudience(): PresentedMessage {
 
 export function presentAdminBroadcastPrompt(audience: AdminBroadcastAudience): PresentedMessage {
   return {
-    text: [`Soạn nội dung thông báo.`, `Nhóm nhận: ${audienceLabel(audience)}`, "", "Gửi nội dung bằng tin nhắn tiếp theo."].join("\n"),
+    text: [
+      `Soạn nội dung thông báo.`,
+      `Nhóm nhận: ${audienceLabel(audience)}`,
+      "",
+      "Gửi nội dung bằng tin nhắn tiếp theo.",
+    ].join("\n"),
     buttons: [[{ text: "Huỷ", callbackData: "admin:marketing:cancel" }]],
   };
 }
-
-export function presentAdminBroadcastPreview(input: { campaignId: string; audience: AdminBroadcastAudience; count: number; content: string }): PresentedMessage {
+export function presentAdminBroadcastPreview(input: {
+  campaignId: string;
+  audience: AdminBroadcastAudience;
+  count: number;
+  content: string;
+}): PresentedMessage {
   return {
-    text: ["📣 Xem trước thông báo", `Nhóm nhận: ${audienceLabel(input.audience)}`, `Số khách sẽ nhận: ${input.count}`, "", input.content].join("\n"),
+    text: [
+      "📣 Xem trước thông báo",
+      `Nhóm nhận: ${audienceLabel(input.audience)}`,
+      `Số khách sẽ nhận: ${input.count}`,
+      "",
+      input.content,
+    ].join("\n"),
     buttons: [
       [{ text: "✅ Xác nhận gửi", callbackData: `admin:marketing:confirm:${input.campaignId}` }],
       [{ text: "Huỷ", callbackData: `admin:marketing:cancel:${input.campaignId}` }],
@@ -153,9 +432,32 @@ export function presentAdminBroadcastPreview(input: { campaignId: string; audien
   };
 }
 
-export function presentAdminBroadcastStatus(input: { campaignId: string; status: string; audience: AdminBroadcastAudience; total: number; pending: number; retry: number; sent: number; suppressed: number; dead: number }): PresentedMessage {
+export function presentAdminBroadcastStatus(input: {
+  campaignId: string;
+  status: string;
+  audience: AdminBroadcastAudience;
+  total: number;
+  pending: number;
+  retry: number;
+  sent: number;
+  suppressed: number;
+  dead: number;
+}): PresentedMessage {
   return {
-    text: ["📣 Trạng thái thông báo", `ID: ${input.campaignId}`, `Trạng thái: ${input.status}`, `Nhóm nhận: ${audienceLabel(input.audience)}`, `Tổng: ${input.total}`, `Đang chờ: ${input.pending}`, `Gửi lại: ${input.retry}`, `Đã gửi: ${input.sent}`, `Đã dừng/huỷ: ${input.suppressed}`, `Lỗi chết: ${input.dead}`, "", "Dừng chỉ chặn phần chưa bắt đầu gửi. Tin đang gửi tới Telegram vẫn có thể đến người nhận."].join("\n"),
+    text: [
+      "📣 Trạng thái thông báo",
+      `ID: ${input.campaignId}`,
+      `Trạng thái: ${input.status}`,
+      `Nhóm nhận: ${audienceLabel(input.audience)}`,
+      `Tổng: ${input.total}`,
+      `Đang chờ: ${input.pending}`,
+      `Gửi lại: ${input.retry}`,
+      `Đã gửi: ${input.sent}`,
+      `Đã dừng/huỷ: ${input.suppressed}`,
+      `Lỗi chết: ${input.dead}`,
+      "",
+      "Dừng chỉ chặn phần chưa bắt đầu gửi. Tin đang gửi tới Telegram vẫn có thể đến người nhận.",
+    ].join("\n"),
     buttons: [
       [{ text: "Làm mới", callbackData: `admin:marketing:status:${input.campaignId}` }],
       [{ text: "Dừng phần chưa gửi", callbackData: `admin:marketing:cancel:${input.campaignId}` }],
@@ -168,7 +470,7 @@ export function presentProductCategoryChoices(
   categories: Array<{ id: string; name: string }>,
 ): PresentedMessage {
   return {
-    text: "Bước 3/6 — Chọn danh mục.",
+    text: "Bước 5/8 — Chọn danh mục.",
     buttons: categories
       .slice(0, 20)
       .map((category) => [
@@ -176,32 +478,109 @@ export function presentProductCategoryChoices(
       ]),
   };
 }
-
-export function presentProductDraftPreview(draft: {
-  name: string;
-  sku: string;
-  categoryId: string;
-  priceVnd: bigint;
-  description: string;
-  lowStockThreshold: number;
-}): PresentedMessage {
+export function presentProductFulfillmentTypeChoices(): PresentedMessage {
   return {
-    text: [
-      "Xem trước sản phẩm",
-      `Tên: ${draft.name}`,
-      `SKU: ${draft.sku}`,
-      `Danh mục: ${draft.categoryId}`,
-      `Giá: ${draft.priceVnd.toLocaleString("vi-VN")} ₫`,
-      `Mô tả: ${draft.description}`,
-      `Ngưỡng tồn: ${draft.lowStockThreshold}`,
-    ].join("\n"),
+    text: "Bước 6/8 — Chọn loại giao hàng.",
     buttons: [
-      [{ text: "✅ Tạo sản phẩm", callbackData: "admin:products:confirm" }],
-      [{ text: "❌ Huỷ", callbackData: "admin:products" }],
+      [
+        {
+          text: FULFILLMENT_TYPE_LABELS.STOCK_ACCOUNT,
+          callbackData: "admin:products:type:STOCK_ACCOUNT",
+        },
+      ],
+      [
+        {
+          text: FULFILLMENT_TYPE_LABELS.STOCK_CODE,
+          callbackData: "admin:products:type:STOCK_CODE",
+        },
+      ],
+      [
+        {
+          text: FULFILLMENT_TYPE_LABELS.MANUAL_FULFILLMENT,
+          callbackData: "admin:products:type:MANUAL_FULFILLMENT",
+        },
+      ],
+      [
+        {
+          text: FULFILLMENT_TYPE_LABELS.UNLIMITED_SERVICE,
+          callbackData: "admin:products:type:UNLIMITED_SERVICE",
+        },
+      ],
+      [
+        {
+          text: FULFILLMENT_TYPE_LABELS.QUANTITY_STOCK,
+          callbackData: "admin:products:type:QUANTITY_STOCK",
+        },
+      ],
+      [
+        {
+          text: FULFILLMENT_TYPE_LABELS.DIGITAL_FILE,
+          callbackData: "admin:products:type:DIGITAL_FILE",
+        },
+      ],
+      [
+        {
+          text: FULFILLMENT_TYPE_LABELS.SUPPLIER_API,
+          callbackData: "admin:products:type:SUPPLIER_API",
+        },
+      ],
+      [{ text: "Huỷ", callbackData: "admin:products:cancel" }],
     ],
   };
 }
 
+export function presentProductDraftPreview(draft: {
+  name?: string;
+  existingProductId?: string;
+  sku: string;
+  variantName: string;
+  categoryId?: string;
+  priceVnd: bigint;
+  fulfillmentType: FulfillmentType;
+  inventoryFields: InventoryField[];
+  lowStockThreshold: number;
+  serviceInstructions?: string;
+  initialQuantity?: number;
+  fileArtifact?: { filename: string };
+  supplierConfig?: { supplierId: string; externalSku: string; costVnd: bigint; region?: string };
+}): PresentedMessage {
+  return {
+    text: [
+      draft.existingProductId ? "Xem trước biến thể" : "Xem trước sản phẩm",
+      ...(draft.name ? [`Tên: ${draft.name}`] : []),
+      `Biến thể: ${draft.variantName}`,
+      `SKU: ${draft.sku}`,
+      draft.existingProductId
+        ? `Sản phẩm: ${draft.existingProductId}`
+        : `Danh mục: ${draft.categoryId}`,
+      `Giá: ${draft.priceVnd.toLocaleString("vi-VN")} ₫`,
+      `Loại giao hàng: ${FULFILLMENT_TYPE_LABELS[draft.fulfillmentType]}`,
+      `Trường kho: ${draft.inventoryFields.map((field) => field.label).join(", ") || "—"}`,
+      `Ngưỡng tồn: ${draft.lowStockThreshold}`,
+      ...(draft.serviceInstructions ? [`Hướng dẫn xử lý: ${draft.serviceInstructions}`] : []),
+      ...(draft.initialQuantity === undefined
+        ? []
+        : [`Số lượng ban đầu: ${draft.initialQuantity}`]),
+      ...(draft.fileArtifact
+        ? [`Tệp đăng ký: ${draft.fileArtifact.filename} (chưa kích hoạt/chưa bán)`]
+        : []),
+      ...(draft.supplierConfig
+        ? [
+            `Nhà cung cấp: ${draft.supplierConfig.supplierId} · SKU ${draft.supplierConfig.externalSku} · Giá vốn ${draft.supplierConfig.costVnd.toLocaleString("vi-VN")} ₫${draft.supplierConfig.region ? ` · ${draft.supplierConfig.region}` : ""}`,
+          ]
+        : []),
+    ].join("\n"),
+    buttons: [
+      [
+        {
+          text: draft.existingProductId ? "✅ Tạo biến thể" : "✅ Tạo sản phẩm",
+          callbackData: "admin:products:confirm",
+        },
+      ],
+      [{ text: "❌ Huỷ", callbackData: "admin:products" }],
+    ],
+  };
+}
 export interface AdminDashboardSummary {
   activeProducts: number;
   outOfStock: number;
@@ -243,68 +622,292 @@ export function presentAdminDashboard(data: AdminDashboardSummary): PresentedMes
 export function presentAdminProducts(
   rows: Array<{ id: string; name: string; active: boolean }>,
 ): PresentedMessage {
-  const lines = [
-    ADMIN_COPY.products,
-    ...rows.slice(0, 20).map((row) => `• ${row.name} (${row.active ? "đang bán" : "tạm dừng"})`),
-  ];
-  const rowButtons = rows.slice(0, 20).map((row) => [
-    {
-      text: `${row.name} (${row.active ? "đang bán" : "tạm dừng"})`,
-      callbackData: `admin:products:detail:${row.id}`,
-    },
-  ]);
+  const visibleRows = rows.slice(0, 20);
   return {
-    text: lines.join("\n"),
+    text: [
+      ADMIN_COPY.products,
+      ...visibleRows.map((row) => `• ${row.name} (${row.active ? "đang bán" : "tạm dừng"})`),
+    ].join("\n"),
     buttons: [
       [
         { text: ADMIN_COPY.overview, callbackData: "admin:dashboard" },
         { text: ADMIN_COPY.inventory, callbackData: "admin:inventory" },
       ],
-      ...rowButtons,
+      ...visibleRows.map((row) => [
+        {
+          text: `${row.name} (${row.active ? "đang bán" : "tạm dừng"})`,
+          callbackData: `admin:products:detail:${row.id}`,
+        },
+      ]),
       adminNav("admin:menu"),
     ],
   };
 }
 
-export function presentAdminProductDetail(input: {
-  id: string;
-  name: string;
-  slug: string;
-  categoryName: string;
-  description: string | null;
-  active: boolean;
-  variantCount: number;
-  minPriceVnd: bigint;
-}): PresentedMessage {
-  return {
-    text: [
-      ADMIN_COPY.products,
-      `Mã: ${input.id}`,
-      `Tên: ${input.name}`,
-      `Slug: ${input.slug}`,
-      `Danh mục: ${input.categoryName}`,
-      `Trạng thái: ${input.active ? "đang bán" : "tạm dừng"}`,
-      `Biến thể: ${input.variantCount}`,
-      `Giá thấp nhất: ${input.minPriceVnd.toLocaleString("vi-VN")} ₫`,
-      ...(input.description ? ["", input.description] : []),
-    ].join("\n"),
-    buttons: [[{ text: ADMIN_COPY.back, callbackData: "admin:products" }], adminNav("admin:menu")],
-  };
-}
-
-export function presentAdminInventory(count: number): PresentedMessage {
+export function presentAdminInventory(
+  rows: Array<{ id: string; name: string; variantCount: number }>,
+): PresentedMessage {
+  const visibleRows = rows.slice(0, 20);
   return {
     text: [
       ADMIN_COPY.inventory,
-      `Tồn kho: ${count}`,
-      "Nhập kho bằng dữ liệu CSV ở bước riêng; thông tin đăng nhập không hiển thị.",
+      visibleRows.length === 0 ? "Chưa có sản phẩm" : "Chọn sản phẩm để xem biến thể và nhập kho.",
+      ...visibleRows.map((row) => `• ${row.name} (${row.variantCount} biến thể)`),
     ].join("\n"),
     buttons: [
-      [{ text: "Xem trước nhập kho", callbackData: "admin:inventory:import" }],
+      ...(visibleRows.length === 0
+        ? [[{ text: "Tạo sản phẩm", callbackData: "admin:products:create" }]]
+        : visibleRows.map((row) => [
+            {
+              text: `${row.name} (${row.variantCount} biến thể)`,
+              callbackData: `admin:inventory:product:${row.id}`,
+            },
+          ])),
       [
         { text: ADMIN_COPY.overview, callbackData: "admin:dashboard" },
         { text: ADMIN_COPY.home, callbackData: "admin:menu" },
       ],
+    ],
+  };
+}
+
+export function presentAdminInventoryProduct(input: {
+  id: string;
+  name: string;
+  variants: Array<{
+    id: string;
+    name: string;
+    sku: string;
+    fulfillmentType: FulfillmentType;
+    available: number;
+    lowStockThreshold: number | null;
+    importSupported: boolean;
+  }>;
+}): PresentedMessage {
+  const visibleVariants = input.variants.slice(0, 20);
+  return {
+    text: [
+      ADMIN_COPY.inventory,
+      `Sản phẩm: ${input.name}`,
+      `Mã: ${input.id}`,
+      ...visibleVariants.map(
+        (variant) =>
+          `${variant.name} — ${variant.sku} — ${FULFILLMENT_TYPE_LABELS[variant.fulfillmentType]}${variant.lowStockThreshold === null ? "" : ` — ngưỡng ${variant.lowStockThreshold}`}`,
+      ),
+    ].join("\n"),
+    buttons: [
+      ...visibleVariants.flatMap((variant) =>
+        variant.importSupported
+          ? [[{ text: variant.name, callbackData: `admin:inventory:variant:${variant.id}` }]]
+          : [],
+      ),
+      [{ text: ADMIN_COPY.back, callbackData: "admin:inventory" }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentAdminInventoryVariant(input: {
+  productId: string;
+  id: string;
+  name: string;
+  sku: string;
+  fulfillmentType: FulfillmentType;
+  available: number;
+  lowStockThreshold: number | null;
+  importSupported: boolean;
+  fileImportSupported?: boolean;
+  announceSupported?: boolean;
+  stockVersion?: number;
+}): PresentedMessage {
+  return {
+    text: [
+      ADMIN_COPY.inventory,
+      `Biến thể: ${input.name}`,
+      `SKU: ${input.sku}`,
+      `Loại giao hàng: ${FULFILLMENT_TYPE_LABELS[input.fulfillmentType]}`,
+      `Tồn khả dụng: ${input.available}`,
+      `Ngưỡng tồn: ${input.lowStockThreshold ?? "—"}`,
+      input.fileImportSupported
+        ? "Gửi tài liệu Telegram để tải vào kho riêng, xem trước rồi xác nhận kích hoạt."
+        : input.importSupported
+          ? "Nhập kho bằng dữ liệu bí mật đã được gắn với phiên máy chủ."
+          : input.fulfillmentType === "QUANTITY_STOCK"
+            ? "Điều chỉnh tồn kho số lượng bằng nút cộng/trừ bên dưới."
+            : "Biến thể này không hỗ trợ nhập kho.",
+    ].join("\n"),
+    buttons: [
+      ...(input.fileImportSupported
+        ? [[{ text: "📎 Nhập tệp", callbackData: `admin:inventory:import:${input.id}` }]]
+        : input.importSupported
+          ? [[{ text: "📥 Nhập kho", callbackData: `admin:inventory:import:${input.id}` }]]
+          : input.fulfillmentType === "QUANTITY_STOCK" && input.stockVersion !== undefined
+            ? [
+                [
+                  {
+                    text: "+1",
+                    callbackData: `admin:inventory:qty:${input.id}:1:${input.stockVersion}`,
+                  },
+                  {
+                    text: "-1",
+                    callbackData: `admin:inventory:qty:${input.id}:-1:${input.stockVersion}`,
+                  },
+                ],
+              ]
+            : []),
+      ...(input.announceSupported
+        ? [
+            [
+              {
+                text: "📣 Thông báo còn hàng",
+                callbackData: `admin:inventory:announce:${input.id}`,
+              },
+            ],
+          ]
+        : []),
+      [{ text: "Lịch sử kho", callbackData: `admin:inventory:history:${input.id}` }],
+      [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:product:${input.productId}` }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentAdminInventoryHistory(input: {
+  productId: string;
+  variantId: string;
+  variantName: string;
+  rows: Array<{ label: string; detail: string; occurredAt: string }>;
+}): PresentedMessage {
+  const lines = input.rows.length
+    ? input.rows.map((row) => `• ${row.label} — ${row.detail} — ${row.occurredAt}`)
+    : ["Chưa có lịch sử kho cho biến thể này."];
+  return {
+    text: [
+      ADMIN_COPY.inventory,
+      `Lịch sử kho: ${input.variantName}`,
+      "Hiển thị tối đa 10 mục gần nhất. Không hiển thị lần nhập cũ hoặc nhập nhiều biến thể chưa có liên kết kiểm toán riêng.",
+      ...lines,
+    ].join("\n"),
+    buttons: [
+      [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
+      [{ text: "Sản phẩm", callbackData: `admin:inventory:product:${input.productId}` }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentQuantityStockAdjustPreview(input: {
+  stateId: string;
+  variantName: string;
+  sku: string;
+  delta: number;
+  available: number;
+  nextAvailable: number;
+  expectedStockVersion: number;
+}): PresentedMessage {
+  return {
+    text: [
+      "Xác nhận điều chỉnh tồn kho số lượng",
+      `Biến thể: ${input.variantName}`,
+      `SKU: ${input.sku}`,
+      `Thay đổi: ${input.delta > 0 ? "+" : ""}${input.delta}`,
+      `Tồn hiện tại: ${input.available}`,
+      `Tồn sau điều chỉnh: ${input.nextAvailable}`,
+      `Phiên bản tồn: ${input.expectedStockVersion}`,
+    ].join("\n"),
+    buttons: [
+      [{ text: "✅ Xác nhận", callbackData: `admin:inventory:qty-confirm:${input.stateId}` }],
+      [{ text: ADMIN_COPY.back, callbackData: "admin:inventory" }],
+    ],
+  };
+}
+
+export function presentQuantityStockAdjustReasonPrompt(input: {
+  variantName: string;
+  delta: number;
+  nextAvailable: number;
+}): PresentedMessage {
+  return {
+    text: [
+      "Nhập lý do điều chỉnh tồn kho.",
+      `Biến thể: ${input.variantName}`,
+      `Thay đổi: ${input.delta > 0 ? "+" : ""}${input.delta}`,
+      `Tồn sau điều chỉnh: ${input.nextAvailable}`,
+      "Tối đa 200 ký tự.",
+    ].join("\n"),
+    buttons: [[{ text: ADMIN_COPY.back, callbackData: "admin:inventory" }]],
+  };
+}
+
+export function presentQuantityStockAdjustDone(input: {
+  availableQuantity: number;
+  version: number;
+  idempotent: boolean;
+}): PresentedMessage {
+  return {
+    text: `✅ Đã cập nhật tồn kho: ${input.availableQuantity} (phiên bản ${input.version})${input.idempotent ? " — đã ghi nhận trước đó" : ""}.`,
+    buttons: [[{ text: ADMIN_COPY.inventory, callbackData: "admin:inventory" }]],
+  };
+}
+
+export function presentInventoryImportPrompt(input: {
+  variantId: string;
+  variantName: string;
+  sku: string;
+  kind?: "secret" | "file";
+}): PresentedMessage {
+  const file = input.kind === "file";
+  return {
+    text: [
+      "📦 Nhập kho biến thể",
+      `Biến thể: ${input.variantName}`,
+      `SKU: ${input.sku}`,
+      file
+        ? "Gửi một tài liệu Telegram. Bot tải tối đa 20 MB vào kho riêng, tính hash, rồi chờ xác nhận kích hoạt."
+        : "Tải CSV mẫu cho biến thể này, điền từng dòng credential giả lập thật rồi dán lại nội dung CSV vào chat.",
+      file
+        ? "Không gửi đường dẫn hay token. Bấm /cancel để huỷ."
+        : "Không nhập credential thật vào dòng mẫu placeholder; dòng placeholder sẽ bị báo thiếu dữ liệu nếu chưa thay.",
+      ...(file ? [] : ["Trường dữ liệu không hiện giá trị trong lỗi. Bấm /cancel để huỷ."]),
+    ].join("\n"),
+    buttons: [
+      ...(file
+        ? []
+        : [
+            [
+              {
+                text: "⬇️ Tải CSV mẫu",
+                callbackData: `admin:inventory:template:${input.variantId}`,
+              },
+            ],
+          ]),
+      [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
+      [{ text: ADMIN_COPY.adminMenu, callbackData: "admin:menu" }],
+    ],
+  };
+}
+
+export function presentInventoryImportTemplate(input: {
+  variantName: string;
+  sku: string;
+  filename: string;
+  csv: string;
+  requiredFields: string[];
+  optionalFields: string[];
+}): PresentedMessage {
+  return {
+    text: [
+      "CSV mẫu nhập kho",
+      `Biến thể: ${input.variantName}`,
+      `SKU: ${input.sku}`,
+      `Bắt buộc: ${input.requiredFields.join(", ") || "—"}`,
+      `Tuỳ chọn: ${input.optionalFields.join(", ") || "—"}`,
+      "Điền giá trị thật vào dòng mới hoặc thay placeholder, rồi dán lại nội dung CSV vào chat.",
+    ].join("\n"),
+    document: { kind: "buffer", value: Buffer.from(input.csv, "utf8"), filename: input.filename },
+    buttons: [
+      [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
+      [{ text: ADMIN_COPY.adminMenu, callbackData: "admin:menu" }],
     ],
   };
 }
@@ -314,39 +917,6 @@ export interface InventoryImportPreview {
   invalid: number;
   duplicates: number;
   variants: string[];
-}
-
-export function presentInventoryImportPrompt(): PresentedMessage {
-  return {
-    text: [
-      "📦 Nhập kho từ CSV",
-      "Dán nội dung `variantId,credential` vào chat.",
-      "Mỗi dòng một tài khoản; bấm /cancel để huỷ.",
-    ].join("\n"),
-    buttons: [[{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }], [{ text: ADMIN_COPY.adminMenu, callbackData: "admin:menu" }]],
-  };
-}
-
-/** Parse metadata for confirmation; credentials never enter the returned value. */
-export function previewInventoryImport(input: string): InventoryImportPreview {
-  const variants: string[] = [];
-  let invalid = 0;
-  for (const line of input.split(/\r?\n/).filter((line) => line.trim())) {
-    const comma = line.indexOf(",");
-    const variant = comma < 0 ? "" : line.slice(0, comma).trim();
-    const credential = comma < 0 ? "" : line.slice(comma + 1).trim();
-    if (
-      !/^[A-Za-z0-9_-]{1,128}$/.test(variant) ||
-      credential.length === 0 ||
-      credential.length > 4096
-    ) {
-      invalid += 1;
-    } else {
-      variants.push(variant);
-    }
-  }
-  const uniqueVariants = [...new Set(variants)];
-  return { ready: uniqueVariants.length, invalid, duplicates: variants.length - uniqueVariants.length, variants: uniqueVariants };
 }
 
 export function presentInventoryImportPreview(preview: InventoryImportPreview): PresentedMessage {
@@ -365,6 +935,133 @@ export function presentInventoryImportPreview(preview: InventoryImportPreview): 
       [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
       [{ text: ADMIN_COPY.adminMenu, callbackData: "admin:menu" }],
     ],
+  };
+}
+
+export function presentFileArtifactImportPreview(input: {
+  stateId: string;
+  filename: string;
+  sizeBytes: bigint;
+  sha256: string;
+}): PresentedMessage {
+  return {
+    text: [
+      "📦 Xem trước tệp nhập kho",
+      `Tệp: ${input.filename}`,
+      `Dung lượng: ${input.sizeBytes.toString()} bytes`,
+      `SHA-256: ${input.sha256}`,
+      "Tệp đã được tải vào kho riêng và sẽ chỉ bán sau khi xác nhận kích hoạt.",
+    ].join("\n"),
+    buttons: [
+      [{ text: "✅ Kích hoạt tệp", callbackData: `admin:inventory:file-confirm:${input.stateId}` }],
+      [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
+      [{ text: ADMIN_COPY.adminMenu, callbackData: "admin:menu" }],
+    ],
+  };
+}
+
+export function presentFileArtifactImportDone(input: { filename: string }): PresentedMessage {
+  return {
+    text: `✅ Đã kích hoạt tệp ${input.filename}.`,
+    buttons: [
+      [
+        { text: "📦 Kho hàng", callbackData: "admin:inventory" },
+        { text: "🛍 Sản phẩm", callbackData: "admin:products" },
+      ],
+    ],
+  };
+}
+
+export function presentAdminProductDetail(input: {
+  id: string;
+  name: string;
+  slug: string;
+  categoryName: string;
+  description: string | null;
+  active: boolean;
+  variantCount: number;
+  minPriceVnd: bigint;
+  variants?: Array<{
+    id: string;
+    name: string;
+    sku: string;
+    priceVnd?: bigint;
+    active?: boolean;
+    fulfillmentType: string;
+    expectedVersion?: number;
+  }>;
+}): PresentedMessage {
+  return {
+    text: [
+      ADMIN_COPY.products,
+      `Mã: ${input.id}`,
+      `Tên: ${input.name}`,
+      `Slug: ${input.slug}`,
+      `Danh mục: ${input.categoryName}`,
+      `Trạng thái: ${input.active ? "đang bán" : "tạm dừng"}`,
+      `Biến thể: ${input.variantCount}`,
+      `Giá thấp nhất: ${input.minPriceVnd.toLocaleString("vi-VN")} ₫`,
+      ...(input.variants?.length
+        ? [
+            "",
+            ...input.variants.map(
+              (variant) =>
+                `• ${variant.name} — ${variant.sku}${variant.priceVnd === undefined ? "" : ` — ${variant.priceVnd.toLocaleString("vi-VN")} ₫`}${variant.expectedVersion === undefined ? "" : ` — v${variant.expectedVersion}`}`,
+            ),
+          ]
+        : []),
+      ...(input.description ? ["", input.description] : []),
+    ].join("\n"),
+    buttons: [
+      [{ text: "➕ Thêm biến thể", callbackData: `admin:products:variant-add:${input.id}` }],
+      ...(input.variants ?? []).flatMap((variant) => [
+        [
+          {
+            text: `Sửa ${variant.name}`,
+            callbackData: `admin:products:variant-edit:${variant.id}`,
+          },
+        ],
+      ]),
+      [{ text: ADMIN_COPY.back, callbackData: "admin:products" }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentAdminVariantDraft(input: {
+  stateId: string;
+  productId: string;
+  variantId: string;
+  expectedVersion: number;
+  sku: string;
+  name: string;
+  priceVnd: bigint;
+  durationCode: string;
+  warrantyDays: number;
+  lowStockThreshold: number | null;
+}): PresentedMessage {
+  return {
+    text: [
+      "✏️ Sửa biến thể",
+      `Sản phẩm: ${input.productId}`,
+      `Biến thể: ${input.variantId}`,
+      `Phiên bản: ${input.expectedVersion}`,
+      "",
+      `Gửi: ${input.stateId}|name|priceVnd|durationCode|warrantyDays|lowStockThreshold`,
+      "Bỏ trống cột để giữ nguyên; dùng '-' để xoá ngưỡng tồn.",
+    ].join("\n"),
+    buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products" }]],
+  };
+}
+
+export function presentAdminVariantMutationDone(input: {
+  productId: string;
+  variantName: string;
+  action: "created" | "updated";
+}): PresentedMessage {
+  return {
+    text: `${input.action === "created" ? "✅ Đã thêm" : "✅ Đã cập nhật"} biến thể ${input.variantName}.`,
+    buttons: [[{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${input.productId}` }]],
   };
 }
 

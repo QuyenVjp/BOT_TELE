@@ -104,6 +104,9 @@ describe("fulfillment crash/replay recovery (FR-010 / SR-006)", () => {
     });
     expect(res.ok).toBe(true);
     if (!res.ok) return;
+    expect(res.kind).toBe("DELIVERY_BUNDLE");
+    if (res.kind !== "DELIVERY_BUNDLE")
+      throw new Error(`expected delivery bundle, got ${res.kind}`);
     expect(res.bundleId).toBeTruthy();
     expect(res.token.length).toBeGreaterThanOrEqual(32);
     expect(res.assetId).toBe(f.assetId);
@@ -136,6 +139,12 @@ describe("fulfillment crash/replay recovery (FR-010 / SR-006)", () => {
     expect(second.ok).toBe(true);
 
     if (first.ok && second.ok) {
+      expect(first.kind).toBe("DELIVERY_BUNDLE");
+      expect(second.kind).toBe("DELIVERY_BUNDLE");
+      if (first.kind !== "DELIVERY_BUNDLE")
+        throw new Error(`expected delivery bundle, got ${first.kind}`);
+      if (second.kind !== "DELIVERY_BUNDLE")
+        throw new Error(`expected delivery bundle, got ${second.kind}`);
       expect(second.assetId).toBe(first.assetId);
       expect(second.bundleId).toBe(first.bundleId);
     }

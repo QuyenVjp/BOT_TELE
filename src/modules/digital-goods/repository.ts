@@ -2,7 +2,9 @@ import { sql } from "kysely";
 import type { Db, Executor, Trx } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { nextVersion } from "../../infrastructure/db/version.js";
+import { newId } from "../../shared/ids/index.js";
 import type { AssetStatus } from "./domain.js";
+import { emitQuantityStockDeltaEvents } from "../catalog/quantity-stock.js";
 
 /**
  * Atomic local asset reserve/claim/release (T066, FR-014, SC-006).
@@ -137,6 +139,67 @@ export async function claimLocalAssetInTransaction(
 export type ReserveOutcome =
   | { ok: true; assetId: string; fingerprintHash: string }
   | { ok: false; reason: "NO_STOCK" | "CONTENTION_TIMEOUT" | "RESERVATION_LOST" };
+export type TypedStockKind =
+  | "STOCK_ACCOUNT"
+  | "STOCK_CODE"
+  | "DIGITAL_FILE"
+  | "SUPPLIER_API"
+  | "MANUAL_FULFILLMENT"
+  | "QUANTITY_STOCK"
+  | "UNLIMITED_SERVICE";
+
+export type TypedReserveResult =
+  | { ok: true; kind: "DISCRETE"; assetId: string; fingerprintHash: string }
+  | { ok: true; kind: "QUANTITY"; ledgerId: string; remainingQuantity: number }
+  | { ok: true; kind: "UNLIMITED" }
+  | { ok: true; kind: "DEFERRED" }
+  | { ok: false; reason: "NO_STOCK" | "CONTENTION_TIMEOUT" | "RESERVATION_LOST" };
+
+export interface ReserveTypedStockInput {
+  variantId: string;
+  orderId: string;
+  fulfillmentType: TypedStockKind;
+  reserveUntil: Date;
+  quantity?: number;
+}
+
+export async function reserveTypedStockForOrder(
+  exec: Executor,
+  input: ReserveTypedStockInput,
+): Promise<TypedReserveResult> {
+  switch (input.fulfillmentType) {
+    case "STOCK_ACCOUNT":
+    case "STOCK_CODE":
+      return reserveAvailableAssetForOrder(exec, input).then((result) =>
+        result.ok
+          ? {
+              ok: true,
+              kind: "DISCRETE",
+              assetId: result.assetId,
+              fingerprintHash: result.fingerprintHash,
+            }
+          : result,
+      );
+    case "QUANTITY_STOCK":
+      return reserveQuantityStockForOrder(exec, input);
+    case "DIGITAL_FILE":
+      return hasActiveFileArtifact(exec, input.variantId).then((ok) =>
+        ok ? { ok: true, kind: "DEFERRED" as const } : { ok: false, reason: "NO_STOCK" as const },
+      );
+    case "SUPPLIER_API":
+      return hasConfiguredSupplier(exec, input.variantId).then((ok) =>
+        ok ? { ok: true, kind: "DEFERRED" as const } : { ok: false, reason: "NO_STOCK" as const },
+      );
+    case "MANUAL_FULFILLMENT":
+      return hasServiceDefinition(exec, input.variantId, "MANUAL_FULFILLMENT").then((ok) =>
+        ok ? { ok: true, kind: "DEFERRED" as const } : { ok: false, reason: "NO_STOCK" as const },
+      );
+    case "UNLIMITED_SERVICE":
+      return hasServiceDefinition(exec, input.variantId, "UNLIMITED_SERVICE").then((ok) =>
+        ok ? { ok: true, kind: "UNLIMITED" as const } : { ok: false, reason: "NO_STOCK" as const },
+      );
+  }
+}
 
 export async function reserveAvailableAssetForOrder(
   exec: Executor,
@@ -196,6 +259,34 @@ export async function orderHasActiveReservation(
   variantId: string,
   now: Date = new Date(),
 ): Promise<boolean> {
+  const variant = await sql<{ fulfillment_type: TypedStockKind }>`
+    select fulfillment_type from product_variant where id = ${variantId}
+  `.execute(exec);
+  switch (variant.rows[0]?.fulfillment_type) {
+    case "STOCK_ACCOUNT":
+    case "STOCK_CODE":
+      return orderHasActiveAssetReservation(exec, orderId, variantId, now);
+    case "QUANTITY_STOCK":
+      return orderHasActiveQuantityReservation(exec, orderId, variantId, now);
+    case "DIGITAL_FILE":
+      return hasActiveFileArtifact(exec, variantId);
+    case "SUPPLIER_API":
+      return hasConfiguredSupplier(exec, variantId);
+    case "MANUAL_FULFILLMENT":
+      return hasServiceDefinition(exec, variantId, "MANUAL_FULFILLMENT");
+    case "UNLIMITED_SERVICE":
+      return hasServiceDefinition(exec, variantId, "UNLIMITED_SERVICE");
+    default:
+      return false;
+  }
+}
+
+async function orderHasActiveAssetReservation(
+  exec: Executor,
+  orderId: string,
+  variantId: string,
+  now: Date,
+): Promise<boolean> {
   const result = await sql<{ one: number }>`
     select 1 as one
     from digital_asset
@@ -209,6 +300,64 @@ export async function orderHasActiveReservation(
   return result.rows.length > 0;
 }
 
+async function orderHasActiveQuantityReservation(
+  exec: Executor,
+  orderId: string,
+  variantId: string,
+  now: Date,
+): Promise<boolean> {
+  const result = await sql<{ one: number }>`
+    select 1 as one
+    from quantity_stock_ledger
+    where order_id = ${orderId}
+      and variant_id = ${variantId}
+      and entry_type = 'RESERVE'
+      and released_at is null
+      and expires_at is not null
+      and expires_at > ${now.toISOString()}
+    limit 1
+  `.execute(exec);
+  return result.rows.length > 0;
+}
+
+async function hasActiveFileArtifact(exec: Executor, variantId: string): Promise<boolean> {
+  const result = await sql<{ one: number }>`
+    select 1 as one
+    from variant_file_artifact
+    where variant_id = ${variantId} and is_active
+    limit 1
+  `.execute(exec);
+  return result.rows.length > 0;
+}
+
+async function hasConfiguredSupplier(exec: Executor, variantId: string): Promise<boolean> {
+  const result = await sql<{ one: number }>`
+    select 1 as one
+    from supplier_sku ss
+    join supplier s on s.id = ss.supplier_id
+    where ss.variant_id = ${variantId}
+      and ss.is_active
+      and s.status = 'ACTIVE'
+    limit 1
+  `.execute(exec);
+  return result.rows.length > 0;
+}
+
+async function hasServiceDefinition(
+  exec: Executor,
+  variantId: string,
+  fulfillmentType: "MANUAL_FULFILLMENT" | "UNLIMITED_SERVICE",
+): Promise<boolean> {
+  const result = await sql<{ one: number }>`
+    select 1 as one
+    from variant_service_fulfillment
+    where variant_id = ${variantId}
+      and fulfillment_type = ${fulfillmentType}
+      and is_active
+    limit 1
+  `.execute(exec);
+  return result.rows.length > 0;
+}
 /** Find the deterministic active fulfillment hold for an Order. */
 export async function findActiveAssetHoldByOrder(
   exec: Executor,
@@ -256,6 +405,186 @@ export async function findDeliveredAssetHistoryForOrder(
     limit 1
   `.execute(exec);
   return result.rows[0] ?? null;
+}
+
+async function reserveQuantityStockForOrder(
+  exec: Executor,
+  input: ReserveTypedStockInput,
+): Promise<TypedReserveResult> {
+  const quantity = input.quantity ?? 1;
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new RangeError("quantity reserve must be a positive integer");
+  }
+
+  const activeOrHistorical = await sql<{
+    id: string;
+    variant_id: string;
+    remaining_quantity: number;
+    released_at: Date | string | null;
+    expires_at: Date | string | null;
+  }>`
+    select l.id, l.variant_id, s.available_quantity::int as remaining_quantity,
+           l.released_at, l.expires_at
+    from quantity_stock_ledger l
+    join variant_quantity_stock s on s.variant_id = l.variant_id
+    where l.order_id = ${input.orderId}
+      and l.entry_type = 'RESERVE'
+    order by l.created_at asc, l.id asc
+    limit 1
+    for update of l, s
+  `.execute(exec);
+  const existing = activeOrHistorical.rows[0];
+  if (existing) {
+    const active =
+      existing.variant_id === input.variantId &&
+      existing.released_at === null &&
+      existing.expires_at !== null &&
+      new Date(existing.expires_at).getTime() > Date.now();
+    if (active) {
+      return {
+        ok: true,
+        kind: "QUANTITY",
+        ledgerId: existing.id,
+        remainingQuantity: existing.remaining_quantity,
+      };
+    }
+    return { ok: false, reason: "NO_STOCK" };
+  }
+
+  const stock = await sql<{ available_quantity: number; version: number }>`
+    select available_quantity::int, version
+    from variant_quantity_stock
+    where variant_id = ${input.variantId}
+    limit 1
+    for update skip locked
+  `.execute(exec);
+  const row = stock.rows[0];
+  if (!row) {
+    const contention = await sql<{ n: number }>`
+      select count(*)::int as n
+      from variant_quantity_stock
+      where variant_id = ${input.variantId}
+        and available_quantity >= ${quantity}
+    `.execute(exec);
+    return (contention.rows[0]?.n ?? 0) > 0
+      ? { ok: false, reason: "CONTENTION_TIMEOUT" }
+      : { ok: false, reason: "NO_STOCK" };
+  }
+  if (row.available_quantity < quantity) return { ok: false, reason: "NO_STOCK" };
+
+  const confirmed = await sql<{
+    id: string;
+    variant_id: string;
+    remaining_quantity: number;
+    released_at: Date | string | null;
+    expires_at: Date | string | null;
+  }>`
+    select l.id, l.variant_id, s.available_quantity::int as remaining_quantity,
+           l.released_at, l.expires_at
+    from quantity_stock_ledger l
+    join variant_quantity_stock s on s.variant_id = l.variant_id
+    where l.order_id = ${input.orderId}
+      and l.entry_type = 'RESERVE'
+    order by l.created_at asc, l.id asc
+    limit 1
+    for update of l, s
+  `.execute(exec);
+  if (confirmed.rows[0]) {
+    const held = confirmed.rows[0];
+    const active =
+      held.variant_id === input.variantId &&
+      held.released_at === null &&
+      held.expires_at !== null &&
+      new Date(held.expires_at).getTime() > Date.now();
+    if (active) {
+      return {
+        ok: true,
+        kind: "QUANTITY",
+        ledgerId: held.id,
+        remainingQuantity: held.remaining_quantity,
+      };
+    }
+    return { ok: false, reason: "NO_STOCK" };
+  }
+
+  const nextQuantity = row.available_quantity - quantity;
+  const nextVersion = row.version + 1;
+  const updated = await sql`
+    update variant_quantity_stock
+    set available_quantity = ${nextQuantity}, version = ${nextVersion}, updated_at = now()
+    where variant_id = ${input.variantId}
+      and version = ${row.version}
+      and available_quantity >= ${quantity}
+  `.execute(exec);
+  if (Number(updated.numAffectedRows ?? 0) < 1) {
+    return { ok: false, reason: "RESERVATION_LOST" };
+  }
+
+  const ledgerId = newId();
+  await sql`
+    insert into quantity_stock_ledger
+      (id, variant_id, order_id, entry_type, quantity_delta, quantity_after, expires_at)
+    values
+      (${ledgerId}, ${input.variantId}, ${input.orderId}, 'RESERVE', ${-quantity}, ${nextQuantity}, ${input.reserveUntil.toISOString()})
+  `.execute(exec);
+  await emitQuantityStockDeltaEvents(exec, {
+    variantId: input.variantId,
+    delta: -quantity,
+    stockBefore: row.available_quantity,
+    stockAfter: nextQuantity,
+    version: nextVersion,
+    correlationId: `quantity-reserve:${input.orderId}`,
+  });
+  return { ok: true, kind: "QUANTITY", ledgerId, remainingQuantity: nextQuantity };
+}
+
+export async function releaseTypedStockForOrder(exec: Executor, orderId: string): Promise<boolean> {
+  const releasedAsset = await releaseReservationForOrder(exec, orderId);
+  const reserved = await sql<{ id: string; variant_id: string; quantity_delta: number }>`
+    select id, variant_id, quantity_delta::int
+    from quantity_stock_ledger
+    where order_id = ${orderId} and entry_type = 'RESERVE' and released_at is null
+      and not exists (select 1 from quantity_stock_ledger d where d.parent_ledger_id = quantity_stock_ledger.id and d.entry_type = 'DELIVER')
+    for update
+  `.execute(exec);
+  const row = reserved.rows[0];
+  if (!row) return releasedAsset;
+  const quantity = Math.abs(row.quantity_delta);
+  const stock = await sql<{ available_quantity: number; version: number }>`
+    select available_quantity::int, version
+    from variant_quantity_stock
+    where variant_id = ${row.variant_id}
+    limit 1
+    for update
+  `.execute(exec);
+  const live = stock.rows[0];
+  if (!live) return releasedAsset;
+  const nextQuantity = live.available_quantity + quantity;
+  const nextVersion = live.version + 1;
+  await sql`
+    update variant_quantity_stock
+    set available_quantity = ${nextQuantity}, version = ${nextVersion}, updated_at = now()
+    where variant_id = ${row.variant_id} and version = ${live.version}
+  `.execute(exec);
+  await sql`
+    update quantity_stock_ledger set released_at = now() where id = ${row.id}
+  `.execute(exec);
+  const ledgerId = newId();
+  await sql`
+    insert into quantity_stock_ledger
+      (id, variant_id, order_id, entry_type, quantity_delta, quantity_after, parent_ledger_id)
+    values
+      (${ledgerId}, ${row.variant_id}, ${orderId}, 'RELEASE', ${quantity}, ${nextQuantity}, ${row.id})
+  `.execute(exec);
+  await emitQuantityStockDeltaEvents(exec, {
+    variantId: row.variant_id,
+    delta: quantity,
+    stockBefore: live.available_quantity,
+    stockAfter: nextQuantity,
+    version: nextVersion,
+    correlationId: `quantity-release:${orderId}`,
+  });
+  return true;
 }
 
 /**

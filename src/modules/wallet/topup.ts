@@ -8,7 +8,8 @@ import { presentPayment, type PaymentPresentation } from "../payments/vietqr.js"
 import { newId } from "../../shared/ids/index.js";
 import { creditWalletLedgerEntry, ensureWalletAccount } from "./ledger.js";
 
-export type WalletTopupStatus = "CREATED" | "PRESENTED" | "SUCCEEDED" | "EXPIRED" | "FAILED" | "NEEDS_REVIEW";
+export type WalletTopupStatus =
+  "CREATED" | "PRESENTED" | "SUCCEEDED" | "EXPIRED" | "FAILED" | "NEEDS_REVIEW";
 
 export interface WalletTopupIntent {
   id: string;
@@ -24,18 +25,38 @@ export interface WalletTopupIntent {
 
 export type TopupMatchDecision =
   | { kind: "SETTLE" }
-  | { kind: "DISCREPANCY"; reason: "UNMATCHED" | "WRONG_ACCOUNT" | "UNDERPAYMENT" | "OVERPAYMENT" | "LATE_PAYMENT" | "NOT_LIVE" };
+  | {
+      kind: "DISCREPANCY";
+      reason:
+        | "UNMATCHED"
+        | "WRONG_ACCOUNT"
+        | "UNDERPAYMENT"
+        | "OVERPAYMENT"
+        | "LATE_PAYMENT"
+        | "NOT_LIVE";
+    };
 
 export function decideTopupMatch(
-  evidence: Pick<VerifiedSePayEvidence, "direction" | "merchantAccountId" | "amountVnd" | "transactedAt">,
-  intent: Pick<WalletTopupIntent, "merchantAccountId" | "amountVnd" | "status" | "expiresAt"> | null,
+  evidence: Pick<
+    VerifiedSePayEvidence,
+    "direction" | "merchantAccountId" | "amountVnd" | "transactedAt"
+  >,
+  intent: Pick<
+    WalletTopupIntent,
+    "merchantAccountId" | "amountVnd" | "status" | "expiresAt"
+  > | null,
 ): TopupMatchDecision {
   if (evidence.direction !== "IN" || !intent) return { kind: "DISCREPANCY", reason: "UNMATCHED" };
-  if (evidence.merchantAccountId !== intent.merchantAccountId) return { kind: "DISCREPANCY", reason: "WRONG_ACCOUNT" };
-  if (BigInt(evidence.amountVnd) < intent.amountVnd) return { kind: "DISCREPANCY", reason: "UNDERPAYMENT" };
-  if (BigInt(evidence.amountVnd) > intent.amountVnd) return { kind: "DISCREPANCY", reason: "OVERPAYMENT" };
-  if (intent.status !== "CREATED" && intent.status !== "PRESENTED") return { kind: "DISCREPANCY", reason: "NOT_LIVE" };
-  if (evidence.transactedAt.getTime() > intent.expiresAt.getTime() + 60_000) return { kind: "DISCREPANCY", reason: "LATE_PAYMENT" };
+  if (evidence.merchantAccountId !== intent.merchantAccountId)
+    return { kind: "DISCREPANCY", reason: "WRONG_ACCOUNT" };
+  if (BigInt(evidence.amountVnd) < intent.amountVnd)
+    return { kind: "DISCREPANCY", reason: "UNDERPAYMENT" };
+  if (BigInt(evidence.amountVnd) > intent.amountVnd)
+    return { kind: "DISCREPANCY", reason: "OVERPAYMENT" };
+  if (intent.status !== "CREATED" && intent.status !== "PRESENTED")
+    return { kind: "DISCREPANCY", reason: "NOT_LIVE" };
+  if (evidence.transactedAt.getTime() > intent.expiresAt.getTime() + 60_000)
+    return { kind: "DISCREPANCY", reason: "LATE_PAYMENT" };
   return { kind: "SETTLE" };
 }
 
@@ -51,8 +72,11 @@ export async function presentWalletTopup(input: {
   bankAlias?: string;
   correlationId: string;
   ttlSeconds?: number;
-}): Promise<{ ok: true; intentId: string; presentation: PaymentPresentation } | { ok: false; error: string }> {
-  if (input.amountVnd <= 0n || input.amountVnd > BigInt(Number.MAX_SAFE_INTEGER)) return { ok: false, error: "invalid amount" };
+}): Promise<
+  { ok: true; intentId: string; presentation: PaymentPresentation } | { ok: false; error: string }
+> {
+  if (input.amountVnd <= 0n || input.amountVnd > BigInt(Number.MAX_SAFE_INTEGER))
+    return { ok: false, error: "invalid amount" };
 
   return withTransaction(input.db, async (trx) => {
     const account = await ensureWalletAccount(trx, input.customerId);
@@ -91,7 +115,12 @@ export async function presentWalletTopup(input: {
       aggregateId: id,
       aggregateVersion: 1,
       eventType: "WalletTopupPresented",
-      payloadRedacted: { intentId: id, customerId: input.customerId, amountVnd: Number(input.amountVnd), correlationId: input.correlationId },
+      payloadRedacted: {
+        intentId: id,
+        customerId: input.customerId,
+        amountVnd: Number(input.amountVnd),
+        correlationId: input.correlationId,
+      },
     });
     return { ok: true, intentId: id, presentation: render(input, intent) };
   });
@@ -100,8 +129,11 @@ export async function presentWalletTopup(input: {
 export async function applyWalletTopupEvidence(
   db: Db,
   evidence: VerifiedSePayEvidence,
-): Promise<{ ok: true; kind: "CREDITED" | "ALREADY_APPLIED" | "NEEDS_REVIEW" } | { ok: false; error: string }> {
-  if (!isVerifiedSePayEvidence(evidence)) return { ok: false, error: "unverified payment evidence" };
+): Promise<
+  { ok: true; kind: "CREDITED" | "ALREADY_APPLIED" | "NEEDS_REVIEW" } | { ok: false; error: string }
+> {
+  if (!isVerifiedSePayEvidence(evidence))
+    return { ok: false, error: "unverified payment evidence" };
   return withTransaction(db, async (trx) => {
     const bankTxn = await insertBankTransactionIfNew(trx, evidence, "VERIFIED", "sepay.v1");
     if (bankTxn.kind === "DUPLICATE") return { ok: true, kind: "ALREADY_APPLIED" };
@@ -134,14 +166,25 @@ export async function applyWalletTopupEvidence(
       aggregateId: intent.id,
       aggregateVersion: intent.version + 1,
       eventType: "WalletTopupCredited",
-      payloadRedacted: { intentId: intent.id, customerId: intent.customerId, amountVnd: Number(intent.amountVnd), correlationId: evidence.correlationId },
+      payloadRedacted: {
+        intentId: intent.id,
+        customerId: intent.customerId,
+        amountVnd: Number(intent.amountVnd),
+        correlationId: evidence.correlationId,
+      },
     });
     return { ok: true, kind: ledger.inserted ? "CREDITED" : "ALREADY_APPLIED" };
   });
 }
 
 function render(
-  input: { bankBin: string; beneficiaryAccountNumber: string; accountName: string; bankName?: string; bankAlias?: string },
+  input: {
+    bankBin: string;
+    beneficiaryAccountNumber: string;
+    accountName: string;
+    bankName?: string;
+    bankAlias?: string;
+  },
   intent: WalletTopupIntent,
 ): PaymentPresentation {
   return presentPayment({
@@ -157,7 +200,10 @@ function render(
   });
 }
 
-async function findLiveTopupByCustomer(exec: Executor, customerId: string): Promise<WalletTopupIntent | null> {
+async function findLiveTopupByCustomer(
+  exec: Executor,
+  customerId: string,
+): Promise<WalletTopupIntent | null> {
   const result = await sql<TopupRow>`
     select * from wallet_topup_intent
     where customer_id = ${customerId} and status in ('CREATED','PRESENTED')
@@ -167,7 +213,10 @@ async function findLiveTopupByCustomer(exec: Executor, customerId: string): Prom
   return result.rows[0] ? mapTopup(result.rows[0]) : null;
 }
 
-async function findTopupByContentForUpdate(exec: Executor, content: string): Promise<WalletTopupIntent | null> {
+async function findTopupByContentForUpdate(
+  exec: Executor,
+  content: string,
+): Promise<WalletTopupIntent | null> {
   const result = await sql<TopupRow>`
     select * from wallet_topup_intent
     where transfer_content = ${content}

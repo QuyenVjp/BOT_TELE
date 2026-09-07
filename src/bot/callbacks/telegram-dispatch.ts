@@ -8,7 +8,11 @@ import {
   presentAdminSuppliersMenu,
   presentAdminSupportMenu,
 } from "../presenters/admin.js";
-import { presentCustomerAccountPrompt, presentCustomerHome, CUSTOMER_COPY } from "../presenters/customer.js";
+import {
+  presentCustomerAccountPrompt,
+  presentCustomerHome,
+  CUSTOMER_COPY,
+} from "../presenters/customer.js";
 import { presentShopLaunch } from "../presenters/customer.js";
 import type { TelegramUpdate } from "../webhook.js";
 import type { PresentedMessage } from "../presenters/catalog.js";
@@ -133,15 +137,101 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    variantCreatePrompt?(input: {
+      telegramUserId: string;
+      productId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    variantEditPrompt?(input: {
+      telegramUserId: string;
+      variantId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     inventory?(input: {
       telegramUserId: string;
       chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    inventoryProduct?(input: {
+      telegramUserId: string;
+      productId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    inventoryVariant?(input: {
+      telegramUserId: string;
+      variantId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    stockAnnouncementPreview?(input: {
+      telegramUserId: string;
+      variantId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    inventoryHistory?(input: {
+      telegramUserId: string;
+      variantId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    quantityAdjustPreview?(input: {
+      telegramUserId: string;
+      variantId: string;
+      delta: number;
+      expectedStockVersion: number;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    quantityAdjustConfirm?(input: {
+      telegramUserId: string;
+      stateId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    quantityAdjustText?(input: {
+      telegramUserId: string;
+      text: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage | null>;
+    suppliers?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierVariant?(input: {
+      telegramUserId: string;
+      chatType: string;
+      variantId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierSelect?(input: {
+      telegramUserId: string;
+      chatType: string;
+      supplierSkuId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierClear?(input: {
+      telegramUserId: string;
+      chatType: string;
+      variantId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierVerify?(input: {
+      telegramUserId: string;
+      chatType: string;
+      supplierSkuId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
     importPreview?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
+      variantId?: string;
     }): Promise<PresentedMessage>;
     importConfirm?(input: {
       telegramUserId: string;
@@ -153,10 +243,34 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    importFileConfirm?(input: {
+      telegramUserId: string;
+      chatType: string;
+      stateId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     importText?(input: {
       telegramUserId: string;
       text: string;
       chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage | null>;
+    importDocument?(input: {
+      telegramUserId: string;
+      document: {
+        fileId: string;
+        fileUniqueId?: string | null;
+        filename: string;
+        mimeType: string;
+        fileSize?: number;
+      };
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage | null>;
+    importTemplate?(input: {
+      telegramUserId: string;
+      chatType: string;
+      variantId: string;
       correlationId: string;
     }): Promise<PresentedMessage | null>;
     confirm?(input: {
@@ -166,8 +280,112 @@ export interface TelegramDomainDispatcherDeps {
       challenge: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
-    presentAdminCustomerDetail?(ctx: TelegramActionContext, customerId: string): Promise<PresentedMessage>;
-    sendAdminCustomerMessage?(ctx: TelegramActionContext, input: { customerId: string; text: string }): Promise<PresentedMessage>;
+    manualTasks?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    manualTask?(input: {
+      telegramUserId: string;
+      chatType: string;
+      taskId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    manualComplete?(input: {
+      telegramUserId: string;
+      chatType: string;
+      stateId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    orders?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      filter?:
+        | "all"
+        | "pending_payment"
+        | "paid"
+        | "processing"
+        | "completed"
+        | "payment_review"
+        | "fulfillment_review"
+        | "refunds";
+      query?: string | null;
+      cursor?: string | null;
+    }): Promise<PresentedMessage>;
+    orderState?(input: {
+      telegramUserId: string;
+      chatType: string;
+      stateId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    orderSearch?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    orderMessagePrompt?(input: {
+      telegramUserId: string;
+      chatType: string;
+      stateId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    orderText?(input: {
+      telegramUserId: string;
+      text: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage | null>;
+    support?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supportApprove?(input: {
+      telegramUserId: string;
+      chatType: string;
+      caseId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    customers?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      filter?: "recent" | "top_spend" | "unreachable" | "support_open" | "payment_review";
+      query?: string | null;
+      cursor?: string | null;
+    }): Promise<PresentedMessage>;
+    customerState?(input: {
+      telegramUserId: string;
+      chatType: string;
+      stateId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    customerSearch?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    customerMessagePrompt?(input: {
+      telegramUserId: string;
+      chatType: string;
+      stateId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    customerText?(input: {
+      telegramUserId: string;
+      text: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage | null>;
+    presentAdminCustomerDetail?(
+      ctx: TelegramActionContext,
+      customerId: string,
+    ): Promise<PresentedMessage>;
+    sendAdminCustomerMessage?(
+      ctx: TelegramActionContext,
+      input: { customerId: string; text: string },
+    ): Promise<PresentedMessage>;
     marketing?(input: {
       telegramUserId: string;
       chatType: string;
@@ -215,6 +433,12 @@ export interface TelegramDomainDispatcherDeps {
         chatType: string;
         correlationId: string;
       }): Promise<PresentedMessage | null>;
+      variantText?(input: {
+        telegramUserId: string;
+        text: string;
+        chatType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage | null>;
       start(input: {
         telegramUserId: string;
         chatType: string;
@@ -223,6 +447,12 @@ export interface TelegramDomainDispatcherDeps {
       category?(input: {
         telegramUserId: string;
         categoryId: string;
+        chatType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
+      fulfillmentType?(input: {
+        telegramUserId: string;
+        fulfillmentType: string;
         chatType: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
@@ -305,6 +535,14 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : presentAdminProductsMenu();
+        } else if (route === "products:create") {
+          message = admin.workflow
+            ? await admin.workflow.start({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Tạo sản phẩm không khả dụng.");
         } else if (route.startsWith("products:category:")) {
           message = admin.workflow?.category
             ? await admin.workflow.category({
@@ -323,6 +561,15 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Danh mục không khả dụng.");
+        } else if (route.startsWith("products:type:")) {
+          message = admin.workflow?.fulfillmentType
+            ? await admin.workflow.fulfillmentType({
+                telegramUserId: envelope.actorUserId,
+                fulfillmentType: route.slice("products:type:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Loại giao hàng không khả dụng.");
         } else if (route === "products:confirm") {
           message = admin.workflow?.confirm
             ? await admin.workflow.confirm({
@@ -339,6 +586,24 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : presentAdminMenu();
+        } else if (route.startsWith("products:variant-add:")) {
+          message = admin.variantCreatePrompt
+            ? await admin.variantCreatePrompt({
+                telegramUserId: envelope.actorUserId,
+                productId: route.slice("products:variant-add:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Thêm biến thể không khả dụng.");
+        } else if (route.startsWith("products:variant-edit:")) {
+          message = admin.variantEditPrompt
+            ? await admin.variantEditPrompt({
+                telegramUserId: envelope.actorUserId,
+                variantId: route.slice("products:variant-edit:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Sửa biến thể không khả dụng.");
         } else if (route.startsWith("products:detail:")) {
           message = admin.productDetail
             ? await admin.productDetail({
@@ -356,14 +621,85 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : presentAdminInventoryMenu();
-        } else if (route === "inventory:import") {
+        } else if (route.startsWith("inventory:product:")) {
+          message = admin.inventoryProduct
+            ? await admin.inventoryProduct({
+                telegramUserId: envelope.actorUserId,
+                productId: route.slice("inventory:product:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Sản phẩm kho không khả dụng.");
+        } else if (route.startsWith("inventory:variant:")) {
+          message = admin.inventoryVariant
+            ? await admin.inventoryVariant({
+                telegramUserId: envelope.actorUserId,
+                variantId: route.slice("inventory:variant:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Biến thể kho không khả dụng.");
+        } else if (route.startsWith("inventory:announce:")) {
+          message = admin.stockAnnouncementPreview
+            ? await admin.stockAnnouncementPreview({
+                telegramUserId: envelope.actorUserId,
+                variantId: route.slice("inventory:announce:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Thông báo kho không khả dụng.");
+        } else if (route.startsWith("inventory:history:")) {
+          message = admin.inventoryHistory
+            ? await admin.inventoryHistory({
+                telegramUserId: envelope.actorUserId,
+                variantId: route.slice("inventory:history:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Lịch sử kho không khả dụng.");
+        } else if (route.startsWith("inventory:qty-confirm:")) {
+          message = admin.quantityAdjustConfirm
+            ? await admin.quantityAdjustConfirm({
+                telegramUserId: envelope.actorUserId,
+                stateId: route.slice("inventory:qty-confirm:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Điều chỉnh tồn kho không khả dụng.");
+        } else if (route.startsWith("inventory:qty:")) {
+          const [, variantId, rawDelta, rawVersion] =
+            route.match(/^inventory:qty:([^:]+):(-?\d+):(\d+)$/u) ?? [];
+          message =
+            admin.quantityAdjustPreview && variantId && rawDelta && rawVersion
+              ? await admin.quantityAdjustPreview({
+                  telegramUserId: envelope.actorUserId,
+                  variantId,
+                  delta: Number(rawDelta),
+                  expectedStockVersion: Number(rawVersion),
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : safeError("Điều chỉnh tồn kho không hợp lệ.");
+        } else if (route.startsWith("inventory:import:")) {
           message = admin.importPreview
             ? await admin.importPreview({
                 telegramUserId: envelope.actorUserId,
+                variantId: route.slice("inventory:import:".length),
                 chatType: envelope.chatType,
                 correlationId,
               })
             : safeError("Nhập kho không khả dụng.");
+        } else if (route === "inventory:import") {
+          message = safeError("Chọn biến thể tài khoản/mã kho trước khi nhập kho.");
+        } else if (route.startsWith("inventory:file-confirm:")) {
+          message = admin.importFileConfirm
+            ? await admin.importFileConfirm({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                stateId: route.slice("inventory:file-confirm:".length),
+                correlationId,
+              })
+            : safeError("Xác nhận tệp không khả dụng.");
         } else if (route === "inventory:confirm") {
           message = admin.importConfirm
             ? await admin.importConfirm({
@@ -372,6 +708,15 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Xác nhận nhập kho không khả dụng.");
+        } else if (route.startsWith("inventory:template:")) {
+          message = admin.importTemplate
+            ? ((await admin.importTemplate({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                variantId: route.slice("inventory:template:".length),
+                correlationId,
+              })) ?? safeError("CSV mẫu nhập kho không khả dụng."))
+            : safeError("CSV mẫu nhập kho không khả dụng.");
         } else if (route === "inventory:cancel") {
           message = admin.importCancel
             ? await admin.importCancel({
@@ -382,41 +727,266 @@ export function createTelegramDomainDispatcher(
             : presentAdminMenu();
         } else if (route === "marketing") {
           message = admin.marketing
-            ? await admin.marketing({ telegramUserId: envelope.actorUserId, chatType: envelope.chatType, correlationId })
+            ? await admin.marketing({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
             : presentAdminMarketingMenu();
         } else if (route === "marketing:compose") {
           message = admin.broadcastCompose
-            ? await admin.broadcastCompose({ telegramUserId: envelope.actorUserId, chatType: envelope.chatType, correlationId })
+            ? await admin.broadcastCompose({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
             : safeError("Soạn thông báo không khả dụng.");
         } else if (route.startsWith("marketing:audience:")) {
           const audience = route.slice("marketing:audience:".length);
-          message = (audience === "all" || audience === "shop" || audience === "activity" || audience === "root") && admin.broadcastAudience
-            ? await admin.broadcastAudience({ telegramUserId: envelope.actorUserId, chatType: envelope.chatType, audience, correlationId })
-            : safeError("Nhóm nhận không hợp lệ.");
+          message =
+            (audience === "all" ||
+              audience === "shop" ||
+              audience === "activity" ||
+              audience === "root") &&
+            admin.broadcastAudience
+              ? await admin.broadcastAudience({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  audience,
+                  correlationId,
+                })
+              : safeError("Nhóm nhận không hợp lệ.");
         } else if (route.startsWith("marketing:confirm:")) {
           message = admin.broadcastConfirm
-            ? await admin.broadcastConfirm({ telegramUserId: envelope.actorUserId, chatType: envelope.chatType, campaignId: route.slice("marketing:confirm:".length), correlationId })
+            ? await admin.broadcastConfirm({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                campaignId: route.slice("marketing:confirm:".length),
+                correlationId,
+              })
             : safeError("Xác nhận thông báo không khả dụng.");
         } else if (route.startsWith("marketing:cancel:")) {
           message = admin.broadcastCancel
-            ? await admin.broadcastCancel({ telegramUserId: envelope.actorUserId, chatType: envelope.chatType, campaignId: route.slice("marketing:cancel:".length), correlationId })
+            ? await admin.broadcastCancel({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                campaignId: route.slice("marketing:cancel:".length),
+                correlationId,
+              })
             : presentAdminMarketingMenu();
         } else if (route === "marketing:cancel") {
           message = admin.broadcastCancel
-            ? await admin.broadcastCancel({ telegramUserId: envelope.actorUserId, chatType: envelope.chatType, correlationId })
+            ? await admin.broadcastCancel({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
             : presentAdminMarketingMenu();
         } else if (route.startsWith("marketing:status:")) {
           message = admin.broadcastStatus
-            ? await admin.broadcastStatus({ telegramUserId: envelope.actorUserId, chatType: envelope.chatType, campaignId: route.slice("marketing:status:".length), correlationId })
+            ? await admin.broadcastStatus({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                campaignId: route.slice("marketing:status:".length),
+                correlationId,
+              })
             : safeError("Trạng thái thông báo không khả dụng.");
+        } else if (route === "customers") {
+          message = admin.customers
+            ? await admin.customers({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Khách hàng không khả dụng.");
+        } else if (route === "customers:search") {
+          message = admin.customerSearch
+            ? await admin.customerSearch({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Tìm khách không khả dụng.");
+        } else if (route.startsWith("customers:filter:")) {
+          const filter = route.slice("customers:filter:".length);
+          message =
+            (filter === "recent" ||
+              filter === "top_spend" ||
+              filter === "unreachable" ||
+              filter === "support_open" ||
+              filter === "payment_review") &&
+            admin.customers
+              ? await admin.customers({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  filter,
+                  correlationId,
+                })
+              : safeError("Bộ lọc khách không hợp lệ.");
+        } else if (route.startsWith("customers:view:") || route.startsWith("customers:page:")) {
+          const prefix = route.startsWith("customers:view:")
+            ? "customers:view:"
+            : "customers:page:";
+          message = admin.customerState
+            ? await admin.customerState({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                stateId: route.slice(prefix.length),
+                correlationId,
+              })
+            : safeError("Phiên khách hàng không khả dụng.");
+        } else if (route.startsWith("customers:message:")) {
+          message = admin.customerMessagePrompt
+            ? await admin.customerMessagePrompt({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                stateId: route.slice("customers:message:".length),
+                correlationId,
+              })
+            : safeError("Nhắn khách không khả dụng.");
+        } else if (route === "manual") {
+          message = admin.manualTasks
+            ? await admin.manualTasks({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Xử lý thủ công không khả dụng.");
+        } else if (route.startsWith("manual:view:")) {
+          message = admin.manualTask
+            ? await admin.manualTask({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                taskId: route.slice("manual:view:".length),
+                correlationId,
+              })
+            : safeError("Tác vụ thủ công không khả dụng.");
+        } else if (route.startsWith("manual:complete:")) {
+          message = admin.manualComplete
+            ? await admin.manualComplete({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                stateId: route.slice("manual:complete:".length),
+                correlationId,
+              })
+            : safeError("Xác nhận tác vụ thủ công không khả dụng.");
         } else if (route === "orders") {
-          message = presentAdminOrdersMenu();
+          message = admin.orders
+            ? await admin.orders({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : presentAdminOrdersMenu();
+        } else if (route === "orders:search") {
+          message = admin.orderSearch
+            ? await admin.orderSearch({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Tìm đơn không khả dụng.");
+        } else if (route.startsWith("orders:filter:")) {
+          const filter = route.slice("orders:filter:".length);
+          message =
+            (filter === "all" ||
+              filter === "pending_payment" ||
+              filter === "paid" ||
+              filter === "processing" ||
+              filter === "completed" ||
+              filter === "payment_review" ||
+              filter === "fulfillment_review" ||
+              filter === "refunds") &&
+            admin.orders
+              ? await admin.orders({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  filter,
+                  correlationId,
+                })
+              : safeError("Bộ lọc đơn không hợp lệ.");
+        } else if (route.startsWith("orders:view:") || route.startsWith("orders:page:")) {
+          const prefix = route.startsWith("orders:view:") ? "orders:view:" : "orders:page:";
+          message = admin.orderState
+            ? await admin.orderState({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                stateId: route.slice(prefix.length),
+                correlationId,
+              })
+            : safeError("Phiên đơn hàng không khả dụng.");
+        } else if (route.startsWith("orders:message:")) {
+          message = admin.orderMessagePrompt
+            ? await admin.orderMessagePrompt({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                stateId: route.slice("orders:message:".length),
+                correlationId,
+              })
+            : safeError("Nhắn khách theo đơn không khả dụng.");
         } else if (route === "payments") {
           message = presentAdminPaymentsMenu();
         } else if (route === "suppliers") {
-          message = presentAdminSuppliersMenu();
+          message = admin.suppliers
+            ? await admin.suppliers({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : presentAdminSuppliersMenu();
+        } else if (route.startsWith("supv:")) {
+          message = admin.supplierVariant
+            ? await admin.supplierVariant({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                variantId: route.slice("supv:".length),
+                correlationId,
+              })
+            : safeError("Nhà cung cấp không khả dụng.");
+        } else if (route.startsWith("sups:")) {
+          message = admin.supplierSelect
+            ? await admin.supplierSelect({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                supplierSkuId: route.slice("sups:".length),
+                correlationId,
+              })
+            : safeError("Mapping nhà cung cấp không khả dụng.");
+        } else if (route.startsWith("supc:")) {
+          message = admin.supplierClear
+            ? await admin.supplierClear({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                variantId: route.slice("supc:".length),
+                correlationId,
+              })
+            : safeError("Mapping nhà cung cấp không khả dụng.");
+        } else if (route.startsWith("supm:")) {
+          message = admin.supplierVerify
+            ? await admin.supplierVerify({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                supplierSkuId: route.slice("supm:".length),
+                correlationId,
+              })
+            : safeError("Xác nhận thủ công không khả dụng.");
         } else if (route === "support") {
-          message = presentAdminSupportMenu();
+          message = admin.support
+            ? await admin.support({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : presentAdminSupportMenu();
+        } else if (route.startsWith("support:approve:")) {
+          message = admin.supportApprove
+            ? await admin.supportApprove({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                caseId: route.slice("support:approve:".length),
+                correlationId,
+              })
+            : safeError("Duyệt thay thế không khả dụng.");
         } else {
           message = safeError("Lệnh quản trị không khả dụng.");
         }
@@ -432,15 +1002,16 @@ export function createTelegramDomainDispatcher(
             : safeError("Lệnh quản trị không khả dụng.");
       } else if (command === "/confirm") {
         const parsed = parseAdminConfirm(envelope.searchQuery);
-        message = parsed && deps.admin?.confirm
-          ? await deps.admin.confirm({
-              telegramUserId: envelope.actorUserId,
-              chatType: envelope.chatType,
-              confirmationId: parsed.confirmationId,
-              challenge: parsed.challenge,
-              correlationId,
-            })
-          : safeError("Dùng /confirm <confirmationId> <mã xác nhận>.");
+        message =
+          parsed && deps.admin?.confirm
+            ? await deps.admin.confirm({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                confirmationId: parsed.confirmationId,
+                challenge: parsed.challenge,
+                correlationId,
+              })
+            : safeError("Dùng /confirm <confirmationId> <mã xác nhận>.");
       } else if (command === "/cancel" && deps.admin?.workflow) {
         message = await deps.admin.workflow.cancel({
           telegramUserId: envelope.actorUserId,
@@ -449,24 +1020,37 @@ export function createTelegramDomainDispatcher(
         });
       } else if (command === "/customer") {
         const customerId = envelope.searchQuery;
-        message = customerId && deps.admin?.presentAdminCustomerDetail
-          ? await deps.admin.presentAdminCustomerDetail(ctx, customerId)
-          : safeError("Dùng /customer kèm mã khách hàng.");
+        message =
+          customerId && deps.admin?.presentAdminCustomerDetail
+            ? await deps.admin.presentAdminCustomerDetail(ctx, customerId)
+            : safeError("Dùng /customer kèm mã khách hàng.");
       } else if (command === "/message_customer") {
         const parsed = parseAdminMessageCustomer(envelope.searchQuery);
-        message = parsed && deps.admin?.sendAdminCustomerMessage
-          ? await deps.admin.sendAdminCustomerMessage(ctx, parsed)
-          : safeError("Dùng /message_customer <customerId> <nội dung>.");
+        message =
+          parsed && deps.admin?.sendAdminCustomerMessage
+            ? await deps.admin.sendAdminCustomerMessage(ctx, parsed)
+            : safeError("Dùng /message_customer <customerId> <nội dung>.");
       } else if (command === "/start") {
         message = presentCustomerHome();
       } else if (command === "/catalog") {
         message = await deps.catalog.mainMenu();
       } else if (command === "/account" || envelope.callbackData === "wallet:account") {
-        message = deps.walletAccount ? await deps.walletAccount(ctx) : presentCustomerAccountPrompt();
-      } else if (command === "/topup" || envelope.callbackData === "wallet:topup" || envelope.messageText === CUSTOMER_COPY.topup) {
-        message = deps.walletTopup ? await deps.walletTopup(ctx) : safeError("Nạp ví không khả dụng.");
+        message = deps.walletAccount
+          ? await deps.walletAccount(ctx)
+          : presentCustomerAccountPrompt();
+      } else if (
+        command === "/topup" ||
+        envelope.callbackData === "wallet:topup" ||
+        envelope.messageText === CUSTOMER_COPY.topup
+      ) {
+        message = deps.walletTopup
+          ? await deps.walletTopup(ctx)
+          : safeError("Nạp ví không khả dụng.");
       } else if (command === "/pay") {
-        message = deps.walletPay && envelope.searchQuery ? await deps.walletPay(ctx, envelope.searchQuery) : safeError("Dùng /pay kèm mã đơn hàng.");
+        message =
+          deps.walletPay && envelope.searchQuery
+            ? await deps.walletPay(ctx, envelope.searchQuery)
+            : safeError("Dùng /pay kèm mã đơn hàng.");
       } else if (command === "/search") {
         message = envelope.searchQuery
           ? await deps.catalog.search(envelope.searchQuery)
@@ -475,33 +1059,100 @@ export function createTelegramDomainDispatcher(
         message = deps.support.reasonMenu();
       } else if (envelope.messageText === "🔔 Báo có hàng") {
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
-        message = customerId && deps.notification ? await deps.notification.subscriptions(customerId) : safeError("Không xác minh được khách hàng.");
+        message =
+          customerId && deps.notification
+            ? await deps.notification.subscriptions(customerId)
+            : safeError("Không xác minh được khách hàng.");
       } else if (envelope.messageText === "🔔 Cài đặt thông báo") {
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
-        message = customerId && deps.notification ? await deps.notification.settings(customerId) : safeError("Không xác minh được khách hàng.");
-      } else if (envelope.messageText === "🛍 Tắt cập nhật sản phẩm") {
+        message =
+          customerId && deps.notification
+            ? await deps.notification.settings(customerId)
+            : safeError("Không xác minh được khách hàng.");
+      } else if (envelope.messageText === CUSTOMER_COPY.shopUpdates) {
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
-        message = customerId && deps.notification ? await deps.notification.toggle(customerId, "shop") : safeError("Không xác minh được khách hàng.");
-      } else if (envelope.messageText === "📣 Tắt hoạt động mua hàng") {
+        message =
+          customerId && deps.notification
+            ? await deps.notification.toggle(customerId, "shop")
+            : safeError("Không xác minh được khách hàng.");
+      } else if (envelope.messageText === CUSTOMER_COPY.purchaseActivity) {
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
-        message = customerId && deps.notification ? await deps.notification.toggle(customerId, "activity") : safeError("Không xác minh được khách hàng.");
-      } else if (envelope.messageText === CUSTOMER_COPY.openShop || envelope.messageText === "🌐 Mở cửa hàng") {
+        message =
+          customerId && deps.notification
+            ? await deps.notification.toggle(customerId, "activity")
+            : safeError("Không xác minh được khách hàng.");
+      } else if (
+        envelope.messageText === CUSTOMER_COPY.openShop ||
+        envelope.messageText === "🌐 Mở cửa hàng"
+      ) {
         message = presentShopLaunch(deps.shopUrl ?? "");
-      } else if (envelope.messageText === CUSTOMER_COPY.browse || envelope.messageText === "🛒 Mua hàng") {
+      } else if (
+        envelope.messageText === CUSTOMER_COPY.browse ||
+        envelope.messageText === "🛒 Mua hàng"
+      ) {
         message = await deps.catalog.mainMenu();
-      } else if (envelope.messageText === CUSTOMER_COPY.account || envelope.messageText === "👤 Tài khoản") {
-        message = deps.walletAccount ? await deps.walletAccount(ctx) : presentCustomerAccountPrompt();
-      } else if (envelope.messageText === CUSTOMER_COPY.back || envelope.messageText === "↩️ Quay lại") {
+      } else if (
+        envelope.messageText === CUSTOMER_COPY.account ||
+        envelope.messageText === "👤 Tài khoản"
+      ) {
+        message = deps.walletAccount
+          ? await deps.walletAccount(ctx)
+          : presentCustomerAccountPrompt();
+      } else if (
+        envelope.messageText === CUSTOMER_COPY.back ||
+        envelope.messageText === "↩️ Quay lại"
+      ) {
         message = presentCustomerHome();
-      } else if (envelope.messageText === CUSTOMER_COPY.orders || envelope.messageText === "🧾 Đơn hàng") {
+      } else if (
+        envelope.messageText === CUSTOMER_COPY.orders ||
+        envelope.messageText === "🧾 Đơn hàng"
+      ) {
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
-        message = customerId ? await deps.history.list(customerId) : safeError("Không xác minh được khách hàng.");
-      } else if (envelope.messageText === CUSTOMER_COPY.support || envelope.messageText === "🛟 Hỗ trợ") {
+        message = customerId
+          ? await deps.history.list(customerId)
+          : safeError("Không xác minh được khách hàng.");
+      } else if (
+        envelope.messageText === CUSTOMER_COPY.support ||
+        envelope.messageText === "🛟 Hỗ trợ"
+      ) {
         message = deps.support.reasonMenu();
       } else if (envelope.contactPhoneNumber) {
         message = presentCustomerAccountPrompt();
-      } else if (envelope.messageText && (deps.admin?.broadcastText || deps.admin?.importText || deps.admin?.workflow)) {
+      } else if (envelope.document && deps.admin?.importDocument) {
         message =
+          (await deps.admin.importDocument({
+            telegramUserId: envelope.actorUserId,
+            document: envelope.document,
+            chatType: envelope.chatType,
+            correlationId,
+          })) ?? (await deps.catalog.mainMenu());
+      } else if (
+        envelope.messageText &&
+        (deps.admin?.orderText ||
+          deps.admin?.customerText ||
+          deps.admin?.broadcastText ||
+          deps.admin?.importText ||
+          deps.admin?.quantityAdjustText ||
+          deps.admin?.workflow?.variantText ||
+          deps.admin?.workflow)
+      ) {
+        message =
+          (deps.admin.orderText
+            ? await deps.admin.orderText({
+                telegramUserId: envelope.actorUserId,
+                text: envelope.messageText,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : null) ??
+          (deps.admin.customerText
+            ? await deps.admin.customerText({
+                telegramUserId: envelope.actorUserId,
+                text: envelope.messageText,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : null) ??
           (deps.admin.broadcastText
             ? await deps.admin.broadcastText({
                 telegramUserId: envelope.actorUserId,
@@ -512,6 +1163,22 @@ export function createTelegramDomainDispatcher(
             : null) ??
           (deps.admin.importText
             ? await deps.admin.importText({
+                telegramUserId: envelope.actorUserId,
+                text: envelope.messageText,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : null) ??
+          (deps.admin.quantityAdjustText
+            ? await deps.admin.quantityAdjustText({
+                telegramUserId: envelope.actorUserId,
+                text: envelope.messageText,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : null) ??
+          (deps.admin.workflow?.variantText
+            ? await deps.admin.workflow.variantText({
                 telegramUserId: envelope.actorUserId,
                 text: envelope.messageText,
                 chatType: envelope.chatType,
@@ -557,7 +1224,10 @@ function normalizeTelegramCommand(command?: string): string | undefined {
   return command?.trim().toLowerCase();
 }
 
-function actionContext(envelope: TelegramCommandEnvelope, correlationId: string): TelegramActionContext {
+function actionContext(
+  envelope: TelegramCommandEnvelope,
+  correlationId: string,
+): TelegramActionContext {
   return {
     telegramUserId: envelope.actorUserId,
     chatId: envelope.chatId,
@@ -567,13 +1237,17 @@ function actionContext(envelope: TelegramCommandEnvelope, correlationId: string)
   };
 }
 
-function parseAdminConfirm(input?: string | null): { confirmationId: string; challenge: string } | null {
+function parseAdminConfirm(
+  input?: string | null,
+): { confirmationId: string; challenge: string } | null {
   const match = input?.trim().match(/^(\S+)\s+(\S+)$/u);
   if (!match) return null;
   return { confirmationId: match[1]!, challenge: match[2]! };
 }
 
-function parseAdminMessageCustomer(input?: string | null): { customerId: string; text: string } | null {
+function parseAdminMessageCustomer(
+  input?: string | null,
+): { customerId: string; text: string } | null {
   const match = input?.match(/^(\S+)\s+([\s\S]{1,1000})$/u);
   if (!match) return null;
   const text = match[2]!.trim();
@@ -660,11 +1334,17 @@ async function dispatchVerified(
     case "SUPPORT_TICKET_VIEW":
       return deps.support.list(customerId);
     case "RESTOCK_SUBSCRIBE":
-      return deps.restock ? deps.restock.subscribe(customerId, token.resourceId!) : safeError("Báo có hàng không khả dụng.");
+      return deps.restock
+        ? deps.restock.subscribe(customerId, token.resourceId!)
+        : safeError("Báo có hàng không khả dụng.");
     case "RESTOCK_UNSUBSCRIBE":
-      return deps.restock ? deps.restock.unsubscribe(customerId, token.resourceId!) : safeError("Báo có hàng không khả dụng.");
+      return deps.restock
+        ? deps.restock.unsubscribe(customerId, token.resourceId!)
+        : safeError("Báo có hàng không khả dụng.");
     case "RESTOCK_LIST":
-      return deps.restock ? deps.restock.list(customerId) : safeError("Báo có hàng không khả dụng.");
+      return deps.restock
+        ? deps.restock.list(customerId)
+        : safeError("Báo có hàng không khả dụng.");
     case "ADMIN_COMMAND":
       return deps.admin
         ? deps.admin.handleToken({

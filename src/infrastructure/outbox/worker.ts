@@ -60,12 +60,12 @@ export async function drainOutboxOnce(db: Db, options: DrainOptions): Promise<Dr
     throw new RangeError("outbox maxAttempts must be an integer between 1 and 10000");
   }
 
-  const cutoff = await sql<{ cutoff: Date }>`select now() as cutoff`.execute(db);
+  const cutoff = await sql<{ cutoff: string }>`select now()::text as cutoff`.execute(db);
   const claimOpts: {
     batchSize: number;
     ownerId?: string;
     leaseSeconds?: number;
-    occurredBefore: Date;
+    occurredBefore: string;
   } = {
     // Bound active ownership to one event. A slow handler can therefore only
     // let one lease expire, and generation fencing rejects its stale ack/fail.

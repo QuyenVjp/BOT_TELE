@@ -13,6 +13,12 @@ import type { RootActor, RootAdminConfig } from "../../modules/identity/root-adm
 import type { Vault } from "../../infrastructure/vault/port.js";
 import { guardRootAction } from "../middleware/root-admin.js";
 import { refundWalletCredit } from "../../modules/wallet/refund.js";
+import { completeManualFulfillmentTaskInTransaction } from "../../modules/digital-goods/manual-fulfillment.js";
+import {
+  clearVariantSupplierMapping,
+  markSupplierSkuManuallyVerified,
+  selectVariantSupplierMapping,
+} from "../../modules/supplier/admin.js";
 
 /**
  * Allowlisted owner callbacks (T097, FR-021–FR-023).
@@ -32,6 +38,11 @@ export const OWNER_COMMANDS = [
   "order.inspect",
   "inventory.import",
   "wallet.refund",
+  "manual_fulfillment.complete",
+  "supplier.mapping.select",
+  "supplier.mapping.clear",
+  "supplier.mapping.verify",
+  "support.replacement.approve",
 ] as const;
 
 export type OwnerCommand = (typeof OWNER_COMMANDS)[number];
@@ -46,7 +57,18 @@ export interface AdminCallbackDeps {
   rootChannelIdentityId: string;
   confirmation: AdminConfirmationService;
   vault?: Vault;
-  inventoryImport?: (input: { actor: RootActor; input: string; reason: string; correlationId: string }) => Promise<{ imported: number; duplicates: number; invalid: number }>;
+  inventoryImport?: (input: {
+    actor: RootActor;
+    input: string;
+    reason: string;
+    correlationId: string;
+  }) => Promise<{ imported: number; duplicates: number; invalid: number }>;
+  supportReplacementApprove?: (input: {
+    exec: Trx;
+    caseId: string;
+    actorId: string;
+    correlationId: string;
+  }) => Promise<{ ok: boolean }>;
   telemetry?: IdentityTelemetry;
 }
 
@@ -60,7 +82,11 @@ export interface HandleInput {
   input?: string;
 }
 export type HandleResult =
-  | { ok: true; needsConfirmation: false; inventorySummary?: { imported: number; duplicates: number; invalid: number } }
+  | {
+      ok: true;
+      needsConfirmation: false;
+      inventorySummary?: { imported: number; duplicates: number; invalid: number };
+    }
   | {
       ok: true;
       needsConfirmation: true;
@@ -70,7 +96,13 @@ export type HandleResult =
     }
   | {
       ok: false;
-      code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "UNKNOWN_COMMAND" | "INVALID_REASON" | "NOT_FOUND";
+      code:
+        | "NOT_ROOT_ADMIN"
+        | "WRONG_CONTEXT"
+        | "UNKNOWN_COMMAND"
+        | "INVALID_REASON"
+        | "NOT_FOUND"
+        | "DIGITAL_FILE_ARTIFACT_REQUIRED";
       message: string;
     };
 
@@ -90,7 +122,7 @@ export type ConfirmActionResult =
     };
 
 interface PendingAction {
-  command: "discrepancy.resolve" | "wallet.refund";
+  command: DurableAdminAction["commandRef"];
   targetId: string;
   reason: string;
   resolutionCode?: string;
@@ -108,9 +140,21 @@ function fingerprintFor(command: string, targetId: string, resolutionCode?: stri
   return `${command}:${targetId}:${resolutionCode ?? ""}`;
 }
 
-function targetTypeFor(command: OwnerCommand): "ProductVariant" | "Discrepancy" | "Order" {
+function targetTypeFor(
+  command: OwnerCommand,
+):
+  | "ProductVariant"
+  | "Discrepancy"
+  | "Order"
+  | "ManualFulfillmentTask"
+  | "SupplierSku"
+  | "ReplacementCase" {
   if (command.startsWith("catalog.")) return "ProductVariant";
+  if (command.startsWith("supplier.mapping.clear")) return "ProductVariant";
+  if (command.startsWith("supplier.")) return "SupplierSku";
   if (command.startsWith("discrepancy.")) return "Discrepancy";
+  if (command === "manual_fulfillment.complete") return "ManualFulfillmentTask";
+  if (command === "support.replacement.approve") return "ReplacementCase";
   return "Order";
 }
 
@@ -121,7 +165,7 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
   const actorId = payload.actorId;
   const resolutionCode = payload.resolutionCode;
   if (
-    (action.commandRef !== "discrepancy.resolve" && action.commandRef !== "wallet.refund") ||
+    !isDurableAdminCommandRef(action.commandRef) ||
     typeof targetId !== "string" ||
     targetId.length === 0 ||
     targetId.length > 128 ||
@@ -148,6 +192,15 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
 export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
   const { db, rootConfig, rootChannelIdentityId, confirmation, telemetry } = deps;
 
+  const mapSupplierError = (result: {
+    ok: false;
+    code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "INVALID_INPUT" | "NOT_FOUND";
+    message: string;
+  }): HandleResult => ({
+    ok: false,
+    code: result.code === "INVALID_INPUT" ? "INVALID_REASON" : result.code,
+    message: result.message,
+  });
   async function applyLowRisk(input: HandleInput, command: OwnerCommand): Promise<HandleResult> {
     switch (command) {
       case "inventory.import": {
@@ -162,10 +215,65 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         });
         return { ok: true, needsConfirmation: false, inventorySummary: summary };
       }
+      case "supplier.mapping.select": {
+        if (!input.input)
+          return { ok: false, code: "INVALID_REASON", message: "Thiếu SKU nhà cung cấp." };
+        const result = await selectVariantSupplierMapping({
+          db,
+          actor: input.actor,
+          config: rootConfig,
+          variantId: input.targetId,
+          supplierSkuId: input.input,
+          reason: input.reason,
+          correlationId: input.correlationId,
+          ...(telemetry ? { telemetry } : {}),
+        });
+        return result.ok ? { ok: true, needsConfirmation: false } : mapSupplierError(result);
+      }
+      case "supplier.mapping.clear": {
+        const result = await clearVariantSupplierMapping({
+          db,
+          actor: input.actor,
+          config: rootConfig,
+          variantId: input.targetId,
+          reason: input.reason,
+          correlationId: input.correlationId,
+          ...(telemetry ? { telemetry } : {}),
+        });
+        return result.ok ? { ok: true, needsConfirmation: false } : mapSupplierError(result);
+      }
+      case "supplier.mapping.verify": {
+        if (!input.input)
+          return { ok: false, code: "INVALID_REASON", message: "Thiếu SKU nhà cung cấp." };
+        const result = await markSupplierSkuManuallyVerified({
+          db,
+          actor: input.actor,
+          config: rootConfig,
+          variantId: input.targetId,
+          supplierSkuId: input.input,
+          reason: input.reason,
+          correlationId: input.correlationId,
+          ...(telemetry ? { telemetry } : {}),
+        });
+        return result.ok ? { ok: true, needsConfirmation: false } : mapSupplierError(result);
+      }
       case "catalog.activate":
       case "catalog.deactivate": {
         const active = command === "catalog.activate";
         const updated = await withTransaction(db, async (trx) => {
+          if (active) {
+            const ready = await sql<{ id: string }>`
+              select v.id
+              from product_variant v
+              join variant_file_artifact a on a.variant_id = v.id and a.is_active
+              where v.id = ${input.targetId} and v.fulfillment_type = 'DIGITAL_FILE'
+              limit 1
+            `.execute(trx);
+            const digital = await sql<{ id: string }>`
+              select id from product_variant where id = ${input.targetId} and fulfillment_type = 'DIGITAL_FILE' limit 1
+            `.execute(trx);
+            if (digital.rows[0] && !ready.rows[0]) return "DIGITAL_FILE_ARTIFACT_REQUIRED" as const;
+          }
           const res = await sql<{ id: string }>`
             update product_variant
             set is_active = ${active}, updated_at = now(), version = version + 1
@@ -185,6 +293,13 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           });
           return true;
         });
+        if (updated === "DIGITAL_FILE_ARTIFACT_REQUIRED") {
+          return {
+            ok: false,
+            code: "DIGITAL_FILE_ARTIFACT_REQUIRED",
+            message: "Cần nhập và kích hoạt tệp thật trước khi bật bán biến thể tệp số.",
+          };
+        }
         if (!updated) {
           return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy biến thể." };
         }
@@ -255,6 +370,24 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           metadataRedacted: { result: refunded.kind },
         });
         return true;
+      }
+      case "manual_fulfillment.complete": {
+        const completed = await completeManualFulfillmentTaskInTransaction(exec, {
+          taskId: action.targetId,
+          actorId: action.actorId,
+          correlationId,
+        });
+        return completed.ok;
+      }
+      case "support.replacement.approve": {
+        if (!deps.supportReplacementApprove) return false;
+        const approved = await deps.supportReplacementApprove({
+          exec,
+          caseId: action.targetId,
+          actorId: action.actorId,
+          correlationId,
+        });
+        return approved.ok;
       }
       default:
         return false;

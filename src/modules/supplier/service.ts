@@ -110,11 +110,31 @@ async function findSupplierOrderById(exec: Executor, id: string): Promise<Suppli
 async function findAssetBySupplierOrder(
   exec: Executor,
   supplierOrderId: string,
-): Promise<{ id: string } | null> {
-  const result = await sql<{ id: string }>`
-    select id from digital_asset where supplier_order_id = ${supplierOrderId} limit 1
+): Promise<{ id: string; status: string } | null> {
+  const result = await sql<{ id: string; status: string }>`
+    select id, status from digital_asset where supplier_order_id = ${supplierOrderId} limit 1
   `.execute(exec);
   return result.rows[0] ?? null;
+}
+
+function provisionResultFromExisting(
+  existing: SupplierOrderRow,
+  asset: { id: string; status: string } | null,
+): ProvisionResult | null {
+  if (existing.status === "FULFILLED" && asset) {
+    return asset.status === "SUPPLIER_NEEDS_REVIEW"
+      ? { ok: true, kind: "NEEDS_REVIEW", supplierOrderId: existing.id, assetId: asset.id }
+      : { ok: true, kind: "FULFILLED", supplierOrderId: existing.id, assetId: asset.id };
+  }
+  if (existing.status === "REJECTED")
+    return { ok: true, kind: "REJECTED", supplierOrderId: existing.id };
+  return null;
+}
+
+function recoverResultFromAsset(asset: { id: string; status: string }): RecoverResult {
+  return asset.status === "SUPPLIER_NEEDS_REVIEW"
+    ? { ok: true, kind: "NEEDS_REVIEW", assetId: asset.id }
+    : { ok: true, kind: "FULFILLED", assetId: asset.id };
 }
 
 /**
@@ -145,13 +165,23 @@ async function ingestFulfilledAsset(
   });
 
   return withTransaction(db, async (trx) => {
+    const locked = await sql<{ id: string }>`
+      select id from supplier_order where id = ${params.supplierOrderId} for update
+    `.execute(trx);
+    if (!locked.rows[0]) throw new Error("Supplier order disappeared during fulfilled ingest");
+
+    const existing = await findAssetBySupplierOrder(trx, params.supplierOrderId);
+    if (existing) {
+      return { assetId: existing.id, quarantined: existing.status === "SUPPLIER_NEEDS_REVIEW" };
+    }
+
     const assetId = newId();
     const quarantined = !decision.ok;
     const status = quarantined ? "SUPPLIER_NEEDS_REVIEW" : "READY";
     const reservedOrderId = quarantined ? null : params.orderId;
-    const summary = quarantined
-      ? { quarantined: true, reasonCode: decision.ok ? null : decision.reasonCode }
-      : { validated: true };
+    const summary = decision.ok
+      ? { validated: true }
+      : { quarantined: true, reasonCode: decision.reasonCode };
 
     await sql`
       insert into digital_asset
@@ -192,35 +222,95 @@ export async function provisionFromSupplier(
 
   const idempotencyKey = input.idempotencyKey ?? `${input.orderId}:${input.supplierSkuId}`;
 
-  // Idempotent short-circuit: an already-fulfilled supplier order returns its asset.
   const existing = await findSupplierOrderByIdempotency(db, input.supplierId, idempotencyKey);
-  if (existing && existing.status === "FULFILLED") {
-    const asset = await findAssetBySupplierOrder(db, existing.id);
-    if (asset) {
-      return { ok: true, kind: "FULFILLED", supplierOrderId: existing.id, assetId: asset.id };
-    }
-  }
-
-  // Record (or reuse) the supplier order as SUBMITTED before the upstream call.
-  let supplierOrderId: string;
   if (existing) {
-    supplierOrderId = existing.id;
-  } else {
-    supplierOrderId = newId();
-    const costSnapshot = input.costCeilingVnd;
-    const margin = input.salePriceVnd - costSnapshot;
-    await sql`
-      insert into supplier_order
-        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
-         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at)
-      values
-        (${supplierOrderId}, ${input.supplierId}, ${input.supplierSkuId}, ${input.orderId},
-         ${idempotencyKey}, ${requestFingerprint(input, idempotencyKey)}, 'SUBMITTED',
-         ${costSnapshot}, ${input.salePriceVnd}, ${margin}, now())
-    `.execute(db);
+    const known = provisionResultFromExisting(
+      existing,
+      await findAssetBySupplierOrder(db, existing.id),
+    );
+    if (known) return known;
+
+    if (existing.status === "UNKNOWN" || existing.status === "PENDING") {
+      const recovered = await recoverUnknownSupplierOrder(db, {
+        supplierOrderId: existing.id,
+        queryKey: existing.external_order_id ?? idempotencyKey,
+        expectedSku: input.expectedSku,
+        deliveryType: input.deliveryType,
+        durationCode: input.durationCode,
+        region: input.region,
+        correlationId: input.correlationId,
+        port: input.port,
+        vault: input.vault,
+      });
+      if (!recovered.ok) return { ok: false, code: recovered.code, message: recovered.message };
+      if (recovered.kind === "FULFILLED") {
+        return {
+          ok: true,
+          kind: "FULFILLED",
+          supplierOrderId: existing.id,
+          assetId: recovered.assetId,
+        };
+      }
+      if (recovered.kind === "NEEDS_REVIEW") {
+        return {
+          ok: true,
+          kind: "NEEDS_REVIEW",
+          supplierOrderId: existing.id,
+          assetId: recovered.assetId,
+        };
+      }
+      if (recovered.kind === "REJECTED")
+        return { ok: true, kind: "REJECTED", supplierOrderId: existing.id };
+      return {
+        ok: true,
+        kind: "UNKNOWN",
+        supplierOrderId: existing.id,
+        queryKey: existing.external_order_id ?? idempotencyKey,
+      };
+    }
+
+    return {
+      ok: true,
+      kind: "UNKNOWN",
+      supplierOrderId: existing.id,
+      queryKey: existing.external_order_id ?? idempotencyKey,
+    };
   }
 
-  // Call the port (adapter dedupes on the same idempotency key).
+  // Insert the durable winner before external I/O. ON CONFLICT waits for a concurrent
+  // winner, then the loser returns that in-flight state without creating or querying.
+  const supplierOrderId = newId();
+  const costSnapshot = input.costCeilingVnd;
+  const margin = input.salePriceVnd - costSnapshot;
+  const inserted = await sql<{ id: string }>`
+    insert into supplier_order
+      (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+       status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at)
+    values
+      (${supplierOrderId}, ${input.supplierId}, ${input.supplierSkuId}, ${input.orderId},
+       ${idempotencyKey}, ${requestFingerprint(input, idempotencyKey)}, 'SUBMITTED',
+       ${costSnapshot}, ${input.salePriceVnd}, ${margin}, now())
+    on conflict (supplier_id, idempotency_key) do nothing
+    returning id
+  `.execute(db);
+
+  if (!inserted.rows[0]) {
+    const winner = await findSupplierOrderByIdempotency(db, input.supplierId, idempotencyKey);
+    if (!winner) throw new Error("supplier idempotency winner was not visible after conflict wait");
+    const known = provisionResultFromExisting(
+      winner,
+      await findAssetBySupplierOrder(db, winner.id),
+    );
+    return (
+      known ?? {
+        ok: true,
+        kind: "UNKNOWN",
+        supplierOrderId: winner.id,
+        queryKey: winner.external_order_id ?? idempotencyKey,
+      }
+    );
+  }
+
   const result = await input.port.createOrder({
     idempotencyKey,
     supplierSku: input.externalSku,
@@ -250,7 +340,8 @@ export async function provisionFromSupplier(
     case "UNKNOWN": {
       await sql`
         update supplier_order
-        set status = 'UNKNOWN', last_queried_at = now(), version = version + 1
+        set status = 'UNKNOWN', external_order_id = coalesce(external_order_id, ${result.queryKey}),
+            last_queried_at = now(), version = version + 1
         where id = ${supplierOrderId}
       `.execute(db);
       return { ok: true, kind: "UNKNOWN", supplierOrderId, queryKey: result.queryKey };
@@ -292,7 +383,7 @@ export async function recoverUnknownSupplierOrder(
   // Already recovered.
   if (so.status === "FULFILLED") {
     const asset = await findAssetBySupplierOrder(db, so.id);
-    if (asset) return { ok: true, kind: "FULFILLED", assetId: asset.id };
+    if (asset) return recoverResultFromAsset(asset);
   }
 
   const order = await findOrderById(db, so.order_id);

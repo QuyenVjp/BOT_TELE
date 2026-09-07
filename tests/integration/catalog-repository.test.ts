@@ -49,6 +49,8 @@ interface SeedIds {
   inactiveProductId: string;
   supplierOnlyProductId: string;
   supplierOnlyVariantId: string;
+  configuredSupplierVariantId: string;
+  zeroQuantityVariantId: string;
   sellableVariantIds: string[];
 }
 
@@ -59,7 +61,10 @@ async function seed(): Promise<SeedIds> {
   const inactiveProductId = newId();
   const supplierOnlyProductId = newId();
   const supplierOnlyVariantId = newId();
-
+  const configuredSupplierVariantId = newId();
+  const zeroQuantityVariantId = newId();
+  const configuredSupplierId = newId();
+  const configuredSupplierSkuId = newId();
   await sql`
     insert into category (id, name_vi, slug, is_active, sort_order)
     values
@@ -90,6 +95,27 @@ async function seed(): Promise<SeedIds> {
     `.execute(ctx.db);
   }
 
+  await sql`
+    insert into product_variant
+      (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
+       stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
+    values
+      (${zeroQuantityVariantId}, ${activeProductId}, 'SKU-ZERO-QTY', 'Hết tồn số lượng', 100000,
+       'P1M', 'LICENSE', 30, 'LOCAL_ONLY', 'RES-QTY', true, 6, 'QUANTITY_STOCK'),
+      (${configuredSupplierVariantId}, ${supplierOnlyProductId}, 'SKU-SUPPLIER-OK', 'Nguồn nhà cung cấp OK', 100000,
+       'P1M', 'LICENSE', 30, 'SUPPLIER_ONLY', 'RES-SUP-OK', true, 7, 'SUPPLIER_API')
+  `.execute(ctx.db);
+  await sql`insert into variant_quantity_stock (variant_id, available_quantity) values (${zeroQuantityVariantId}, 0)`.execute(
+    ctx.db,
+  );
+  await sql`insert into supplier (id, name, adapter_type, credential_vault_ref, status) values (${configuredSupplierId}, 'Primary', 'sandbox', 'vault:supplier', 'ACTIVE')`.execute(
+    ctx.db,
+  );
+  await sql`
+    insert into supplier_sku (id, supplier_id, variant_id, external_sku, cost_vnd, delivery_type, is_active)
+    values (${configuredSupplierSkuId}, ${configuredSupplierId}, ${configuredSupplierVariantId}, 'EXT-SUP-OK', 50000, 'LICENSE', true)
+  `.execute(ctx.db);
+
   // Unsellable variants (must all be hidden).
   await sql`
     insert into product_variant
@@ -108,11 +134,10 @@ async function seed(): Promise<SeedIds> {
       -- under an inactive product
       (${newId()}, ${inactiveProductId}, 'SKU-DEADPROD', 'SP ẩn', 100000,
        'P1M', 'LICENSE', 30, 'LOCAL_ONLY', 'RES-Z', true, 13),
-      -- Feature 001 fail-closed: supplier capacity is not held before payment
+      -- Unsupported legacy: supplier-only without configured SUPPLIER_API route
       (${supplierOnlyVariantId}, ${supplierOnlyProductId}, 'SKU-SUPPLIER', 'Nguồn nhà cung cấp', 100000,
        'P1M', 'LICENSE', 30, 'SUPPLIER_ONLY', 'RES-SUP', true, 14)
   `.execute(ctx.db);
-
   return {
     activeCategoryId,
     inactiveCategoryId,
@@ -121,6 +146,8 @@ async function seed(): Promise<SeedIds> {
     supplierOnlyProductId,
     supplierOnlyVariantId,
     sellableVariantIds,
+    configuredSupplierVariantId,
+    zeroQuantityVariantId,
   };
 }
 
@@ -132,20 +159,32 @@ describe("catalog repository (FR-002)", () => {
     expect(categories.map((c) => c.id)).not.toContain(ids.inactiveCategoryId);
   });
 
-  it("lists only sellable variants (hides inactive/paused/unauthorized/dead-product)", async () => {
+  it("lists visible variants (including configured supplier and zero-quantity restock rows)", async () => {
     const ids = await seed();
     const variants = await listSellableVariants(ctx.db, { limit: 50 });
     const returnedIds = variants.items.map((v) => v.id).sort();
-    expect(returnedIds).toEqual([...ids.sellableVariantIds].sort());
+    expect(returnedIds).toEqual(
+      [
+        ...ids.sellableVariantIds,
+        ids.configuredSupplierVariantId,
+        ids.zeroQuantityVariantId,
+      ].sort(),
+    );
   });
 
-  it("hides supplier-only products and variants from every purchasable repository surface", async () => {
+  it("keeps configured supplier and zero-quantity variants visible, but not ready when stock is zero", async () => {
     const ids = await seed();
     const products = await listActiveProductsByCategory(ctx.db, ids.activeCategoryId);
-    expect(products.map((product) => product.id)).not.toContain(ids.supplierOnlyProductId);
+    expect(products.map((product) => product.id)).toContain(ids.supplierOnlyProductId);
 
-    const variants = await listSellableVariants(ctx.db, { limit: 50 });
-    expect(variants.items.map((variant) => variant.id)).not.toContain(ids.supplierOnlyVariantId);
+    const configuredSupplier = await getVariantById(ctx.db, ids.configuredSupplierVariantId);
+    expect(configuredSupplier?.fulfillment_type).toBe("SUPPLIER_API");
+    expect(configuredSupplier?.is_ready).toBe(true);
+
+    const zeroQuantity = await getVariantById(ctx.db, ids.zeroQuantityVariantId);
+    expect(zeroQuantity?.available_quantity).toBe(0);
+    expect(zeroQuantity?.is_ready).toBe(false);
+
     expect(await getVariantById(ctx.db, ids.supplierOnlyVariantId)).toBeNull();
   });
 
@@ -159,14 +198,21 @@ describe("catalog repository (FR-002)", () => {
     expect(page2.items).toHaveLength(2);
 
     const page3 = await listSellableVariants(ctx.db, { limit: 2, cursor: page2.nextCursor });
-    expect(page3.items).toHaveLength(1);
-    expect(page3.nextCursor).toBeNull();
+    expect(page3.items).toHaveLength(2);
 
-    const seen = [...page1.items, ...page2.items, ...page3.items].map((v) => v.id);
-    // No duplicates across pages.
-    expect(new Set(seen).size).toBe(5);
-    // Covers exactly the sellable set.
-    expect(seen.sort()).toEqual([...ids.sellableVariantIds].sort());
+    const page4 = await listSellableVariants(ctx.db, { limit: 2, cursor: page3.nextCursor });
+    expect(page4.items).toHaveLength(1);
+    expect(page4.nextCursor).toBeNull();
+
+    const seen = [...page1.items, ...page2.items, ...page3.items, ...page4.items].map((v) => v.id);
+    expect(new Set(seen).size).toBe(7);
+    expect(seen.sort()).toEqual(
+      [
+        ...ids.sellableVariantIds,
+        ids.configuredSupplierVariantId,
+        ids.zeroQuantityVariantId,
+      ].sort(),
+    );
   });
 
   it("getVariantById returns a sellable variant and null for an unauthorized one", async () => {

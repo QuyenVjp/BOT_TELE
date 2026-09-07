@@ -40,6 +40,13 @@ export interface TelegramUpdate {
     };
     text?: string;
     entities?: Array<{ type?: string; offset?: number; length?: number }>;
+    document?: {
+      file_id?: string;
+      file_unique_id?: string;
+      file_name?: string;
+      mime_type?: string;
+      file_size?: number;
+    };
   };
   callback_query?: {
     id: string;
@@ -205,6 +212,22 @@ function normalizeTelegramUpdate(update: TelegramUpdate): TelegramCommandEnvelop
       ? contact.phone_number
       : undefined;
 
+  const document = update.message?.document;
+  const normalizedDocument =
+    document &&
+    typeof document.file_id === "string" &&
+    typeof document.file_name === "string" &&
+    typeof document.mime_type === "string"
+      ? {
+          fileId: document.file_id,
+          ...(typeof document.file_unique_id === "string"
+            ? { fileUniqueId: document.file_unique_id }
+            : {}),
+          filename: document.file_name,
+          mimeType: document.mime_type,
+          ...(typeof document.file_size === "number" ? { fileSize: document.file_size } : {}),
+        }
+      : null;
   return {
     actorUserId: String(actorId),
     ...(actorUsername ? { actorUsername } : {}),
@@ -225,6 +248,7 @@ function normalizeTelegramUpdate(update: TelegramUpdate): TelegramCommandEnvelop
     ...(contactPhoneNumber ? { contactPhoneNumber } : {}),
     ...(contactPhoneNumber ? { contactSharedAt: new Date().toISOString() } : {}),
     ...(searchQuery ? { searchQuery } : {}),
+    ...(normalizedDocument ? { document: normalizedDocument } : {}),
   };
 }
 
@@ -287,8 +311,8 @@ function classifyAction(
 const SAFE_MESSAGE_TEXT: Record<string, true> = {
   "🔔 Báo có hàng": true,
   "🔔 Cài đặt thông báo": true,
-  "🛍 Tắt cập nhật sản phẩm": true,
-  "📣 Tắt hoạt động mua hàng": true,
+  "🛍 Cập nhật sản phẩm": true,
+  "📣 Hoạt động mua hàng": true,
   "🌐 Mở cửa hàng": true,
   "👤 Tài khoản": true,
   "💰 Nạp ví": true,

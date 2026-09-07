@@ -3,6 +3,7 @@ import type { Executor } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
 import { nextVersion, assertVersionUpdated } from "../../infrastructure/db/version.js";
 import { assertTransition, type Order, type OrderSnapshot, type OrderStatus } from "./order.js";
+import type { FulfillmentType } from "../catalog/fulfillment-type.js";
 
 /**
  * Order persistence + unique-effect conflict mapping (T049).
@@ -38,6 +39,7 @@ function mapRow(row: {
   delivery_type: string;
   warranty_days: number;
   supplier_policy_snapshot: string | null;
+  fulfillment_type: FulfillmentType;
   status: OrderStatus;
   expires_at: Date | string | null;
   paid_at: Date | string | null;
@@ -62,6 +64,7 @@ function mapRow(row: {
     deliveryType: row.delivery_type,
     warrantyDays: row.warranty_days,
     supplierPolicySnapshot: row.supplier_policy_snapshot,
+    fulfillmentType: row.fulfillment_type,
     status: row.status,
     expiresAt: toIso(row.expires_at),
     paidAt: toIso(row.paid_at),
@@ -148,11 +151,11 @@ export async function insertOrder(
       insert into "order"
         (id, order_number, idempotency_key, customer_id, variant_id,
          product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type,
-         warranty_days, supplier_policy_snapshot, status, expires_at)
+         warranty_days, supplier_policy_snapshot, fulfillment_type, status, expires_at)
       values
         (${id}, ${orderNumber}, ${input.idempotencyKey}, ${input.customerId}, ${input.variantId},
          ${s.productNameVi}, ${s.variantNameVi}, ${s.priceVnd}, ${s.durationCode}, ${s.deliveryType},
-         ${s.warrantyDays}, ${s.supplierPolicySnapshot}, ${input.status},
+         ${s.warrantyDays}, ${s.supplierPolicySnapshot}, ${s.fulfillmentType}, ${input.status},
          ${input.expiresAt ? input.expiresAt.toISOString() : null})
       on conflict (customer_id, idempotency_key)
         where idempotency_key is not null

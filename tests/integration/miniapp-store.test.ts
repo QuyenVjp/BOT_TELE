@@ -5,7 +5,11 @@ import { sql } from "kysely";
 import { createApp } from "../../src/app.js";
 import { createInMemoryUpdateInbox } from "../../src/bot/webhook.js";
 import { newId } from "../../src/shared/ids/index.js";
-import { dockerAvailable, startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import {
+  dockerAvailable,
+  startPostgresContainer,
+  type PgTestContext,
+} from "../helpers/pg-container.js";
 
 const botToken = randomBytes(32).toString("hex");
 const hasDocker = await dockerAvailable();
@@ -18,7 +22,10 @@ function signedInitData(telegramUserId: number): string {
     query_id: `q-${telegramUserId}`,
     user: JSON.stringify({ id: telegramUserId }),
   });
-  const check = [...values.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([key, value]) => `${key}=${value}`).join("\n");
+  const check = [...values.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([key, value]) => `${key}=${value}`)
+    .join("\n");
   const secret = createHmac("sha256", "WebAppData").update(botToken).digest();
   values.set("hash", createHmac("sha256", secret).update(check).digest("hex"));
   return values.toString();
@@ -68,34 +75,49 @@ beforeEach(async () => {
   `.execute(ctx.db);
 });
 
-async function seedCatalog(): Promise<{ variantId: string; price: number }> {
+async function seedCatalog(
+  options: { quantity?: number; fulfillmentType?: string } = {},
+): Promise<{ variantId: string; price: number }> {
   const categoryId = newId();
   const productId = newId();
   const variantId = newId();
   const assetId = newId();
   const price = 100000;
-  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Giải trí', ${categoryId.slice(-8)}, true, 1)`.execute(ctx.db);
-  await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Netflix', ${productId.slice(-8)}, true, 1)`.execute(ctx.db);
+  const fulfillmentType = options.fulfillmentType ?? "STOCK_ACCOUNT";
+  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Giải trí', ${categoryId.slice(-8)}, true, 1)`.execute(
+    ctx.db,
+  );
+  await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Netflix', ${productId.slice(-8)}, true, 1)`.execute(
+    ctx.db,
+  );
   await sql`
     insert into product_variant
       (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
-       warranty_days, stock_policy, resale_evidence_id, is_active, sort_order)
+       warranty_days, stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
     values (${variantId}, ${productId}, ${"SKU-" + variantId.slice(-8)}, 'Premium 1 tháng', ${price},
-      'P1M', 'CREDENTIAL', 30, 'LOCAL_ONLY', 'RES-MINIAPP', true, 1)
+      'P1M', 'CREDENTIAL', 30, 'LOCAL_ONLY', 'RES-MINIAPP', true, 1, ${fulfillmentType})
   `.execute(ctx.db);
-  await sql`
-    insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
-    values (${assetId}, ${variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId}, 'AVAILABLE')
-  `.execute(ctx.db);
+  if (fulfillmentType === "QUANTITY_STOCK") {
+    await sql`insert into variant_quantity_stock (variant_id, available_quantity) values (${variantId}, ${options.quantity ?? 1})`.execute(
+      ctx.db,
+    );
+  } else {
+    await sql`
+      insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+      values (${assetId}, ${variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId}, 'AVAILABLE')
+    `.execute(ctx.db);
+  }
   return { variantId, price };
 }
 
 async function customerIdFor(telegramUserId: number): Promise<string> {
-  const row = (await sql<{ customer_id: string }>`
+  const row = (
+    await sql<{ customer_id: string }>`
     select customer_id from channel_identity
     where channel = 'TELEGRAM' and channel_user_id = ${String(telegramUserId)}
     limit 1
-  `.execute(ctx.db)).rows[0];
+  `.execute(ctx.db)
+  ).rows[0];
   if (!row) throw new Error("missing test customer identity");
   return row.customer_id;
 }
@@ -106,14 +128,29 @@ describe.skipIf(!hasDocker)("Mini App store authenticated flow", () => {
     const otherInitData = signedInitData(20202);
     const seeded = await seedCatalog();
 
-    const catalog = await app.inject({ method: "GET", url: "/shop/api/catalog", headers: { "x-telegram-init-data": ownerInitData } });
+    const catalog = await app.inject({
+      method: "GET",
+      url: "/shop/api/catalog",
+      headers: { "x-telegram-init-data": ownerInitData },
+    });
     expect(catalog.statusCode).toBe(200);
     expect(catalog.json()).toMatchObject({
-      items: [{ id: seeded.variantId, productNameVi: "Netflix", nameVi: "Premium 1 tháng", priceVnd: String(seeded.price) }],
+      items: [
+        {
+          id: seeded.variantId,
+          productNameVi: "Netflix",
+          nameVi: "Premium 1 tháng",
+          priceVnd: String(seeded.price),
+        },
+      ],
       nextCursor: null,
     });
 
-    const account = await app.inject({ method: "GET", url: "/shop/api/account", headers: { "x-telegram-init-data": ownerInitData } });
+    const account = await app.inject({
+      method: "GET",
+      url: "/shop/api/account",
+      headers: { "x-telegram-init-data": ownerInitData },
+    });
     expect(account.statusCode).toBe(200);
     const ownerCustomerId = await customerIdFor(10101);
     await sql`
@@ -126,13 +163,21 @@ describe.skipIf(!hasDocker)("Mini App store authenticated flow", () => {
       method: "POST",
       url: "/shop/api/orders",
       headers: { "content-type": "application/json", "x-telegram-init-data": ownerInitData },
-      payload: JSON.stringify({ variantId: seeded.variantId, expectedPriceVnd: seeded.price, idempotencyKey: "miniapp-order-1" }),
+      payload: JSON.stringify({
+        variantId: seeded.variantId,
+        expectedPriceVnd: seeded.price,
+        idempotencyKey: "miniapp-order-1",
+      }),
     });
     expect(created.statusCode).toBe(200);
     const order = created.json().order as { id: string; orderNumber: string; status: string };
     expect(order).toMatchObject({ status: "PENDING_PAYMENT" });
 
-    const otherOrders = await app.inject({ method: "GET", url: "/shop/api/orders", headers: { "x-telegram-init-data": otherInitData } });
+    const otherOrders = await app.inject({
+      method: "GET",
+      url: "/shop/api/orders",
+      headers: { "x-telegram-init-data": otherInitData },
+    });
     expect(otherOrders.statusCode).toBe(200);
     expect(otherOrders.json()).toMatchObject({ ok: true, items: [] });
 
@@ -160,5 +205,40 @@ describe.skipIf(!hasDocker)("Mini App store authenticated flow", () => {
       where o.id = ${order.id}
     `.execute(ctx.db);
     expect(rows.rows[0]).toEqual({ status: "PAID", balance_vnd: "150000" });
+  });
+
+  it("keeps zero-quantity catalog items visible but blocks payable order creation", async () => {
+    const ownerInitData = signedInitData(30303);
+    const seeded = await seedCatalog({ fulfillmentType: "QUANTITY_STOCK", quantity: 0 });
+
+    const catalog = await app.inject({
+      method: "GET",
+      url: "/shop/api/catalog",
+      headers: { "x-telegram-init-data": ownerInitData },
+    });
+    expect(catalog.statusCode).toBe(200);
+    expect(catalog.json()).toMatchObject({
+      items: [
+        {
+          id: seeded.variantId,
+          availableQuantity: 0,
+          isReady: false,
+          canBuy: false,
+        },
+      ],
+    });
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/shop/api/orders",
+      headers: { "content-type": "application/json", "x-telegram-init-data": ownerInitData },
+      payload: JSON.stringify({
+        variantId: seeded.variantId,
+        expectedPriceVnd: seeded.price,
+        idempotencyKey: "miniapp-zero-quantity",
+      }),
+    });
+    expect(created.statusCode).toBe(409);
+    expect(created.json()).toMatchObject({ ok: false, code: "NO_STOCK" });
   });
 });

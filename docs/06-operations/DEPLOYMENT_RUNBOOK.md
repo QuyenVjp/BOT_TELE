@@ -89,3 +89,9 @@ After rollback, re-drain the outbox and re-check health signals.
 - Confirm SePay webhook HMAC still verifies with a known test event (staging) or a canary.
 - Confirm owner root-admin self-test: private chat, low-risk catalog action, audit write.
 - Watch fulfillment lag, reconciliation lag, and invalid-asset counters for one pilot window.
+
+## Isolated backup and restore drill
+
+Run `npm exec tsx scripts/backup-restore-drill.ts` with Docker/OrbStack available. The script creates a disposable PostgreSQL container, migrates a source database, inserts synthetic customer/order/payment/inventory/wallet/audit rows, runs `pg_dump -Fc`, and restores into a second database with `pg_restore --exit-on-error`.
+
+It checks row counts, commerce relationships, ledger balance, primary-key enforcement and nonnegative balance constraints, then removes its container. It does not accept a production database URL or export customer data. A successful synthetic drill proves this schema/tool path, not production backup freshness, encryption, retention, external vault recovery or a production RTO/RPO.

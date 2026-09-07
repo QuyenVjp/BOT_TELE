@@ -2,9 +2,11 @@ import type { PresentedMessage, ReplyKeyboard } from "./catalog.js";
 
 export const CUSTOMER_COPY = {
   homeTitle: "🛒 SHOP DIGITAL",
-  homeBody: "Chọn tác vụ phía dưới. Số điện thoại chỉ được lưu khi bạn tự chia sẻ trong chat riêng.",
+  homeBody:
+    "Chọn tác vụ phía dưới. Số điện thoại chỉ được lưu khi bạn tự chia sẻ trong chat riêng.",
   accountTitle: "👤 Tài khoản",
-  accountBody: "Chia sẻ số điện thoại để nhận hỗ trợ và cập nhật hồ sơ. Bạn có thể quay lại shop bất cứ lúc nào.",
+  accountBody:
+    "Chia sẻ số điện thoại để nhận hỗ trợ và cập nhật hồ sơ. Bạn có thể quay lại shop bất cứ lúc nào.",
   shareContact: "📱 Chia sẻ số điện thoại",
   back: "↩️ Quay lại",
   browse: "🛒 Mua hàng",
@@ -33,7 +35,18 @@ export const MAIN_REPLY_KEYBOARD: ReplyKeyboard = {
 
 export function presentShopLaunch(url: string): PresentedMessage {
   if (!/^https:\/\//i.test(url)) return presentCustomerHome();
-  return { text: "🌐 Mở cửa hàng", buttons: [[{ text: "Mở Mini App", callbackData: "shop:open", webAppUrl: `${url.replace(/\/$/, "")}/shop` }]] };
+  return {
+    text: "🌐 Mở cửa hàng",
+    buttons: [
+      [
+        {
+          text: "Mở Mini App",
+          callbackData: "shop:open",
+          webAppUrl: `${url.replace(/\/$/, "")}/shop`,
+        },
+      ],
+    ],
+  };
 }
 
 export function presentCustomerHome(): PresentedMessage {

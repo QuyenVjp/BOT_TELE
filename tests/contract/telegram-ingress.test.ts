@@ -286,7 +286,12 @@ describe("command normalization", () => {
               language_code: "vi",
             },
             chat: { id: 100, type: "private", first_name: "Nguyen", last_name: "An" },
-            contact: { phone_number: "+84912345678", user_id: 100, first_name: "Nguyen", last_name: "An" },
+            contact: {
+              phone_number: "+84912345678",
+              user_id: 100,
+              first_name: "Nguyen",
+              last_name: "An",
+            },
             text: "/admin@tier20ai_bot",
             entities: [{ type: "bot_command", offset: 0, length: 19 }],
           },

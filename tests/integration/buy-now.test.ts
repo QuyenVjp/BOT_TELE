@@ -46,8 +46,10 @@ async function seed(
     stockPolicy?: string;
     resale?: string | null;
     active?: boolean;
-    /** How many AVAILABLE local assets to stock (default 3). */
     assetCount?: number;
+    fulfillmentType?: string;
+    quantity?: number;
+    supplierConfigured?: boolean | "disabled";
   } = {},
 ): Promise<Seed> {
   const customerId = newId();
@@ -68,18 +70,18 @@ async function seed(
   await sql`
     insert into product_variant
       (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
-       stock_policy, resale_evidence_id, is_active, sort_order)
+       stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
     values
       (${variantId}, ${productId}, 'NF-1M', 'Gói 1 tháng', ${price}, 'P1M', 'CREDENTIAL', 30,
        ${overrides.stockPolicy ?? "LOCAL_ONLY"}, ${overrides.resale === undefined ? "RES-NF1" : overrides.resale},
-       ${overrides.active ?? true}, 1)
+       ${overrides.active ?? true}, 1, ${overrides.fulfillmentType ?? null})
   `.execute(ctx.db);
 
   // FR-006a: LOCAL_ONLY / LOCAL_THEN_SUPPLIER variants require finite local stock
   // to be reserved before Order/Payment Intent creation. Seed enough AVAILABLE
   // assets so the single-buyer cases continue to pass.
-  const stockPolicy = overrides.stockPolicy ?? "LOCAL_ONLY";
-  if (stockPolicy === "LOCAL_ONLY" || stockPolicy === "LOCAL_THEN_SUPPLIER") {
+  const fulfillmentType = overrides.fulfillmentType ?? "STOCK_ACCOUNT";
+  if (fulfillmentType === "STOCK_ACCOUNT" || fulfillmentType === "STOCK_CODE") {
     const n = overrides.assetCount ?? 3;
     for (let i = 0; i < n; i++) {
       const assetId = newId();
@@ -88,13 +90,27 @@ async function seed(
         values (${assetId}, ${variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId}, 'AVAILABLE')
       `.execute(ctx.db);
     }
+  } else if (fulfillmentType === "QUANTITY_STOCK") {
+    await sql`insert into variant_quantity_stock (variant_id, available_quantity) values (${variantId}, ${overrides.quantity ?? 3})`.execute(
+      ctx.db,
+    );
+  } else if (fulfillmentType === "SUPPLIER_API" && overrides.supplierConfigured) {
+    const supplierId = newId();
+    const supplierSkuId = newId();
+    await sql`insert into supplier (id, name, adapter_type, credential_vault_ref, status) values (${supplierId}, 'Primary', 'sandbox', 'vault:supplier', 'ACTIVE')`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into supplier_sku (id, supplier_id, variant_id, external_sku, cost_vnd, delivery_type, is_active)
+      values (${supplierSkuId}, ${supplierId}, ${variantId}, 'EXT-SUP', 50000, 'CREDENTIAL', ${overrides.supplierConfigured === true})
+    `.execute(ctx.db);
   }
 
   return { customerId, categoryId, productId, variantId, price };
 }
 
 beforeEach(async () => {
-  await sql`truncate table order_transition, payment_intent, digital_asset, "order", product_variant, product_alias, product, category, customer cascade`.execute(
+  await sql`truncate table quantity_stock_ledger, variant_quantity_stock, supplier_order, supplier_sku, supplier, order_transition, payment_intent, digital_asset, "order", product_variant, product_alias, product, category, customer cascade`.execute(
     ctx.db,
   );
 });
@@ -123,11 +139,42 @@ describe("Buy Now creates one immutable Order (FR-006/FR-007)", () => {
     await sql`update product_variant set price_vnd = 999000, name_vi = 'Đổi tên' where id = ${s.variantId}`.execute(
       ctx.db,
     );
-    const reread = await sql<{ price_vnd: string; variant_name_vi: string }>`
-      select price_vnd, variant_name_vi from "order" where id = ${order.id}
+    const reread = await sql<{
+      price_vnd: string;
+      variant_name_vi: string;
+      fulfillment_type: string;
+    }>`
+      select price_vnd, variant_name_vi, fulfillment_type from "order" where id = ${order.id}
     `.execute(ctx.db);
     expect(reread.rows[0]?.price_vnd).toBe(String(s.price));
     expect(reread.rows[0]?.variant_name_vi).toBe("Gói 1 tháng");
+    expect(reread.rows[0]?.fulfillment_type).toBe("STOCK_ACCOUNT");
+    await sql`update product_variant set fulfillment_type = 'MANUAL_FULFILLMENT' where id = ${s.variantId}`.execute(
+      ctx.db,
+    );
+    const afterTypeChange = await sql<{
+      fulfillment_type: string;
+    }>`select fulfillment_type from "order" where id = ${order.id}`.execute(ctx.db);
+    expect(afterTypeChange.rows[0]?.fulfillment_type).toBe("STOCK_ACCOUNT");
+  });
+
+  it("derives fulfillment_type for legacy direct order inserts without reading mutable variant config", async () => {
+    const s = await seed();
+    const orderId = newId();
+    await sql`
+      insert into "order" (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
+        price_vnd, duration_code, delivery_type, supplier_policy_snapshot, status)
+      values (${orderId}, ${"ORD-" + orderId}, ${s.customerId}, ${s.variantId}, 'Netflix', 'Gói 1 tháng',
+        ${s.price}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'PENDING_PAYMENT')
+    `.execute(ctx.db);
+
+    await sql`update product_variant set fulfillment_type = 'MANUAL_FULFILLMENT' where id = ${s.variantId}`.execute(
+      ctx.db,
+    );
+    const order = await sql<{
+      fulfillment_type: string;
+    }>`select fulfillment_type from "order" where id = ${orderId}`.execute(ctx.db);
+    expect(order.rows[0]?.fulfillment_type).toBe("STOCK_ACCOUNT");
   });
 
   it("records an order transition for the creation", async () => {
@@ -205,6 +252,103 @@ describe("Buy Now revalidation (FR-006)", () => {
     });
     expect(result.ok).toBe(false);
     expect((result as Extract<BuyNowResult, { ok: false }>).code).toBe("VARIANT_UNAVAILABLE");
+  });
+});
+
+describe("Buy Now fulfillment route readiness", () => {
+  it("creates a supplier-only SUPPLIER_API order when a supplier SKU is configured", async () => {
+    const s = await seed({
+      stockPolicy: "SUPPLIER_ONLY",
+      fulfillmentType: "SUPPLIER_API",
+      supplierConfigured: true,
+    });
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-supplier-ok",
+      correlationId: "corr-supplier-ok",
+    });
+    expect(result.ok).toBe(true);
+    expect((result as Extract<BuyNowResult, { ok: true }>).order.fulfillmentType).toBe(
+      "SUPPLIER_API",
+    );
+  });
+
+  it("blocks supplier-only SUPPLIER_API checkout when the supplier SKU is disabled without creating an order", async () => {
+    const s = await seed({
+      stockPolicy: "SUPPLIER_ONLY",
+      fulfillmentType: "SUPPLIER_API",
+      supplierConfigured: "disabled",
+    });
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-supplier-disabled",
+      correlationId: "corr-supplier-disabled",
+    });
+    expect(result.ok).toBe(false);
+    expect((result as Extract<BuyNowResult, { ok: false }>).code).toBe("NO_STOCK");
+    const count = await sql<{ count: number }>`select count(*)::int as count from "order"`.execute(
+      ctx.db,
+    );
+    expect(count.rows[0]?.count).toBe(0);
+  });
+
+  it("creates a LOCAL_THEN_SUPPLIER order by reserving local stock before falling back", async () => {
+    const s = await seed({
+      stockPolicy: "LOCAL_THEN_SUPPLIER",
+      fulfillmentType: "STOCK_ACCOUNT",
+      assetCount: 1,
+    });
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-local-then-supplier",
+      correlationId: "corr-local-then-supplier",
+    });
+    expect(result.ok).toBe(true);
+    const order = (result as Extract<BuyNowResult, { ok: true }>).order;
+    expect(order.supplierPolicySnapshot).toBe("LOCAL_THEN_SUPPLIER");
+    await expect(
+      sql<{
+        count: number;
+      }>`select count(*)::int as count from digital_asset where variant_id = ${s.variantId} and reserved_order_id = ${order.id} and status = 'RESERVED'`.execute(
+        ctx.db,
+      ),
+    ).resolves.toMatchObject({ rows: [{ count: 1 }] });
+  });
+
+  it("blocks supplier-only SUPPLIER_API checkout without configured supplier SKU", async () => {
+    const s = await seed({ stockPolicy: "SUPPLIER_ONLY", fulfillmentType: "SUPPLIER_API" });
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-supplier-missing",
+      correlationId: "corr-supplier-missing",
+    });
+    expect(result.ok).toBe(false);
+    expect((result as Extract<BuyNowResult, { ok: false }>).code).toBe("NO_STOCK");
+  });
+
+  it("blocks zero-quantity checkout without leaving a payable order", async () => {
+    const s = await seed({ fulfillmentType: "QUANTITY_STOCK", quantity: 0 });
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-zero-qty",
+      correlationId: "corr-zero-qty",
+    });
+    expect(result.ok).toBe(false);
+    expect((result as Extract<BuyNowResult, { ok: false }>).code).toBe("NO_STOCK");
+    const count = await sql<{ count: number }>`select count(*)::int as count from "order"`.execute(
+      ctx.db,
+    );
+    expect(count.rows[0]?.count).toBe(0);
   });
 });
 

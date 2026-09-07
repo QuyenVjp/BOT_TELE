@@ -11,6 +11,15 @@ import { fulfillPaidOrder, type FulfillmentDeps } from "./fulfillment.js";
 import type { FulfillmentTelemetry } from "./telemetry.js";
 import { createDeliveryNotificationHandoff } from "./delivery-notification.js";
 import type { DeliverySessionCodecConfig } from "./delivery-session.js";
+import {
+  handleNotificationOutboxEvent,
+  queueManualFulfillmentNotification,
+} from "../notification/service.js";
+import {
+  processFileDelivery,
+  queueFileDelivery,
+  type TelegramDocumentSender,
+} from "./file-delivery.js";
 
 /**
  * Outbox handlers that connect payment settlement to fulfillment and delivery
@@ -48,6 +57,10 @@ export interface FulfillmentHandlerDeps {
   deliverySession?: {
     config: DeliverySessionCodecConfig;
     ttlSeconds: number;
+  };
+  fileDelivery?: {
+    storageRoots: readonly string[];
+    sender: TelegramDocumentSender;
   };
   telemetry?: FulfillmentTelemetry;
 }
@@ -88,13 +101,38 @@ export function createFulfillmentOutboxHandler(
       return { kind: "UNKNOWN_EVENT", eventType: event.eventType };
     }
 
+    if (
+      event.eventType === "WalletTopupPresented" ||
+      event.eventType === "WalletTopupCredited" ||
+      event.eventType === "WalletRefunded"
+    ) {
+      return handleNotificationOutboxEvent(deps.db, event);
+    }
+
     if (event.eventType === "OrderPaid") {
       const p = payloadOf(event);
       const orderId = typeof p.orderId === "string" ? p.orderId : event.aggregateId;
       const correlationId =
         typeof p.correlationId === "string" ? p.correlationId : `outbox-${event.id}`;
-
       const started = Date.now();
+
+      const queuedFile = await queueFileDelivery({ db: deps.db, orderId });
+      if (queuedFile.ok) {
+        if (!deps.fileDelivery) return { kind: "RETRY", errorCode: "FILE_DELIVERY_NOT_CONFIGURED" };
+        const delivered = await processFileDelivery({
+          db: deps.db,
+          job: queuedFile.job,
+          storageRoots: deps.fileDelivery.storageRoots,
+          sender: deps.fileDelivery.sender,
+        });
+        return delivered.ok ? { kind: "PUBLISHED" } : { kind: "RETRY", errorCode: delivered.code };
+      }
+      if (queuedFile.code !== "NOT_DIGITAL_FILE") {
+        return queuedFile.code === "ORDER_NOT_FOUND" || queuedFile.code === "ORDER_NOT_PAID"
+          ? { kind: "TERMINAL_REVIEW", errorCode: queuedFile.code }
+          : { kind: "RETRY", errorCode: queuedFile.code };
+      }
+
       const result = await fulfillPaidOrder(deps.db, {
         orderId,
         correlationId,
@@ -105,7 +143,7 @@ export function createFulfillmentOutboxHandler(
         const lagSeconds = Math.floor((Date.now() - started) / 1000);
         deps.telemetry?.recordFulfillmentLag({ orderId, lagSeconds });
 
-        if (result.token && deps.deliverySession) {
+        if (result.kind === "DELIVERY_BUNDLE" && result.token && deps.deliverySession) {
           await createDeliveryNotificationHandoff(deps.db, {
             vault: deps.vault,
             bundleId: result.bundleId,
@@ -114,7 +152,7 @@ export function createFulfillmentOutboxHandler(
             sessionTtlSeconds: deps.deliverySession.ttlSeconds,
             sessionConfig: deps.deliverySession.config,
           });
-        } else if (deps.notifier && result.token) {
+        } else if (result.kind === "DELIVERY_BUNDLE" && deps.notifier && result.token) {
           // First-issue only: a reused bundle has an empty token and the
           // original notification already went out.
           await deps.notifier.notifyBundleReady({
@@ -151,7 +189,7 @@ export function createFulfillmentOutboxHandler(
           correlationId,
           deps: fulfillmentDeps,
         });
-        if (!result.ok || !result.token) {
+        if (!result.ok || result.kind !== "DELIVERY_BUNDLE" || !result.token) {
           return { kind: "RETRY", errorCode: "DELIVERY_HANDOFF_NOT_READY" };
         }
         await createDeliveryNotificationHandoff(deps.db, {
@@ -163,6 +201,38 @@ export function createFulfillmentOutboxHandler(
           sessionConfig: deps.deliverySession.config,
         });
       }
+      return { kind: "PUBLISHED" };
+    }
+
+    if (event.eventType === "ManualFulfillmentTaskCreated") {
+      const p = payloadOf(event);
+      const taskId = typeof p.taskId === "string" ? p.taskId : event.aggregateId;
+      const customerId = typeof p.customerId === "string" ? p.customerId : null;
+      const correlationId =
+        typeof p.correlationId === "string" ? p.correlationId : `outbox-${event.id}`;
+      if (!customerId) return { kind: "RETRY", errorCode: "MANUAL_TASK_CUSTOMER_MISSING" };
+      await queueManualFulfillmentNotification(deps.db, {
+        customerId,
+        taskId,
+        state: "WAITING",
+        correlationId,
+      });
+      return { kind: "PUBLISHED" };
+    }
+
+    if (event.eventType === "ManualFulfillmentTaskCompleted") {
+      const p = payloadOf(event);
+      const taskId = typeof p.taskId === "string" ? p.taskId : event.aggregateId;
+      const customerId = typeof p.customerId === "string" ? p.customerId : null;
+      const correlationId =
+        typeof p.correlationId === "string" ? p.correlationId : `outbox-${event.id}`;
+      if (!customerId) return { kind: "RETRY", errorCode: "MANUAL_TASK_CUSTOMER_MISSING" };
+      await queueManualFulfillmentNotification(deps.db, {
+        customerId,
+        taskId,
+        state: "COMPLETED",
+        correlationId,
+      });
       return { kind: "PUBLISHED" };
     }
 

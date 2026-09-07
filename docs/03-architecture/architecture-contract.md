@@ -6,6 +6,33 @@ This sprint adds customer store credit, Telegram customer profile snapshots, a p
 
 Wallet is closed-loop store credit only. No withdrawal, cash-out, or P2P transfer.
 
+### Operational product-to-delivery sprint
+
+The active scope is the complete admin product → variant → inventory → customer checkout → verified payment → durable fulfillment → warranty workflow. The previous wallet/broadcast checkpoint remains an immutable baseline, not a production release.
+
+- Reuse `product` and `product_variant`; inventory, fulfillment configuration, price, supplier mapping and low-stock threshold belong to the variant.
+- Explicit fulfillment types: `STOCK_ACCOUNT`, `STOCK_CODE`, `DIGITAL_FILE`, `SUPPLIER_API`, `MANUAL_FULFILLMENT`, `QUANTITY_STOCK`, `UNLIMITED_SERVICE`. User-facing labels are Vietnamese, not enum names.
+- Discrete account/code records retain reservation, delivery and replacement lineage. A reusable file artifact is versioned content, never a one-unit stock item; file bytes stay outside PostgreSQL and Telegram identifiers are bound to artifact version/hash.
+- Payment remains VietQR/bank/verified SePay or atomic wallet checkout. Payment handlers never perform type-specific delivery; the existing durable fulfillment boundary owns routing and retries.
+- Account field schemas distinguish required, secret and customer-visible fields. Import previews, audit, metrics and callbacks never contain inventory values. Existing vault protection remains mandatory.
+- Inventory home selects a product first. With no products it offers creation; it never presents a contextless global stock count or generic CSV instructions.
+- Preserve HMAC over timestamp plus exact raw body, ledger-only money changes, numeric Telegram identity, root/private admin authorization, atomic reservations and supplier UNKNOWN reconciliation before failover.
+- Acceptance requires real owner-operable Telegram paths; source/test presence alone does not prove live UI acceptance. No new Telegram Stars payment path.
+
+### Seven-type operational completion contract
+
+- Customer catalog and checkout use the same fulfillment-type/stock-policy compatibility rules. `SUPPLIER_ONLY` is accepted only for configured `SUPPLIER_API`; unsupported legacy combinations remain blocked.
+- Catalog readiness reflects each type's backing inventory/configuration. Zero quantity may remain visible for restock navigation, but must not expose a payable action. Checkout revalidates readiness transactionally; catalog readiness is never payment authorization.
+- File setup may create an inactive variant before upload. Admin inventory must keep that variant reachable, and activation requires a real active artifact. No placeholder metadata counts as ready inventory.
+- The seven-type creation wizard reuses existing schemas and root/private preview-confirm flows. Supplier configuration references an existing provider; service types persist their actual service definition; quantity stock uses its ledger-backed operations.
+- Intentional compatibility change: configured supplier-only API products become customer-operable. Preserved invariants: resale evidence, numeric identity, atomic reservations, verified payment, durable fulfillment, secret-safe previews and explicit owner activation.
+
+### Operational history and wallet event dispatch
+
+- Root-private variant inventory history reads bounded redacted audit counts and quantity-ledger movements. New single-variant imports bind audit target IDs to the variant; older unscoped `manual` import records cannot be attributed retroactively.
+- `WalletTopupPresented`, `WalletTopupCredited`, and `WalletRefunded` enqueue durable critical-service notifications through the existing notification lane. Campaign/delivery keys deduplicate replay; missing recipients retry and malformed known wallet payloads require terminal review rather than silent acknowledgement.
+- Product-specific restock subscriptions provide consent only for that product's alert. Subscribing does not enable general shop-update campaigns.
+
 ## 2. Module breakdown
 
 ### Existing modules that stay authoritative
@@ -155,6 +182,9 @@ Bottom navigation can be added later, but it must call shared backend services o
 - Restock and wallet notifications are emitted from durable events, not from ad hoc DB updates.
 - Broadcast pacing must stay bounded and retry-safe.
 - Inventory correction must not masquerade as a customer-facing announcement unless explicitly toggled and derived from a real stock delta.
+- Marketing `all` is `SHOP_UPDATE` and requires `shop_updates` consent at preview, recipient creation and send time. Only genuine service-critical campaigns retain opt-out-independent delivery; marketing navigation cannot select that class.
+- Owner-triggered stock announcements from an inventory variant view are optional `SHOP_UPDATE` marketing broadcasts. The preview content is rebuilt from product/variant/stock/price tables, then confirmed through the existing broadcast campaign flow; product restock subscriptions never imply shop-update consent.
+- A supplier purchase has one persisted dispatch winner. Re-entering a pending/submitted/unknown attempt never issues another purchase; recovery queries the original provider identity without holding a database transaction across network I/O.
 
 ## 8. Safety invariants
 
@@ -167,6 +197,14 @@ Bottom navigation can be added later, but it must call shared backend services o
 - Mini App auth must validate raw initData server-side.
 - Notifications respect opt-in.
 - Admin messages and wallet adjustments are audited.
+
+### Release-candidate recovery boundary
+
+- Explicit operator recovery targets a known durable job family and ID, requires operator identity and reason, and appends redacted before/after metadata to audit in the same transaction.
+- Recovery locks the durable row, rejects nonterminal/already-recovered jobs and owned leases, increments existing fencing generation, and changes only retry-safe scheduling/state fields. Business identity, ownership, provider transaction IDs and idempotency keys are immutable.
+- Retry is allowlisted by actual handler semantics, never arbitrary stored payload replay. Ambiguous supplier create results and sensitive Telegram sends require reconciliation or manual review, not resend.
+- RC workload/restore scripts use synthetic non-PII data in separate disposable databases. No benchmark invokes real Telegram/supplier transport or SePay Live.
+- Checkpoint and RC commits are authorized for this sprint. Staging must run an exact clean commit; production deployment, store opening, live refunds and mass broadcast remain owner-only and unexecuted.
 
 ## 9. Increment plan
 

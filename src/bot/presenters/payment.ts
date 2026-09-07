@@ -69,7 +69,9 @@ export function formatExpiryVietnam(iso: string): string {
  * the no-screenshot line. Callbacks bind to the order number so the checkout
  * layer can re-resolve the live intent without smuggling state in the message.
  */
-export async function presentPaymentScreen(presentation: PaymentPresentation): Promise<PresentedMessage> {
+export async function presentPaymentScreen(
+  presentation: PaymentPresentation,
+): Promise<PresentedMessage> {
   const amount = formatVnd(makeVnd(presentation.amountVnd));
   const bankLine = presentation.bankName
     ? `${PAYMENT_COPY.accountLabel}: ${presentation.accountNumber} — ${presentation.bankName} (${presentation.accountName})`

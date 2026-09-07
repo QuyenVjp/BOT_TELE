@@ -98,4 +98,27 @@ describe.skipIf(!hasDocker)("outbox concurrency lease (T130)", () => {
     `.execute(ctx.db);
     expect(Number(unpublished.rows[0]?.count)).toBe(0);
   });
+
+  it("claims events created in the current PostgreSQL microsecond", async () => {
+    const dispatched: string[] = [];
+
+    await sql`
+      insert into outbox_event
+        (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted, occurred_at)
+      values
+        (${"microsecond-event"}, 'PaymentIntent', ${newId()}, 1, 'PaymentSettled', '{}'::jsonb, now())
+    `.execute(ctx.db);
+
+    const result = await drainOutboxOnce(ctx.db, {
+      batchSize: 1,
+      maxAttempts: 5,
+      handler: async (event) => {
+        dispatched.push(event.id);
+        return { kind: "PUBLISHED" };
+      },
+    });
+
+    expect(result).toMatchObject({ claimed: 1, published: 1 });
+    expect(dispatched).toEqual(["microsecond-event"]);
+  });
 });

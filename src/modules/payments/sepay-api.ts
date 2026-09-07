@@ -23,6 +23,7 @@ const TransactionSchema = z.object({
   va_id: z.string().uuid().nullable(),
   webhook_success: z.union([z.literal(0), z.literal(1)]),
 });
+const SinceIdSchema = z.string().uuid();
 
 const ResponseSchema = z.object({
   status: z.literal("success"),
@@ -113,8 +114,8 @@ export function createSePayApiPort(options: {
       url.searchParams.set("per_page", String(limit));
       url.searchParams.set("timestamp_format", "iso8601");
       if (listOptions.sinceId !== undefined) {
-        if (!/^[A-Za-z0-9:_-]{1,128}$/.test(listOptions.sinceId)) {
-          throw new RangeError("SePay API since_id is invalid");
+        if (!SinceIdSchema.safeParse(listOptions.sinceId).success) {
+          throw new RangeError("SePay API since_id must be a UUID");
         }
         url.searchParams.set("since_id", listOptions.sinceId);
       }

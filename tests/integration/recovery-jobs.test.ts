@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
@@ -10,6 +11,7 @@ import {
 } from "../../src/modules/digital-goods/recovery.js";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import type { SePayReconciliationPort } from "../../src/modules/payments/reconciliation.js";
+import { createInMemoryRateLimiter } from "../../src/modules/risk/service.js";
 import type { SupplierPort } from "../../src/modules/supplier/port.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
 import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
@@ -24,6 +26,26 @@ import { startPostgresContainer, type PgTestContext } from "../helpers/pg-contai
  */
 
 let ctx: PgTestContext;
+async function sePayCursorRow(): Promise<{
+  window_from_sec: number;
+  window_to_sec: number;
+  page: number;
+  per_page: number;
+  generation: number;
+} | null> {
+  const row = await sql<{
+    window_from_sec: number;
+    window_to_sec: number;
+    page: number;
+    per_page: number;
+    generation: number;
+  }>`
+    select window_from_sec, window_to_sec, page, per_page, generation
+    from sepay_reconciliation_cursor
+    where provider = 'sepay'
+  `.execute(ctx.db);
+  return row.rows[0] ?? null;
+}
 
 beforeAll(async () => {
   ctx = await startPostgresContainer();
@@ -35,7 +57,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await sql`
-    truncate table delivery_bundle, digital_asset, supplier_order, supplier_sku, supplier,
+    truncate table sepay_reconciliation_cursor, delivery_bundle, digital_asset, supplier_order, supplier_sku, supplier,
       outbox_event, payment_allocation, discrepancy, bank_transaction, payment_intent,
       order_transition, "order", product_variant, product, category, customer cascade
   `.execute(ctx.db);
@@ -210,7 +232,7 @@ describe("bounded recovery jobs (T167/T168)", () => {
     const second = await seedOrder(seed, { createdAt: new Date(now.getTime() - 60_000) });
     const evidence = verifiedSePayEvidence({
       provider: "sepay",
-      providerTransactionId: "api:" + newId(),
+      providerTransactionId: "api:" + randomUUID(),
       direction: "IN",
       merchantAccountId: first.account,
       amountVnd: 149999,
@@ -242,6 +264,236 @@ describe("bounded recovery jobs (T167/T168)", () => {
       select count(*)::int as n from payment_allocation where status = 'SETTLED'
     `.execute(ctx.db);
     expect(allocations.rows[0]?.n).toBe(0);
+  });
+
+  it("keeps the fixed SePay window while the worker clock changes after a throttled page", async () => {
+    const seed = await seedCommerce();
+    await seedOrder(seed, { createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    const calls: Array<{
+      from: number;
+      to: number;
+      limit: number | undefined;
+      sinceId: string | undefined;
+    }> = [];
+    const port: SePayReconciliationPort = {
+      listTransactions(from, to, limit, options) {
+        calls.push({ from, to, limit, sinceId: options?.sinceId });
+        return Promise.resolve([
+          verifiedSePayEvidence({
+            provider: "sepay",
+            providerTransactionId: "api:" + randomUUID(),
+            direction: "IN",
+            merchantAccountId: "0123456789",
+            amountVnd: 150000,
+            content: "NO_MATCH",
+            reference: "FT-window",
+            transactedAt: new Date("2026-01-01T00:01:00.000Z"),
+            rawHash: "hash-window",
+            correlationId: "recovery-window",
+          } satisfies PaymentEvidence),
+        ]);
+      },
+    };
+    const limiter = createInMemoryRateLimiter({ capacity: 0, refillPerSecond: 0 });
+
+    await recoverSePayBatch(ctx.db, {
+      batchSize: 2,
+      now: new Date("2026-01-01T00:10:00.000Z"),
+      port,
+      rateLimiter: limiter,
+    });
+    const firstCursor = await sePayCursorRow();
+    await recoverSePayBatch(ctx.db, {
+      batchSize: 5,
+      now: new Date("2026-01-01T00:20:00.000Z"),
+      port,
+      rateLimiter: limiter,
+    });
+    const secondCursor = await sePayCursorRow();
+
+    expect(calls[1]).toMatchObject({
+      from: calls[0]?.from,
+      to: calls[0]?.to,
+      limit: firstCursor?.per_page,
+      sinceId: undefined,
+    });
+    expect(firstCursor).toMatchObject({ page: 1, generation: 1, per_page: 2 });
+    expect(secondCursor).toMatchObject({ page: 1, generation: 1, per_page: 2 });
+  });
+
+  it("does not advance the SePay cursor on the first failed row and replays that row", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed);
+    const badId = randomUUID();
+    const goodId = randomUUID();
+    const badEvidence = { providerTransactionId: "api:" + badId } as unknown as PaymentEvidence;
+    const goodEvidence = verifiedSePayEvidence({
+      provider: "sepay",
+      providerTransactionId: "api:" + goodId,
+      direction: "IN",
+      merchantAccountId: order.account,
+      amountVnd: 150000,
+      content: order.content,
+      reference: "FT-replay",
+      transactedAt: new Date(),
+      rawHash: "hash-replay",
+      correlationId: "recovery-replay",
+    } satisfies PaymentEvidence);
+    const seenSince: Array<string | undefined> = [];
+    let attempt = 0;
+    const port: SePayReconciliationPort = {
+      listTransactions(_from, _to, _limit, options) {
+        seenSince.push(options?.sinceId);
+        attempt += 1;
+        return Promise.resolve([(attempt === 1 ? badEvidence : goodEvidence) as never]);
+      },
+    };
+
+    const failed = await recoverSePayBatch(ctx.db, { batchSize: 1, now: new Date(), port });
+    const afterFailure = await sePayCursorRow();
+    const replayed = await recoverSePayBatch(ctx.db, { batchSize: 1, now: new Date(), port });
+    const afterReplay = await sePayCursorRow();
+
+    expect(failed).toMatchObject({ succeeded: 0, failed: 1 });
+    expect(afterFailure).toMatchObject({ page: 1, generation: 1 });
+    expect(seenSince).toEqual([undefined, undefined]);
+    expect(replayed).toMatchObject({ succeeded: 1, failed: 0 });
+    expect(afterReplay).toMatchObject({ page: 2, generation: 2 });
+  });
+
+  it("advances the SePay cursor only after all rows in the page succeed", async () => {
+    const seed = await seedCommerce();
+    const first = await seedOrder(seed);
+    const second = await seedOrder(seed);
+    const firstId = randomUUID();
+    const secondId = randomUUID();
+    const port: SePayReconciliationPort = {
+      listTransactions() {
+        return Promise.resolve([
+          verifiedSePayEvidence({
+            provider: "sepay",
+            providerTransactionId: "api:" + firstId,
+            direction: "IN",
+            merchantAccountId: first.account,
+            amountVnd: 150000,
+            content: first.content,
+            reference: "FT-ok-1",
+            transactedAt: new Date(),
+            rawHash: "hash-ok-1",
+            correlationId: "recovery-ok-1",
+          } satisfies PaymentEvidence),
+          verifiedSePayEvidence({
+            provider: "sepay",
+            providerTransactionId: "api:" + secondId,
+            direction: "IN",
+            merchantAccountId: second.account,
+            amountVnd: 150000,
+            content: second.content,
+            reference: "FT-ok-2",
+            transactedAt: new Date(),
+            rawHash: "hash-ok-2",
+            correlationId: "recovery-ok-2",
+          } satisfies PaymentEvidence),
+        ]);
+      },
+    };
+
+    await recoverSePayBatch(ctx.db, { batchSize: 2, now: new Date(), port });
+    expect(await sePayCursorRow()).toMatchObject({ page: 2, generation: 2, per_page: 2 });
+  });
+
+  it("completes an empty SePay window into the next overlap window", async () => {
+    const seed = await seedCommerce();
+    const oldestPending = new Date("2026-01-01T00:00:00.000Z");
+    await seedOrder(seed, { createdAt: oldestPending });
+    const calls: Array<{ from: number; to: number; limit: number | undefined }> = [];
+    const port: SePayReconciliationPort = {
+      listTransactions(from, to, limit) {
+        calls.push({ from, to, limit });
+        return Promise.resolve([]);
+      },
+    };
+
+    await recoverSePayBatch(ctx.db, {
+      batchSize: 3,
+      now: new Date("2026-01-01T00:10:00.000Z"),
+      port,
+    });
+    const cursor = await sePayCursorRow();
+
+    expect(calls[0]).toMatchObject({ limit: 3 });
+    expect(cursor).toMatchObject({
+      window_from_sec: Math.min(Math.floor(oldestPending.getTime() / 1000), calls[0]!.to - 300),
+      window_to_sec: calls[0]!.to,
+      page: 1,
+      per_page: 3,
+      generation: 2,
+    });
+  });
+
+  it("rescans page one after an empty page so late rows in the fixed window are not missed", async () => {
+    const seed = await seedCommerce();
+    const first = await seedOrder(seed, { createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    const late = await seedOrder(seed, { createdAt: new Date("2026-01-01T00:00:30.000Z") });
+    const calls: Array<{ page: number | undefined; sinceId: string | undefined }> = [];
+    const firstEvidence = verifiedSePayEvidence({
+      provider: "sepay",
+      providerTransactionId: "api:" + randomUUID(),
+      direction: "IN",
+      merchantAccountId: first.account,
+      amountVnd: 150000,
+      content: first.content,
+      reference: "FT-rescan-1",
+      transactedAt: new Date("2026-01-01T00:01:00.000Z"),
+      rawHash: "hash-rescan-1",
+      correlationId: "recovery-rescan-1",
+    } satisfies PaymentEvidence);
+    const lateEvidence = verifiedSePayEvidence({
+      provider: "sepay",
+      providerTransactionId: "api:" + randomUUID(),
+      direction: "IN",
+      merchantAccountId: late.account,
+      amountVnd: 150000,
+      content: late.content,
+      reference: "FT-rescan-2",
+      transactedAt: new Date("2026-01-01T00:01:30.000Z"),
+      rawHash: "hash-rescan-2",
+      correlationId: "recovery-rescan-2",
+    } satisfies PaymentEvidence);
+    const port: SePayReconciliationPort = {
+      listTransactions(_from, _to, _limit, options) {
+        calls.push({ page: options?.page, sinceId: options?.sinceId });
+        if (calls.length === 1) return Promise.resolve([firstEvidence]);
+        if (calls.length === 2) return Promise.resolve([]);
+        return Promise.resolve([lateEvidence]);
+      },
+    };
+
+    await recoverSePayBatch(ctx.db, {
+      batchSize: 1,
+      now: new Date("2026-01-01T00:10:00.000Z"),
+      port,
+    });
+    await recoverSePayBatch(ctx.db, {
+      batchSize: 1,
+      now: new Date("2026-01-01T00:10:30.000Z"),
+      port,
+    });
+    await recoverSePayBatch(ctx.db, {
+      batchSize: 1,
+      now: new Date("2026-01-01T00:11:00.000Z"),
+      port,
+    });
+
+    expect(calls).toEqual([
+      { page: 1, sinceId: undefined },
+      { page: 2, sinceId: undefined },
+      { page: 1, sinceId: undefined },
+    ]);
+    const lateOrder = await sql<{
+      status: string;
+    }>`select status from "order" where id = ${late.orderId}`.execute(ctx.db);
+    expect(lateOrder.rows[0]?.status).toBe("PAID");
   });
 
   it("claims supplier UNKNOWN rows once, queries only, and isolates provider failures", async () => {
@@ -306,6 +558,65 @@ describe("bounded recovery jobs (T167/T168)", () => {
     expect(createCalls).toBe(0);
     expect(queryCalls).toBe(2);
     expect(result).toMatchObject({ claimed: 2, succeeded: 1, failed: 1, backlog: 2 });
+  });
+
+  it("claims stale SUBMITTED supplier rows only after the retry threshold", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed, { status: "PAID" });
+    const supplierId = newId();
+    const supplierSkuId = newId();
+    await sql`
+      insert into supplier (id, name, adapter_type, credential_vault_ref)
+      values (${supplierId}, 'S', 'fixture', 'vault:supplier')
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_sku
+        (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type)
+      values (${supplierSkuId}, ${supplierId}, ${seed.variantId}, 'EXT-SKU', 100000, 'VN', 'CREDENTIAL')
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
+         submitted_at)
+      values
+        (${newId()}, ${supplierId}, ${supplierSkuId}, ${order.orderId}, 'fresh-submitted', 'fp-fresh',
+         'SUBMITTED', 100000, 150000, 50000, now())
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
+         submitted_at)
+      values
+        (${newId()}, ${supplierId}, ${supplierSkuId}, ${order.orderId}, 'stale-submitted', 'fp-stale',
+         'SUBMITTED', 100000, 150000, 50000, now() - interval '10 minutes')
+    `.execute(ctx.db);
+
+    let queryCalls = 0;
+    const port: SupplierPort = {
+      getAvailability: () =>
+        Promise.resolve({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
+      createOrder: () => Promise.reject(new Error("create must not be called by recovery")),
+      queryOrder: () => {
+        queryCalls += 1;
+        return Promise.resolve({ status: "PENDING", externalOrderId: "external-submitted" });
+      },
+      cancelOrder: async () => ({ status: "ACCEPTED" }),
+      requestRefund: async () => ({ status: "PENDING" }),
+      reconcile: async () => ({ observations: [], nextCursor: null }),
+    };
+
+    const result = await recoverSupplierOrdersBatch(ctx.db, {
+      batchSize: 2,
+      now: new Date(),
+      retryDelaySeconds: 60,
+      resolvePort: () => port,
+      vault: createInMemoryVault(),
+    });
+
+    expect(queryCalls).toBe(1);
+    expect(result.claimed).toBe(1);
   });
 
   it("lets concurrent bundle workers split expired rows and never resets CONSUMED", async () => {

@@ -7,7 +7,10 @@ import {
   provisionFromSupplier,
   recoverUnknownSupplierOrder,
 } from "../../src/modules/supplier/service.js";
+import type { SupplierPort } from "../../src/modules/supplier/port.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import { performance } from "node:perf_hooks";
+import { listActiveCategories } from "../../src/modules/catalog/repository.js";
 
 /**
  * T069 — Supplier create/query with Unknown recovery (FR-015/FR-016).
@@ -88,6 +91,66 @@ beforeEach(async () => {
 });
 
 describe("supplier provision service (FR-015/FR-016)", () => {
+  it("keeps catalog reads responsive while supplier create is blocked", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    let entered!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>((resolve) => {
+      entered = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const port: SupplierPort = {
+      ...sandbox,
+      async createOrder(input) {
+        entered();
+        await blocked;
+        return sandbox.createOrder(input);
+      },
+    };
+    const pending = provisionFromSupplier(ctx.db, {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL",
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "slow-isolation",
+      port,
+      vault: createInMemoryVault(),
+    });
+    try {
+      await started;
+      const timings: number[] = [];
+      for (let i = 0; i < 100; i++) {
+        const before = performance.now();
+        expect((await listActiveCategories(ctx.db)).length).toBeGreaterThan(0);
+        timings.push(performance.now() - before);
+      }
+      timings.sort((a, b) => a - b);
+      console.warn(
+        JSON.stringify({
+          probe: "blocked-supplier-catalog",
+          reads: 100,
+          p50Ms: timings[49],
+          p95Ms: timings[94],
+          p99Ms: timings[98],
+          poolWaiting: ctx.handle.pool.waitingCount,
+          production: false,
+        }),
+      );
+    } finally {
+      release();
+      await pending;
+    }
+    expect((await pending).ok).toBe(true);
+  });
   it("provisions a fulfilled supplier order into a READY local asset", async () => {
     const f = await seedPaidOrderWithSupplierSku();
     const vault = createInMemoryVault();
@@ -126,6 +189,92 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     `.execute(ctx.db);
     expect(so.rows[0]?.status).toBe("FULFILLED");
   });
+  it("quarantined fulfillment replays as NEEDS_REVIEW without duplicating assets", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const vault = createInMemoryVault();
+    const port = createSandboxSupplierAdapter({ mode: "fulfill" });
+    const input = {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: "OTHER-SKU",
+      deliveryType: "CREDENTIAL" as const,
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-quarantine",
+      port,
+      vault,
+      idempotencyKey: "idem-quarantine-1",
+    };
+
+    const first = await provisionFromSupplier(ctx.db, input);
+    const second = await provisionFromSupplier(ctx.db, input);
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.kind).toBe("NEEDS_REVIEW");
+    expect(second.kind).toBe("NEEDS_REVIEW");
+    if (first.kind !== "NEEDS_REVIEW" || second.kind !== "NEEDS_REVIEW") return;
+    expect(second.assetId).toBe(first.assetId);
+
+    const assets = await sql<{ count: string }>`
+      select count(*)::text as count from digital_asset where supplier_order_id = ${first.supplierOrderId}
+    `.execute(ctx.db);
+    expect(Number(assets.rows[0]?.count)).toBe(1);
+  });
+
+  it("concurrent recovery dedupes on supplier row lock and creates one asset", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const vault = createInMemoryVault();
+    const port = createSandboxSupplierAdapter({ mode: "fulfill" });
+    const supplierOrderId = newId();
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId}, 'idem-recover-lock', 'fp-recover-lock',
+         'UNKNOWN', 150000, 199000, 49000, now() - interval '10 minutes')
+    `.execute(ctx.db);
+    await port.createOrder({
+      idempotencyKey: "idem-recover-lock",
+      supplierSku: f.externalSku,
+      costCeilingVnd: 150000,
+      orderId: f.orderId,
+      region: "VN",
+    });
+
+    const input = {
+      supplierOrderId,
+      queryKey: "qk-idem-recover-lock",
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL" as const,
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-recover-lock",
+      port,
+      vault,
+    };
+
+    const [first, second] = await Promise.all([
+      recoverUnknownSupplierOrder(ctx.db, input),
+      recoverUnknownSupplierOrder(ctx.db, input),
+    ]);
+
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.kind).toBe("FULFILLED");
+    expect(second.kind).toBe("FULFILLED");
+    if (first.kind !== "FULFILLED" || second.kind !== "FULFILLED") return;
+    expect(second.assetId).toBe(first.assetId);
+
+    const assets = await sql<{ count: string }>`
+      select count(*)::text as count from digital_asset where supplier_order_id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(Number(assets.rows[0]?.count)).toBe(1);
+  });
 
   it("create is idempotent on the same idempotency key (one supplier_order)", async () => {
     const f = await seedPaidOrderWithSupplierSku();
@@ -161,12 +310,136 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     expect(Number(count.rows[0]?.count)).toBe(1);
   });
 
-  it("timeout maps to UNKNOWN and is recovered via query (never re-create)", async () => {
+  it("timeout retry queries existing UNKNOWN and never creates again", async () => {
     const f = await seedPaidOrderWithSupplierSku();
     const vault = createInMemoryVault();
-    const port = createSandboxSupplierAdapter({ mode: "timeout-then-fulfill" });
+    const upstream = createSandboxSupplierAdapter({ mode: "timeout-then-fulfill" });
+    let creates = 0;
+    let queries = 0;
+    const port: SupplierPort = {
+      ...upstream,
+      createOrder(input) {
+        creates += 1;
+        return upstream.createOrder(input);
+      },
+      queryOrder(input) {
+        queries += 1;
+        return upstream.queryOrder(input);
+      },
+    };
+    const input = {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL" as const,
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-to",
+      port,
+      vault,
+      idempotencyKey: "idem-timeout-1",
+    };
 
-    const first = await provisionFromSupplier(ctx.db, {
+    const first = await provisionFromSupplier(ctx.db, input);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    expect(first.kind).toBe("UNKNOWN");
+    expect({ creates, queries }).toEqual({ creates: 1, queries: 0 });
+
+    const second = await provisionFromSupplier(ctx.db, input);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(second.kind).toBe("FULFILLED");
+    expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
+
+    const count = await sql<{ count: string }>`
+      select count(*)::text as count from supplier_order where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(Number(count.rows[0]?.count)).toBe(1);
+  });
+
+  it("ambiguous accepted retry queries existing PENDING and never creates again", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const vault = createInMemoryVault();
+    let creates = 0;
+    let queries = 0;
+    const port: SupplierPort = {
+      getAvailability: () =>
+        Promise.resolve({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
+      createOrder: () => {
+        creates += 1;
+        return Promise.resolve({
+          kind: "ACCEPTED",
+          externalOrderId: "ext-pending-1",
+          status: "PENDING",
+        });
+      },
+      queryOrder: () => {
+        queries += 1;
+        return Promise.resolve({ status: "PENDING", externalOrderId: "ext-pending-1" });
+      },
+      cancelOrder: () => Promise.resolve({ status: "UNSUPPORTED" }),
+      requestRefund: () => Promise.resolve({ status: "UNSUPPORTED" }),
+      reconcile: () => Promise.resolve({ observations: [], nextCursor: null }),
+    };
+    const input = {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL" as const,
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-pending",
+      port,
+      vault,
+      idempotencyKey: "idem-pending-1",
+    };
+
+    const first = await provisionFromSupplier(ctx.db, input);
+    const second = await provisionFromSupplier(ctx.db, input);
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(first.kind).toBe("UNKNOWN");
+    expect(second.kind).toBe("UNKNOWN");
+    expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
+  });
+
+  it("in-flight SUBMITTED idempotency loser does not create or query", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const vault = createInMemoryVault();
+    const idempotencyKey = "idem-submitted-1";
+    const supplierOrderId = newId();
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId}, ${idempotencyKey}, 'fp-submitted',
+         'SUBMITTED', 150000, 199000, 49000, now())
+    `.execute(ctx.db);
+    const port: SupplierPort = {
+      getAvailability: () =>
+        Promise.resolve({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
+      createOrder: () => {
+        throw new Error("create must not be called by an idempotency loser");
+      },
+      queryOrder: () => {
+        throw new Error("query must not run while create is in-flight");
+      },
+      cancelOrder: () => Promise.resolve({ status: "UNSUPPORTED" }),
+      requestRefund: () => Promise.resolve({ status: "UNSUPPORTED" }),
+      reconcile: () => Promise.resolve({ observations: [], nextCursor: null }),
+    };
+
+    const result = await provisionFromSupplier(ctx.db, {
       orderId: f.orderId,
       supplierId: f.supplierId,
       supplierSkuId: f.supplierSkuId,
@@ -177,47 +450,17 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       deliveryType: "CREDENTIAL",
       durationCode: "P1M",
       region: "VN",
-      correlationId: "sup-to",
+      correlationId: "sup-submitted",
       port,
       vault,
-      idempotencyKey: "idem-timeout-1",
+      idempotencyKey,
     });
-    expect(first.ok).toBe(true);
-    if (!first.ok) return;
-    expect(first.kind).toBe("UNKNOWN");
-    if (first.kind !== "UNKNOWN") return;
-
-    const so = await sql<{ status: string }>`
-      select status from supplier_order where id = ${first.supplierOrderId}
-    `.execute(ctx.db);
-    expect(so.rows[0]?.status).toBe("UNKNOWN");
-
-    // Recover via query — do NOT re-create.
-    const recovered = await recoverUnknownSupplierOrder(ctx.db, {
-      supplierOrderId: first.supplierOrderId,
-      queryKey: first.queryKey,
-      expectedSku: f.externalSku,
-      deliveryType: "CREDENTIAL",
-      durationCode: "P1M",
-      region: "VN",
-      correlationId: "sup-recover",
-      port,
-      vault,
+    expect(result).toEqual({
+      ok: true,
+      kind: "UNKNOWN",
+      supplierOrderId,
+      queryKey: idempotencyKey,
     });
-    expect(recovered.ok).toBe(true);
-    if (!recovered.ok) return;
-    expect(recovered.kind).toBe("FULFILLED");
-
-    const after = await sql<{ status: string }>`
-      select status from supplier_order where id = ${first.supplierOrderId}
-    `.execute(ctx.db);
-    expect(after.rows[0]?.status).toBe("FULFILLED");
-
-    // Still exactly one supplier_order row.
-    const count = await sql<{ count: string }>`
-      select count(*)::text as count from supplier_order where order_id = ${f.orderId}
-    `.execute(ctx.db);
-    expect(Number(count.rows[0]?.count)).toBe(1);
   });
 
   it("a rejected supplier response does not create an asset", async () => {

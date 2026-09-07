@@ -7,6 +7,10 @@ import {
   expireOverdueOrders,
 } from "../../src/modules/commerce/buy-now.js";
 import {
+  releaseTypedStockForOrder,
+  reserveTypedStockForOrder,
+} from "../../src/modules/digital-goods/repository.js";
+import {
   dockerAvailable,
   startPostgresContainer,
   type PgTestContext,
@@ -166,5 +170,116 @@ describe.skipIf(!hasDocker)("reservation release (T155)", () => {
       select status from "order" where id = ${first.order.id}
     `.execute(ctx.db);
     expect(orderStatus.rows[0]?.status).toBe("EXPIRED");
+  });
+
+  it("quantity stock reservation replay stays bound to the same live reserve and never resurrects a released hold", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const orderId = newId();
+    const customerId = newId();
+    const slug = categoryId.slice(-8);
+
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'C', ${slug}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'P', ${slug}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
+         stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
+      values
+        (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', 150000, 'P1M', 'CREDENTIAL', 30,
+         'LOCAL_ONLY', 'RES-1', true, 1, 'QUANTITY_STOCK')
+    `.execute(ctx.db);
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`insert into "order" (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type, status, paid_at) values (${orderId}, ${"ORD-" + orderId}, ${customerId}, ${variantId}, 'P', 'V', 150000, 'P1M', 'CREDENTIAL', 'PAID', now())`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into variant_quantity_stock (variant_id, available_quantity)
+      values (${variantId}, 1)
+    `.execute(ctx.db);
+
+    const first = await reserveTypedStockForOrder(ctx.db, {
+      variantId,
+      orderId,
+      fulfillmentType: "QUANTITY_STOCK",
+      reserveUntil: new Date(Date.now() + 15 * 60 * 1000),
+      quantity: 1,
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const replay = await reserveTypedStockForOrder(ctx.db, {
+      variantId,
+      orderId,
+      fulfillmentType: "QUANTITY_STOCK",
+      reserveUntil: new Date(Date.now() + 15 * 60 * 1000),
+      quantity: 1,
+    });
+    expect(replay).toEqual(first);
+
+    await releaseTypedStockForOrder(ctx.db, orderId);
+
+    const afterRelease = await reserveTypedStockForOrder(ctx.db, {
+      variantId,
+      orderId,
+      fulfillmentType: "QUANTITY_STOCK",
+      reserveUntil: new Date(Date.now() + 15 * 60 * 1000),
+      quantity: 1,
+    });
+    expect(afterRelease.ok).toBe(false);
+    if (afterRelease.ok) return;
+    expect(afterRelease.reason).toBe("NO_STOCK");
+  });
+
+  it("unlimited service reservation requires an active service definition", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const slug = categoryId.slice(-8);
+
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'C', ${slug}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'P', ${slug}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
+         stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
+      values
+        (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', 150000, 'P1M', 'CREDENTIAL', 30,
+         'LOCAL_ONLY', 'RES-1', true, 1, 'UNLIMITED_SERVICE')
+    `.execute(ctx.db);
+
+    const missing = await reserveTypedStockForOrder(ctx.db, {
+      variantId,
+      orderId: newId(),
+      fulfillmentType: "UNLIMITED_SERVICE",
+      reserveUntil: new Date(Date.now() + 15 * 60 * 1000),
+    });
+    expect(missing.ok).toBe(false);
+    if (missing.ok) return;
+    expect(missing.reason).toBe("NO_STOCK");
+
+    await sql`
+      insert into variant_service_fulfillment (variant_id, fulfillment_type, instructions, is_active)
+      values (${variantId}, 'UNLIMITED_SERVICE', 'Always available', true)
+    `.execute(ctx.db);
+
+    const present = await reserveTypedStockForOrder(ctx.db, {
+      variantId,
+      orderId: newId(),
+      fulfillmentType: "UNLIMITED_SERVICE",
+      reserveUntil: new Date(Date.now() + 15 * 60 * 1000),
+    });
+    expect(present).toEqual({ ok: true, kind: "UNLIMITED" });
   });
 });

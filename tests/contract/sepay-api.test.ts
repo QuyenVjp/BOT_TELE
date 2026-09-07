@@ -65,6 +65,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
     const url = new URL(String(request));
     expect(url.origin + url.pathname).toBe("https://userapi.sepay.vn/v2/transactions");
     expect(url.searchParams.get("per_page")).toBe("1");
+    expect(url.searchParams.get("transaction_date_sort")).toBe("asc");
     expect(url.searchParams.get("timestamp_format")).toBe("iso8601");
     expect(new Headers(init?.headers).get("authorization")).toBe(
       `Bearer ${API_CREDENTIAL_FIXTURE}`,
@@ -93,7 +94,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
     expect(String(error)).not.toContain(API_CREDENTIAL_FIXTURE);
   });
 
-  it("supports official pagination and since_id cursors without changing the evidence namespace", async () => {
+  it("supports official pagination and UUID since_id cursors without changing the evidence namespace", async () => {
     const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
       new Response(
         JSON.stringify({
@@ -111,12 +112,17 @@ describe("official SePay API v2 reconciliation adapter", () => {
       token: API_CREDENTIAL_FIXTURE,
       fetchImpl,
     });
-    await port.listTransactions(1, 2, 100, { page: 3, sinceId: "api:cursor-1" });
+    const sinceId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    await port.listTransactions(1, 2, 100, { page: 3, sinceId });
     const [request] = fetchImpl.mock.calls[0]!;
     const url = new URL(String(request));
     expect(url.searchParams.get("page")).toBe("3");
     expect(url.searchParams.get("per_page")).toBe("100");
-    expect(url.searchParams.get("since_id")).toBe("api:cursor-1");
+    expect(url.searchParams.get("transaction_date_sort")).toBe("asc");
+    expect(url.searchParams.get("since_id")).toBe(sinceId);
+    await expect(port.listTransactions(1, 2, 100, { sinceId: "api:cursor-1" })).rejects.toThrow(
+      "UUID",
+    );
   });
 
   it("normalizes provider timeout as a redacted retryable API error", async () => {
