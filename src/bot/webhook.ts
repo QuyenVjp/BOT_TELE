@@ -97,11 +97,25 @@ export function createInMemoryUpdateInbox(): UpdateInbox {
     },
   };
 }
+export type RootProductDraftTextStep =
+  | "name"
+  | "sku"
+  | "variantName"
+  | "price"
+  | "inventoryFields"
+  | "threshold"
+  | "initialQuantity";
+
+export interface RootProductDraftTextIngress {
+  adminTelegramUserId: number;
+  activeStep(telegramUserId: string): Promise<RootProductDraftTextStep | null>;
+}
 
 export interface TelegramWebhookOptions {
   path: string;
   secretToken: string;
   inbox: UpdateInbox;
+  rootProductDraftText?: RootProductDraftTextIngress;
   metrics?: LatencyMetrics;
 }
 
@@ -120,7 +134,7 @@ export async function registerTelegramWebhook(
 
     const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body);
     const update = coerceUpdate(rawBody);
-    const normalized = update ? normalizeTelegramUpdate(update) : null;
+    const normalized = update ? await normalizeTelegramUpdate(update, options.rootProductDraftText) : null;
     if (!update || !normalized) {
       return reply.code(200).send({ ok: true });
     }
@@ -179,7 +193,10 @@ function coerceUpdate(body: unknown): TelegramUpdate | undefined {
   return undefined;
 }
 
-function normalizeTelegramUpdate(update: TelegramUpdate): TelegramCommandEnvelope | null {
+async function normalizeTelegramUpdate(
+  update: TelegramUpdate,
+  rootProductDraftText?: RootProductDraftTextIngress,
+): Promise<TelegramCommandEnvelope | null> {
   if (
     !Number.isSafeInteger(update.update_id) ||
     update.update_id < 0 ||
@@ -203,7 +220,11 @@ function normalizeTelegramUpdate(update: TelegramUpdate): TelegramCommandEnvelop
   const searchQuery = commandInfo
     ? normalizeCommandArgument(command, text.slice(commandInfo.rawLength))
     : null;
-  const messageText = normalizeSafeMessageText(text, command);
+  const normalizedMessageText = await normalizeSafeMessageText(text, command, {
+    actorId,
+    chatType: chat?.type ?? "private",
+    ...(rootProductDraftText ? { rootProductDraftText } : {}),
+  });
   const action = classifyAction(callbackData, command);
   const actorUsername = normalizeUsernameMetadata(actor.username);
   const contact = update.message?.contact;
@@ -241,7 +262,8 @@ function normalizeTelegramUpdate(update: TelegramUpdate): TelegramCommandEnvelop
     action,
     ...(callbackData ? { callbackData } : {}),
     ...(command ? { command } : {}),
-    ...(messageText ? { messageText } : {}),
+    ...(normalizedMessageText?.text ? { messageText: normalizedMessageText.text } : {}),
+    ...(normalizedMessageText?.rootProductDraftText ? { rootProductDraftText: true as const } : {}),
     ...(actor.first_name ? { firstName: actor.first_name } : {}),
     ...(actor.last_name ? { lastName: actor.last_name } : {}),
     ...(actor.language_code ? { languageCode: actor.language_code } : {}),
@@ -339,8 +361,60 @@ function normalizeCommandArgument(command: string | undefined, value: string): s
   return normalized.length > 0 ? normalized : null;
 }
 
-function normalizeSafeMessageText(text: string, command: string | undefined): string | null {
+async function normalizeSafeMessageText(
+  text: string,
+  command: string | undefined,
+  context: {
+    actorId: number;
+    chatType: string;
+    rootProductDraftText?: RootProductDraftTextIngress;
+  },
+): Promise<{ text: string; rootProductDraftText?: true } | null> {
   if (!text || command) return null;
   const normalized = text.normalize("NFC").trim();
-  return SAFE_MESSAGE_TEXT[normalized] ? normalized : null;
+  if (SAFE_MESSAGE_TEXT[normalized]) return { text: normalized };
+  if (
+    context.rootProductDraftText &&
+    context.chatType === "private" &&
+    context.actorId === context.rootProductDraftText.adminTelegramUserId
+  ) {
+    const step = await context.rootProductDraftText.activeStep(String(context.actorId));
+    const productText = step ? normalizeRootProductDraftText(normalized, step) : null;
+    if (productText) return { text: productText, rootProductDraftText: true };
+  }
+  return /^(?:0|[1-9][0-9]*|[1-9][0-9]{0,2}([.,])[0-9]{3}(?:\1[0-9]{3})*)$/u.test(normalized)
+    ? { text: normalized }
+    : null;
+}
+
+function normalizeRootProductDraftText(
+  normalized: string,
+  step: RootProductDraftTextStep,
+): string | null {
+  switch (step) {
+    case "name":
+    case "variantName":
+      return Buffer.byteLength(normalized, "utf8") <= 200 && !/[\p{Cc}\p{Cf}\0]/u.test(normalized)
+        ? normalized
+        : null;
+    case "sku":
+      return /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(normalized) ? normalized : null;
+    case "inventoryFields": {
+      const fields = normalized.split(",").map((part) => part.trim().toLowerCase());
+      const allowed: Record<string, true> = {
+        username: true,
+        password: true,
+        email: true,
+        profile_url: true,
+        note: true,
+      };
+      return fields.length > 0 && fields.every((field) => allowed[field])
+        ? fields.join(",")
+        : null;
+    }
+    case "price":
+    case "threshold":
+    case "initialQuantity":
+      return /^\d{1,15}$/u.test(normalized) ? normalized : null;
+  }
 }

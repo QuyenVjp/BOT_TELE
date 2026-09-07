@@ -216,20 +216,30 @@ export async function provisionFromSupplier(
   if (!order) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
-  if (order.status !== "PAID" && order.status !== "PROCESSING") {
+
+  if (order.status !== "PAID" && order.status !== "PROCESSING" && order.status !== "COMPLETED") {
     return { ok: false, code: "NOT_PAID", message: "Đơn hàng chưa được thanh toán." };
   }
 
   const idempotencyKey = input.idempotencyKey ?? `${input.orderId}:${input.supplierSkuId}`;
-
   const existing = await findSupplierOrderByIdempotency(db, input.supplierId, idempotencyKey);
+  if (existing && existing.order_id !== input.orderId) {
+    return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
+  }
   if (existing) {
     const known = provisionResultFromExisting(
       existing,
       await findAssetBySupplierOrder(db, existing.id),
     );
     if (known) return known;
+  }
 
+  const canReuseCompletedReplay = order.status === "COMPLETED" && existing !== null;
+  if (order.status !== "PAID" && order.status !== "PROCESSING" && !canReuseCompletedReplay) {
+    return { ok: false, code: "NOT_PAID", message: "Đơn hàng chưa được thanh toán." };
+  }
+
+  if (existing) {
     if (existing.status === "UNKNOWN" || existing.status === "PENDING") {
       const recovered = await recoverUnknownSupplierOrder(db, {
         supplierOrderId: existing.id,

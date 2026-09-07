@@ -2,7 +2,11 @@ import Fastify, { type FastifyInstance } from "fastify";
 import type { Db } from "./infrastructure/db/transaction.js";
 import { pingDb } from "./infrastructure/db/client.js";
 import type { Vault } from "./infrastructure/vault/port.js";
-import { registerTelegramWebhook, type UpdateInbox } from "./bot/webhook.js";
+import {
+  registerTelegramWebhook,
+  type RootProductDraftTextIngress,
+  type UpdateInbox,
+} from "./bot/webhook.js";
 import { registerDeliveryRoute } from "./modules/digital-goods/delivery-route.js";
 import type { DeliverySessionCodecConfig } from "./modules/digital-goods/delivery-session.js";
 import { registerMiniApp } from "./modules/miniapp/index.js";
@@ -42,6 +46,7 @@ export interface CreateAppDeps {
     secretToken: string;
     /** Required: callers must choose a durable or explicit test inbox. */
     inbox: UpdateInbox;
+    rootProductDraftText?: RootProductDraftTextIngress;
   };
   sepay: {
     path: string;
@@ -95,6 +100,9 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
     path: deps.telegram.path,
     secretToken: deps.telegram.secretToken,
     inbox: deps.telegram.inbox,
+    ...(deps.telegram.rootProductDraftText === undefined
+      ? {}
+      : { rootProductDraftText: deps.telegram.rootProductDraftText }),
   });
 
   // --- SePay webhook (raw body preserved) ---------------------------------

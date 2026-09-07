@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { chmod, mkdir, open, realpath, unlink } from "node:fs/promises";
+import { chmod, mkdir, open, readFile, realpath, unlink } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { basename, resolve, sep } from "node:path";
 import { Readable, Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
@@ -240,6 +241,22 @@ export function createTelegramFileDownloader(botToken: string): TelegramFileDown
     },
   };
 }
+export function createTelegramTextFileDownloader(botToken: string): {
+  downloadText(fileId: string): Promise<string>;
+} {
+  const downloader = createTelegramFileDownloader(botToken);
+  return {
+    async downloadText(fileId) {
+      const file = await downloader.download({ fileId, root: tmpdir(), maxBytes: 64_000n });
+      try {
+        return await readFile(file.storageReference, "utf8");
+      } finally {
+        await unlink(file.storageReference).catch(() => undefined);
+      }
+    },
+  };
+}
+
 
 async function authorize(
   db: Db,

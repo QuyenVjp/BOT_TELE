@@ -7,6 +7,7 @@ import { isVerifiedSePayEvidence, type VerifiedSePayEvidence } from "../payments
 import { presentPayment, type PaymentPresentation } from "../payments/vietqr.js";
 import { newId } from "../../shared/ids/index.js";
 import { creditWalletLedgerEntry, ensureWalletAccount } from "./ledger.js";
+import type { WalletAccount } from "./ledger.js";
 
 export type WalletTopupStatus =
   "CREATED" | "PRESENTED" | "SUCCEEDED" | "EXPIRED" | "FAILED" | "NEEDS_REVIEW";
@@ -21,6 +22,129 @@ export interface WalletTopupIntent {
   status: WalletTopupStatus;
   expiresAt: Date;
   version: number;
+}
+
+export interface WalletTopupBounds {
+  minVnd: number;
+  maxVnd: number;
+}
+
+export const WALLET_TOPUP_PRESET_AMOUNTS = [50_000, 100_000, 200_000, 500_000, 1_000_000] as const;
+
+export type WalletTopupAmountParseResult =
+  | { ok: true; amountVnd: bigint }
+  | { ok: false; error: string };
+
+export function parseWalletTopupAmount(
+  input: string,
+  bounds: WalletTopupBounds,
+): WalletTopupAmountParseResult {
+  const raw = input.trim();
+  const match = raw.match(/^(?:0|[1-9][0-9]*|[1-9][0-9]{0,2}([.,])[0-9]{3}(?:\1[0-9]{3})*)$/u);
+  if (!match) return { ok: false, error: "Số tiền phải là số nguyên VND." };
+  const normalized = raw.replace(/[.,]/g, "");
+  const max = String(bounds.maxVnd);
+  if (normalized.length > max.length || (normalized.length === max.length && normalized > max)) {
+    return { ok: false, error: `Số tiền tối đa là ${formatVnd(bounds.maxVnd)}.` };
+  }
+  const amount = BigInt(normalized);
+  if (amount < BigInt(bounds.minVnd)) {
+    return { ok: false, error: `Số tiền tối thiểu là ${formatVnd(bounds.minVnd)}.` };
+  }
+  return { ok: true, amountVnd: amount };
+}
+
+export function formatVnd(amountVnd: number | bigint): string {
+  return `${amountVnd.toLocaleString("vi-VN")} ₫`;
+}
+
+export function renderWalletTopupPicker(account: WalletAccount, bounds: WalletTopupBounds): string {
+  return [
+    "Nạp ví",
+    "",
+    `Số dư hiện tại: ${formatVnd(account.balanceVnd)}`,
+    `Chọn số tiền nạp (${formatVnd(bounds.minVnd)} – ${formatVnd(bounds.maxVnd)}).`,
+  ].join("\n");
+}
+
+export function renderWalletTopupConfirmation(input: {
+  selectedAmountVnd: bigint;
+  currentBalanceVnd: bigint;
+}): string {
+  return [
+    "Xác nhận nạp ví",
+    "",
+    `Số tiền nạp: ${formatVnd(input.selectedAmountVnd)}`,
+    `Số dư hiện tại: ${formatVnd(input.currentBalanceVnd)}`,
+    `Số dư sau nạp: ${formatVnd(input.currentBalanceVnd + input.selectedAmountVnd)}`,
+    "",
+    "Chỉ bấm Tạo mã VietQR khi bạn muốn tạo giao dịch chuyển khoản.",
+  ].join("\n");
+}
+
+export async function saveWalletTopupSelection(input: {
+  db: Executor;
+  customerId: string;
+  amountVnd: bigint;
+  ttlSeconds?: number;
+}): Promise<void> {
+  await sql`
+    insert into wallet_topup_selection (customer_id, amount_vnd, expires_at, updated_at)
+    values (${input.customerId}, ${input.amountVnd.toString()}, now() + make_interval(secs => ${input.ttlSeconds ?? 900}), now())
+    on conflict (customer_id) do update set
+      amount_vnd = excluded.amount_vnd,
+      expires_at = excluded.expires_at,
+      updated_at = now()
+  `.execute(input.db);
+}
+
+export async function loadWalletTopupSelection(
+  db: Executor,
+  customerId: string,
+): Promise<bigint | null> {
+  const result = await sql<{ amount_vnd: string }>`
+    select amount_vnd from wallet_topup_selection
+    where customer_id = ${customerId} and expires_at > now()
+    limit 1
+  `.execute(db);
+  return result.rows[0] ? BigInt(result.rows[0].amount_vnd) : null;
+}
+
+export async function clearWalletTopupSelection(db: Executor, customerId: string): Promise<void> {
+  await sql`delete from wallet_topup_selection where customer_id = ${customerId}`.execute(db);
+}
+
+export async function saveWalletTopupAwaitingAmount(input: {
+  db: Executor;
+  customerId: string;
+  ttlSeconds?: number;
+}): Promise<void> {
+  await saveWalletTopupSelection({ ...input, amountVnd: 0n });
+}
+
+export async function isAwaitingWalletTopupAmount(
+  db: Executor,
+  customerId: string,
+): Promise<boolean> {
+  const result = await sql<{ exists: boolean }>`
+    select exists(
+      select 1 from wallet_topup_selection
+      where customer_id = ${customerId} and amount_vnd = 0 and expires_at > now()
+    ) as exists
+  `.execute(db);
+  return result.rows[0]?.exists ?? false;
+}
+
+export async function cancelLiveWalletTopup(input: {
+  db: Db;
+  customerId: string;
+}): Promise<{ cancelled: boolean }> {
+  const result = await sql`
+    update wallet_topup_intent
+    set status = 'EXPIRED', version = version + 1
+    where customer_id = ${input.customerId} and status in ('CREATED','PRESENTED')
+  `.execute(input.db);
+  return { cancelled: Number(result.numAffectedRows ?? 0) > 0 };
 }
 
 export type TopupMatchDecision =
@@ -87,7 +211,16 @@ export async function presentWalletTopup(input: {
         and expires_at <= now()
     `.execute(trx);
     const existing = await findLiveTopupByCustomer(trx, input.customerId);
-    if (existing) return { ok: true, intentId: existing.id, presentation: render(input, existing) };
+    if (existing && existing.amountVnd === input.amountVnd) {
+      await clearWalletTopupSelection(trx, input.customerId);
+      return { ok: true, intentId: existing.id, presentation: render(input, existing) };
+    }
+    if (existing) {
+      await sql`
+        update wallet_topup_intent set status = 'EXPIRED', version = version + 1
+        where id = ${existing.id} and version = ${existing.version}
+      `.execute(trx);
+    }
 
     const id = newId();
     const expiresAt = new Date(Date.now() + (input.ttlSeconds ?? 900) * 1000);
@@ -122,6 +255,7 @@ export async function presentWalletTopup(input: {
         correlationId: input.correlationId,
       },
     });
+    await clearWalletTopupSelection(trx, input.customerId);
     return { ok: true, intentId: id, presentation: render(input, intent) };
   });
 }
@@ -207,6 +341,19 @@ async function findLiveTopupByCustomer(
   const result = await sql<TopupRow>`
     select * from wallet_topup_intent
     where customer_id = ${customerId} and status in ('CREATED','PRESENTED')
+    order by created_at desc
+    limit 1
+  `.execute(exec);
+  return result.rows[0] ? mapTopup(result.rows[0]) : null;
+}
+
+export async function loadLatestWalletTopup(
+  exec: Executor,
+  customerId: string,
+): Promise<WalletTopupIntent | null> {
+  const result = await sql<TopupRow>`
+    select * from wallet_topup_intent
+    where customer_id = ${customerId}
     order by created_at desc
     limit 1
   `.execute(exec);

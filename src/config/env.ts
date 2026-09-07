@@ -90,6 +90,8 @@ export const envSchema = z.object({
     .default("compact"),
 
   PAYMENT_INTENT_TTL_SECONDS: z.coerce.number().int().positive().default(900),
+  WALLET_TOPUP_MIN_VND: z.coerce.number().int().positive().default(50_000),
+  WALLET_TOPUP_MAX_VND: z.coerce.number().int().positive().default(1_000_000),
   DELIVERY_BUNDLE_TTL_SECONDS: z.coerce.number().int().positive().default(86400),
   PRIVATE_ARTIFACT_ROOT: z.string().default(""),
 

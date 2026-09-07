@@ -176,4 +176,56 @@ describe("supplier fulfillment from OrderPaid", () => {
     `.execute(ctx.db);
     expect(counts.rows[0]).toEqual({ assets: 1, orders: 1, bundles: 1 });
   });
+  it("replays a completed supplier order without a second supplier create or delivery bundle", async () => {
+    const f = await seedSupplierPaidOrder();
+    const eventId = await enqueueOrderPaid(f.orderId, "supplier-completed-replay");
+    const vault = createInMemoryVault();
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    let createCount = 0;
+    const supplier = {
+      ...sandbox,
+      async createOrder(input: Parameters<typeof sandbox.createOrder>[0]) {
+        createCount += 1;
+        return sandbox.createOrder(input);
+      },
+    };
+    const handler = createFulfillmentOutboxHandler({
+      db: ctx.db,
+      vault,
+      supplier,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+    });
+
+    await drainOutboxOnce(ctx.db, { batchSize: 10, maxAttempts: 5, handler });
+    await sql`update "order" set status = 'COMPLETED' where id = ${f.orderId}`.execute(ctx.db);
+
+    const event = await sql<{
+      published: boolean;
+    }>`select (published_at is not null) as published from outbox_event where id = ${eventId}`.execute(
+      ctx.db,
+    );
+    expect(event.rows[0]?.published).toBe(true);
+
+    await handler({
+      id: eventId,
+      aggregateType: "Order",
+      aggregateId: f.orderId,
+      aggregateVersion: 2,
+      eventType: "OrderPaid",
+      payloadRedacted: { orderId: f.orderId, correlationId: "supplier-completed-replay" },
+      attemptCount: 2,
+      claimedBy: "completed-replay-fixture",
+      generation: 2,
+    });
+
+    const counts = await sql<{ assets: number; orders: number; bundles: number }>`
+      select
+        (select count(*)::int from digital_asset where reserved_order_id = ${f.orderId}) as assets,
+        (select count(*)::int from supplier_order where order_id = ${f.orderId}) as orders,
+        (select count(*)::int from delivery_bundle where order_id = ${f.orderId}) as bundles
+    `.execute(ctx.db);
+    expect(counts.rows[0]).toEqual({ assets: 1, orders: 1, bundles: 1 });
+    expect(createCount).toBe(1);
+  });
 });

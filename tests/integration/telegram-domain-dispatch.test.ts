@@ -35,6 +35,10 @@ function setup() {
     text: "dashboard",
     buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
   });
+  const adminAudit = vi.fn().mockResolvedValue({
+    text: "audit",
+    buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
+  });
   const adminProducts = vi.fn().mockResolvedValue({
     text: "products",
     buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
@@ -67,6 +71,7 @@ function setup() {
   });
   const send = vi.fn().mockResolvedValue(undefined);
   const walletTopup = vi.fn().mockResolvedValue({ text: "wallet topup", buttons: [] });
+  const walletTopupText = vi.fn().mockResolvedValue(null);
   const walletPay = vi.fn().mockResolvedValue({ text: "wallet pay", buttons: [] });
   const presentAdminCustomerDetail = vi
     .fn()
@@ -158,6 +163,7 @@ function setup() {
     history: { list: vi.fn(), detail: vi.fn() },
     support: { reasonMenu: supportReasonMenu, open: vi.fn(), list: vi.fn() },
     walletTopup,
+    walletTopupText,
     walletPay,
     notification: {
       settings: notificationSettings,
@@ -176,6 +182,7 @@ function setup() {
       }),
       mainMenu: adminMainMenu,
       dashboard: adminDashboard,
+      audit: adminAudit,
       products: adminProducts,
       productDetail: adminProductDetail,
       variantCreatePrompt: adminVariantCreatePrompt,
@@ -234,6 +241,7 @@ function setup() {
     mainMenu,
     adminMainMenu,
     adminDashboard,
+    adminAudit,
     adminProducts,
     adminProductDetail,
     adminInventory,
@@ -241,6 +249,7 @@ function setup() {
     workflowCancel,
     refresh,
     walletTopup,
+    walletTopupText,
     walletPay,
     presentAdminCustomerDetail,
     sendAdminCustomerMessage,
@@ -311,6 +320,84 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const sent = send.mock.calls[0]![0];
     expect(sent.message.buttons[0]![0]!.callbackData).toMatch(/^cb:/);
     expect(sent.message.buttons[0]![0]!.callbackData).not.toContain(order.orderNumber);
+  });
+
+  it("routes a 200k wallet preset selection", async () => {
+    const { dispatcher, walletTopup, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "10",
+      action: "WALLET",
+      callbackData: "wallet:topup:amount:200000",
+    });
+
+    expect(walletTopup).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: USER }),
+      { kind: "SELECT", amountVnd: 200_000n },
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes custom wallet topup text before admin text handlers", async () => {
+    const { dispatcher, walletTopupText, workflowMessageText, send } = setup();
+    walletTopupText.mockResolvedValueOnce({ text: "confirm 375000", buttons: [] });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "10",
+      action: "UNKNOWN",
+      messageText: "375.000",
+    });
+
+    expect(walletTopupText).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: USER }),
+      "375.000",
+    );
+    expect(workflowMessageText).not.toHaveBeenCalled();
+    expect(send.mock.calls[0]![0].message.text).toBe("confirm 375000");
+  });
+
+  it("routes wallet topup status refresh without confirming again", async () => {
+    const { dispatcher, walletTopup, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "10",
+      action: "WALLET",
+      callbackData: "wallet:topup:status",
+    });
+
+    expect(walletTopup).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: USER }),
+      { kind: "STATUS" },
+    );
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes wallet topup cancellation", async () => {
+    const { dispatcher, walletTopup, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "10",
+      action: "WALLET",
+      callbackData: "wallet:topup:cancel",
+    });
+
+    expect(walletTopup).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: USER }),
+      { kind: "CANCEL" },
+    );
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it("routes /start to the persistent customer home once even when admin workflow exists", async () => {
@@ -758,6 +845,26 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(send).toHaveBeenCalledTimes(1);
   });
 
+  it("routes inventory history shortcut to the audit handler", async () => {
+    const { dispatcher, adminAudit, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "inventory-audit",
+      action: "ADMIN",
+      callbackData: "admin:audit",
+    });
+
+    expect(adminAudit).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      correlationId: "telegram:inventory-audit",
+    });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("routes selected inventory template callbacks", async () => {
     const { dispatcher, importTemplate, send } = setup();
 
@@ -829,6 +936,31 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     });
     expect(workflowMessageText).toHaveBeenCalledTimes(1);
     expect(mainMenu).not.toHaveBeenCalled();
+  });
+
+  it("routes active product workflow text before stale admin customer search", async () => {
+    const { dispatcher, workflowMessageText, adminCustomerText, send } = setup();
+    workflowMessageText.mockResolvedValueOnce({ text: "draft advanced", buttons: [] });
+    adminCustomerText.mockResolvedValueOnce({ text: "customer search", buttons: [] });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "draft-before-customer-search",
+      action: "UNKNOWN",
+      messageText: "CANARY P0 Inventory - KHONG BAN",
+      rootProductDraftText: true,
+    });
+
+    expect(workflowMessageText).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      text: "CANARY P0 Inventory - KHONG BAN",
+      chatType: "private",
+      correlationId: "telegram:draft-before-customer-search",
+    });
+    expect(adminCustomerText).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
   });
   it("routes inventory import text before the generic workflow when present", async () => {
     const base = setup();
@@ -1263,7 +1395,10 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       command: "/support",
     });
 
-    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }));
+    expect(walletTopup).toHaveBeenCalledWith(
+      expect.objectContaining({ telegramUserId: USER }),
+      { kind: "PICK" },
+    );
     expect(walletPay).toHaveBeenCalledWith(
       expect.objectContaining({ telegramUserId: USER }),
       "ORD-1",

@@ -22,6 +22,8 @@ import type {
   presentAdminOrderDetail,
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
+import type { PresentedMessage } from "./bot/presenters/catalog.js";
+import type { WalletAccount } from "./modules/wallet/ledger.js";
 import type { Vault } from "./infrastructure/vault/port.js";
 import { pruneTelegramUsernameData } from "./infrastructure/inbox/telegram.js";
 import type { SePayReconciliationPort } from "./modules/payments/reconciliation.js";
@@ -78,6 +80,7 @@ import {
   resolveAdminOrderState,
   resolveOrderCustomerForRelay,
 } from "./modules/admin/order-operations.js";
+import { listAuditEvents } from "./modules/identity/audit.js";
 
 export function marketingBroadcastClassForAudience(
   audience: BroadcastAudience,
@@ -678,8 +681,22 @@ async function bootstrap(): Promise<void> {
   const { createSupportCallbacks } = await import("./bot/callbacks/support.js");
   const { presentPaymentScreen } = await import("./bot/presenters/payment.js");
   const { createWalletLedgerService } = await import("./modules/wallet/ledger.js");
-  const { presentWalletTopup, applyWalletTopupEvidence } =
-    await import("./modules/wallet/topup.js");
+  const {
+    WALLET_TOPUP_PRESET_AMOUNTS,
+    applyWalletTopupEvidence,
+    cancelLiveWalletTopup,
+    clearWalletTopupSelection,
+    formatVnd,
+    isAwaitingWalletTopupAmount,
+    loadLatestWalletTopup,
+    loadWalletTopupSelection,
+    parseWalletTopupAmount,
+    presentWalletTopup,
+    renderWalletTopupConfirmation,
+    renderWalletTopupPicker,
+    saveWalletTopupAwaitingAmount,
+    saveWalletTopupSelection,
+  } = await import("./modules/wallet/topup.js");
   const { createWalletPurchaseService } = await import("./modules/wallet/purchase.js");
   const { createTelegramDomainDispatcher } = await import("./bot/callbacks/telegram-dispatch.js");
   const { createGrammyDocumentSender, createGrammyResponder } =
@@ -698,6 +715,7 @@ async function bootstrap(): Promise<void> {
     cancelInventoryImportSession,
     confirmInventoryImportSession,
     getInventoryImportSession,
+    stageInventoryImportDocument,
     stageInventoryImportInput,
     startInventoryImportSession,
   } = await import("./modules/digital-goods/inventory-import-session.js");
@@ -705,6 +723,7 @@ async function bootstrap(): Promise<void> {
     cancelFileArtifactImportSession,
     confirmFileArtifactImportSession,
     createTelegramFileDownloader,
+    createTelegramTextFileDownloader,
     getFileArtifactImportSession,
     stageFileArtifactDocument,
     startFileArtifactImportSession,
@@ -750,6 +769,7 @@ async function bootstrap(): Promise<void> {
     presentFileArtifactImportDone,
     presentFileArtifactImportPreview,
     presentProductFulfillmentTypeChoices,
+    presentProductCategoryChoices,
     presentProductDraftPreview,
     presentAdminVariantDraft,
     presentAdminVariantMutationDone,
@@ -761,6 +781,7 @@ async function bootstrap(): Promise<void> {
     presentAdminOrderDetail,
     presentAdminOrders: presentAdminOrdersPage,
     presentAdminOrderSearchPrompt,
+    presentAuditList,
   } = await import("./bot/presenters/admin.js");
   const { presentAdminManualTaskDetail, presentAdminManualTasks } =
     await import("./bot/presenters/manual-fulfillment.js");
@@ -879,6 +900,63 @@ async function bootstrap(): Promise<void> {
     bankAlias: config.VIETQR_BANK_ALIAS,
     template: config.VIETQR_TEMPLATE,
   };
+  const walletTopupBounds = {
+    minVnd: config.WALLET_TOPUP_MIN_VND,
+    maxVnd: config.WALLET_TOPUP_MAX_VND,
+  };
+  function walletTopupPickerMessage(account: WalletAccount): PresentedMessage {
+    return {
+      text: renderWalletTopupPicker(account, walletTopupBounds),
+      buttons: [
+        ...WALLET_TOPUP_PRESET_AMOUNTS.filter(
+          (amount) => amount >= walletTopupBounds.minVnd && amount <= walletTopupBounds.maxVnd,
+        ).map((amount) => [
+          { text: formatVnd(amount), callbackData: `wallet:topup:amount:${amount}` },
+        ]),
+        [{ text: "Nhập số khác", callbackData: "wallet:topup:custom" }],
+        [{ text: "Ví", callbackData: "wallet:account" }],
+        [{ text: "Menu chính", callbackData: "menu:main" }],
+      ],
+    };
+  }
+
+  function walletTopupCustomPrompt(error?: string): PresentedMessage {
+    return {
+      text: [
+        ...(error ? [error, ""] : []),
+        "Nhập số tiền muốn nạp.",
+        `Cho phép từ ${formatVnd(walletTopupBounds.minVnd)} đến ${formatVnd(walletTopupBounds.maxVnd)}.`,
+        "Ví dụ: 50000, 50.000 hoặc 50,000.",
+      ].join("\n"),
+      buttons: [[{ text: "Huỷ", callbackData: "wallet:topup:cancel" }]],
+    };
+  }
+
+  function walletTopupConfirmMessage(amountVnd: bigint, balanceVnd: bigint): PresentedMessage {
+    return {
+      text: renderWalletTopupConfirmation({
+        selectedAmountVnd: amountVnd,
+        currentBalanceVnd: balanceVnd,
+      }),
+      buttons: [
+        [{ text: "Tạo mã VietQR", callbackData: "wallet:topup:confirm" }],
+        [{ text: "Đổi số tiền", callbackData: "wallet:topup:change" }],
+        [{ text: "Huỷ", callbackData: "wallet:topup:cancel" }],
+      ],
+    };
+  }
+
+  function walletTopupPaymentScreen(message: PresentedMessage): PresentedMessage {
+    return {
+      ...message,
+      buttons: [
+        [{ text: "Kiểm tra nạp ví", callbackData: "wallet:topup:status" }],
+        [{ text: "Đổi số tiền", callbackData: "wallet:topup:change" }],
+        [{ text: "Huỷ", callbackData: "wallet:topup:cancel" }],
+        ...message.buttons,
+      ],
+    };
+  }
   const support = createSupportCallbacks({ db: dbHandle.db });
   const rootIdentity =
     config.ADMIN_TELEGRAM_USER_ID > 0
@@ -1019,33 +1097,113 @@ async function bootstrap(): Promise<void> {
           buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
         };
       return {
-        text: `Ví của bạn\n\nSố dư: ${account.balanceVnd.toLocaleString("vi-VN")} ₫`,
+        text: `Ví của bạn\n\nSố dư: ${formatVnd(account.balanceVnd)}`,
         buttons: [
           [{ text: "Nạp ví", callbackData: "wallet:topup" }],
           [{ text: "Menu chính", callbackData: "menu:main" }],
         ],
       };
     },
-    async walletTopup(ctx) {
+    async walletTopup(ctx, action = { kind: "PICK" }) {
       const customerId = await resolveCustomerId(ctx.telegramUserId);
       if (!customerId)
         return {
           text: "Không xác minh được khách hàng.",
           buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
         };
-      const result = await presentWalletTopup({
+      const account = await walletLedger.ensureAccount(customerId);
+      if (!account)
+        return {
+          text: "Không tìm thấy tài khoản khách hàng.",
+          buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
+        };
+      if (action.kind === "CUSTOM") {
+        await saveWalletTopupAwaitingAmount({
+          db: dbHandle.db,
+          customerId,
+          ttlSeconds: config.PAYMENT_INTENT_TTL_SECONDS,
+        });
+        return walletTopupCustomPrompt();
+      }
+      if (action.kind === "SELECT") {
+        const parsed = parseWalletTopupAmount(action.amountVnd.toString(), walletTopupBounds);
+        if (!parsed.ok) return walletTopupPickerMessage(account);
+        await saveWalletTopupSelection({
+          db: dbHandle.db,
+          customerId,
+          amountVnd: parsed.amountVnd,
+          ttlSeconds: config.PAYMENT_INTENT_TTL_SECONDS,
+        });
+        return walletTopupConfirmMessage(parsed.amountVnd, account.balanceVnd);
+      }
+      if (action.kind === "CONFIRM") {
+        const amountVnd = await loadWalletTopupSelection(dbHandle.db, customerId);
+        if (!amountVnd)
+          return walletTopupCustomPrompt("Phiên chọn số tiền đã hết hạn. Nhập lại số tiền muốn nạp.");
+        const result = await presentWalletTopup({
+          db: dbHandle.db,
+          customerId,
+          amountVnd,
+          correlationId: ctx.correlationId,
+          ...merchant,
+        });
+        return result.ok
+          ? walletTopupPaymentScreen(await presentPaymentScreen(result.presentation))
+          : walletTopupPickerMessage(account);
+      }
+      if (action.kind === "STATUS") {
+        const latest = await loadLatestWalletTopup(dbHandle.db, customerId);
+        if (!latest) return walletTopupPickerMessage(account);
+        return {
+          text: [
+            "Trạng thái nạp ví",
+            "",
+            `Số tiền: ${formatVnd(latest.amountVnd)}`,
+            `Nội dung chuyển khoản: ${latest.transferContent}`,
+            `Trạng thái: ${latest.status}`,
+          ].join("\n"),
+          buttons: [
+            [{ text: "Kiểm tra lại", callbackData: "wallet:topup:status" }],
+            [{ text: "Đổi số tiền", callbackData: "wallet:topup:change" }],
+            [{ text: "Huỷ", callbackData: "wallet:topup:cancel" }],
+            [{ text: "Ví", callbackData: "wallet:account" }],
+          ],
+        };
+      }
+      if (action.kind === "CHANGE") {
+        await cancelLiveWalletTopup({ db: dbHandle.db, customerId });
+        await clearWalletTopupSelection(dbHandle.db, customerId);
+        return walletTopupPickerMessage(account);
+      }
+      if (action.kind === "CANCEL") {
+        await cancelLiveWalletTopup({ db: dbHandle.db, customerId });
+        await clearWalletTopupSelection(dbHandle.db, customerId);
+        return {
+          text: "Đã huỷ nạp ví chưa thanh toán.",
+          buttons: [[{ text: "Ví", callbackData: "wallet:account" }], [{ text: "Menu chính", callbackData: "menu:main" }]],
+        };
+      }
+      return walletTopupPickerMessage(account);
+    },
+    async walletTopupText(ctx, text) {
+      const customerId = await resolveCustomerId(ctx.telegramUserId);
+      if (!customerId) return null;
+      if (!(await isAwaitingWalletTopupAmount(dbHandle.db, customerId))) return null;
+      const account = await walletLedger.ensureAccount(customerId);
+      if (!account)
+        return {
+          text: "Không tìm thấy tài khoản khách hàng.",
+          buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
+        };
+      const parsed = parseWalletTopupAmount(text, walletTopupBounds);
+      if (!parsed.ok) return walletTopupCustomPrompt(parsed.error);
+      await saveWalletTopupSelection({
         db: dbHandle.db,
         customerId,
-        amountVnd: 100000n,
-        correlationId: ctx.correlationId,
-        ...merchant,
+        amountVnd: parsed.amountVnd,
+        ttlSeconds: config.PAYMENT_INTENT_TTL_SECONDS,
       });
-      return result.ok
-        ? presentPaymentScreen(result.presentation)
-        : {
-            text: "Không tạo được mã nạp ví. Vui lòng thử lại.",
-            buttons: [[{ text: "Ví", callbackData: "wallet:account" }]],
-          };
+      return walletTopupConfirmMessage(parsed.amountVnd, account.balanceVnd);
     },
     async walletPay(ctx, orderNumber) {
       const customerId = await resolveCustomerId(ctx.telegramUserId);
@@ -1484,6 +1642,28 @@ async function bootstrap(): Promise<void> {
           fulfillmentFailures: row.fulfillment_failures,
         });
       },
+      async audit(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: "admin-inventory",
+          reason: "Admin inventory audit access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        return presentAuditList(
+          await listAuditEvents(dbHandle.db, {
+            targetType: "DigitalAsset",
+            targetId: "manual",
+            limit: 10,
+          }),
+        );
+      },
       async products(input) {
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const gate = await adminCallbacks.handle({
@@ -1917,24 +2097,65 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const result = await sql<{ id: string; name: string; variant_count: number }>`
-          select
-            p.id,
-            p.name_vi as name,
-            count(v.id)::int as variant_count
-          from product p
-          left join product_variant v on v.product_id = p.id
-          where p.is_active
-          group by p.id, p.name_vi
-          order by p.sort_order asc, p.id asc
+        const result = await sql<{
+          id: string;
+          name: string;
+          variant_count: number;
+          in_stock: number;
+          low_stock: number;
+          out_stock: number;
+          active: boolean;
+          total_products: number;
+          total_variants: number;
+          total_in_stock: number;
+          total_low_stock: number;
+          total_out_stock: number;
+        }>`
+          with variant_stock as (
+            select v.id, v.product_id, v.low_stock_threshold, v.is_active as active,
+              case
+                when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce((select q.available_quantity from variant_quantity_stock q where q.variant_id = v.id), 0)::int
+                when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
+                when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
+                else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
+              end as available
+            from product_variant v
+          ), product_stock as (
+            select p.id, p.name_vi as name, p.is_active as active, p.sort_order, count(vs.id)::int as variant_count,
+              count(vs.id) filter (where vs.available > 0)::int as in_stock,
+              count(vs.id) filter (where vs.low_stock_threshold is not null and vs.low_stock_threshold > 0 and vs.available > 0 and vs.available <= vs.low_stock_threshold)::int as low_stock,
+              count(vs.id) filter (where vs.available <= 0)::int as out_stock
+            from product p
+            left join variant_stock vs on vs.product_id = p.id
+            group by p.id, p.name_vi, p.is_active, p.sort_order
+          )
+          select id, name, active, variant_count, in_stock, low_stock, out_stock,
+            count(*) over()::int as total_products,
+            coalesce(sum(variant_count) over(), 0)::int as total_variants,
+            coalesce(sum(in_stock) over(), 0)::int as total_in_stock,
+            coalesce(sum(low_stock) over(), 0)::int as total_low_stock,
+            coalesce(sum(out_stock) over(), 0)::int as total_out_stock
+          from product_stock
+          order by sort_order asc, id asc
           limit 20
         `.execute(dbHandle.db);
         return presentAdminInventory(
           result.rows.map((row) => ({
             id: row.id,
             name: row.name,
+            active: row.active,
             variantCount: row.variant_count,
+            inStock: row.in_stock,
+            lowStock: row.low_stock,
+            outOfStock: row.out_stock,
           })),
+          {
+            products: result.rows[0]?.total_products ?? 0,
+            variants: result.rows[0]?.total_variants ?? 0,
+            inStock: result.rows[0]?.total_in_stock ?? 0,
+            lowStock: result.rows[0]?.total_low_stock ?? 0,
+            outOfStock: result.rows[0]?.total_out_stock ?? 0,
+          },
         );
       },
       async inventoryProduct(input) {
@@ -1954,7 +2175,7 @@ async function bootstrap(): Promise<void> {
         const product = await sql<{
           id: string;
           name: string;
-        }>`select id, name_vi as name from product where id = ${input.productId} and is_active limit 1`.execute(
+        }>`select id, name_vi as name from product where id = ${input.productId} limit 1`.execute(
           dbHandle.db,
         );
         const row = product.rows[0];
@@ -1976,13 +2197,28 @@ async function bootstrap(): Promise<void> {
             | "QUANTITY_STOCK"
             | "UNLIMITED_SERVICE";
           available: number;
+          reserved: number;
+          delivered: number;
+          error: number;
           low_stock_threshold: number | null;
+          stock_version: number | null;
+          active: boolean;
         }>`
-          select v.id, v.name_vi as name, v.sku, v.fulfillment_type, count(da.id)::int as available, v.low_stock_threshold
+          select v.id, v.name_vi as name, v.sku, v.fulfillment_type, v.is_active as active,
+            case
+              when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
+              when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
+              when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
+              else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
+            end as available,
+            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int as reserved,
+            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'DELIVERED'), 0)::int as delivered,
+            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('FAILED','SUPPLIER_NEEDS_REVIEW','COMPROMISED','REVOKED')), 0)::int as error,
+            v.low_stock_threshold,
+            case when v.fulfillment_type = 'QUANTITY_STOCK' then q.version::int else null end as stock_version
           from product_variant v
-          left join digital_asset da on da.variant_id = v.id and da.status = 'AVAILABLE'
+          left join variant_quantity_stock q on q.variant_id = v.id
           where v.product_id = ${input.productId}
-          group by v.id
           order by v.sort_order asc, v.id asc
           limit 20
         `.execute(dbHandle.db);
@@ -1993,13 +2229,20 @@ async function bootstrap(): Promise<void> {
             id: variant.id,
             name: variant.name,
             sku: variant.sku,
+            active: variant.active,
             fulfillmentType: variant.fulfillment_type,
             available: variant.available,
+            reserved: variant.reserved,
+            delivered: variant.delivered,
+            error: variant.error,
             lowStockThreshold: variant.low_stock_threshold,
             importSupported:
               variant.fulfillment_type === "STOCK_ACCOUNT" ||
-              variant.fulfillment_type === "STOCK_CODE" ||
-              variant.fulfillment_type === "DIGITAL_FILE",
+              variant.fulfillment_type === "STOCK_CODE",
+            fileImportSupported: variant.fulfillment_type === "DIGITAL_FILE",
+            supplierSupported: variant.fulfillment_type === "SUPPLIER_API",
+            quantityAdjustSupported:
+              variant.fulfillment_type === "QUANTITY_STOCK" && variant.stock_version !== null,
           })),
         });
       },
@@ -2030,19 +2273,30 @@ async function bootstrap(): Promise<void> {
             | "MANUAL_FULFILLMENT"
             | "QUANTITY_STOCK"
             | "UNLIMITED_SERVICE";
+          inventory_fields: unknown;
           available: number;
+          reserved: number;
+          delivered: number;
+          error: number;
           stock_version: number | null;
           low_stock_threshold: number | null;
+          active: boolean;
         }>`
-          select v.product_id, v.id, v.name_vi as name, v.sku, v.fulfillment_type,
-            case when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int else count(da.id)::int end as available,
+          select v.product_id, v.id, v.name_vi as name, v.sku, v.fulfillment_type, v.inventory_fields, v.is_active as active,
+            case
+              when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
+              when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
+              when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
+              else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
+            end as available,
+            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int as reserved,
+            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'DELIVERED'), 0)::int as delivered,
+            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('FAILED','SUPPLIER_NEEDS_REVIEW','COMPROMISED','REVOKED')), 0)::int as error,
             case when v.fulfillment_type = 'QUANTITY_STOCK' then q.version::int else null end as stock_version,
             v.low_stock_threshold
           from product_variant v
-          left join digital_asset da on da.variant_id = v.id and da.status = 'AVAILABLE'
           left join variant_quantity_stock q on q.variant_id = v.id
           where v.id = ${input.variantId}
-          group by v.id, q.available_quantity, q.version
           limit 1
         `.execute(dbHandle.db);
         const variant = result.rows[0];
@@ -2056,19 +2310,27 @@ async function bootstrap(): Promise<void> {
           id: variant.id,
           name: variant.name,
           sku: variant.sku,
+          active: variant.active,
           fulfillmentType: variant.fulfillment_type,
           available: variant.available,
+          reserved: variant.reserved,
+          delivered: variant.delivered,
+          error: variant.error,
           lowStockThreshold: variant.low_stock_threshold,
           importSupported:
             variant.fulfillment_type === "STOCK_ACCOUNT" ||
             variant.fulfillment_type === "STOCK_CODE",
           fileImportSupported: variant.fulfillment_type === "DIGITAL_FILE",
+          supplierSupported: variant.fulfillment_type === "SUPPLIER_API",
           announceSupported:
             variant.available > 0 &&
             (variant.fulfillment_type === "STOCK_ACCOUNT" ||
               variant.fulfillment_type === "STOCK_CODE" ||
               variant.fulfillment_type === "QUANTITY_STOCK"),
           ...(variant.stock_version === null ? {} : { stockVersion: variant.stock_version }),
+          inventoryFields: Array.isArray(variant.inventory_fields)
+            ? (variant.inventory_fields as [])
+            : [],
         });
       },
       async stockAnnouncementPreview(input) {
@@ -2323,8 +2585,9 @@ async function bootstrap(): Promise<void> {
           name: string;
           sku: string;
           fulfillment_type: string;
+          inventory_fields: unknown;
         }>`
-          select id, name_vi as name, sku, fulfillment_type
+          select id, name_vi as name, sku, fulfillment_type, inventory_fields
           from product_variant
           where id = ${input.variantId}
           limit 1
@@ -2393,6 +2656,8 @@ async function bootstrap(): Promise<void> {
           variantId: row.id,
           variantName: row.name,
           sku: row.sku,
+          fulfillmentType: row.fulfillment_type === "STOCK_CODE" ? "STOCK_CODE" : "STOCK_ACCOUNT",
+          inventoryFields: Array.isArray(row.inventory_fields) ? (row.inventory_fields as []) : [],
         });
       },
       async importTemplate(input) {
@@ -2459,6 +2724,36 @@ async function bootstrap(): Promise<void> {
       },
       async importDocument(input) {
         if (!adminCallbacks) return null;
+        const textSession = await getInventoryImportSession(dbHandle.db, String(input.telegramUserId));
+        if (textSession && textSession.status !== "COMMITTED" && textSession.status !== "CANCELLED") {
+          const result = await stageInventoryImportDocument(dbHandle.db, vault, {
+            actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+            config: {
+              adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+              expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+            },
+            correlationId: input.correlationId,
+            document: input.document,
+            downloader: createTelegramTextFileDownloader(config.TELEGRAM_BOT_TOKEN),
+          });
+          if (!result.ok)
+            return {
+              text: "Tệp nhập kho không hợp lệ. Chỉ nhận .csv/.txt tối đa 64 KB / 500 dòng và đúng header.",
+              buttons: [
+                [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
+                [{ text: "📦 Kho hàng", callbackData: "admin:inventory" }],
+              ],
+            };
+          const preview = result.preview;
+          return presentInventoryImportPreview({
+            ready: preview.ready,
+            invalid: preview.invalid,
+            duplicates: preview.duplicates,
+            variants: preview.lines
+              .filter((line) => line.classification === "READY" && line.variantId)
+              .map((line) => line.variantId!),
+          });
+        }
         const session = await getFileArtifactImportSession(
           dbHandle.db,
           String(input.telegramUserId),
@@ -2794,10 +3089,33 @@ async function bootstrap(): Promise<void> {
                   : "Dữ liệu không hợp lệ, vui lòng thử lại.",
               buttons: [[{ text: "Huỷ", callbackData: "admin:products:cancel" }]],
             };
-          if (result.draft.step === "confirm")
-            return presentProductDraftPreview(result.draft as Required<typeof result.draft>);
+          if (result.draft.step === "confirm") {
+            const categoryName = result.draft.categoryId
+              ? (
+                  await sql<{ name: string }>`select name_vi as name from category where id = ${result.draft.categoryId} limit 1`.execute(
+                    dbHandle.db,
+                  )
+                ).rows[0]?.name
+              : undefined;
+            return presentProductDraftPreview({
+              ...(result.draft as Required<typeof result.draft>),
+              ...(categoryName ? { categoryName } : {}),
+            });
+          }
           if (result.draft.step === "fulfillmentType")
             return presentProductFulfillmentTypeChoices();
+          if (result.draft.step === "category") {
+            const rows = await sql<{ id: string; name_vi: string }>`
+              select id, name_vi
+              from category
+              where is_active
+              order by sort_order, id
+              limit 20
+            `.execute(dbHandle.db);
+            return presentProductCategoryChoices(
+              rows.rows.map((row) => ({ id: row.id, name: row.name_vi })),
+            );
+          }
           const prompts: Record<string, string> = {
             sku: result.draft.existingProductId
               ? "Bước 2/8 — Nhập SKU biến thể."
@@ -2988,6 +3306,30 @@ async function bootstrap(): Promise<void> {
             buttons: [[{ text: "Huỷ", callbackData: "admin:products:cancel" }]],
           };
         },
+        async review(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const draft = await productDraftWorkflow.get(input.telegramUserId);
+          if (draft?.step !== "confirm")
+            return {
+              text: "Chưa có nháp sản phẩm sẵn sàng xác nhận.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          const categoryName = draft.categoryId
+            ? (
+                await sql<{ name: string }>`select name_vi as name from category where id = ${draft.categoryId} limit 1`.execute(
+                  dbHandle.db,
+                )
+              ).rows[0]?.name
+            : undefined;
+          return presentProductDraftPreview({
+            ...(draft as Required<typeof draft>),
+            ...(categoryName ? { categoryName } : {}),
+          });
+        },
         async confirm(input) {
           if (
             Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
@@ -3067,7 +3409,7 @@ async function bootstrap(): Promise<void> {
                   ...(draft.supplierConfig === undefined
                     ? {}
                     : { supplierConfig: draft.supplierConfig }),
-                  active: draft.fulfillmentType === "DIGITAL_FILE" ? false : true,
+                  active: input.active ?? (draft.fulfillmentType === "DIGITAL_FILE" ? false : true),
                   priceVnd: draft.priceVnd,
                   reason: "Admin product creation",
                   correlationId: input.correlationId,
@@ -3081,7 +3423,7 @@ async function bootstrap(): Promise<void> {
                   }
                 : { text: "📦 Kho hàng", callbackData: "admin:inventory" };
             return {
-              text: `✅ Đã tạo ${product.active ? "sản phẩm" : "biến thể tạm dừng"} ${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫`,
+              text: `✅ Đã ${product.active ? "tạo sản phẩm" : "lưu nháp chưa mở bán"} ${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫`,
               buttons: [[setupButton, { text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
             };
           } catch (error) {

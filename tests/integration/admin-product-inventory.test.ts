@@ -21,6 +21,7 @@ import {
 import {
   confirmInventoryImportSession,
   createInventoryImportTemplate,
+  stageInventoryImportDocument,
   stageInventoryImportInput,
   startInventoryImportSession,
 } from "../../src/modules/digital-goods/inventory-import-session.js";
@@ -546,8 +547,8 @@ describe("admin product creation and selected-variant inventory import", () => {
     const vault = createInMemoryVault();
     const inventoryFields = [
       {
-        name: "username",
-        label: "Tên đăng nhập",
+        name: "email",
+        label: "Email",
         required: true,
         secret: false,
         customerVisible: true,
@@ -575,6 +576,8 @@ describe("admin product creation and selected-variant inventory import", () => {
         (${variantId}, ${productId}, 'TPL_MAIN', 'Main', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', ${JSON.stringify(inventoryFields)}::jsonb),
         (${otherVariantId}, ${productId}, 'TPL_OTHER', 'Other', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', ${JSON.stringify(inventoryFields)}::jsonb)
     `.execute(ctx.db);
+    await sql`update product_variant set is_active = false where id = ${variantId}`.execute(ctx.db);
+
 
     const template = await createInventoryImportTemplate(ctx.db, {
       actor: rootActor,
@@ -585,9 +588,19 @@ describe("admin product creation and selected-variant inventory import", () => {
     expect(template).toMatchObject({
       ok: true,
       template: {
-        csv: `variantId,username,password,note\n${variantId},<username:required>,<password:required>,<note:optional>\n`,
+        csv: `email,password,note
+<email:required>,<password:required>,<note:optional>
+`,
       },
     });
+    const inactiveTemplate = await createInventoryImportTemplate(ctx.db, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:inactive-template",
+      variantId,
+    });
+    expect(inactiveTemplate).toMatchObject({ ok: true });
+
     if (!template.ok) return;
 
     await startInventoryImportSession(ctx.db, {
@@ -596,16 +609,33 @@ describe("admin product creation and selected-variant inventory import", () => {
       correlationId: "admin-product-inventory:template-start",
       variantId,
     });
+    expect(await startInventoryImportSession(ctx.db, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:inactive-template-start",
+      variantId,
+    })).toMatchObject({ ok: true });
     const staged = await stageInventoryImportInput(ctx.db, vault, {
       actor: rootActor,
       config: rootConfig,
       correlationId: "admin-product-inventory:template-stage",
-      rawInput: template.template.csv.replace(
-        "<username:required>,<password:required>,<note:optional>",
-        "alice,p@ss,internal-note",
-      ),
+      rawInput: `password,email,note\n"NOT,A-REAL-CREDENTIAL",canary@example.invalid,"CANARY\nNOT-FOR-SALE"\n`,
     });
     expect(staged).toMatchObject({ ok: true, preview: { ready: 1, invalid: 0, duplicates: 0 } });
+    if (!staged.ok) return;
+    expect(staged.preview.lines).toHaveLength(1);
+    expect(staged.preview.lines[0]).toMatchObject({ variantId, code: "READY" });
+
+    const restaged = await stageInventoryImportInput(ctx.db, vault, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:template-restage",
+      rawInput: `email,password,note\ncanary2@example.invalid,SECOND-SAFE-VALUE,SECOND-NOTE\n`,
+    });
+    expect(restaged).toMatchObject({ ok: true, preview: { ready: 1, invalid: 0, duplicates: 0 } });
+    if (!restaged.ok) return;
+    expect(restaged.preview.lines).toHaveLength(1);
+    expect(restaged.preview.lines[0]).toMatchObject({ variantId, code: "READY" });
 
     const confirmed = await confirmInventoryImportSession(ctx.db, vault, {
       actor: rootActor,
@@ -618,9 +648,17 @@ describe("admin product creation and selected-variant inventory import", () => {
     });
 
     const stored = await sql<{
-      count: string;
-    }>`select count(*)::text from digital_asset where variant_id = ${variantId}`.execute(ctx.db);
-    expect(stored.rows[0]?.count).toBe("1");
+      vault_ref: string;
+    }>`select vault_ref from digital_asset where variant_id = ${variantId}`.execute(ctx.db);
+    expect(stored.rows).toHaveLength(1);
+    const material = JSON.parse(await vault.reveal(stored.rows[0]!.vault_ref)) as {
+      values: Array<{ name: string; value: string }>;
+    };
+    expect(material.values).toEqual([
+      { name: "email", value: "canary2@example.invalid" },
+      { name: "password", value: "SECOND-SAFE-VALUE" },
+      { name: "note", value: "SECOND-NOTE" },
+    ]);
 
     await startInventoryImportSession(ctx.db, {
       actor: rootActor,
@@ -668,6 +706,157 @@ describe("admin product creation and selected-variant inventory import", () => {
       ok: true,
       summary: { imported: 0, invalid: 1, duplicates: 0 },
     });
+  });
+
+  it("rejects selected-variant credential sessions, templates, and text uploads for non-secret types", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const fileVariantId = newId();
+    const quantityVariantId = newId();
+    const vault = createInMemoryVault();
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Typed', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Typed Product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type)
+      values
+        (${fileVariantId}, ${productId}, 'FILE_TYPED', 'File', 100000, 'P1M', 'MANUAL_REVIEW', 'LOCAL_ONLY', 'DIGITAL_FILE'),
+        (${quantityVariantId}, ${productId}, 'QTY_TYPED', 'Qty', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'QUANTITY_STOCK')
+    `.execute(ctx.db);
+    await sql`insert into variant_quantity_stock (variant_id, available_quantity) values (${quantityVariantId}, 3)`.execute(
+      ctx.db,
+    );
+
+    await expect(
+      createInventoryImportTemplate(ctx.db, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:file-template-denied",
+        variantId: fileVariantId,
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "NOT_FOUND" });
+    await expect(
+      startInventoryImportSession(ctx.db, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:qty-import-denied",
+        variantId: quantityVariantId,
+      }),
+    ).resolves.toMatchObject({ ok: false });
+
+    await startInventoryImportSession(ctx.db, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:secret-start",
+      variantId: fileVariantId,
+    });
+    const staged = await stageInventoryImportInput(ctx.db, vault, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:file-stage-denied",
+      rawInput: "secret-one",
+    });
+    expect(staged).toMatchObject({ ok: false });
+    const stored = await sql<{ count: string }>`select count(*)::text as count from digital_asset`.execute(
+      ctx.db,
+    );
+    expect(stored.rows[0]?.count).toBe("0");
+  });
+
+  it("stages bounded csv and txt document uploads through the selected variant session", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Docs', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Doc Product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type)
+      values (${variantId}, ${productId}, 'DOC_MAIN', 'Main', 100000, 'P1M', 'ACTIVATION_KEY', 'LOCAL_ONLY', 'STOCK_CODE')
+    `.execute(ctx.db);
+    const started = await startInventoryImportSession(ctx.db, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:doc-start",
+      variantId,
+    });
+    expect(started).toMatchObject({ ok: true });
+    const staged = await stageInventoryImportDocument(ctx.db, vault, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:doc-stage",
+      document: { fileId: "file-1", filename: "codes.txt", mimeType: "text/plain", fileSize: 9 },
+      downloader: { downloadText: async () => "CODE-ONE\nCODE-TWO" },
+    });
+    expect(staged).toMatchObject({ ok: true, preview: { ready: 2, invalid: 0, duplicates: 0 } });
+    if (!staged.ok) return;
+    expect(staged.preview.lines.map((line) => line.variantId)).toEqual([variantId, variantId]);
+    await expect(
+      stageInventoryImportDocument(ctx.db, vault, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:doc-large",
+        document: { fileId: "file-2", filename: "codes.csv", mimeType: "text/csv", fileSize: 64 * 1024 + 1 },
+        downloader: { downloadText: async () => "SHOULD_NOT_DOWNLOAD" },
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "INVALID_INPUT" });
+  });
+
+  it("generates STOCK_CODE CSV templates and rejects non-text upload MIME types", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Codes', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Code Product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields)
+      values (${variantId}, ${productId}, 'CODE_MAIN', 'Main', 100000, 'P1M', 'ACTIVATION_KEY', 'LOCAL_ONLY', 'STOCK_CODE', ${JSON.stringify([{ name: "code", label: "Mã kích hoạt", required: true, secret: true, customerVisible: true }])}::jsonb)
+    `.execute(ctx.db);
+    await expect(
+      startInventoryImportSession(ctx.db, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:code-start",
+        variantId,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await expect(
+      createInventoryImportTemplate(ctx.db, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:code-template",
+        variantId,
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      template: { csv: `code
+<code:required>
+` },
+    });
+    await expect(
+      stageInventoryImportDocument(ctx.db, vault, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:code-invalid-mime",
+        document: { fileId: "file-3", filename: "codes.pdf", mimeType: "application/pdf", fileSize: 9 },
+        downloader: { downloadText: async () => "SHOULD_NOT_DOWNLOAD" },
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "UNSUPPORTED_DOCUMENT" });
   });
 
   it("records per-variant import audit counts for multi-variant imports", async () => {

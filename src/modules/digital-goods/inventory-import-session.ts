@@ -12,7 +12,7 @@ import {
 } from "./inventory-import.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { guardRootAction } from "../../bot/middleware/root-admin.js";
-import { INVENTORY_FIELDS_SCHEMA } from "../catalog/fulfillment-type.js";
+import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfillment-type.js";
 
 export const INVENTORY_IMPORT_TTL_SECONDS = 15 * 60;
 
@@ -27,6 +27,7 @@ export interface InventoryImportSession {
   previewInvalid: number;
   previewDuplicates: number;
   previewVariants: string[];
+  selectedVariantId: string | null;
   expiresAt: number;
   importedAt?: number;
   cancelledAt?: number;
@@ -56,10 +57,32 @@ interface SessionRow {
   preview_invalid: number;
   preview_duplicates: number;
   preview_variants: unknown;
+  selected_variant_id: string | null;
   expires_at: Date | string;
   imported_at: Date | string | null;
   cancelled_at: Date | string | null;
 }
+export interface InventoryTextDocumentImport {
+  filename: string;
+  mimeType: string;
+  fileSize?: number;
+}
+
+export interface InventoryTextDocumentDownloader {
+  downloadText(fileId: string): Promise<string>;
+}
+
+const TEXT_DOCUMENT_EXTENSIONS = /\.(?:csv|txt)$/iu;
+const TEXT_DOCUMENT_MIME_TYPES: Record<string, true> = {
+  "application/csv": true,
+  "text/csv": true,
+  "text/plain": true,
+};
+
+function isAllowedTextDocument(input: InventoryTextDocumentImport): boolean {
+  return TEXT_DOCUMENT_EXTENSIONS.test(input.filename) || TEXT_DOCUMENT_MIME_TYPES[input.mimeType] === true;
+}
+
 
 function ttlExpiry(now: number, ttlSeconds = INVENTORY_IMPORT_TTL_SECONDS): Date {
   return new Date(now + ttlSeconds * 1000);
@@ -79,6 +102,7 @@ function mapSession(row: SessionRow): InventoryImportSession {
     previewInvalid: row.preview_invalid,
     previewDuplicates: row.preview_duplicates,
     previewVariants: parsePreviewVariants(row.preview_variants),
+    selectedVariantId: row.selected_variant_id,
     expiresAt: new Date(row.expires_at).getTime(),
     ...(row.imported_at ? { importedAt: new Date(row.imported_at).getTime() } : {}),
     ...(row.cancelled_at ? { cancelledAt: new Date(row.cancelled_at).getTime() } : {}),
@@ -91,7 +115,7 @@ async function loadSession(
 ): Promise<InventoryImportSession | null> {
   const result = await sql<SessionRow>`
     select admin_telegram_user_id, status, input_vault_ref, preview_ready,
-      preview_invalid, preview_duplicates, preview_variants, expires_at,
+      preview_invalid, preview_duplicates, preview_variants, selected_variant_id, expires_at,
       imported_at, cancelled_at
     from admin_inventory_import
     where admin_telegram_user_id = ${adminTelegramUserId}
@@ -105,37 +129,94 @@ async function clearSession(exec: Executor, adminTelegramUserId: string): Promis
     exec,
   );
 }
-
-function firstCsvCell(line: string): string {
-  const comma = line.indexOf(",");
-  return (comma < 0 ? line : line.slice(0, comma)).trim().replace(/^"|"$/g, "");
+function csvCell(value: string): string {
+  return /[",\n\r]/u.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
-function bindSecretsToVariant(rawInput: string, variantId: string): string {
-  const lines = rawInput
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  const hasCsvHeader = lines.some((line) => firstCsvCell(line) === "variantId");
-  return lines
-    .filter((line) => firstCsvCell(line) !== "variantId")
-    .map((line) => {
-      if (!hasCsvHeader) return `${variantId},${line}`;
-      return firstCsvCell(line) === variantId ? line : ",";
-    })
-    .join("\n");
+function parseCsvRecords(raw: string): string[][] | null {
+  const records: string[][] = [];
+  let record: string[] = [];
+  let cell = "";
+  let quoted = false;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index]!;
+    if (quoted) {
+      if (char === '"' && raw[index + 1] === '"') {
+        cell += '"';
+        index += 1;
+      } else if (char === '"') quoted = false;
+      else cell += char;
+    } else if (char === ',') {
+      record.push(cell.trim());
+      cell = "";
+    } else if (char === '"' && cell.length === 0) quoted = true;
+    else if (char === "\n") {
+      record.push(cell.trim());
+      if (record.length > 1 || record.some((value) => value.length > 0)) records.push(record);
+      record = [];
+      cell = "";
+    } else if (char === "\r") {
+      continue;
+    } else cell += char;
+  }
+  if (quoted) return null;
+  record.push(cell.trim());
+  if (record.length > 1 || record.some((value) => value.length > 0)) records.push(record);
+  return records;
+}
+
+async function inventoryFieldsForSecretImportVariant(
+  db: Db,
+  variantId: string,
+): Promise<InventoryField[] | null> {
+  const variant = await sql<{ inventory_fields: unknown }>`
+    select inventory_fields
+    from product_variant
+    where id = ${variantId}
+      and fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE')
+    limit 1
+  `.execute(db);
+  const row = variant.rows[0];
+  if (!row) return null;
+  const parsed = INVENTORY_FIELDS_SCHEMA.safeParse(row.inventory_fields);
+  return parsed.success ? parsed.data : [];
+}
+function bindSecretsToVariant(rawInput: string, variantId: string, fields: readonly InventoryField[]): string {
+  const records = parseCsvRecords(rawInput);
+  if (!records || records.length === 0) return "";
+  const [firstRecord, ...dataRecords] = records;
+  const firstCell = firstRecord?.[0] ?? "";
+  if (firstCell === "variantId") {
+    return dataRecords
+      .map((record) => (record[0] === variantId ? record.map(csvCell).join(",") : ","))
+      .join("\n");
+  }
+  if (firstRecord) {
+    const fieldIndexByHeader = fields.map((field) => firstRecord.indexOf(field.name));
+    if (
+      firstRecord.length === fields.length &&
+      fieldIndexByHeader.every((index) => index >= 0) &&
+      new Set(fieldIndexByHeader).size === fields.length
+    ) {
+      return dataRecords
+        .map((record) => [variantId, ...fieldIndexByHeader.map((index) => record[index] ?? "")].map(csvCell).join(","))
+        .join("\n");
+    }
+  }
+  return records.map((record) => [variantId, ...record].map(csvCell).join(",")).join("\n");
 }
 
 function selectedVariantFrom(session: InventoryImportSession): string | null {
-  return session.status === "WAITING_INPUT" && session.previewVariants.length === 1
-    ? session.previewVariants[0]!
-    : null;
+  return session.selectedVariantId;
 }
+
 
 function sha256(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
-
+async function isSecretImportVariant(db: Db, variantId: string): Promise<boolean> {
+  return (await inventoryFieldsForSecretImportVariant(db, variantId)) !== null;
+}
 export async function createInventoryImportTemplate(
   db: Db,
   input: InventoryImportSessionInput,
@@ -156,7 +237,8 @@ export async function createInventoryImportTemplate(
   const variant = await sql<{ name: string; sku: string; inventory_fields: unknown }>`
     select name_vi as name, sku, inventory_fields
     from product_variant
-    where id = ${input.variantId} and is_active
+    where id = ${input.variantId}
+      and fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE')
     limit 1
   `.execute(db);
   const row = variant.rows[0];
@@ -169,7 +251,7 @@ export async function createInventoryImportTemplate(
       variantId: input.variantId,
       variantName: row.name,
       sku: row.sku,
-      csv: formatInventoryImportTemplate({ variantId: input.variantId, inventoryFields: fields }),
+      csv: formatInventoryImportTemplate({ inventoryFields: fields }),
       requiredFields: fields.filter((field) => field.required).map((field) => field.name),
       optionalFields: fields.filter((field) => !field.required).map((field) => field.name),
     },
@@ -195,6 +277,8 @@ export async function startInventoryImportSession(
     targetId: input.variantId ?? "manual",
   });
   if (!gate.ok) return { ok: false, code: gate.reason };
+  if (input.variantId && !(await isSecretImportVariant(db, input.variantId)))
+    return { ok: false, code: "NOT_ROOT_ADMIN" };
   const session: InventoryImportSession = {
     adminTelegramUserId: String(input.actor.numericUserId),
     status: "WAITING_INPUT",
@@ -203,14 +287,15 @@ export async function startInventoryImportSession(
     previewInvalid: 0,
     previewDuplicates: 0,
     previewVariants: input.variantId ? [input.variantId] : [],
+    selectedVariantId: input.variantId ?? null,
     expiresAt: ttlExpiry(now).getTime(),
   };
   await sql`
     insert into admin_inventory_import
       (admin_telegram_user_id, status, input_vault_ref, preview_ready, preview_invalid,
-       preview_duplicates, preview_variants, expires_at, updated_at)
+       preview_duplicates, preview_variants, selected_variant_id, expires_at, updated_at)
     values (${session.adminTelegramUserId}, ${session.status}, null, 0, 0, 0, ${JSON.stringify(session.previewVariants)}::jsonb,
-      ${new Date(session.expiresAt).toISOString()}, now())
+      ${session.selectedVariantId}, ${new Date(session.expiresAt).toISOString()}, now())
     on conflict (admin_telegram_user_id) do update set
       status = excluded.status,
       input_vault_ref = null,
@@ -218,6 +303,7 @@ export async function startInventoryImportSession(
       preview_invalid = 0,
       preview_duplicates = 0,
       preview_variants = ${JSON.stringify(session.previewVariants)}::jsonb,
+      selected_variant_id = excluded.selected_variant_id,
       expires_at = excluded.expires_at,
       imported_at = null,
       cancelled_at = null,
@@ -298,8 +384,12 @@ export async function stageInventoryImportInput(
     await clearSession(db, String(input.actor.numericUserId));
     return { ok: false, code: "EXPIRED" };
   }
+  const selectedVariantFields = selectedVariantId
+    ? await inventoryFieldsForSecretImportVariant(db, selectedVariantId)
+    : null;
+  if (selectedVariantId && !selectedVariantFields) return { ok: false, code: "INVALID_INPUT" };
   const normalizedInput = selectedVariantId
-    ? bindSecretsToVariant(input.rawInput, selectedVariantId)
+    ? bindSecretsToVariant(input.rawInput, selectedVariantId, selectedVariantFields ?? [])
     : input.rawInput;
   const preview = await previewDigitalInventory({
     db,
@@ -333,6 +423,34 @@ export async function stageInventoryImportInput(
     await vault.delete(existingRef).catch(() => undefined);
   return { ok: true, preview };
 }
+export async function stageInventoryImportDocument(
+  db: Db,
+  vault: Vault,
+  input: InventoryImportSessionInput & {
+    document: InventoryTextDocumentImport & { fileId: string };
+    downloader: InventoryTextDocumentDownloader;
+  },
+  now = Date.now(),
+): Promise<
+  | { ok: true; preview: InventoryPreviewResult }
+  | {
+      ok: false;
+      code:
+        | "NOT_ROOT_ADMIN"
+        | "WRONG_CONTEXT"
+        | "INVALID_INPUT"
+        | "NOT_FOUND"
+        | "EXPIRED"
+        | "UNSUPPORTED_DOCUMENT";
+    }
+> {
+  if (!isAllowedTextDocument(input.document)) return { ok: false, code: "UNSUPPORTED_DOCUMENT" };
+  if (input.document.fileSize !== undefined && input.document.fileSize > 64 * 1024)
+    return { ok: false, code: "INVALID_INPUT" };
+  const rawInput = await input.downloader.downloadText(input.document.fileId);
+  return stageInventoryImportInput(db, vault, { ...input, rawInput }, now);
+}
+
 
 export async function confirmInventoryImportSession(
   db: Db,
@@ -353,13 +471,15 @@ export async function confirmInventoryImportSession(
         | "EXPIRED";
     }
 > {
+  const session = await loadSession(db, String(input.actor.numericUserId));
+  const selectedVariantId = session?.selectedVariantId ?? null;
   const gate = await guardRootAction(db, {
     actor: input.actor,
     config: input.config,
     correlationId: input.correlationId,
     action: "inventory.import",
     targetType: "DigitalAsset",
-    targetId: "manual",
+    targetId: selectedVariantId ?? "manual",
   });
   if (!gate.ok) return { ok: false, code: gate.reason };
 

@@ -62,6 +62,15 @@ interface OrderRef {
   createdAt: string;
 }
 
+export type WalletTopupAction =
+  | { kind: "PICK" }
+  | { kind: "SELECT"; amountVnd: bigint }
+  | { kind: "CUSTOM" }
+  | { kind: "CONFIRM" }
+  | { kind: "STATUS" }
+  | { kind: "CHANGE" }
+  | { kind: "CANCEL" };
+
 export interface TelegramDomainDispatcherDeps {
   codec: CallbackTokenCodec;
   resolveCustomerId(telegramUserId: string): Promise<string | null>;
@@ -96,8 +105,9 @@ export interface TelegramDomainDispatcherDeps {
     list(customerId: string): Promise<PresentedMessage>;
   };
   walletAccount?(ctx: TelegramActionContext): Promise<PresentedMessage>;
-  walletTopup?(ctx: TelegramActionContext): Promise<PresentedMessage>;
+  walletTopup?(ctx: TelegramActionContext, action?: WalletTopupAction): Promise<PresentedMessage>;
   walletPay?(ctx: TelegramActionContext, orderNumber: string): Promise<PresentedMessage>;
+  walletTopupText?(ctx: TelegramActionContext, text: string): Promise<PresentedMessage | null>;
   notification?: {
     settings(customerId: string): Promise<PresentedMessage>;
     toggle(customerId: string, kind: "shop" | "activity"): Promise<PresentedMessage>;
@@ -122,6 +132,11 @@ export interface TelegramDomainDispatcherDeps {
       correlationId: string;
     }): Promise<PresentedMessage>;
     dashboard?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    audit?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
@@ -456,10 +471,16 @@ export interface TelegramDomainDispatcherDeps {
         chatType: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
+      review?(input: {
+        telegramUserId: string;
+        chatType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
       confirm?(input: {
         telegramUserId: string;
         chatType: string;
         correlationId: string;
+        active?: boolean;
       }): Promise<PresentedMessage>;
       cancel(input: {
         telegramUserId: string;
@@ -570,6 +591,14 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Loại giao hàng không khả dụng.");
+        } else if (route === "products:review") {
+          message = admin.workflow?.review
+            ? await admin.workflow.review({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Xem lại nháp sản phẩm không khả dụng.");
         } else if (route === "products:confirm") {
           message = admin.workflow?.confirm
             ? await admin.workflow.confirm({
@@ -578,6 +607,15 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Xác nhận sản phẩm không khả dụng.");
+        } else if (route === "products:draft") {
+          message = admin.workflow?.confirm
+            ? await admin.workflow.confirm({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+                active: false,
+              })
+            : safeError("Lưu nháp sản phẩm không khả dụng.");
         } else if (route === "products:cancel") {
           message = admin.workflow
             ? await admin.workflow.cancel({
@@ -725,6 +763,14 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : presentAdminMenu();
+        } else if (route === "audit") {
+          message = admin.audit
+            ? await admin.audit({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Nhật ký kiểm toán không khả dụng.");
         } else if (route === "marketing") {
           message = admin.marketing
             ? await admin.marketing({
@@ -1038,13 +1084,13 @@ export function createTelegramDomainDispatcher(
         message = deps.walletAccount
           ? await deps.walletAccount(ctx)
           : presentCustomerAccountPrompt();
-      } else if (
-        command === "/topup" ||
-        envelope.callbackData === "wallet:topup" ||
-        envelope.messageText === CUSTOMER_COPY.topup
-      ) {
+      } else if (command === "/topup" || envelope.messageText === CUSTOMER_COPY.topup) {
         message = deps.walletTopup
-          ? await deps.walletTopup(ctx)
+          ? await deps.walletTopup(ctx, { kind: "PICK" })
+          : safeError("Nạp ví không khả dụng.");
+      } else if (envelope.callbackData?.startsWith("wallet:topup")) {
+        message = deps.walletTopup
+          ? await deps.walletTopup(ctx, parseWalletTopupAction(envelope.callbackData))
           : safeError("Nạp ví không khả dụng.");
       } else if (command === "/pay") {
         message =
@@ -1128,7 +1174,8 @@ export function createTelegramDomainDispatcher(
           })) ?? (await deps.catalog.mainMenu());
       } else if (
         envelope.messageText &&
-        (deps.admin?.orderText ||
+        (deps.walletTopupText ||
+          deps.admin?.orderText ||
           deps.admin?.customerText ||
           deps.admin?.broadcastText ||
           deps.admin?.importText ||
@@ -1136,64 +1183,84 @@ export function createTelegramDomainDispatcher(
           deps.admin?.workflow?.variantText ||
           deps.admin?.workflow)
       ) {
-        message =
-          (deps.admin.orderText
-            ? await deps.admin.orderText({
-                telegramUserId: envelope.actorUserId,
-                text: envelope.messageText,
-                chatType: envelope.chatType,
-                correlationId,
-              })
-            : null) ??
-          (deps.admin.customerText
-            ? await deps.admin.customerText({
-                telegramUserId: envelope.actorUserId,
-                text: envelope.messageText,
-                chatType: envelope.chatType,
-                correlationId,
-              })
-            : null) ??
-          (deps.admin.broadcastText
-            ? await deps.admin.broadcastText({
-                telegramUserId: envelope.actorUserId,
-                text: envelope.messageText,
-                chatType: envelope.chatType,
-                correlationId,
-              })
-            : null) ??
-          (deps.admin.importText
-            ? await deps.admin.importText({
-                telegramUserId: envelope.actorUserId,
-                text: envelope.messageText,
-                chatType: envelope.chatType,
-                correlationId,
-              })
-            : null) ??
-          (deps.admin.quantityAdjustText
-            ? await deps.admin.quantityAdjustText({
-                telegramUserId: envelope.actorUserId,
-                text: envelope.messageText,
-                chatType: envelope.chatType,
-                correlationId,
-              })
-            : null) ??
-          (deps.admin.workflow?.variantText
-            ? await deps.admin.workflow.variantText({
-                telegramUserId: envelope.actorUserId,
-                text: envelope.messageText,
-                chatType: envelope.chatType,
-                correlationId,
-              })
-            : null) ??
-          (deps.admin.workflow
-            ? await deps.admin.workflow.messageText({
-                telegramUserId: envelope.actorUserId,
-                text: envelope.messageText,
-                chatType: envelope.chatType,
-                correlationId,
-              })
-            : null) ??
-          (await deps.catalog.mainMenu());
+        message = envelope.rootProductDraftText
+          ? ((deps.admin?.workflow?.variantText
+              ? await deps.admin.workflow.variantText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (deps.admin?.workflow
+              ? await deps.admin.workflow.messageText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (await deps.catalog.mainMenu()))
+          : ((deps.walletTopupText
+              ? await deps.walletTopupText(ctx, envelope.messageText)
+              : null) ??
+            (deps.admin?.orderText
+              ? await deps.admin.orderText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (deps.admin?.customerText
+              ? await deps.admin.customerText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (deps.admin?.broadcastText
+              ? await deps.admin.broadcastText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (deps.admin?.importText
+              ? await deps.admin.importText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (deps.admin?.quantityAdjustText
+              ? await deps.admin.quantityAdjustText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (deps.admin?.workflow?.variantText
+              ? await deps.admin.workflow.variantText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (deps.admin?.workflow
+              ? await deps.admin.workflow.messageText({
+                  telegramUserId: envelope.actorUserId,
+                  text: envelope.messageText,
+                  chatType: envelope.chatType,
+                  correlationId,
+                })
+              : null) ??
+            (await deps.catalog.mainMenu()));
       } else if (envelope.callbackData) {
         const verified = deps.codec.verify(envelope.callbackData, {
           telegramUserId: envelope.actorUserId,
@@ -1228,6 +1295,7 @@ function actionContext(
   envelope: TelegramCommandEnvelope,
   correlationId: string,
 ): TelegramActionContext {
+
   return {
     telegramUserId: envelope.actorUserId,
     chatId: envelope.chatId,
@@ -1235,6 +1303,16 @@ function actionContext(
     messageId: envelope.messageId,
     correlationId,
   };
+}
+function parseWalletTopupAction(callbackData: string): WalletTopupAction {
+  if (callbackData === "wallet:topup") return { kind: "PICK" };
+  if (callbackData === "wallet:topup:custom") return { kind: "CUSTOM" };
+  if (callbackData === "wallet:topup:confirm") return { kind: "CONFIRM" };
+  if (callbackData === "wallet:topup:status") return { kind: "STATUS" };
+  if (callbackData === "wallet:topup:change") return { kind: "CHANGE" };
+  if (callbackData === "wallet:topup:cancel") return { kind: "CANCEL" };
+  const selected = callbackData.match(/^wallet:topup:amount:([1-9][0-9]{0,12})$/u);
+  return selected ? { kind: "SELECT", amountVnd: BigInt(selected[1]!) } : { kind: "PICK" };
 }
 
 function parseAdminConfirm(

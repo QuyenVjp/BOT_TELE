@@ -308,6 +308,17 @@ async function main(): Promise<void> {
     const seedStarted = performance.now();
     const dataset = await seedRcDataset(ctx.db);
     const seedMs = Math.round(performance.now() - seedStarted);
+    const readiness = await sql<{ not_ready: number }>`
+      select count(*)::int as not_ready
+      from product_variant v
+      left join variant_quantity_stock q on q.variant_id = v.id
+      left join variant_service_fulfillment f on f.variant_id = v.id and f.is_active
+      where v.id like '01VAR0%'
+        and (v.fulfillment_type <> 'QUANTITY_STOCK'
+          or coalesce(q.available_quantity, 0) <= 0
+          or f.fulfillment_type <> v.fulfillment_type)
+    `.execute(ctx.db);
+    assert.equal(readiness.rows[0]?.not_ready, 0, "RC quantity-stock variants are not ready");
 
     await sql`
       insert into outbox_event (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted)

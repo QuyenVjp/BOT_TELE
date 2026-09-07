@@ -42,6 +42,10 @@ const MAX_DELIVERY_NOTIFICATION_SEND_TIMEOUT_MS = 29_000;
 class DeliveryNotificationSendTimeoutError extends Error {
   override name = "DeliveryNotificationSendTimeoutError";
 }
+const AMBIGUOUS_DELIVERY_NOTIFICATION_SEND_ERRORS: Record<string, true> = {
+  DeliveryNotificationSendTimeoutError: true,
+  TelegramAmbiguousSendError: true,
+};
 
 async function sendDeliveryNotificationWithTimeout(
   sender: {
@@ -1095,7 +1099,9 @@ export async function processDeliveryNotificationBatch(input: {
       else stale += 1;
     } catch (error) {
       const code = error instanceof Error ? error.name.slice(0, 128) : "UNKNOWN_ERROR";
-      const terminal = claim.attemptCount >= input.maxAttempts;
+      const terminal =
+        claim.attemptCount >= input.maxAttempts ||
+        AMBIGUOUS_DELIVERY_NOTIFICATION_SEND_ERRORS[code] === true;
       const result = await sql`
         update delivery_notification_handoff
         set status = ${terminal ? "DEAD" : "RETRY"},

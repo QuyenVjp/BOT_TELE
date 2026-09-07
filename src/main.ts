@@ -7,6 +7,7 @@
  * See plan.md "Delivery Phases" and contracts/application-commands.md.
  */
 import { pathToFileURL } from "node:url";
+import { sql } from "kysely";
 
 async function main(): Promise<void> {
   // Load local `.env` for development; production injects environment variables
@@ -62,6 +63,31 @@ async function main(): Promise<void> {
       path: config.TELEGRAM_WEBHOOK_PATH,
       secretToken: config.TELEGRAM_WEBHOOK_SECRET,
       inbox,
+      rootProductDraftText: {
+        adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+        async activeStep(telegramUserId: string) {
+          if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return null;
+          const row = (
+            await sql<{ step: string }>`
+              select step
+              from admin_workflow
+              where admin_telegram_user_id = ${telegramUserId}
+                and expires_at > now()
+                and step in ('name','sku','variantName','price','inventoryFields','threshold','initialQuantity')
+              limit 1
+            `.execute(dbHandle.db)
+          ).rows[0];
+          return row?.step === "name" ||
+            row?.step === "sku" ||
+            row?.step === "variantName" ||
+            row?.step === "price" ||
+            row?.step === "inventoryFields" ||
+            row?.step === "threshold" ||
+            row?.step === "initialQuantity"
+            ? row.step
+            : null;
+        },
+      },
     },
     sepay: {
       path: "/webhooks/sepay",

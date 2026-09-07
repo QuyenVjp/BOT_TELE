@@ -206,6 +206,14 @@ Bottom navigation can be added later, but it must call shared backend services o
 - RC workload/restore scripts use synthetic non-PII data in separate disposable databases. No benchmark invokes real Telegram/supplier transport or SePay Live.
 - Checkpoint and RC commits are authorized for this sprint. Staging must run an exact clean commit; production deployment, store opening, live refunds and mass broadcast remain owner-only and unexecuted.
 
+### Live UX P0 boundary
+
+- Wallet entry displays the real balance and an amount picker without creating a top-up intent. A durable customer-owned selection/custom-amount workflow precedes explicit VietQR confirmation; configured integer VND bounds apply once at the shared boundary.
+- Confirmed amount is immutable on the resulting intent and QR. Changing an unpaid amount cancels/expires the old intent before returning to selection; paid intents and verified once-only ledger credits remain unchanged.
+- Inventory entry is product-first, then variant-first. Durable root-owned import sessions bind the selected variant and configured schema; user input never requires a database variant ID. Templates, uploads and actions follow fulfillment type.
+- Inventory preview/list responses contain counts and safe metadata only. Import confirmation remains the stock mutation boundary. Per-variant restock subscriptions retain generation semantics; general shop announcements require preview/confirmation.
+- P0 local/staging API and worker restart is authorized after focused checks. Real Telegram wallet/inventory visible acceptance precedes the P0 commit and resumption of overnight release work; no production deployment or real payment is authorized by this canary.
+
 ## 9. Increment plan
 
 1. Customer profile snapshot + persistent keyboard + contact share.

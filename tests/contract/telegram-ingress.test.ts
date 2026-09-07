@@ -166,6 +166,156 @@ describe("input normalization (SR-004)", () => {
   });
 });
 
+describe("root product draft text ingress", () => {
+  it("preserves bounded root-active product metadata and suppresses other raw text", async () => {
+    const accepted: unknown[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      rootProductDraftText: {
+        adminTelegramUserId: 123456789,
+        activeStep: async (telegramUserId) =>
+          telegramUserId === "123456789" ? "name" : null,
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9001, 123456789, "CANARY P0 Inventory - KHONG BAN"),
+      });
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9002, 987654321, "CANARY P0 Inventory - KHONG BAN"),
+      });
+
+      expect(accepted).toHaveLength(2);
+      expect(accepted[0]).toMatchObject({
+        messageText: "CANARY P0 Inventory - KHONG BAN",
+        rootProductDraftText: true,
+      });
+      expect(accepted[1]).not.toHaveProperty("messageText");
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("marks numeric root-active price text as product draft text", async () => {
+    const accepted: unknown[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      rootProductDraftText: {
+        adminTelegramUserId: 123456789,
+        activeStep: async (telegramUserId) => (telegramUserId === "123456789" ? "price" : null),
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9004, 123456789, "10000"),
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]).toMatchObject({ messageText: "10000", rootProductDraftText: true });
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("marks configured inventory field names as root product draft text only at that step", async () => {
+    const accepted: unknown[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      rootProductDraftText: {
+        adminTelegramUserId: 123456789,
+        activeStep: async (telegramUserId) =>
+          telegramUserId === "123456789" ? "inventoryFields" : null,
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9005, 123456789, "username,password,email"),
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]).toMatchObject({
+        messageText: "username,password,email",
+        rootProductDraftText: true,
+      });
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("does not persist arbitrary root inventory paste without a product metadata step", async () => {
+    const accepted: unknown[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      rootProductDraftText: {
+        adminTelegramUserId: 123456789,
+        activeStep: async () => null,
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9003, 123456789, "variant-1,secret-value"),
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]).not.toHaveProperty("messageText");
+      expect(JSON.stringify(accepted[0])).not.toContain("secret-value");
+    } finally {
+      await ingress.close();
+    }
+  });
+});
+
 describe("durable callback ACK", () => {
   function callbackUpdate(updateId: number, callbackId = "cb-1") {
     return {
@@ -306,6 +456,37 @@ describe("command normalization", () => {
         lastName: "An",
         languageCode: "vi",
         contactPhoneNumber: "+84912345678",
+      });
+    } finally {
+      await localApp.close();
+    }
+  });
+
+  it("preserves plain wallet amount text in the durable envelope", async () => {
+    let seen: unknown = null;
+    const localApp = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(localApp, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          seen = input.envelope;
+          return { kind: "ACCEPTED", id: "wallet-amount" };
+        },
+      },
+    });
+    await localApp.ready();
+    try {
+      const res = await localApp.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(601, 100, "375000"),
+      });
+      expect(res.statusCode).toBe(200);
+      expect(seen).toMatchObject({
+        action: "UNKNOWN",
+        messageText: "375000",
       });
     } finally {
       await localApp.close();

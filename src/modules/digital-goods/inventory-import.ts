@@ -94,10 +94,7 @@ function csvCell(value: string): string {
   return /[",\n\r]/u.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
-export function formatInventoryImportTemplate(input: {
-  variantId: string;
-  inventoryFields: InventoryField[];
-}): string {
+export function formatInventoryImportTemplate(input: { inventoryFields: InventoryField[] }): string {
   const fields =
     input.inventoryFields.length > 0
       ? input.inventoryFields
@@ -110,11 +107,8 @@ export function formatInventoryImportTemplate(input: {
             customerVisible: true,
           },
         ];
-  const headers = ["variantId", ...fields.map((field) => field.name)];
-  const sample = [
-    input.variantId,
-    ...fields.map((field) => `<${field.name}${field.required ? ":required" : ":optional"}>`),
-  ];
+  const headers = fields.map((field) => field.name);
+  const sample = fields.map((field) => `<${field.name}${field.required ? ":required" : ":optional"}>`);
   return `${headers.map(csvCell).join(",")}\n${sample.map(csvCell).join(",")}\n`;
 }
 
@@ -162,32 +156,40 @@ async function loadVariantInventoryConfigs(
   );
 }
 
-function parseCsvRow(line: string): string[] | null {
-  const cells: string[] = [];
+function parseCsvRecords(raw: string): string[][] | null {
+  const records: string[][] = [];
+  let record: string[] = [];
   let cell = "";
   let quoted = false;
-  for (let index = 0; index < line.length; index += 1) {
-    const char = line[index]!;
+  for (let index = 0; index < raw.length; index += 1) {
+    const char = raw[index]!;
     if (quoted) {
-      if (char === '"' && line[index + 1] === '"') {
+      if (char === '"' && raw[index + 1] === '"') {
         cell += '"';
         index += 1;
       } else if (char === '"') quoted = false;
       else cell += char;
-    } else if (char === ",") {
-      cells.push(cell.trim());
+    } else if (char === ',') {
+      record.push(cell.trim());
       cell = "";
     } else if (char === '"' && cell.length === 0) quoted = true;
-    else cell += char;
+    else if (char === "\n") {
+      record.push(cell.trim());
+      if (record.length > 1 || record.some((value) => value.length > 0)) records.push(record);
+      record = [];
+      cell = "";
+    } else if (char === "\r") {
+      continue;
+    } else cell += char;
   }
   if (quoted) return null;
-  cells.push(cell.trim());
-  return cells;
+  record.push(cell.trim());
+  if (record.length > 1 || record.some((value) => value.length > 0)) records.push(record);
+  return records;
 }
 
-function parseLine(line: string): ParsedLine | null {
-  const columns = parseCsvRow(line);
-  if (!columns || columns.length < 2) return null;
+function parseLine(columns: string[]): ParsedLine | null {
+  if (columns.length < 2) return null;
   const variantId = columns[0]!.trim();
   const credential = columns.length === 2 ? columns[1]!.trim() : columns.slice(1).join(":");
   if (!/^[A-Za-z0-9_-]{1,128}$/.test(variantId)) return null;
@@ -204,9 +206,9 @@ function parseLine(line: string): ParsedLine | null {
 
 function parseLines(raw: string): { parsed: (ParsedLine | null)[]; invalid: number } | null {
   if (Buffer.byteLength(raw, "utf8") > MAX_IMPORT_BYTES || raw.includes("\0")) return null;
-  const lines = raw.split(/\r?\n/).filter((line) => line.trim().length > 0);
-  if (lines.length > MAX_IMPORT_LINES) return null;
-  const parsed = lines.map(parseLine);
+  const records = parseCsvRecords(raw);
+  if (!records || records.length > MAX_IMPORT_LINES) return null;
+  const parsed = records.map(parseLine);
   return { parsed, invalid: parsed.filter((row) => !row).length };
 }
 

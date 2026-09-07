@@ -535,6 +535,7 @@ export function presentProductDraftPreview(draft: {
   sku: string;
   variantName: string;
   categoryId?: string;
+  categoryName?: string;
   priceVnd: bigint;
   fulfillmentType: FulfillmentType;
   inventoryFields: InventoryField[];
@@ -552,7 +553,7 @@ export function presentProductDraftPreview(draft: {
       `SKU: ${draft.sku}`,
       draft.existingProductId
         ? `Sản phẩm: ${draft.existingProductId}`
-        : `Danh mục: ${draft.categoryId}`,
+        : `Danh mục: ${draft.categoryName ?? draft.categoryId}`,
       `Giá: ${draft.priceVnd.toLocaleString("vi-VN")} ₫`,
       `Loại giao hàng: ${FULFILLMENT_TYPE_LABELS[draft.fulfillmentType]}`,
       `Trường kho: ${draft.inventoryFields.map((field) => field.label).join(", ") || "—"}`,
@@ -577,6 +578,9 @@ export function presentProductDraftPreview(draft: {
           callbackData: "admin:products:confirm",
         },
       ],
+      ...(!draft.existingProductId
+        ? [[{ text: "💾 Lưu nháp", callbackData: "admin:products:draft" }]]
+        : []),
       [{ text: "❌ Huỷ", callbackData: "admin:products" }],
     ],
   };
@@ -639,32 +643,102 @@ export function presentAdminProducts(
           callbackData: `admin:products:detail:${row.id}`,
         },
       ]),
+      [{ text: "📝 Xem lại nháp", callbackData: "admin:products:review" }],
       adminNav("admin:menu"),
     ],
   };
 }
 
+export interface AdminInventoryProductSummary {
+  id: string;
+  name: string;
+  active?: boolean;
+  variantCount: number;
+  inStock: number;
+  lowStock: number;
+  outOfStock: number;
+}
+
+export interface AdminInventoryVariantSummary {
+  id: string;
+  name: string;
+  sku: string;
+  fulfillmentType: FulfillmentType;
+  available: number;
+  reserved: number;
+  delivered: number;
+  error: number;
+  lowStockThreshold: number | null;
+  importSupported: boolean;
+  fileImportSupported?: boolean;
+  quantityAdjustSupported?: boolean;
+  supplierSupported?: boolean;
+  active?: boolean;
+}
+
+function stockBadge(input: { available: number; lowStockThreshold: number | null }): string {
+  if (input.available <= 0) return "hết hàng";
+  return input.lowStockThreshold !== null &&
+    input.lowStockThreshold > 0 &&
+    input.available <= input.lowStockThreshold
+    ? `sắp hết (${input.available})`
+    : `còn ${input.available}`;
+}
+
+function importInstruction(input: { fulfillmentType: FulfillmentType; fields?: InventoryField[] }): string {
+  switch (input.fulfillmentType) {
+    case "STOCK_ACCOUNT": {
+      const fields = input.fields?.map((field) => field.name).join(", ") || "dữ liệu";
+      return `Dán dạng pipe theo trường: ${fields}; hoặc tải CSV mẫu, điền đúng cột rồi dán/gửi tệp .csv/.txt.`;
+    }
+    case "STOCK_CODE":
+      return "Dán mỗi mã một dòng hoặc gửi tệp .txt/.csv; bot chỉ xem trước số dòng, không ghi kho trước khi xác nhận.";
+    case "DIGITAL_FILE":
+      return "Gửi một tài liệu Telegram để đăng ký tệp bán, xem trước rồi xác nhận kích hoạt.";
+    case "SUPPLIER_API":
+      return "Đồng bộ/mapping qua màn hình nhà cung cấp; không nhập CSV cho loại này.";
+    case "QUANTITY_STOCK":
+      return "Điều chỉnh số lượng bằng nút +1/-1; không nhập dữ liệu đăng nhập.";
+    case "MANUAL_FULFILLMENT":
+    case "UNLIMITED_SERVICE":
+      return "Xử lý theo quy trình dịch vụ, không có nhập kho vật lý.";
+  }
+}
+
 export function presentAdminInventory(
-  rows: Array<{ id: string; name: string; variantCount: number }>,
+  rows: AdminInventoryProductSummary[],
+  totals?: { products: number; variants: number; inStock: number; lowStock: number; outOfStock: number },
 ): PresentedMessage {
   const visibleRows = rows.slice(0, 20);
   return {
     text: [
       ADMIN_COPY.inventory,
-      visibleRows.length === 0 ? "Chưa có sản phẩm" : "Chọn sản phẩm để xem biến thể và nhập kho.",
-      ...visibleRows.map((row) => `• ${row.name} (${row.variantCount} biến thể)`),
+      totals
+        ? `Tổng: ${totals.products} sản phẩm · ${totals.variants} biến thể · còn ${totals.inStock} · sắp hết ${totals.lowStock} · hết ${totals.outOfStock}`
+        : "Tổng quan tồn kho sản phẩm.",
+      visibleRows.length === 0
+        ? "Chưa có sản phẩm. Tạo sản phẩm mới để bắt đầu; không dùng CSV khi chưa có biến thể."
+        : "Chọn sản phẩm để xem biến thể, nhập kho, lịch sử hoặc xử lý theo loại.",
+      ...visibleRows.map((row) => {
+        const status = row.active === false ? " · nháp/chưa mở bán" : "";
+        return `• ${row.name}${status}: ${row.variantCount} biến thể · còn ${row.inStock} · sắp hết ${row.lowStock} · hết ${row.outOfStock}`;
+      }),
     ].join("\n"),
     buttons: [
       ...(visibleRows.length === 0
-        ? [[{ text: "Tạo sản phẩm", callbackData: "admin:products:create" }]]
+        ? [[{ text: "➕ Tạo sản phẩm", callbackData: "admin:products:create" }]]
         : visibleRows.map((row) => [
             {
-              text: `${row.name} (${row.variantCount} biến thể)`,
+              text: `${row.name}${row.active === false ? " · nháp" : ""} · ${row.inStock}/${row.variantCount} còn`,
               callbackData: `admin:inventory:product:${row.id}`,
             },
           ])),
       [
-        { text: ADMIN_COPY.overview, callbackData: "admin:dashboard" },
+        { text: "🔎 Tìm sản phẩm", callbackData: "admin:products" },
+        { text: "⚠️ Sắp/hết hàng", callbackData: "admin:dashboard" },
+      ],
+      [
+        { text: "🕘 Lịch sử", callbackData: "admin:audit" },
         { text: ADMIN_COPY.home, callbackData: "admin:menu" },
       ],
     ],
@@ -674,33 +748,27 @@ export function presentAdminInventory(
 export function presentAdminInventoryProduct(input: {
   id: string;
   name: string;
-  variants: Array<{
-    id: string;
-    name: string;
-    sku: string;
-    fulfillmentType: FulfillmentType;
-    available: number;
-    lowStockThreshold: number | null;
-    importSupported: boolean;
-  }>;
+  variants: AdminInventoryVariantSummary[];
 }): PresentedMessage {
   const visibleVariants = input.variants.slice(0, 20);
   return {
     text: [
       ADMIN_COPY.inventory,
       `Sản phẩm: ${input.name}`,
-      `Mã: ${input.id}`,
+      visibleVariants.length === 0 ? "Chưa có biến thể. Tạo biến thể để bán hoặc nhập kho." : "Biến thể:",
       ...visibleVariants.map(
         (variant) =>
-          `${variant.name} — ${variant.sku} — ${FULFILLMENT_TYPE_LABELS[variant.fulfillmentType]}${variant.lowStockThreshold === null ? "" : ` — ngưỡng ${variant.lowStockThreshold}`}`,
+          `• ${variant.name}${variant.active === false ? " · nháp/chưa mở bán" : ""} — ${variant.sku} — ${FULFILLMENT_TYPE_LABELS[variant.fulfillmentType]} — khả dụng ${variant.available} · giữ ${variant.reserved} · giao ${variant.delivered} · lỗi ${variant.error}${variant.lowStockThreshold === null ? "" : ` — ngưỡng ${variant.lowStockThreshold}`}`,
       ),
     ].join("\n"),
     buttons: [
-      ...visibleVariants.flatMap((variant) =>
-        variant.importSupported
-          ? [[{ text: variant.name, callbackData: `admin:inventory:variant:${variant.id}` }]]
-          : [],
-      ),
+      ...visibleVariants.map((variant) => [
+        {
+          text: `${variant.name}${variant.active === false ? " · nháp" : ""} · ${stockBadge(variant)}`,
+          callbackData: `admin:inventory:variant:${variant.id}`,
+        },
+      ]),
+      [{ text: "➕ Thêm biến thể", callbackData: `admin:products:variant-add:${input.id}` }],
       [{ text: ADMIN_COPY.back, callbackData: "admin:inventory" }],
       adminNav("admin:menu"),
     ],
@@ -714,58 +782,56 @@ export function presentAdminInventoryVariant(input: {
   sku: string;
   fulfillmentType: FulfillmentType;
   available: number;
+  reserved?: number;
+  delivered?: number;
+  error?: number;
   lowStockThreshold: number | null;
   importSupported: boolean;
   fileImportSupported?: boolean;
   announceSupported?: boolean;
   stockVersion?: number;
+  inventoryFields?: InventoryField[];
+  supplierSupported?: boolean;
+  active?: boolean;
 }): PresentedMessage {
   return {
     text: [
       ADMIN_COPY.inventory,
       `Biến thể: ${input.name}`,
       `SKU: ${input.sku}`,
-      `Loại giao hàng: ${FULFILLMENT_TYPE_LABELS[input.fulfillmentType]}`,
-      `Tồn khả dụng: ${input.available}`,
-      `Ngưỡng tồn: ${input.lowStockThreshold ?? "—"}`,
-      input.fileImportSupported
-        ? "Gửi tài liệu Telegram để tải vào kho riêng, xem trước rồi xác nhận kích hoạt."
-        : input.importSupported
-          ? "Nhập kho bằng dữ liệu bí mật đã được gắn với phiên máy chủ."
-          : input.fulfillmentType === "QUANTITY_STOCK"
-            ? "Điều chỉnh tồn kho số lượng bằng nút cộng/trừ bên dưới."
-            : "Biến thể này không hỗ trợ nhập kho.",
+      `Loại: ${FULFILLMENT_TYPE_LABELS[input.fulfillmentType]}`,
+      `Trạng thái: ${input.active === false ? "nháp/chưa mở bán" : "đang quản lý"}`,
+      `Khả dụng: ${input.available}`,
+      `Đang giữ: ${input.reserved ?? 0}`,
+      `Đã giao: ${input.delivered ?? 0}`,
+      `Lỗi/khóa: ${input.error ?? 0}`,
+      `Ngưỡng cảnh báo: ${input.lowStockThreshold ?? "—"}`,
+      importInstruction({ fulfillmentType: input.fulfillmentType, ...(input.inventoryFields ? { fields: input.inventoryFields } : {}) }),
     ].join("\n"),
     buttons: [
       ...(input.fileImportSupported
-        ? [[{ text: "📎 Nhập tệp", callbackData: `admin:inventory:import:${input.id}` }]]
+        ? [[{ text: "📎 Đăng ký tệp", callbackData: `admin:inventory:import:${input.id}` }]]
         : input.importSupported
-          ? [[{ text: "📥 Nhập kho", callbackData: `admin:inventory:import:${input.id}` }]]
-          : input.fulfillmentType === "QUANTITY_STOCK" && input.stockVersion !== undefined
-            ? [
-                [
-                  {
-                    text: "+1",
-                    callbackData: `admin:inventory:qty:${input.id}:1:${input.stockVersion}`,
-                  },
-                  {
-                    text: "-1",
-                    callbackData: `admin:inventory:qty:${input.id}:-1:${input.stockVersion}`,
-                  },
-                ],
-              ]
-            : []),
-      ...(input.announceSupported
+          ? [
+              [{ text: "📥 Nhập kho", callbackData: `admin:inventory:import:${input.id}` }],
+              [{ text: "⬇️ Template", callbackData: `admin:inventory:template:${input.id}` }],
+            ]
+          : []),
+      ...(input.fulfillmentType === "QUANTITY_STOCK" && input.stockVersion !== undefined
         ? [
             [
-              {
-                text: "📣 Thông báo còn hàng",
-                callbackData: `admin:inventory:announce:${input.id}`,
-              },
+              { text: "+1", callbackData: `admin:inventory:qty:${input.id}:1:${input.stockVersion}` },
+              { text: "-1", callbackData: `admin:inventory:qty:${input.id}:-1:${input.stockVersion}` },
             ],
           ]
         : []),
-      [{ text: "Lịch sử kho", callbackData: `admin:inventory:history:${input.id}` }],
+      ...(input.supplierSupported
+        ? [[{ text: "🚚 Mapping/đồng bộ", callbackData: `admin:supv:${input.id}` }]]
+        : []),
+      ...(input.announceSupported
+        ? [[{ text: "📣 Thông báo còn hàng", callbackData: `admin:inventory:announce:${input.id}` }]]
+        : []),
+      [{ text: "📋 Danh sách an toàn", callbackData: `admin:inventory:history:${input.id}` }],
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:product:${input.productId}` }],
       adminNav("admin:menu"),
     ],
@@ -855,20 +921,24 @@ export function presentInventoryImportPrompt(input: {
   variantName: string;
   sku: string;
   kind?: "secret" | "file";
+  fulfillmentType?: FulfillmentType;
+  inventoryFields?: InventoryField[];
 }): PresentedMessage {
   const file = input.kind === "file";
   return {
     text: [
-      "📦 Nhập kho biến thể",
+      file ? "📎 Đăng ký tệp bán" : "📦 Nhập kho biến thể",
       `Biến thể: ${input.variantName}`,
       `SKU: ${input.sku}`,
       file
         ? "Gửi một tài liệu Telegram. Bot tải tối đa 20 MB vào kho riêng, tính hash, rồi chờ xác nhận kích hoạt."
-        : "Tải CSV mẫu cho biến thể này, điền từng dòng credential giả lập thật rồi dán lại nội dung CSV vào chat.",
+        : importInstruction({
+            fulfillmentType: input.fulfillmentType ?? "STOCK_ACCOUNT",
+            ...(input.inventoryFields ? { fields: input.inventoryFields } : {}),
+          }),
       file
         ? "Không gửi đường dẫn hay token. Bấm /cancel để huỷ."
-        : "Không nhập credential thật vào dòng mẫu placeholder; dòng placeholder sẽ bị báo thiếu dữ liệu nếu chưa thay.",
-      ...(file ? [] : ["Trường dữ liệu không hiện giá trị trong lỗi. Bấm /cancel để huỷ."]),
+        : "Có thể dán nội dung hoặc gửi tài liệu .csv/.txt tối đa 64 KB / 500 dòng. Preview không hiện dữ liệu bí mật.",
     ].join("\n"),
     buttons: [
       ...(file
@@ -902,7 +972,7 @@ export function presentInventoryImportTemplate(input: {
       `SKU: ${input.sku}`,
       `Bắt buộc: ${input.requiredFields.join(", ") || "—"}`,
       `Tuỳ chọn: ${input.optionalFields.join(", ") || "—"}`,
-      "Điền giá trị thật vào dòng mới hoặc thay placeholder, rồi dán lại nội dung CSV vào chat.",
+      "Sao chép nội dung hoặc tải tệp CSV, điền dòng mới rồi dán/gửi lại. Không đổi header.",
     ].join("\n"),
     document: { kind: "buffer", value: Buffer.from(input.csv, "utf8"), filename: input.filename },
     buttons: [
@@ -926,7 +996,7 @@ export function presentInventoryImportPreview(preview: InventoryImportPreview): 
       `Dòng hợp lệ: ${preview.ready}`,
       `Dòng không hợp lệ: ${preview.invalid}`,
       `Dòng trùng: ${preview.duplicates}`,
-      `Biến thể: ${preview.variants.join(", ") || "—"}`,
+      `Biến thể trong tệp: ${new Set(preview.variants).size || "—"}`,
       "",
       "Thông tin đăng nhập không được hiển thị.",
     ].join("\n"),

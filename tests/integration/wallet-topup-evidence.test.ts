@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
-import { applyWalletTopupEvidence, presentWalletTopup } from "../../src/modules/wallet/topup.js";
+import {
+  applyWalletTopupEvidence,
+  cancelLiveWalletTopup,
+  presentWalletTopup,
+} from "../../src/modules/wallet/topup.js";
 import type { PaymentPresentation } from "../../src/modules/payments/vietqr.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
@@ -189,4 +193,62 @@ describe.skipIf(!hasDocker)("wallet topup evidence integration", () => {
       expect(rows.rows[0]).toEqual({ status, ledger_count: ledgerCount, balance_vnd: balance });
     },
   );
+
+  it("cancels only unpaid live topup and preserves a succeeded topup ledger credit", async () => {
+    const succeeded = await seedPresentedTopup(150_000n);
+    const providerTransactionId = "SEPAY-CREDIT-" + newId();
+    await expect(
+      applyWalletTopupEvidence(ctx.db, evidenceFor(succeeded, { providerTransactionId })),
+    ).resolves.toEqual({ ok: true, kind: "CREDITED" });
+
+    const unpaid = await presentWalletTopup({
+      db: ctx.db,
+      customerId: succeeded.customerId,
+      amountVnd: 200_000n,
+      merchantAccountId: "0123456789",
+      beneficiaryAccountNumber: "0123456789",
+      bankBin: "970422",
+      accountName: "BOT TELE",
+      correlationId: "present-unpaid-" + newId().slice(-8),
+    });
+    expect(unpaid.ok).toBe(true);
+    if (!unpaid.ok) throw new Error(unpaid.error);
+
+    await expect(
+      cancelLiveWalletTopup({ db: ctx.db, customerId: succeeded.customerId }),
+    ).resolves.toEqual({ cancelled: true });
+
+    const rows = await sql<{
+      succeeded_status: string;
+      unpaid_status: string;
+      balance_vnd: string;
+      ledger_sum: string | null;
+      credit_count: string;
+    }>`
+      select
+        (select status from wallet_topup_intent where id = ${succeeded.intentId}) as succeeded_status,
+        (select status from wallet_topup_intent where id = ${unpaid.intentId}) as unpaid_status,
+        (select balance_vnd::text from wallet_account where customer_id = ${succeeded.customerId}) as balance_vnd,
+        (
+          select sum(l.amount_vnd)::text
+          from wallet_ledger l
+          join wallet_account a on a.id = l.wallet_account_id
+          where a.customer_id = ${succeeded.customerId}
+        ) as ledger_sum,
+        (
+          select count(*)::text
+          from wallet_ledger l
+          join wallet_account a on a.id = l.wallet_account_id
+          where a.customer_id = ${succeeded.customerId} and l.entry_type = 'CREDIT'
+        ) as credit_count
+    `.execute(ctx.db);
+
+    expect(rows.rows[0]).toEqual({
+      succeeded_status: "SUCCEEDED",
+      unpaid_status: "EXPIRED",
+      balance_vnd: "150000",
+      ledger_sum: "150000",
+      credit_count: "1",
+    });
+  });
 });

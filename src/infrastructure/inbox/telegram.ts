@@ -20,6 +20,7 @@ export interface TelegramCommandEnvelope {
   callbackData?: string;
   command?: string;
   messageText?: string;
+  rootProductDraftText?: true;
   searchQuery?: string;
   firstName?: string;
   lastName?: string;

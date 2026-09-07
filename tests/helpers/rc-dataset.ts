@@ -50,10 +50,10 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
 
     await sql`
       insert into product_variant
-        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, resale_evidence_id, sort_order)
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, resale_evidence_id, sort_order)
       select '01VAR0' || lpad(gs::text, 20, '0'),
         '01PRD0' || lpad((((gs - 1) / 5)::int + 1)::text, 20, '0'),
-        'RC-SKU-' || gs, 'RC Variant ' || gs, 100000 + gs, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'RC-RESALE-' || gs, gs
+        'RC-SKU-' || gs, 'RC Variant ' || gs, 100000 + gs, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'QUANTITY_STOCK', 'RC-RESALE-' || gs, gs
       from generate_series(1, ${COUNTS.variants}) gs
     `.execute(trx);
 
@@ -93,10 +93,10 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
 
     await sql`
       insert into "order"
-        (id, order_number, idempotency_key, customer_id, variant_id, product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type, warranty_days, supplier_policy_snapshot, status, expires_at, paid_at, completed_at)
+        (id, order_number, idempotency_key, customer_id, variant_id, product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type, warranty_days, supplier_policy_snapshot, fulfillment_type, status, expires_at, paid_at, completed_at)
       select '01ARD0' || lpad(o::text, 20, '0'), 'RC' || lpad(o::text, 10, '0'), 'rc-order-' || o,
         '01CST0' || lpad((((o - 1) % ${COUNTS.customers}) + 1)::text, 20, '0'),
-        v.id, p.name_vi, v.name_vi, v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days, v.stock_policy,
+        v.id, p.name_vi, v.name_vi, v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days, v.stock_policy, v.fulfillment_type,
         'COMPLETED', now() + interval '1 day', now(), now()
       from generate_series(1, ${COUNTS.orders}) o
       join product_variant v on v.id = '01VAR0' || lpad((((o - 1) % ${COUNTS.variants}) + 1)::text, 20, '0')
@@ -250,18 +250,32 @@ export async function verifyRcDataset(db: Kysely<Database>): Promise<RcDatasetSu
         or not exists (select 1 from payment_intent p where p.order_id = o.id and p.status = 'SUCCEEDED')
         or not exists (select 1 from payment_allocation a join payment_intent p on p.id = a.payment_intent_id where p.order_id = o.id and a.status = 'SETTLED')
         or not exists (select 1 from audit_event a where a.target_type = 'order' and a.target_id = o.id)
+    ), fulfillment_failures as (
+      select count(*)::int as n
+      from product_variant v
+      left join variant_quantity_stock s on s.variant_id = v.id
+      left join variant_service_fulfillment f on f.variant_id = v.id and f.is_active
+      where v.fulfillment_type <> 'QUANTITY_STOCK'
+        or s.variant_id is null
+        or f.fulfillment_type <> v.fulfillment_type
+        or not exists (
+          select 1 from "order" o
+          where o.variant_id = v.id and o.fulfillment_type = v.fulfillment_type
+        )
     ), stock_failures as (
       select count(*)::int as n
       from variant_quantity_stock s
+      left join product_variant v on v.id = s.variant_id
       left join (
         select variant_id, sum(quantity_delta)::int as available_quantity
         from quantity_stock_ledger
         group by variant_id
       ) l on l.variant_id = s.variant_id
       where s.available_quantity <> coalesce(l.available_quantity, -1)
+        or v.fulfillment_type <> 'QUANTITY_STOCK'
         or not exists (
           select 1 from variant_service_fulfillment f
-          where f.variant_id = s.variant_id and f.fulfillment_type = 'QUANTITY_STOCK' and f.is_active
+          where f.variant_id = s.variant_id and f.fulfillment_type = v.fulfillment_type and f.is_active
         )
     ), delivery_failures as (
       select count(*)::int as n
@@ -270,7 +284,7 @@ export async function verifyRcDataset(db: Kysely<Database>): Promise<RcDatasetSu
         or not exists (select 1 from customer c where c.id = d.customer_id)
     )
     select ((select n from wallet_failures) + (select n from order_failures) +
-      (select n from stock_failures) + (select n from delivery_failures))::int as failures
+      (select n from fulfillment_failures) + (select n from stock_failures) + (select n from delivery_failures))::int as failures
   `.execute(db);
 
   const failures = invariants.rows[0]?.failures ?? 1;

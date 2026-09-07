@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { decideTopupMatch, type WalletTopupIntent } from "../../src/modules/wallet/topup.js";
+import {
+  decideTopupMatch,
+  parseWalletTopupAmount,
+  type WalletTopupIntent,
+} from "../../src/modules/wallet/topup.js";
 
 const intent = (over: Partial<WalletTopupIntent> = {}): WalletTopupIntent => ({
   id: "topup-1",
@@ -44,4 +48,26 @@ describe("decideTopupMatch", () => {
       reason: "NOT_LIVE",
     });
   });
+});
+
+describe("parseWalletTopupAmount", () => {
+  const bounds = { minVnd: 50_000, maxVnd: 1_000_000 };
+
+  it.each(["50000", "50.000", "50,000"])("accepts %s as 50000 VND", (input) => {
+    expect(parseWalletTopupAmount(input, bounds)).toEqual({ ok: true, amountVnd: 50_000n });
+  });
+
+  it("accepts a custom amount inside bounds", () => {
+    expect(parseWalletTopupAmount("375.000", bounds)).toEqual({
+      ok: true,
+      amountVnd: 375_000n,
+    });
+  });
+
+  it.each(["50.00", "50,00", "50.000,000", "NaN", "100000000000000000000"])(
+    "rejects malformed or out-of-bounds input %s",
+    (input) => {
+      expect(parseWalletTopupAmount(input, bounds).ok).toBe(false);
+    },
+  );
 });
