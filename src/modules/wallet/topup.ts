@@ -32,8 +32,7 @@ export interface WalletTopupBounds {
 export const WALLET_TOPUP_PRESET_AMOUNTS = [50_000, 100_000, 200_000, 500_000, 1_000_000] as const;
 
 export type WalletTopupAmountParseResult =
-  | { ok: true; amountVnd: bigint }
-  | { ok: false; error: string };
+  { ok: true; amountVnd: bigint } | { ok: false; error: string };
 
 export function parseWalletTopupAmount(
   input: string,

@@ -1295,7 +1295,6 @@ function actionContext(
   envelope: TelegramCommandEnvelope,
   correlationId: string,
 ): TelegramActionContext {
-
   return {
     telegramUserId: envelope.actorUserId,
     chatId: envelope.chatId,

@@ -80,9 +80,11 @@ const TEXT_DOCUMENT_MIME_TYPES: Record<string, true> = {
 };
 
 function isAllowedTextDocument(input: InventoryTextDocumentImport): boolean {
-  return TEXT_DOCUMENT_EXTENSIONS.test(input.filename) || TEXT_DOCUMENT_MIME_TYPES[input.mimeType] === true;
+  return (
+    TEXT_DOCUMENT_EXTENSIONS.test(input.filename) ||
+    TEXT_DOCUMENT_MIME_TYPES[input.mimeType] === true
+  );
 }
-
 
 function ttlExpiry(now: number, ttlSeconds = INVENTORY_IMPORT_TTL_SECONDS): Date {
   return new Date(now + ttlSeconds * 1000);
@@ -146,7 +148,7 @@ function parseCsvRecords(raw: string): string[][] | null {
         index += 1;
       } else if (char === '"') quoted = false;
       else cell += char;
-    } else if (char === ',') {
+    } else if (char === ",") {
       record.push(cell.trim());
       cell = "";
     } else if (char === '"' && cell.length === 0) quoted = true;
@@ -181,7 +183,11 @@ async function inventoryFieldsForSecretImportVariant(
   const parsed = INVENTORY_FIELDS_SCHEMA.safeParse(row.inventory_fields);
   return parsed.success ? parsed.data : [];
 }
-function bindSecretsToVariant(rawInput: string, variantId: string, fields: readonly InventoryField[]): string {
+function bindSecretsToVariant(
+  rawInput: string,
+  variantId: string,
+  fields: readonly InventoryField[],
+): string {
   const records = parseCsvRecords(rawInput);
   if (!records || records.length === 0) return "";
   const [firstRecord, ...dataRecords] = records;
@@ -199,7 +205,11 @@ function bindSecretsToVariant(rawInput: string, variantId: string, fields: reado
       new Set(fieldIndexByHeader).size === fields.length
     ) {
       return dataRecords
-        .map((record) => [variantId, ...fieldIndexByHeader.map((index) => record[index] ?? "")].map(csvCell).join(","))
+        .map((record) =>
+          [variantId, ...fieldIndexByHeader.map((index) => record[index] ?? "")]
+            .map(csvCell)
+            .join(","),
+        )
         .join("\n");
     }
   }
@@ -209,7 +219,6 @@ function bindSecretsToVariant(rawInput: string, variantId: string, fields: reado
 function selectedVariantFrom(session: InventoryImportSession): string | null {
   return session.selectedVariantId;
 }
-
 
 function sha256(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
@@ -450,7 +459,6 @@ export async function stageInventoryImportDocument(
   const rawInput = await input.downloader.downloadText(input.document.fileId);
   return stageInventoryImportInput(db, vault, { ...input, rawInput }, now);
 }
-
 
 export async function confirmInventoryImportSession(
   db: Db,

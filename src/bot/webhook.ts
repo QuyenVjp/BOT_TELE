@@ -98,13 +98,7 @@ export function createInMemoryUpdateInbox(): UpdateInbox {
   };
 }
 export type RootProductDraftTextStep =
-  | "name"
-  | "sku"
-  | "variantName"
-  | "price"
-  | "inventoryFields"
-  | "threshold"
-  | "initialQuantity";
+  "name" | "sku" | "variantName" | "price" | "inventoryFields" | "threshold" | "initialQuantity";
 
 export interface RootProductDraftTextIngress {
   adminTelegramUserId: number;
@@ -134,7 +128,9 @@ export async function registerTelegramWebhook(
 
     const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body);
     const update = coerceUpdate(rawBody);
-    const normalized = update ? await normalizeTelegramUpdate(update, options.rootProductDraftText) : null;
+    const normalized = update
+      ? await normalizeTelegramUpdate(update, options.rootProductDraftText)
+      : null;
     if (!update || !normalized) {
       return reply.code(200).send({ ok: true });
     }
@@ -408,9 +404,7 @@ function normalizeRootProductDraftText(
         profile_url: true,
         note: true,
       };
-      return fields.length > 0 && fields.every((field) => allowed[field])
-        ? fields.join(",")
-        : null;
+      return fields.length > 0 && fields.every((field) => allowed[field]) ? fields.join(",") : null;
     }
     case "price":
     case "threshold":

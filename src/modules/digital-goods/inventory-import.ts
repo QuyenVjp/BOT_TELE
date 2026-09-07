@@ -94,7 +94,9 @@ function csvCell(value: string): string {
   return /[",\n\r]/u.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
 }
 
-export function formatInventoryImportTemplate(input: { inventoryFields: InventoryField[] }): string {
+export function formatInventoryImportTemplate(input: {
+  inventoryFields: InventoryField[];
+}): string {
   const fields =
     input.inventoryFields.length > 0
       ? input.inventoryFields
@@ -108,7 +110,9 @@ export function formatInventoryImportTemplate(input: { inventoryFields: Inventor
           },
         ];
   const headers = fields.map((field) => field.name);
-  const sample = fields.map((field) => `<${field.name}${field.required ? ":required" : ":optional"}>`);
+  const sample = fields.map(
+    (field) => `<${field.name}${field.required ? ":required" : ":optional"}>`,
+  );
   return `${headers.map(csvCell).join(",")}\n${sample.map(csvCell).join(",")}\n`;
 }
 
@@ -169,7 +173,7 @@ function parseCsvRecords(raw: string): string[][] | null {
         index += 1;
       } else if (char === '"') quoted = false;
       else cell += char;
-    } else if (char === ',') {
+    } else if (char === ",") {
       record.push(cell.trim());
       cell = "";
     } else if (char === '"' && cell.length === 0) quoted = true;

@@ -578,7 +578,6 @@ describe("admin product creation and selected-variant inventory import", () => {
     `.execute(ctx.db);
     await sql`update product_variant set is_active = false where id = ${variantId}`.execute(ctx.db);
 
-
     const template = await createInventoryImportTemplate(ctx.db, {
       actor: rootActor,
       config: rootConfig,
@@ -609,12 +608,14 @@ describe("admin product creation and selected-variant inventory import", () => {
       correlationId: "admin-product-inventory:template-start",
       variantId,
     });
-    expect(await startInventoryImportSession(ctx.db, {
-      actor: rootActor,
-      config: rootConfig,
-      correlationId: "admin-product-inventory:inactive-template-start",
-      variantId,
-    })).toMatchObject({ ok: true });
+    expect(
+      await startInventoryImportSession(ctx.db, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:inactive-template-start",
+        variantId,
+      }),
+    ).toMatchObject({ ok: true });
     const staged = await stageInventoryImportInput(ctx.db, vault, {
       actor: rootActor,
       config: rootConfig,
@@ -761,9 +762,9 @@ describe("admin product creation and selected-variant inventory import", () => {
       rawInput: "secret-one",
     });
     expect(staged).toMatchObject({ ok: false });
-    const stored = await sql<{ count: string }>`select count(*)::text as count from digital_asset`.execute(
-      ctx.db,
-    );
+    const stored = await sql<{
+      count: string;
+    }>`select count(*)::text as count from digital_asset`.execute(ctx.db);
     expect(stored.rows[0]?.count).toBe("0");
   });
 
@@ -805,7 +806,12 @@ describe("admin product creation and selected-variant inventory import", () => {
         actor: rootActor,
         config: rootConfig,
         correlationId: "admin-product-inventory:doc-large",
-        document: { fileId: "file-2", filename: "codes.csv", mimeType: "text/csv", fileSize: 64 * 1024 + 1 },
+        document: {
+          fileId: "file-2",
+          filename: "codes.csv",
+          mimeType: "text/csv",
+          fileSize: 64 * 1024 + 1,
+        },
         downloader: { downloadText: async () => "SHOULD_NOT_DOWNLOAD" },
       }),
     ).resolves.toMatchObject({ ok: false, code: "INVALID_INPUT" });
@@ -844,16 +850,23 @@ describe("admin product creation and selected-variant inventory import", () => {
       }),
     ).resolves.toMatchObject({
       ok: true,
-      template: { csv: `code
+      template: {
+        csv: `code
 <code:required>
-` },
+`,
+      },
     });
     await expect(
       stageInventoryImportDocument(ctx.db, vault, {
         actor: rootActor,
         config: rootConfig,
         correlationId: "admin-product-inventory:code-invalid-mime",
-        document: { fileId: "file-3", filename: "codes.pdf", mimeType: "application/pdf", fileSize: 9 },
+        document: {
+          fileId: "file-3",
+          filename: "codes.pdf",
+          mimeType: "application/pdf",
+          fileSize: 9,
+        },
         downloader: { downloadText: async () => "SHOULD_NOT_DOWNLOAD" },
       }),
     ).resolves.toMatchObject({ ok: false, code: "UNSUPPORTED_DOCUMENT" });

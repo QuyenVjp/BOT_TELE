@@ -151,11 +151,29 @@ describe("admin operational presenters", () => {
     expect(empty.buttons[0]?.[0]).toMatchObject({ callbackData: "admin:products:create" });
 
     const populated = presentAdminInventory([
-      { id: "p1", name: "Netflix", active: true, variantCount: 2, inStock: 1, lowStock: 1, outOfStock: 1 },
-      { id: "p2", name: "Canary", active: false, variantCount: 1, inStock: 0, lowStock: 0, outOfStock: 1 },
+      {
+        id: "p1",
+        name: "Netflix",
+        active: true,
+        variantCount: 2,
+        inStock: 1,
+        lowStock: 1,
+        outOfStock: 1,
+      },
+      {
+        id: "p2",
+        name: "Canary",
+        active: false,
+        variantCount: 1,
+        inStock: 0,
+        lowStock: 0,
+        outOfStock: 1,
+      },
     ]);
     expect(populated.text).toContain("Netflix: 2 biến thể · còn 1 · sắp hết 1 · hết 1");
-    expect(populated.text).toContain("Canary · nháp/chưa mở bán: 1 biến thể · còn 0 · sắp hết 0 · hết 1");
+    expect(populated.text).toContain(
+      "Canary · nháp/chưa mở bán: 1 biến thể · còn 0 · sắp hết 0 · hết 1",
+    );
     expect(populated.buttons[0]?.[0]).toMatchObject({ callbackData: "admin:inventory:product:p1" });
     expect(populated.buttons[1]?.[0]).toMatchObject({
       text: "Canary · nháp · 0/1 còn",
@@ -177,7 +195,15 @@ describe("admin operational presenters", () => {
       categoryName: "Canary Category",
       priceVnd: 10000n,
       fulfillmentType: "STOCK_ACCOUNT",
-      inventoryFields: [{ name: "username", label: "Tên đăng nhập", required: true, secret: false, customerVisible: true }],
+      inventoryFields: [
+        {
+          name: "username",
+          label: "Tên đăng nhập",
+          required: true,
+          secret: false,
+          customerVisible: true,
+        },
+      ],
       lowStockThreshold: 1,
     });
     expect(preview.buttons.flat()).toEqual(
@@ -221,8 +247,12 @@ describe("admin operational presenters", () => {
       ],
     });
 
-    expect(message.text).toContain("Account — A — Tài khoản kho — khả dụng 1 · giữ 2 · giao 3 · lỗi 0");
-    expect(message.text).toContain("File · nháp/chưa mở bán — F — Tệp số — khả dụng 0 · giữ 0 · giao 0 · lỗi 0");
+    expect(message.text).toContain(
+      "Account — A — Tài khoản kho — khả dụng 1 · giữ 2 · giao 3 · lỗi 0",
+    );
+    expect(message.text).toContain(
+      "File · nháp/chưa mở bán — F — Tệp số — khả dụng 0 · giữ 0 · giao 0 · lỗi 0",
+    );
     expect(message.buttons.flat()).toEqual(
       expect.arrayContaining([expect.objectContaining({ text: "File · nháp · hết hàng" })]),
     );
@@ -273,9 +303,9 @@ describe("admin operational presenters", () => {
   });
 
   it("renders all product fulfillment type choices as selectable callbacks", () => {
-    const callbacks = presentProductFulfillmentTypeChoices().buttons.flat().map((button) =>
-      button.callbackData,
-    );
+    const callbacks = presentProductFulfillmentTypeChoices()
+      .buttons.flat()
+      .map((button) => button.callbackData);
 
     expect(callbacks).toEqual(
       expect.arrayContaining([

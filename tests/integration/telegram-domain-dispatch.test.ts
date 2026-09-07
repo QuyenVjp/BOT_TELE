@@ -334,10 +334,10 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData: "wallet:topup:amount:200000",
     });
 
-    expect(walletTopup).toHaveBeenCalledWith(
-      expect.objectContaining({ telegramUserId: USER }),
-      { kind: "SELECT", amountVnd: 200_000n },
-    );
+    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), {
+      kind: "SELECT",
+      amountVnd: 200_000n,
+    });
     expect(send).toHaveBeenCalledTimes(1);
   });
 
@@ -374,10 +374,9 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData: "wallet:topup:status",
     });
 
-    expect(walletTopup).toHaveBeenCalledWith(
-      expect.objectContaining({ telegramUserId: USER }),
-      { kind: "STATUS" },
-    );
+    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), {
+      kind: "STATUS",
+    });
     expect(send).toHaveBeenCalledTimes(1);
   });
 
@@ -393,10 +392,9 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData: "wallet:topup:cancel",
     });
 
-    expect(walletTopup).toHaveBeenCalledWith(
-      expect.objectContaining({ telegramUserId: USER }),
-      { kind: "CANCEL" },
-    );
+    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), {
+      kind: "CANCEL",
+    });
     expect(send).toHaveBeenCalledTimes(1);
   });
 
@@ -1395,10 +1393,9 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       command: "/support",
     });
 
-    expect(walletTopup).toHaveBeenCalledWith(
-      expect.objectContaining({ telegramUserId: USER }),
-      { kind: "PICK" },
-    );
+    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), {
+      kind: "PICK",
+    });
     expect(walletPay).toHaveBeenCalledWith(
       expect.objectContaining({ telegramUserId: USER }),
       "ORD-1",

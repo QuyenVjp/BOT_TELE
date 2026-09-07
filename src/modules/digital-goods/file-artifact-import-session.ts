@@ -257,7 +257,6 @@ export function createTelegramTextFileDownloader(botToken: string): {
   };
 }
 
-
 async function authorize(
   db: Db,
   actor: RootActor,

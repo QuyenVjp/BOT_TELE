@@ -685,7 +685,10 @@ function stockBadge(input: { available: number; lowStockThreshold: number | null
     : `còn ${input.available}`;
 }
 
-function importInstruction(input: { fulfillmentType: FulfillmentType; fields?: InventoryField[] }): string {
+function importInstruction(input: {
+  fulfillmentType: FulfillmentType;
+  fields?: InventoryField[];
+}): string {
   switch (input.fulfillmentType) {
     case "STOCK_ACCOUNT": {
       const fields = input.fields?.map((field) => field.name).join(", ") || "dữ liệu";
@@ -707,7 +710,13 @@ function importInstruction(input: { fulfillmentType: FulfillmentType; fields?: I
 
 export function presentAdminInventory(
   rows: AdminInventoryProductSummary[],
-  totals?: { products: number; variants: number; inStock: number; lowStock: number; outOfStock: number },
+  totals?: {
+    products: number;
+    variants: number;
+    inStock: number;
+    lowStock: number;
+    outOfStock: number;
+  },
 ): PresentedMessage {
   const visibleRows = rows.slice(0, 20);
   return {
@@ -755,7 +764,9 @@ export function presentAdminInventoryProduct(input: {
     text: [
       ADMIN_COPY.inventory,
       `Sản phẩm: ${input.name}`,
-      visibleVariants.length === 0 ? "Chưa có biến thể. Tạo biến thể để bán hoặc nhập kho." : "Biến thể:",
+      visibleVariants.length === 0
+        ? "Chưa có biến thể. Tạo biến thể để bán hoặc nhập kho."
+        : "Biến thể:",
       ...visibleVariants.map(
         (variant) =>
           `• ${variant.name}${variant.active === false ? " · nháp/chưa mở bán" : ""} — ${variant.sku} — ${FULFILLMENT_TYPE_LABELS[variant.fulfillmentType]} — khả dụng ${variant.available} · giữ ${variant.reserved} · giao ${variant.delivered} · lỗi ${variant.error}${variant.lowStockThreshold === null ? "" : ` — ngưỡng ${variant.lowStockThreshold}`}`,
@@ -806,7 +817,10 @@ export function presentAdminInventoryVariant(input: {
       `Đã giao: ${input.delivered ?? 0}`,
       `Lỗi/khóa: ${input.error ?? 0}`,
       `Ngưỡng cảnh báo: ${input.lowStockThreshold ?? "—"}`,
-      importInstruction({ fulfillmentType: input.fulfillmentType, ...(input.inventoryFields ? { fields: input.inventoryFields } : {}) }),
+      importInstruction({
+        fulfillmentType: input.fulfillmentType,
+        ...(input.inventoryFields ? { fields: input.inventoryFields } : {}),
+      }),
     ].join("\n"),
     buttons: [
       ...(input.fileImportSupported
@@ -820,8 +834,14 @@ export function presentAdminInventoryVariant(input: {
       ...(input.fulfillmentType === "QUANTITY_STOCK" && input.stockVersion !== undefined
         ? [
             [
-              { text: "+1", callbackData: `admin:inventory:qty:${input.id}:1:${input.stockVersion}` },
-              { text: "-1", callbackData: `admin:inventory:qty:${input.id}:-1:${input.stockVersion}` },
+              {
+                text: "+1",
+                callbackData: `admin:inventory:qty:${input.id}:1:${input.stockVersion}`,
+              },
+              {
+                text: "-1",
+                callbackData: `admin:inventory:qty:${input.id}:-1:${input.stockVersion}`,
+              },
             ],
           ]
         : []),
@@ -829,7 +849,14 @@ export function presentAdminInventoryVariant(input: {
         ? [[{ text: "🚚 Mapping/đồng bộ", callbackData: `admin:supv:${input.id}` }]]
         : []),
       ...(input.announceSupported
-        ? [[{ text: "📣 Thông báo còn hàng", callbackData: `admin:inventory:announce:${input.id}` }]]
+        ? [
+            [
+              {
+                text: "📣 Thông báo còn hàng",
+                callbackData: `admin:inventory:announce:${input.id}`,
+              },
+            ],
+          ]
         : []),
       [{ text: "📋 Danh sách an toàn", callbackData: `admin:inventory:history:${input.id}` }],
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:product:${input.productId}` }],

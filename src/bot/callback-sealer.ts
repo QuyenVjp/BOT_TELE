@@ -26,7 +26,11 @@ export async function sealPresentedMessageCallbacks(
         sealedRow.push(button);
         continue;
       }
-      if (/^wallet:(?:account|topup(?::(?:custom|confirm|status|change|cancel|amount:[1-9][0-9]{0,12}))?)$/.test(button.callbackData)) {
+      if (
+        /^wallet:(?:account|topup(?::(?:custom|confirm|status|change|cancel|amount:[1-9][0-9]{0,12}))?)$/.test(
+          button.callbackData,
+        )
+      ) {
         sealedRow.push(button);
         continue;
       }

@@ -181,8 +181,7 @@ describe("root product draft text ingress", () => {
       },
       rootProductDraftText: {
         adminTelegramUserId: 123456789,
-        activeStep: async (telegramUserId) =>
-          telegramUserId === "123456789" ? "name" : null,
+        activeStep: async (telegramUserId) => (telegramUserId === "123456789" ? "name" : null),
       },
     });
     await ingress.ready();

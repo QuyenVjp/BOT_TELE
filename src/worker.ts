@@ -1139,7 +1139,9 @@ async function bootstrap(): Promise<void> {
       if (action.kind === "CONFIRM") {
         const amountVnd = await loadWalletTopupSelection(dbHandle.db, customerId);
         if (!amountVnd)
-          return walletTopupCustomPrompt("Phiên chọn số tiền đã hết hạn. Nhập lại số tiền muốn nạp.");
+          return walletTopupCustomPrompt(
+            "Phiên chọn số tiền đã hết hạn. Nhập lại số tiền muốn nạp.",
+          );
         const result = await presentWalletTopup({
           db: dbHandle.db,
           customerId,
@@ -1180,7 +1182,10 @@ async function bootstrap(): Promise<void> {
         await clearWalletTopupSelection(dbHandle.db, customerId);
         return {
           text: "Đã huỷ nạp ví chưa thanh toán.",
-          buttons: [[{ text: "Ví", callbackData: "wallet:account" }], [{ text: "Menu chính", callbackData: "menu:main" }]],
+          buttons: [
+            [{ text: "Ví", callbackData: "wallet:account" }],
+            [{ text: "Menu chính", callbackData: "menu:main" }],
+          ],
         };
       }
       return walletTopupPickerMessage(account);
@@ -2724,8 +2729,15 @@ async function bootstrap(): Promise<void> {
       },
       async importDocument(input) {
         if (!adminCallbacks) return null;
-        const textSession = await getInventoryImportSession(dbHandle.db, String(input.telegramUserId));
-        if (textSession && textSession.status !== "COMMITTED" && textSession.status !== "CANCELLED") {
+        const textSession = await getInventoryImportSession(
+          dbHandle.db,
+          String(input.telegramUserId),
+        );
+        if (
+          textSession &&
+          textSession.status !== "COMMITTED" &&
+          textSession.status !== "CANCELLED"
+        ) {
           const result = await stageInventoryImportDocument(dbHandle.db, vault, {
             actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
             config: {
@@ -3092,7 +3104,9 @@ async function bootstrap(): Promise<void> {
           if (result.draft.step === "confirm") {
             const categoryName = result.draft.categoryId
               ? (
-                  await sql<{ name: string }>`select name_vi as name from category where id = ${result.draft.categoryId} limit 1`.execute(
+                  await sql<{
+                    name: string;
+                  }>`select name_vi as name from category where id = ${result.draft.categoryId} limit 1`.execute(
                     dbHandle.db,
                   )
                 ).rows[0]?.name
@@ -3320,7 +3334,9 @@ async function bootstrap(): Promise<void> {
             };
           const categoryName = draft.categoryId
             ? (
-                await sql<{ name: string }>`select name_vi as name from category where id = ${draft.categoryId} limit 1`.execute(
+                await sql<{
+                  name: string;
+                }>`select name_vi as name from category where id = ${draft.categoryId} limit 1`.execute(
                   dbHandle.db,
                 )
               ).rows[0]?.name
