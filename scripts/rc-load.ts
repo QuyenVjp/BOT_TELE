@@ -41,6 +41,7 @@ const CATEGORY_ID = "01CAT0000000000000000001";
 interface Metric {
   p50: number;
   p95: number;
+  p99: number;
   errors: number;
 }
 
@@ -66,6 +67,7 @@ function metric(values: number[], errors: number): Metric {
   return {
     p50: Number(percentile(values, 50).toFixed(3)),
     p95: Number(percentile(values, 95).toFixed(3)),
+    p99: Number(percentile(values, 99).toFixed(3)),
     errors,
   };
 }

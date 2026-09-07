@@ -320,7 +320,7 @@ describe("durable delivery notification handoff (T139/T145)", () => {
     expect(sent).toEqual([]);
   });
 
-  it("aborts a send before its notification lease can expire", async () => {
+  it("aborts and dead-letters an ambiguous send before its notification lease can expire", async () => {
     const f = await seedBundle();
     await createDeliveryNotificationHandoff(ctx.db, {
       vault: f.vault,
@@ -370,7 +370,7 @@ describe("durable delivery notification handoff (T139/T145)", () => {
     expect(result).toMatchObject({ sent: 0, failed: 1 });
     expect(observedSignal?.aborted).toBe(true);
     expect(row.rows[0]).toMatchObject({
-      status: "RETRY",
+      status: "DEAD",
       last_error_code: "DeliveryNotificationSendTimeoutError",
     });
   });
