@@ -36,6 +36,7 @@ import {
 } from "./modules/digital-goods/recovery.js";
 import {
   cleanupDeliveryNotificationCapabilitiesBatch,
+  processDeliveryNotificationBatch,
   recoverStoredDeliveryNotificationHandoffsBatch,
 } from "./modules/digital-goods/delivery-notification.js";
 import { recoverSePayBatch } from "./modules/payments/recovery.js";
@@ -3760,6 +3761,52 @@ async function bootstrap(): Promise<void> {
       ratePerSecond: notificationRate,
       maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
     });
+    if (config.DELIVERY_SESSION_HMAC_KEY) {
+      await processDeliveryNotificationBatch({
+        db: dbHandle.db,
+        vault,
+        sender: {
+          send: async (input) => {
+            await telegramResponder.send({
+              chatId: input.chatId,
+              messageId: null,
+              message: {
+                text: "🎁 ĐƠN HÀNG CỦA BẠN ĐÃ SẴN SÀNG!\n\nNhấn nút bên dưới để nhận tài khoản / mã kích hoạt của bạn:",
+                buttons: [
+                  [
+                    {
+                      text: "🔐 Nhận hàng ngay",
+                      callbackData: "delivery:open",
+                      webAppUrl: input.miniAppUrl,
+                    },
+                  ],
+                  [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
+                ],
+              },
+            });
+          },
+        },
+        miniAppBaseUrl: `${config.APP_BASE_URL.replace(/\/$/, "")}/delivery/redeem`,
+        owner: ownerId,
+        batchSize: 10,
+        maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
+        sessionConfig: {
+          key: config.DELIVERY_SESSION_HMAC_KEY,
+          keyVersion: config.DELIVERY_SESSION_KEY_VERSION,
+          audience: "delivery-reveal",
+          ...(config.DELIVERY_SESSION_PREVIOUS_HMAC_KEY &&
+          config.DELIVERY_SESSION_PREVIOUS_KEY_VERSION !== undefined &&
+          config.DELIVERY_SESSION_PREVIOUS_KEY_GRACE_UNTIL
+            ? {
+                previousKey: config.DELIVERY_SESSION_PREVIOUS_HMAC_KEY,
+                previousKeyVersion: config.DELIVERY_SESSION_PREVIOUS_KEY_VERSION,
+                previousKeyGraceUntil: new Date(config.DELIVERY_SESSION_PREVIOUS_KEY_GRACE_UNTIL),
+              }
+            : {}),
+        },
+        sessionTtlSeconds: config.DELIVERY_SESSION_TTL_SECONDS,
+      });
+    }
   };
   const ownerId = `worker-${newId().slice(-12)}`;
   const telegramOwnerId = `telegram-${newId().slice(-12)}`;
