@@ -127,7 +127,9 @@ describe("checkout callbacks (T056)", () => {
     const orderNumber = cb.lastOrderNumber();
     expect(orderNumber).toBeTruthy();
     const refreshed = await cb.refresh(orderNumber!, cat.customerId);
-    // Still waiting — shows the payment screen again, not a settled screen.
+    // Still waiting — shows pending notice and the payment screen
+    expect(refreshed.text).toContain("Chưa nhận được thanh toán");
+    expect(refreshed.text).toContain("Hệ thống sẽ tự cập nhật ngay khi ngân hàng xác nhận");
     expect(refreshed.text.toLowerCase()).not.toContain("đã thanh toán");
     expect(buy.text).toContain("199.000");
   });
@@ -157,6 +159,21 @@ describe("checkout callbacks (T056)", () => {
 
     const refreshed = await cb.refresh(orderNumber, cat.customerId);
     expect(refreshed.text.toLowerCase()).toContain("đã thanh toán");
+    expect(refreshed.text).toContain("Đang giao sản phẩm...");
+
+    // Completed order wording
+    await sql`update "order" set status = 'COMPLETED' where order_number = ${orderNumber}`.execute(
+      ctx.db,
+    );
+    const completed = await cb.refresh(orderNumber, cat.customerId);
+    expect(completed.text).toContain("Đơn hàng đã hoàn tất");
+
+    // Manual / unlimited service wording
+    await sql`update "order" set status = 'PROCESSING', fulfillment_type = 'UNLIMITED_SERVICE' where order_number = ${orderNumber}`.execute(
+      ctx.db,
+    );
+    const manualProcessing = await cb.refresh(orderNumber, cat.customerId);
+    expect(manualProcessing.text).toContain("Đang chờ nhân viên xử lý thủ công");
   });
 
   it("unpaid cancel transitions the order to CANCELLED", async () => {

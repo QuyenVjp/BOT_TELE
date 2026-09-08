@@ -1089,6 +1089,44 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       correlationId: "telegram:apply-sku-cb-1",
     });
   });
+  it("routes pay:refresh:<orderNumber> directly to checkout.refresh without codec error", async () => {
+    const base = setup();
+    const refresh = vi.fn().mockResolvedValue({ text: "order status", buttons: [] });
+    const dispatcher = createTelegramDomainDispatcher({
+      codec: base.codec,
+      resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
+      resolveOrderById: vi.fn(),
+      resolveOrderIdByNumber: vi.fn(),
+      resolveCatalogPage: vi.fn().mockResolvedValue(null),
+      catalog: {
+        mainMenu: base.mainMenu,
+        categoryList: vi.fn(),
+        categoryView: vi.fn(),
+        variantDetail: vi.fn(),
+        search: vi.fn(),
+      },
+      checkout: {
+        buyNowFromCallback: vi.fn(),
+        refresh,
+        reopen: vi.fn(),
+        cancel: vi.fn(),
+      },
+      history: { list: vi.fn(), detail: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      responder: { send: base.send },
+    });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "pay-refresh-1",
+      action: "UNKNOWN",
+      callbackData: "pay:refresh:ORD-20260908-16QVJNC6",
+    });
+
+    expect(refresh).toHaveBeenCalledWith("ORD-20260908-16QVJNC6", CUSTOMER);
+  });
   it("routes inventory import text before the generic workflow when present", async () => {
     const base = setup();
     const importText = vi.fn().mockResolvedValue({

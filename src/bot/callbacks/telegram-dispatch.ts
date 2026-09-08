@@ -539,6 +539,30 @@ export function createTelegramDomainDispatcher(
           telegramUserId: envelope.actorUserId,
           correlationId,
         });
+      } else if (envelope.callbackData?.startsWith("pay:refresh:")) {
+        const orderNumber = envelope.callbackData.slice("pay:refresh:".length);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message = customerId
+          ? await deps.checkout.refresh(orderNumber, customerId)
+          : safeError("Không tìm thấy thông tin khách hàng.");
+      } else if (envelope.callbackData?.startsWith("pay:cancel:")) {
+        const orderNumber = envelope.callbackData.slice("pay:cancel:".length);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message = customerId
+          ? await deps.checkout.cancel(orderNumber, customerId, correlationId)
+          : safeError("Không tìm thấy thông tin khách hàng.");
+      } else if (envelope.callbackData?.startsWith("pay:reopen:")) {
+        const orderNumber = envelope.callbackData.slice("pay:reopen:".length);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message = customerId
+          ? await deps.checkout.reopen(orderNumber, customerId)
+          : safeError("Không tìm thấy thông tin khách hàng.");
+      } else if (envelope.callbackData?.startsWith("ord:view:")) {
+        const orderNumber = envelope.callbackData.slice("ord:view:".length);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message = customerId
+          ? await deps.history.detail(orderNumber, customerId)
+          : safeError("Không tìm thấy thông tin khách hàng.");
       } else if (envelope.callbackData?.startsWith("admin:")) {
         const route = envelope.callbackData.slice("admin:".length);
         const admin = deps.admin;
@@ -1295,7 +1319,13 @@ export function createTelegramDomainDispatcher(
         });
         message = verified.ok
           ? await dispatchVerified(deps, envelope, verified.value, correlationId)
-          : safeError("Yêu cầu không hợp lệ. Vui lòng mở lại menu.");
+          : {
+              text: "Yêu cầu không hợp lệ hoặc phiên nút đã cũ. Vui lòng mở lại menu để tiếp tục.",
+              buttons: [
+                [{ text: "🧾 Đơn hàng của tôi", callbackData: "ord:list" }],
+                [{ text: "Menu chính", callbackData: "menu:main" }],
+              ],
+            };
       } else {
         message = await deps.catalog.mainMenu();
       }

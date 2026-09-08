@@ -6,7 +6,6 @@ import { findLiveIntentByOrder } from "../../modules/payments/repository.js";
 import { normalizeTelegramUserId, type BuyNowCallbackCodec } from "../callback-codec.js";
 import {
   presentPaymentScreen,
-  presentPaymentSettled,
   presentPaymentExpired,
   presentPaymentNeedsReview,
   PAYMENT_COPY,
@@ -152,12 +151,28 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       }
 
       // Pure internal projection — no SePay call, no mark-paid.
-      if (
-        order.status === "PAID" ||
-        order.status === "PROCESSING" ||
-        order.status === "COMPLETED"
-      ) {
-        return presentPaymentSettled(order.orderNumber);
+      if (order.status === "COMPLETED") {
+        return {
+          text: `✅ Đơn hàng đã hoàn tất.\n\nĐơn: ${order.orderNumber}`,
+          buttons: [
+            [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
+            [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+          ],
+        };
+      }
+      if (order.status === "PAID" || order.status === "PROCESSING") {
+        const isManual =
+          order.fulfillmentType === "MANUAL_FULFILLMENT" ||
+          order.fulfillmentType === "UNLIMITED_SERVICE";
+        return {
+          text: isManual
+            ? `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang chờ nhân viên xử lý thủ công. Shop sẽ thông báo qua tin nhắn khi hoàn tất.`
+            : `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`,
+          buttons: [
+            [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
+            [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+          ],
+        };
       }
       if (order.status === "EXPIRED") {
         return presentPaymentExpired(order.orderNumber);
@@ -183,7 +198,11 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       }
       lastOrderNumber = presented.presentation.orderNumber;
       lastTransferContent = presented.presentation.transferContent;
-      return await presentPaymentScreen(presented.presentation);
+      const screen = await presentPaymentScreen(presented.presentation);
+      return {
+        ...screen,
+        text: `⏳ Chưa nhận được thanh toán.\nHệ thống sẽ tự cập nhật ngay khi ngân hàng xác nhận.\n\n${screen.text}`,
+      };
     },
 
     async reopen(orderNumber, customerId) {
