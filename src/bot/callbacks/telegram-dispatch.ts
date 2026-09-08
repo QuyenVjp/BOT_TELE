@@ -482,6 +482,17 @@ export interface TelegramDomainDispatcherDeps {
         correlationId: string;
         active?: boolean;
       }): Promise<PresentedMessage>;
+      back?(input: {
+        telegramUserId: string;
+        chatType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
+      applySku?(input: {
+        telegramUserId: string;
+        sku: string;
+        chatType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
       cancel(input: {
         telegramUserId: string;
         chatType: string;
@@ -616,6 +627,23 @@ export function createTelegramDomainDispatcher(
                 active: false,
               })
             : safeError("Lưu nháp sản phẩm không khả dụng.");
+        } else if (route === "products:back") {
+          message = admin.workflow?.back
+            ? await admin.workflow.back({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : presentAdminMenu();
+        } else if (route.startsWith("products:apply-sku:")) {
+          message = admin.workflow?.applySku
+            ? await admin.workflow.applySku({
+                telegramUserId: envelope.actorUserId,
+                sku: route.slice("products:apply-sku:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Áp dụng SKU không khả dụng.");
         } else if (route === "products:cancel") {
           message = admin.workflow
             ? await admin.workflow.cancel({

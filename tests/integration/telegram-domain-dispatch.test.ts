@@ -959,6 +959,135 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     });
     expect(adminCustomerText).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("prioritizes /admin command even when rootProductDraftText is true", async () => {
+    const { dispatcher, adminMainMenu, workflowMessageText, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "admin-cmd-priority",
+      action: "ADMIN",
+      command: "/admin",
+      messageText: "/admin",
+      rootProductDraftText: true,
+    });
+
+    expect(adminMainMenu).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      correlationId: "telegram:admin-cmd-priority",
+    });
+    expect(workflowMessageText).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes products:back to workflow.back", async () => {
+    const base = setup();
+    const back = vi.fn().mockResolvedValue({ text: "back step", buttons: [] });
+    const dispatcher = createTelegramDomainDispatcher({
+      codec: base.codec,
+      resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
+      resolveOrderById: vi.fn(),
+      resolveOrderIdByNumber: vi.fn(),
+      resolveCatalogPage: vi.fn().mockResolvedValue(null),
+      catalog: {
+        mainMenu: base.mainMenu,
+        categoryList: vi.fn(),
+        categoryView: vi.fn(),
+        variantDetail: vi.fn(),
+        search: vi.fn(),
+      },
+      checkout: {
+        buyNowFromCallback: vi.fn(),
+        refresh: vi.fn(),
+        reopen: vi.fn(),
+        cancel: vi.fn(),
+      },
+      history: { list: vi.fn(), detail: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      responder: { send: base.send },
+      admin: {
+        handleToken: vi.fn(),
+        workflow: {
+          start: vi.fn(),
+          messageText: base.workflowMessageText,
+          cancel: vi.fn(),
+          back,
+        },
+      },
+    });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "back-cb-1",
+      action: "ADMIN",
+      callbackData: "admin:products:back",
+    });
+
+    expect(back).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      correlationId: "telegram:back-cb-1",
+    });
+  });
+
+  it("routes products:apply-sku:<sku> to workflow.applySku", async () => {
+    const base = setup();
+    const applySku = vi.fn().mockResolvedValue({ text: "sku applied", buttons: [] });
+    const dispatcher = createTelegramDomainDispatcher({
+      codec: base.codec,
+      resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
+      resolveOrderById: vi.fn(),
+      resolveOrderIdByNumber: vi.fn(),
+      resolveCatalogPage: vi.fn().mockResolvedValue(null),
+      catalog: {
+        mainMenu: base.mainMenu,
+        categoryList: vi.fn(),
+        categoryView: vi.fn(),
+        variantDetail: vi.fn(),
+        search: vi.fn(),
+      },
+      checkout: {
+        buyNowFromCallback: vi.fn(),
+        refresh: vi.fn(),
+        reopen: vi.fn(),
+        cancel: vi.fn(),
+      },
+      history: { list: vi.fn(), detail: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      responder: { send: base.send },
+      admin: {
+        handleToken: vi.fn(),
+        workflow: {
+          start: vi.fn(),
+          messageText: base.workflowMessageText,
+          cancel: vi.fn(),
+          applySku,
+        },
+      },
+    });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "apply-sku-cb-1",
+      action: "ADMIN",
+      callbackData: "admin:products:apply-sku:GPT-PLUS-001",
+    });
+
+    expect(applySku).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      sku: "GPT-PLUS-001",
+      chatType: "private",
+      correlationId: "telegram:apply-sku-cb-1",
+    });
   });
   it("routes inventory import text before the generic workflow when present", async () => {
     const base = setup();

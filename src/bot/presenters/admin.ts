@@ -484,47 +484,50 @@ export function presentProductFulfillmentTypeChoices(): PresentedMessage {
     buttons: [
       [
         {
-          text: FULFILLMENT_TYPE_LABELS.STOCK_ACCOUNT,
+          text: "👤 Tài khoản",
           callbackData: "admin:products:type:STOCK_ACCOUNT",
         },
       ],
       [
         {
-          text: FULFILLMENT_TYPE_LABELS.STOCK_CODE,
+          text: "🔑 Key / Code",
           callbackData: "admin:products:type:STOCK_CODE",
         },
       ],
       [
         {
-          text: FULFILLMENT_TYPE_LABELS.MANUAL_FULFILLMENT,
+          text: "🧑‍💻 Giao thủ công",
           callbackData: "admin:products:type:MANUAL_FULFILLMENT",
         },
       ],
       [
         {
-          text: FULFILLMENT_TYPE_LABELS.UNLIMITED_SERVICE,
+          text: "♾ Dịch vụ",
           callbackData: "admin:products:type:UNLIMITED_SERVICE",
         },
       ],
       [
         {
-          text: FULFILLMENT_TYPE_LABELS.QUANTITY_STOCK,
+          text: "📦 Hàng số lượng",
           callbackData: "admin:products:type:QUANTITY_STOCK",
         },
       ],
       [
         {
-          text: FULFILLMENT_TYPE_LABELS.DIGITAL_FILE,
+          text: "📁 File số",
           callbackData: "admin:products:type:DIGITAL_FILE",
         },
       ],
       [
         {
-          text: FULFILLMENT_TYPE_LABELS.SUPPLIER_API,
+          text: "🔌 API nhà cung cấp",
           callbackData: "admin:products:type:SUPPLIER_API",
         },
       ],
-      [{ text: "Huỷ", callbackData: "admin:products:cancel" }],
+      [
+        { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+        { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+      ],
     ],
   };
 }
@@ -547,27 +550,29 @@ export function presentProductDraftPreview(draft: {
 }): PresentedMessage {
   return {
     text: [
-      draft.existingProductId ? "Xem trước biến thể" : "Xem trước sản phẩm",
+      "📋 XEM TRƯỚC SẢN PHẨM",
+      "",
       ...(draft.name ? [`Tên: ${draft.name}`] : []),
       `Biến thể: ${draft.variantName}`,
       `SKU: ${draft.sku}`,
       draft.existingProductId
-        ? `Sản phẩm: ${draft.existingProductId}`
+        ? `Sản phẩm cha: ${draft.existingProductId}`
         : `Danh mục: ${draft.categoryName ?? draft.categoryId}`,
       `Giá: ${draft.priceVnd.toLocaleString("vi-VN")} ₫`,
-      `Loại giao hàng: ${FULFILLMENT_TYPE_LABELS[draft.fulfillmentType]}`,
-      `Trường kho: ${draft.inventoryFields.map((field) => field.label).join(", ") || "—"}`,
+      `Loại: ${FULFILLMENT_TYPE_LABELS[draft.fulfillmentType]}`,
+      `Trường kho: ${draft.inventoryFields.map((field) => field.label).join(", ") || "Chưa nhập"}`,
       `Ngưỡng tồn: ${draft.lowStockThreshold}`,
-      ...(draft.serviceInstructions ? [`Hướng dẫn xử lý: ${draft.serviceInstructions}`] : []),
+      "Trạng thái: Nháp / Chưa mở bán",
+      ...(draft.serviceInstructions ? [`Hướng dẫn xử lý:\n${draft.serviceInstructions}`] : []),
       ...(draft.initialQuantity === undefined
         ? []
-        : [`Số lượng ban đầu: ${draft.initialQuantity}`]),
+        : [`Số lượng ban đầu:\n${draft.initialQuantity}`]),
       ...(draft.fileArtifact
-        ? [`Tệp đăng ký: ${draft.fileArtifact.filename} (chưa kích hoạt/chưa bán)`]
+        ? [`Tệp đăng ký:\n${draft.fileArtifact.filename} (chưa kích hoạt/chưa bán)`]
         : []),
       ...(draft.supplierConfig
         ? [
-            `Nhà cung cấp: ${draft.supplierConfig.supplierId} · SKU ${draft.supplierConfig.externalSku} · Giá vốn ${draft.supplierConfig.costVnd.toLocaleString("vi-VN")} ₫${draft.supplierConfig.region ? ` · ${draft.supplierConfig.region}` : ""}`,
+            `Nhà cung cấp:\n${draft.supplierConfig.supplierId} · SKU ${draft.supplierConfig.externalSku} · Giá vốn ${draft.supplierConfig.costVnd.toLocaleString("vi-VN")} ₫${draft.supplierConfig.region ? ` · ${draft.supplierConfig.region}` : ""}`,
           ]
         : []),
     ].join("\n"),
@@ -581,7 +586,10 @@ export function presentProductDraftPreview(draft: {
       ...(!draft.existingProductId
         ? [[{ text: "💾 Lưu nháp", callbackData: "admin:products:draft" }]]
         : []),
-      [{ text: "❌ Huỷ", callbackData: "admin:products" }],
+      [
+        { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+        { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+      ],
     ],
   };
 }

@@ -79,8 +79,33 @@ function supplierConfigFromStored(value: unknown): ProductDraftSupplierConfig | 
 }
 
 const TTL_MS = 15 * 60_000;
-const SKU = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
-const SLUG = /^[a-z0-9][a-z0-9-]{1,127}$/;
+export const SKU = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/;
+export const SLUG = /^[a-z0-9][a-z0-9-]{0,127}$/;
+
+export function generateProductSlug(name: string, sku: string): string {
+  const base = (name || sku || "product")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "d")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  return base.length >= 2 ? base.slice(0, 100) : `${base || "p"}-prod`.slice(0, 100);
+}
+
+export function generateSkuProposal(name: string): string {
+  const base = (name || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/đ/g, "d")
+    .replace(/Đ/g, "d")
+    .toUpperCase()
+    .replace(/[^A-Z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+  const prefix = base.length > 0 ? base.slice(0, 24) : "SP";
+  return `${prefix}-001`;
+}
 const INVENTORY_FIELD_PRESETS = {
   STOCK_ACCOUNT: {
     username: {
@@ -191,8 +216,7 @@ export function advanceProductDraft(
     case "sku":
       if (!SKU.test(text)) return { ok: false, error: "INVALID_SKU", draft };
       next.sku = text.toUpperCase();
-      next.slug = text.toLowerCase().replace(/_/g, "-");
-      if (!SLUG.test(next.slug)) return { ok: false, error: "INVALID_SLUG", draft };
+      next.slug = generateProductSlug(next.name ?? "", next.sku);
       next.step = "variantName";
       break;
     case "variantName":

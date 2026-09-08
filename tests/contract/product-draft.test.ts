@@ -282,5 +282,29 @@ describe("admin product draft", () => {
       lowStockThreshold: 1,
     });
     expect(draft).not.toHaveProperty("categoryId");
+    expect(draft).not.toHaveProperty("categoryId");
+  });
+
+  it("accepts short and numeric-only SKUs such as 1, 01, 001, 123, GPT1, GPT-PLUS", () => {
+    const validSkus = ["1", "01", "001", "123", "GPT1", "GPT-PLUS", "GPT_PLUS_01", "KIRO-1K"];
+    for (const sku of validSkus) {
+      const draft = startProductDraft("123");
+      const nameRes = advanceProductDraft(draft, "GPT PLUS BHF 1 tháng");
+      expect(nameRes.ok).toBe(true);
+      const skuRes = advanceProductDraft(nameRes.draft, sku);
+      expect(skuRes.ok).toBe(true);
+      expect(skuRes.draft.sku).toBe(sku.toUpperCase());
+      expect(skuRes.draft.step).toBe("variantName");
+    }
+  });
+
+  it("rejects invalid SKUs with INVALID_SKU", () => {
+    let draft = startProductDraft("123");
+    draft = advanceProductDraft(draft, "GPT PLUS").draft;
+    expect(advanceProductDraft(draft, "SP ACE")).toMatchObject({ ok: false, error: "INVALID_SKU" });
+    expect(advanceProductDraft(draft, "@INVALID")).toMatchObject({
+      ok: false,
+      error: "INVALID_SKU",
+    });
   });
 });

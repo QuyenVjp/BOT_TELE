@@ -111,7 +111,7 @@ function validate(input: AdminProductInput): void {
   if (!input.name.trim() || input.name.length > 200) throw new Error("INVALID_NAME");
   if (!input.variantName.trim() || input.variantName.length > 200)
     throw new Error("INVALID_VARIANT_NAME");
-  if (!/^[a-z0-9][a-z0-9-]{1,127}$/.test(input.slug)) throw new Error("INVALID_SLUG");
+  if (!/^[a-z0-9][a-z0-9-]{0,127}$/.test(input.slug)) throw new Error("INVALID_SLUG");
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.sku)) throw new Error("INVALID_SKU");
   if (input.priceVnd < 0n) throw new Error("INVALID_PRICE");
   if ((input.description ?? "").length > 2_000) throw new Error("INVALID_DESCRIPTION");
