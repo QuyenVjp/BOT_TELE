@@ -735,6 +735,7 @@ async function bootstrap(): Promise<void> {
     await import("./modules/catalog/product-draft.js");
   const { createAdminProduct, createAdminVariant, updateAdminVariant } =
     await import("./modules/catalog/admin-products.js");
+  const { isStoreOpen } = await import("./modules/commerce/buy-now.js");
   const { adjustQuantityStock, listVariantInventoryHistory } =
     await import("./modules/catalog/quantity-stock.js");
   const {
@@ -1567,10 +1568,42 @@ async function bootstrap(): Promise<void> {
           correlationId: input.correlationId,
         });
         return result.ok
-          ? presentAdminMenu()
+          ? presentAdminMenu(await isStoreOpen(dbHandle.db))
           : presentAdminDenied(
               result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
             );
+      },
+      async storeOpen(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const result = await adminCallbacks.handle({
+          command: "store.open",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: "main",
+          reason: "Yêu cầu mở cửa hàng bán công khai",
+          correlationId: input.correlationId,
+        });
+        if (result.ok && result.needsConfirmation) {
+          return presentHighRiskChallenge({
+            confirmationId: result.confirmationId,
+            challenge: result.challenge,
+            expiresAt: result.expiresAt,
+            action: "store.open",
+          });
+        }
+        return presentAdminMenu(await isStoreOpen(dbHandle.db));
+      },
+      async storeClose(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        await adminCallbacks.handle({
+          command: "store.close",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: "main",
+          reason: "Đóng cửa hàng tạm dừng bán",
+          correlationId: input.correlationId,
+        });
+        return presentAdminMenu(false);
       },
       async dashboard(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");

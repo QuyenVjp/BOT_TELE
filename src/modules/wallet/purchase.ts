@@ -29,6 +29,16 @@ export function createWalletPurchaseService(db: Db) {
   return {
     async purchase(input: WalletPurchaseInput): Promise<WalletPurchaseResult> {
       return withTransaction(db, async (trx) => {
+        const storeState = await sql<{ status: string }>`
+          select status from store_control where id = 'main' limit 1
+        `.execute(trx);
+        if (storeState.rows[0]?.status === "CLOSED") {
+          return {
+            ok: false,
+            code: "ORDER_NOT_PAYABLE",
+            message: "Cửa hàng hiện đang tạm đóng cửa.",
+          };
+        }
         const order = await findOrderByIdForUpdate(trx, input.orderId);
         if (!order) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
         if (order.customerId !== input.customerId)

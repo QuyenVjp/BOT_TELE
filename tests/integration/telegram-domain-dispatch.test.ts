@@ -223,6 +223,8 @@ function setup() {
       broadcastConfirm,
       broadcastCancel,
       broadcastStatus,
+      storeOpen: vi.fn().mockResolvedValue({ text: "store open", buttons: [] }),
+      storeClose: vi.fn().mockResolvedValue({ text: "store close", buttons: [] }),
       workflow: {
         variantText: workflowVariantText,
         messageText: workflowMessageText,

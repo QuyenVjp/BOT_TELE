@@ -103,10 +103,14 @@ const visibleAdminButtons = (): InlineButton[][] =>
   }, []);
 
 /** Compact root: only live operational areas are shown. */
-export function presentAdminMenu(): PresentedMessage {
+export function presentAdminMenu(storeOpen: boolean = false): PresentedMessage {
+  const storeBanner = storeOpen ? "🟢 CỬA HÀNG ĐANG MỞ" : "🔴 CỬA HÀNG ĐANG ĐÓNG";
+  const storeButton: InlineButton[] = storeOpen
+    ? [{ text: "🔴 Đóng cửa hàng", callbackData: "admin:store:close" }]
+    : [{ text: "🟢 Mở cửa hàng", callbackData: "admin:store:open" }];
   return {
-    text: ADMIN_COPY.adminMenu,
-    buttons: visibleAdminButtons(),
+    text: `${ADMIN_COPY.adminMenu}\n\n${storeBanner}`,
+    buttons: [storeButton, ...visibleAdminButtons()],
   };
 }
 

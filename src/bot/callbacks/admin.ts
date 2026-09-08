@@ -19,6 +19,7 @@ import {
   markSupplierSkuManuallyVerified,
   selectVariantSupplierMapping,
 } from "../../modules/supplier/admin.js";
+import { setStoreStatus } from "../../modules/commerce/buy-now.js";
 
 /**
  * Allowlisted owner callbacks (T097, FR-021–FR-023).
@@ -43,6 +44,8 @@ export const OWNER_COMMANDS = [
   "supplier.mapping.clear",
   "supplier.mapping.verify",
   "support.replacement.approve",
+  "store.open",
+  "store.close",
 ] as const;
 
 export type OwnerCommand = (typeof OWNER_COMMANDS)[number];
@@ -148,7 +151,9 @@ function targetTypeFor(
   | "Order"
   | "ManualFulfillmentTask"
   | "SupplierSku"
-  | "ReplacementCase" {
+  | "ReplacementCase"
+  | "StoreControl" {
+  if (command.startsWith("store.")) return "StoreControl";
   if (command.startsWith("catalog.")) return "ProductVariant";
   if (command.startsWith("supplier.mapping.clear")) return "ProductVariant";
   if (command.startsWith("supplier.")) return "SupplierSku";
@@ -256,6 +261,19 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           ...(telemetry ? { telemetry } : {}),
         });
         return result.ok ? { ok: true, needsConfirmation: false } : mapSupplierError(result);
+      }
+      case "store.close": {
+        await setStoreStatus(db, "CLOSED", String(input.actor.numericUserId));
+        await appendAuditEvent(db, {
+          actorType: "ROOT_ADMIN",
+          actorId: String(input.actor.numericUserId),
+          action: "store.close",
+          targetType: "StoreControl",
+          targetId: "main",
+          reason: input.reason,
+          correlationId: input.correlationId,
+        });
+        return { ok: true, needsConfirmation: false };
       }
       case "catalog.activate":
       case "catalog.deactivate": {
@@ -388,6 +406,19 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           correlationId,
         });
         return approved.ok;
+      }
+      case "store.open": {
+        await setStoreStatus(exec, "OPEN", action.actorId);
+        await appendAuditEvent(exec, {
+          actorType: "ROOT_ADMIN",
+          actorId: action.actorId,
+          action: "store.open",
+          targetType: "StoreControl",
+          targetId: "main",
+          reason: action.reason,
+          correlationId,
+        });
+        return true;
       }
       default:
         return false;

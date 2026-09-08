@@ -42,6 +42,7 @@ export type BuyNowErrorCode =
   | "ORDER_NOT_OWNED"
   | "ALREADY_PAID"
   | "ORDER_NOT_CANCELLABLE"
+  | "STORE_CLOSED"
   | "NOT_FOUND";
 
 /**
@@ -74,6 +75,8 @@ export interface BuyNowInput {
   correlationId: string;
   /** Payment intent TTL in seconds (default 900). */
   ttlSeconds?: number;
+  /** Admin explicit test bypass. */
+  skipStoreStatusCheck?: boolean;
 }
 
 interface LiveVariant {
@@ -186,6 +189,7 @@ const BUY_NOW_MESSAGES: Record<BuyNowErrorCode, string> = {
   ORDER_NOT_OWNED: "Bạn không sở hữu đơn hàng này.",
   ALREADY_PAID: "Đơn hàng đã được thanh toán.",
   ORDER_NOT_CANCELLABLE: "Đơn hàng không thể hủy.",
+  STORE_CLOSED: "Cửa hàng hiện đang tạm đóng cửa. Vui lòng quay lại sau.",
   NOT_FOUND: "Không tìm thấy.",
 };
 
@@ -200,6 +204,19 @@ function waitOutsideTransaction(ms: number): Promise<void> {
 }
 
 export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> {
+  // Global store kill-switch check (unless explicitly bypassed for admin canaries)
+  if (!input.skipStoreStatusCheck) {
+    const storeState = await sql<{ status: string }>`
+      select status from store_control where id = 'main' limit 1
+    `.execute(db);
+    if (storeState.rows[0]?.status === "CLOSED") {
+      return {
+        ok: false,
+        code: "STORE_CLOSED",
+        message: BUY_NOW_MESSAGES.STORE_CLOSED,
+      };
+    }
+  }
   // 1. Idempotency short-circuit (FR-010) — cheap pre-transaction read.
   const existing = await findOrderByIdempotency(db, input.customerId, input.idempotencyKey);
   if (existing) {
@@ -329,6 +346,25 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
     return { ok: false, code: outcome.code, message: BUY_NOW_MESSAGES[outcome.code] };
   }
   return { ok: true, order: outcome.order };
+}
+export async function isStoreOpen(db: Db): Promise<boolean> {
+  const result = await sql<{ status: string }>`
+    select status from store_control where id = 'main' limit 1
+  `.execute(db);
+  return result.rows[0]?.status === "OPEN";
+}
+
+export async function setStoreStatus(
+  db: Db,
+  status: "OPEN" | "CLOSED",
+  updatedBy: string,
+): Promise<void> {
+  await sql`
+    insert into store_control (id, status, updated_at, updated_by)
+    values ('main', ${status}, now(), ${updatedBy})
+    on conflict (id) do update
+    set status = excluded.status, updated_at = now(), updated_by = excluded.updated_by
+  `.execute(db);
 }
 
 /** The persisted immutable Order snapshot is the canonical Buy Now fingerprint. */

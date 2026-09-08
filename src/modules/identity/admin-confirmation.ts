@@ -33,6 +33,7 @@ export const DURABLE_ADMIN_COMMAND_REFS = [
   "wallet.refund",
   "manual_fulfillment.complete",
   "support.replacement.approve",
+  "store.open",
 ] as const;
 export type DurableAdminCommandRef = (typeof DURABLE_ADMIN_COMMAND_REFS)[number];
 

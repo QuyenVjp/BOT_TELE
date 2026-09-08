@@ -499,6 +499,16 @@ export interface TelegramDomainDispatcherDeps {
         correlationId: string;
       }): Promise<PresentedMessage>;
     };
+    storeOpen?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    storeClose?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
   };
   responder: {
     send(input: {
@@ -575,6 +585,22 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : presentAdminMenu();
+        } else if (route === "store:open") {
+          message = admin.storeOpen
+            ? await admin.storeOpen({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Thao tác không khả dụng.");
+        } else if (route === "store:close") {
+          message = admin.storeClose
+            ? await admin.storeClose({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Thao tác không khả dụng.");
         } else if (route === "dashboard") {
           message = admin.dashboard
             ? await admin.dashboard({
