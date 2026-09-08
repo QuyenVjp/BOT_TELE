@@ -159,7 +159,8 @@ function buildReplyMarkup(message: PresentedMessage): SendReplyMarkup {
   for (const row of message.buttons) {
     for (const button of row) {
       if (button.webAppUrl) inline.webApp(button.text, button.webAppUrl);
-      else inline.text(button.text, button.callbackData);
+      else if (button.url) inline.url(button.text, button.url);
+      else inline.text(button.text, button.callbackData ?? "");
     }
     inline.row();
   }

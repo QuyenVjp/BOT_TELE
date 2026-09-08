@@ -18,6 +18,7 @@ import { newId } from "./shared/ids/index.js";
 import { sealPresentedMessageCallbacks } from "./bot/callback-sealer.js";
 import type { CallbackTokenCodec } from "./bot/callback-codec.js";
 import type { Db } from "./infrastructure/db/transaction.js";
+import type { FulfillmentType } from "./modules/catalog/fulfillment-type.js";
 import type {
   presentAdminOrderDetail,
   presentAdminOrders as presentAdminOrdersPresenter,
@@ -785,7 +786,14 @@ async function bootstrap(): Promise<void> {
     presentAdminOrders: presentAdminOrdersPage,
     presentAdminOrderSearchPrompt,
     presentAuditList,
+    presentAdminInventoryProductPicker,
+    presentAdminInventoryVariantPicker,
+    presentAdminTestLab,
+    presentAdminPreorders,
   } = await import("./bot/presenters/admin.js");
+  const { loadPreorderVariantConfig, presentPreorderConsent, createPreorderReservation } =
+    await import("./modules/commerce/preorder.js");
+  const { presentCustomerNotificationPreferences } = await import("./bot/presenters/customer.js");
   const { presentAdminManualTaskDetail, presentAdminManualTasks } =
     await import("./bot/presenters/manual-fulfillment.js");
 
@@ -1058,6 +1066,84 @@ async function bootstrap(): Promise<void> {
       },
       async list(customerId) {
         return presentRestockList(dbHandle.db, customerId);
+      },
+    },
+    adminRootUserId: config.ADMIN_TELEGRAM_USER_ID,
+    preorder: {
+      async consent(variantId) {
+        const preorderConfig = await loadPreorderVariantConfig(dbHandle.db, variantId);
+        if (!preorderConfig)
+          return {
+            text: "Sản phẩm không tồn tại hoặc chưa hỗ trợ đặt cọc.",
+            buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]],
+          };
+        return presentPreorderConsent(preorderConfig);
+      },
+      async create(customerId, variantId) {
+        const res = await createPreorderReservation(dbHandle.db, { customerId, variantId });
+        if (!res.ok) {
+          const msg =
+            res.code === "QUEUE_FULL"
+              ? "Hàng chờ đặt cọc cho sản phẩm này đã đầy. Vui lòng quay lại sau."
+              : res.code === "ALREADY_PREORDERED"
+                ? "Bạn đã có một suất đặt cọc đang chờ xử lý cho sản phẩm này."
+                : "Không thể thực hiện đặt cọc lúc này.";
+          return { text: msg, buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]] };
+        }
+        return {
+          text: [
+            "✅ ĐẶT CỌC THÀNH CÔNG",
+            "",
+            `Sản phẩm: ${res.config.productName} · ${res.config.variantName}`,
+            `Tiền cọc: ${res.depositVnd.toLocaleString("vi-VN")} ₫`,
+            `Khi hàng về còn thanh toán: ${res.balanceVnd.toLocaleString("vi-VN")} ₫`,
+            "",
+            "Trạng thái: ⏳ Đang chờ đợt hàng mới về",
+            "Hệ thống sẽ gửi thông báo giữ hàng ngay khi đợt hàng tiếp theo được nhập kho!",
+          ].join("\n"),
+          buttons: [
+            [{ text: "📦 Xem các sản phẩm khác", callbackData: "shop:home" }],
+            [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
+          ],
+        };
+      },
+    },
+    notificationPreferences: {
+      async get(customerId) {
+        const pref = await sql<{ marketing_opt_in: boolean; social_proof_opt_in: boolean }>`
+          select marketing_opt_in, social_proof_opt_in from customer_notification_preference where customer_id = ${customerId}
+        `.execute(dbHandle.db);
+        const row = pref.rows[0];
+        return presentCustomerNotificationPreferences({
+          marketing: row?.marketing_opt_in ?? true,
+          socialProof: row?.social_proof_opt_in ?? true,
+        });
+      },
+      async toggle(customerId, kind) {
+        const current = await sql<{ marketing_opt_in: boolean; social_proof_opt_in: boolean }>`
+          select marketing_opt_in, social_proof_opt_in from customer_notification_preference where customer_id = ${customerId}
+        `.execute(dbHandle.db);
+        const curRow = current.rows[0];
+        const nextMarketing =
+          kind === "marketing"
+            ? !(curRow?.marketing_opt_in ?? true)
+            : (curRow?.marketing_opt_in ?? true);
+        const nextSocial =
+          kind === "social"
+            ? !(curRow?.social_proof_opt_in ?? true)
+            : (curRow?.social_proof_opt_in ?? true);
+        await sql`
+          insert into customer_notification_preference (customer_id, marketing_opt_in, social_proof_opt_in, updated_at)
+          values (${customerId}, ${nextMarketing}, ${nextSocial}, now())
+          on conflict (customer_id) do update
+          set marketing_opt_in = ${nextMarketing},
+              social_proof_opt_in = ${nextSocial},
+              updated_at = now()
+        `.execute(dbHandle.db);
+        return presentCustomerNotificationPreferences({
+          marketing: nextMarketing,
+          socialProof: nextSocial,
+        });
       },
     },
     notification: {
@@ -2167,6 +2253,7 @@ async function bootstrap(): Promise<void> {
               count(vs.id) filter (where vs.available <= 0)::int as out_stock
             from product p
             left join variant_stock vs on vs.product_id = p.id
+            where p.is_test = false and p.is_archived = false
             group by p.id, p.name_vi, p.is_active, p.sort_order
           )
           select id, name, active, variant_count, in_stock, low_stock, out_stock,
@@ -2179,6 +2266,13 @@ async function bootstrap(): Promise<void> {
           order by sort_order asc, id asc
           limit 20
         `.execute(dbHandle.db);
+        const extraCounts = await sql<{ held: number; waiting: number }>`
+          select
+            coalesce((select count(*)::int from digital_asset da join product_variant pv on pv.id = da.variant_id join product p on p.id = pv.product_id where da.status = 'RESERVED' and p.is_test = false and p.is_archived = false), 0)::int as held,
+            coalesce((select count(*)::int from preorder_reservation pr where pr.status in ('WAITING_DEPOSIT', 'DEPOSIT_PAID')), 0)::int as waiting
+        `.execute(dbHandle.db);
+        const held = extraCounts.rows[0]?.held ?? 0;
+        const waiting = extraCounts.rows[0]?.waiting ?? 0;
         return presentAdminInventory(
           result.rows.map((row) => ({
             id: row.id,
@@ -2195,6 +2289,8 @@ async function bootstrap(): Promise<void> {
             inStock: result.rows[0]?.total_in_stock ?? 0,
             lowStock: result.rows[0]?.total_low_stock ?? 0,
             outOfStock: result.rows[0]?.total_out_stock ?? 0,
+            held,
+            waiting,
           },
         );
       },
@@ -2436,6 +2532,157 @@ async function bootstrap(): Promise<void> {
           variantName: history.variantName,
           rows: history.rows,
         });
+      },
+      async testLab(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const testProducts = await sql<{ id: string; name_vi: string; is_active: boolean }>`
+          select id, name_vi, is_active from product where is_test = true or is_archived = true order by sort_order asc
+        `.execute(dbHandle.db);
+        const canaryOrders = await sql<{ order_number: string; status: string; price_vnd: string }>`
+          select order_number, status, price_vnd::text from "order" where order_number like '%CANARY%' or order_number in ('ORD-20260908-NJVSQW4T', 'ORD-20260908-16QVJNC6') order by created_at desc limit 5
+        `.execute(dbHandle.db);
+        return presentAdminTestLab({
+          testProducts: testProducts.rows.map((p) => ({
+            id: p.id,
+            name: p.name_vi,
+            active: p.is_active,
+          })),
+          canaryOrders: canaryOrders.rows.map((o) => ({
+            orderNumber: o.order_number,
+            status: o.status,
+            priceVnd: Number(o.price_vnd),
+          })),
+        });
+      },
+      async preorders(input, route) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const filter = route ? route.replace(/^preorders(:filter:)?/u, "") || "all" : "all";
+        let whereClause = sql`true`;
+        if (filter === "waiting_deposit") whereClause = sql`pr.status = 'WAITING_DEPOSIT'`;
+        else if (filter === "deposit_paid") whereClause = sql`pr.status = 'DEPOSIT_PAID'`;
+        else if (filter === "allocated") whereClause = sql`pr.status = 'ALLOCATED'`;
+        else if (filter === "balance_due") whereClause = sql`pr.status = 'BALANCE_DUE'`;
+        else if (filter === "fulfilled")
+          whereClause = sql`pr.status in ('FULLY_PAID', 'FULFILLED')`;
+        else if (filter === "forfeited")
+          whereClause = sql`pr.status in ('DEPOSIT_FORFEITED', 'HOLD_EXPIRED')`;
+        else if (filter === "refund_due")
+          whereClause = sql`pr.status in ('REFUND_DUE', 'SHOP_CANCELLED')`;
+
+        const list = await sql<{
+          id: string;
+          variant_id: string;
+          product_name: string;
+          variant_name: string;
+          status: string;
+          deposit_amount_vnd: string;
+          balance_amount_vnd: string;
+          customer_name: string;
+          hold_until: Date | string | null;
+        }>`
+          select
+            pr.id, pr.variant_id, p.name_vi as product_name, v.name_vi as variant_name,
+            pr.status, pr.deposit_amount_vnd::text, pr.balance_amount_vnd::text,
+            coalesce(ci.observed_username, c.id) as customer_name,
+            pr.hold_until
+          from preorder_reservation pr
+          join product_variant v on v.id = pr.variant_id
+          join product p on p.id = v.product_id
+          join customer c on c.id = pr.customer_id
+          left join channel_identity ci on ci.customer_id = c.id
+          where ${whereClause}
+          order by pr.created_at desc
+          limit 15
+        `.execute(dbHandle.db);
+
+        return presentAdminPreorders({
+          items: list.rows.map((r) => ({
+            id: r.id,
+            variantId: r.variant_id,
+            productName: r.product_name,
+            variantName: r.variant_name,
+            status: r.status,
+            depositVnd: Number(r.deposit_amount_vnd),
+            balanceVnd: Number(r.balance_amount_vnd),
+            customerName: r.customer_name,
+            holdUntil: r.hold_until,
+          })),
+          filter,
+        });
+      },
+      async inventoryAdd(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const prods = await sql<{ id: string; name_vi: string }>`
+          select id, name_vi from product where is_test = false and is_archived = false and is_active = true order by sort_order asc
+        `.execute(dbHandle.db);
+        return presentAdminInventoryProductPicker(
+          prods.rows.map((p) => ({ id: p.id, name: p.name_vi })),
+          "import",
+        );
+      },
+      async inventoryTemplateSelect(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const prods = await sql<{ id: string; name_vi: string }>`
+          select id, name_vi from product where is_test = false and is_archived = false and is_active = true order by sort_order asc
+        `.execute(dbHandle.db);
+        return presentAdminInventoryProductPicker(
+          prods.rows.map((p) => ({ id: p.id, name: p.name_vi })),
+          "template",
+        );
+      },
+      async inventoryPasteSelect(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const prods = await sql<{ id: string; name_vi: string }>`
+          select id, name_vi from product where is_test = false and is_archived = false and is_active = true order by sort_order asc
+        `.execute(dbHandle.db);
+        return presentAdminInventoryProductPicker(
+          prods.rows.map((p) => ({ id: p.id, name: p.name_vi })),
+          "paste",
+        );
+      },
+      async inventoryPickProduct(input, route) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const parts = route.split(":");
+        const action = (parts[3] ?? "import") as "import" | "template" | "paste";
+        const productId = parts[4] ?? "";
+        const prod = await sql<{ id: string; name_vi: string }>`
+          select id, name_vi from product where id = ${productId} limit 1
+        `.execute(dbHandle.db);
+        if (!prod.rows[0])
+          return {
+            text: "Sản phẩm không tồn tại.",
+            buttons: [[{ text: "Quay lại Kho", callbackData: "admin:inventory" }]],
+          };
+        const vars = await sql<{
+          id: string;
+          name_vi: string;
+          sku: string;
+          fulfillment_type: FulfillmentType;
+          available: number;
+        }>`
+          select v.id, v.name_vi, v.sku, v.fulfillment_type,
+            coalesce((select count(*)::int from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int as available
+          from product_variant v
+          where v.product_id = ${productId} and v.is_active = true
+          order by v.sort_order asc
+        `.execute(dbHandle.db);
+        return presentAdminInventoryVariantPicker(
+          { id: prod.rows[0].id, name: prod.rows[0].name_vi },
+          vars.rows.map((v) => ({
+            id: v.id,
+            name: v.name_vi,
+            sku: v.sku,
+            fulfillmentType: v.fulfillment_type,
+            available: v.available,
+          })),
+          action,
+        );
       },
       async quantityAdjustPreview(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");

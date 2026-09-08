@@ -728,18 +728,31 @@ export function presentAdminInventory(
     inStock: number;
     lowStock: number;
     outOfStock: number;
+    held?: number;
+    waiting?: number;
   },
 ): PresentedMessage {
   const visibleRows = rows.slice(0, 20);
   return {
     text: [
-      ADMIN_COPY.inventory,
+      "📦 QUẢN LÝ KHO",
+      "",
       totals
-        ? `Tổng: ${totals.products} sản phẩm · ${totals.variants} biến thể · còn ${totals.inStock} · sắp hết ${totals.lowStock} · hết ${totals.outOfStock}`
+        ? [
+            "Tổng:",
+            `• Sản phẩm: ${totals.products}`,
+            `• Biến thể: ${totals.variants}`,
+            `• Còn hàng: ${totals.inStock}`,
+            `• Sắp hết: ${totals.lowStock}`,
+            `• Hết hàng: ${totals.outOfStock}`,
+            `• Đang giữ: ${totals.held ?? 0}`,
+            `• Chờ nhập: ${totals.waiting ?? 0}`,
+          ].join("\n")
         : "Tổng quan tồn kho sản phẩm.",
+      "",
       visibleRows.length === 0
         ? "Chưa có sản phẩm. Tạo sản phẩm mới để bắt đầu; không dùng CSV khi chưa có biến thể."
-        : "Chọn sản phẩm để xem biến thể, nhập kho, lịch sử hoặc xử lý theo loại.",
+        : "Danh sách sản phẩm kho:",
       ...visibleRows.map((row) => {
         const status = row.active === false ? " · nháp/chưa mở bán" : "";
         return `• ${row.name}${status}: ${row.variantCount} biến thể · còn ${row.inStock} · sắp hết ${row.lowStock} · hết ${row.outOfStock}`;
@@ -755,12 +768,166 @@ export function presentAdminInventory(
             },
           ])),
       [
-        { text: "🔎 Tìm sản phẩm", callbackData: "admin:products" },
-        { text: "⚠️ Sắp/hết hàng", callbackData: "admin:dashboard" },
+        { text: "➕ Nhập kho", callbackData: "admin:inventory:add" },
+        { text: "➕ Tạo sản phẩm", callbackData: "admin:products:create" },
       ],
       [
-        { text: "🕘 Lịch sử", callbackData: "admin:audit" },
-        { text: ADMIN_COPY.home, callbackData: "admin:menu" },
+        { text: "📥 Tải mẫu CSV", callbackData: "admin:inventory:template_select" },
+        { text: "📋 Dán nhanh", callbackData: "admin:inventory:paste_select" },
+      ],
+      [
+        { text: "🔎 Tìm sản phẩm", callbackData: "admin:products" },
+        { text: "⚠️ Sắp / hết hàng", callbackData: "admin:dashboard" },
+      ],
+      [
+        { text: "🕘 Lịch sử kho", callbackData: "admin:audit" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
+    ],
+  };
+}
+
+export function presentAdminInventoryProductPicker(
+  products: Array<{ id: string; name: string }>,
+  action: "import" | "template" | "paste",
+): PresentedMessage {
+  const title =
+    action === "template"
+      ? "📥 CHỌN SẢN PHẨM ĐỂ TẢI MẪU CSV"
+      : action === "paste"
+        ? "📋 CHỌN SẢN PHẨM ĐỂ DÁN DỮ LIỆU"
+        : "➕ CHỌN SẢN PHẨM ĐỂ NHẬP KHO";
+  return {
+    text: [title, "", "Vui lòng chọn sản phẩm bên dưới:"].join("\n"),
+    buttons: [
+      ...products.map((p) => [
+        { text: `📦 ${p.name}`, callbackData: `admin:inventory:pick_prod:${action}:${p.id}` },
+      ]),
+      [{ text: "↩️ Quay lại Kho", callbackData: "admin:inventory" }],
+      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+    ],
+  };
+}
+
+export function presentAdminInventoryVariantPicker(
+  product: { id: string; name: string },
+  variants: Array<{
+    id: string;
+    name: string;
+    sku: string;
+    fulfillmentType: FulfillmentType;
+    available: number;
+  }>,
+  action: "import" | "template" | "paste",
+): PresentedMessage {
+  const title =
+    action === "template"
+      ? "📥 CHỌN BIẾN THỂ ĐỂ TẢI MẪU CSV"
+      : action === "paste"
+        ? "📋 CHỌN BIẾN THỂ ĐỂ DÁN DỮ LIỆU"
+        : "➕ CHỌN BIẾN THỂ ĐỂ NHẬP KHO";
+  return {
+    text: [title, "", `Sản phẩm: ${product.name}`, "Vui lòng chọn biến thể:"].join("\n"),
+    buttons: [
+      ...variants.map((v) => [
+        {
+          text: `🔹 ${v.name} (${v.sku}) — Còn: ${v.available}`,
+          callbackData:
+            action === "template"
+              ? `admin:inventory:template:${v.id}`
+              : `admin:inventory:import:${v.id}`,
+        },
+      ]),
+      [
+        {
+          text: "↩️ Chọn sản phẩm khác",
+          callbackData: `admin:inventory:${action === "template" ? "template_select" : action === "paste" ? "paste_select" : "add"}`,
+        },
+      ],
+      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+    ],
+  };
+}
+
+export function presentAdminTestLab(input: {
+  testProducts: Array<{ id: string; name: string; active: boolean }>;
+  canaryOrders: Array<{ orderNumber: string; status: string; priceVnd: number }>;
+}): PresentedMessage {
+  return {
+    text: [
+      "🧪 TEST LAB (CANARY & KIỂM THỬ NỘI BỘ)",
+      "",
+      "Khu vực này tách biệt hoàn toàn khỏi khách hàng.",
+      "Dùng để kiểm thử giao dịch, SePay replay và Canary automated codes.",
+      "",
+      "📦 Sản phẩm Canary / Test:",
+      ...(input.testProducts.length === 0
+        ? ["• (Chưa có sản phẩm test)"]
+        : input.testProducts.map((p) => `• ${p.name} (ID: ${p.id.slice(0, 12)}...)`)),
+      "",
+      "🧾 Giao dịch Canary gần nhất:",
+      ...(input.canaryOrders.length === 0
+        ? ["• (Chưa có giao dịch)"]
+        : input.canaryOrders.map(
+            (o) => `• ${o.orderNumber} · ${o.status} · ${o.priceVnd.toLocaleString("vi-VN")} ₫`,
+          )),
+    ].join("\n"),
+    buttons: [
+      [
+        { text: "📦 Quản lý kho", callbackData: "admin:inventory" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
+    ],
+  };
+}
+export interface AdminPreorderSummaryItem {
+  id: string;
+  variantId: string;
+  productName: string;
+  variantName: string;
+  status: string;
+  depositVnd: number;
+  balanceVnd: number;
+  customerName: string;
+  holdUntil?: Date | string | null;
+}
+
+export function presentAdminPreorders(input: {
+  items: AdminPreorderSummaryItem[];
+  filter: string;
+}): PresentedMessage {
+  const lines = [
+    "💰 ĐẶT CỌC / GIỮ HÀNG",
+    `Bộ lọc: ${input.filter}`,
+    "",
+    ...(input.items.length === 0
+      ? ["Chưa có lượt đặt cọc nào phù hợp."]
+      : input.items.map(
+          (item) =>
+            `• ${item.productName} · ${item.variantName} · ${item.status} · Cọc: ${item.depositVnd.toLocaleString("vi-VN")} ₫ · Khách: ${item.customerName}`,
+        )),
+  ];
+
+  return {
+    text: lines.join("\n"),
+    buttons: [
+      [
+        { text: "Tất cả", callbackData: "admin:preorders:filter:all" },
+        { text: "Chờ cọc", callbackData: "admin:preorders:filter:waiting_deposit" },
+        { text: "Đã cọc", callbackData: "admin:preorders:filter:deposit_paid" },
+      ],
+      [
+        { text: "Đã giữ hàng", callbackData: "admin:preorders:filter:allocated" },
+        { text: "Chờ thanh toán", callbackData: "admin:preorders:filter:balance_due" },
+        { text: "Hoàn tất", callbackData: "admin:preorders:filter:fulfilled" },
+      ],
+      [
+        { text: "Bỏ cọc", callbackData: "admin:preorders:filter:forfeited" },
+        { text: "Cần hoàn", callbackData: "admin:preorders:filter:refund_due" },
+      ],
+      [
+        { text: "📦 Quản lý kho", callbackData: "admin:inventory" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
       ],
     ],
   };

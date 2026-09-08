@@ -32,6 +32,7 @@ export const CATALOG_COPY = {
 export interface InlineButton {
   text: string;
   callbackData: string;
+  url?: string;
   webAppUrl?: string;
 }
 export interface ReplyKeyboardButton {
@@ -149,6 +150,7 @@ export function presentVariantDetail(
   variant: CatalogVariantRow,
   buyNowCallbackData?: string,
   restockSubscribeCallbackData = `rst:sub:${variant.id}`,
+  preorderCallbackData?: string,
 ): PresentedMessage {
   const price = formatVnd(makeVnd(BigInt(variant.price_vnd)));
   const text = [
@@ -176,10 +178,16 @@ export function presentVariantDetail(
   ) {
     buttons.push([{ text: CATALOG_COPY.buyNow, callbackData: buyNowCallbackData }]);
   }
-  if (!variant.is_ready && variant.fulfillment_type === "QUANTITY_STOCK") {
-    buttons.push([
-      { text: CATALOG_COPY.restockSubscribe, callbackData: restockSubscribeCallbackData },
-    ]);
+  if (!variant.is_ready) {
+    const actionRow: InlineButton[] = [];
+    if (preorderCallbackData) {
+      actionRow.push({ text: "💰 Đặt cọc giữ suất", callbackData: preorderCallbackData });
+    }
+    actionRow.push({
+      text: CATALOG_COPY.restockSubscribe,
+      callbackData: restockSubscribeCallbackData,
+    });
+    buttons.push(actionRow);
   }
   buttons.push(
     [{ text: CATALOG_COPY.back, callbackData: "cat:list" }],

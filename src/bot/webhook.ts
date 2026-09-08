@@ -341,6 +341,7 @@ const SAFE_MESSAGE_TEXT: Record<string, true> = {
 
 function normalizeCommandArgument(command: string | undefined, value: string): string | null {
   if (
+    command !== "/start" &&
     command !== "/search" &&
     command !== "/pay" &&
     command !== "/customer" &&

@@ -1,5 +1,11 @@
 import type { Executor } from "../../infrastructure/db/transaction.js";
-import { listSellableVariants, getVariantById } from "../../modules/catalog/repository.js";
+import {
+  listSellableVariants,
+  getVariantById,
+  listStorefrontProducts,
+} from "../../modules/catalog/repository.js";
+import { getRealStoreStats } from "../../modules/marketing/social-proof.js";
+import { presentStorefront } from "../presenters/customer.js";
 import { searchCatalog } from "../../modules/catalog/search.js";
 import { createCatalogCache, type CatalogCache } from "../../modules/catalog/cache.js";
 import type { SearchParser } from "../../modules/catalog/search-parser-port.js";
@@ -44,6 +50,16 @@ export interface CatalogCallbacks {
   ): Promise<PresentedMessage>;
   firstSellableVariantId(): Promise<string>;
   search(rawQuery: string): Promise<PresentedMessage>;
+  storefront(input: {
+    actorName: string;
+    telegramUserId: string;
+    offset?: number;
+    isRootAdmin?: boolean;
+  }): Promise<PresentedMessage>;
+  productDetail(
+    productId: string,
+    telegramUserId: string | bigint | number,
+  ): Promise<PresentedMessage>;
 }
 
 export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallbacks {
@@ -103,6 +119,33 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       const filter = await deps.parser.parse(rawQuery);
       const page = await searchCatalog(deps.db, filter, { limit: pageSize });
       return presentSearchResults(page.items, page.nextCursor);
+    },
+
+    async storefront(input) {
+      const offset = input.offset ?? 0;
+      const { items, total } = await listStorefrontProducts(deps.db, 6, offset);
+      const stats = await getRealStoreStats(deps.db);
+      return presentStorefront({
+        actorName: input.actorName,
+        isRootAdmin: input.isRootAdmin,
+        products: items,
+        totalProducts: total,
+        offset,
+        limit: 6,
+        stats,
+      });
+    },
+
+    async productDetail(productId, telegramUserId) {
+      const page = await listSellableVariants(deps.db, { limit: 1, productId });
+      const first = page.items[0];
+      if (!first) {
+        return {
+          text: "Sản phẩm không khả dụng hoặc chưa mở bán.",
+          buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]],
+        };
+      }
+      return this.variantDetail(first.id, telegramUserId);
     },
   };
 }

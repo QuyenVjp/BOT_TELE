@@ -83,6 +83,8 @@ export async function listActiveProductsByCategory(
     join category c on c.id = p.category_id
     where c.is_active
       and p.is_active
+      and not p.is_test
+      and not p.is_archived
       and c.id = ${categoryId}
       and exists (
         select 1 from product_variant v
@@ -177,6 +179,8 @@ export async function listSellableVariants(
     left join variant_quantity_stock q on q.variant_id = v.id
     where c.is_active
       and p.is_active
+      and not p.is_test
+      and not p.is_archived
       and v.is_active
       and v.price_vnd > 0
       and v.resale_evidence_id is not null
@@ -244,6 +248,8 @@ export async function getVariantById(
     where v.id = ${variantId}
       and c.is_active
       and p.is_active
+      and not p.is_test
+      and not p.is_archived
       and v.is_active
       and v.price_vnd > 0
       and v.resale_evidence_id is not null
@@ -256,4 +262,97 @@ export async function getVariantById(
       )
   `.execute(exec);
   return result.rows[0] ?? null;
+}
+export interface StorefrontProductSummary {
+  id: string;
+  name_vi: string;
+  slug: string;
+  short_description_vi: string | null;
+  min_price_vnd: string;
+  total_available: number;
+  preorder_enabled: boolean;
+  primary_variant_id: string;
+  primary_variant_sku: string;
+  primary_variant_name: string;
+}
+
+/**
+ * List customer-facing storefront products with stock and preorder status.
+ */
+export async function listStorefrontProducts(
+  exec: Executor,
+  limit: number = 6,
+  offset: number = 0,
+): Promise<{ items: StorefrontProductSummary[]; total: number }> {
+  const result = await sql<StorefrontProductSummary & { total_count: number }>`
+    with variant_data as (
+      select
+        v.id as variant_id,
+        v.product_id,
+        v.sku,
+        v.name_vi as variant_name,
+        v.price_vnd,
+        v.sort_order,
+        v.preorder_enabled,
+        case
+          when v.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then (
+            select count(*)::int from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE'
+          )
+          when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(
+            (select q.available_quantity from variant_quantity_stock q where q.variant_id = v.id), 0
+          )::int
+          when v.fulfillment_type = 'DIGITAL_FILE' then (
+            select count(*)::int from variant_file_artifact f where f.variant_id = v.id and f.is_active
+          )
+          when v.fulfillment_type = 'SUPPLIER_API' then (
+            select count(*)::int from supplier_sku ss join supplier s on s.id = ss.supplier_id
+            where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
+          )
+          when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then (
+            select count(*)::int from variant_service_fulfillment sf
+            where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
+          )
+          else 0
+        end as available_count
+      from product_variant v
+      where v.is_active
+        and v.price_vnd > 0
+        and v.resale_evidence_id is not null
+    ),
+    product_summary as (
+      select
+        p.id,
+        p.name_vi,
+        p.slug,
+        p.short_description_vi,
+        p.sort_order,
+        min(vd.price_vnd)::text as min_price_vnd,
+        coalesce(sum(vd.available_count), 0)::int as total_available,
+        coalesce(bool_or(vd.preorder_enabled), false) as preorder_enabled,
+        (array_agg(vd.variant_id order by vd.sort_order asc, vd.variant_id asc))[1] as primary_variant_id,
+        (array_agg(vd.sku order by vd.sort_order asc, vd.variant_id asc))[1] as primary_variant_sku,
+        (array_agg(vd.variant_name order by vd.sort_order asc, vd.variant_id asc))[1] as primary_variant_name
+      from product p
+      join category c on c.id = p.category_id
+      join variant_data vd on vd.product_id = p.id
+      where c.is_active
+        and p.is_active
+        and not p.is_test
+        and not p.is_archived
+      group by p.id, p.name_vi, p.slug, p.short_description_vi, p.sort_order
+    )
+    select
+      id, name_vi, slug, short_description_vi,
+      min_price_vnd, total_available, preorder_enabled,
+      primary_variant_id, primary_variant_sku, primary_variant_name,
+      count(*) over()::int as total_count
+    from product_summary
+    order by sort_order asc, id asc
+    limit ${limit} offset ${offset}
+  `.execute(exec);
+
+  return {
+    items: result.rows,
+    total: result.rows[0]?.total_count ?? 0,
+  };
 }
