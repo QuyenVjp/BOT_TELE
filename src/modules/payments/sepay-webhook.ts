@@ -67,7 +67,7 @@ export function isTimestampFresh(
  */
 export const SePayPayloadSchema = z
   .object({
-    id: z.number().int().positive(),
+    id: z.number().int().nonnegative(),
     gateway: z.string().min(1),
     transactionDate: z.string().min(1),
     accountNumber: z.string().min(1),
