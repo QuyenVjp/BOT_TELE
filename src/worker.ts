@@ -671,6 +671,7 @@ async function bootstrap(): Promise<void> {
   const { createPostgresSePayInbox, processSePayInboxBatch } =
     await import("./infrastructure/inbox/sepay.js");
   const { applyPaymentEvidence } = await import("./modules/payments/service.js");
+  const { classifyPaymentCode } = await import("./modules/payments/payment-code.js");
   const { createPostgresRateLimiter, DEFAULT_TELEGRAM_RATE_LIMIT_POLICIES } =
     await import("./modules/risk/service.js");
   const { createBuyNowCallbackCodec, createCallbackTokenCodec } =
@@ -730,7 +731,7 @@ async function bootstrap(): Promise<void> {
   } = await import("./modules/digital-goods/file-artifact-import-session.js");
   const { getManualTaskById, listManualFulfillmentTasks } =
     await import("./modules/digital-goods/manual-fulfillment.js");
-  const { createDurableProductDraftWorkflow, createProductDraftRepository } =
+  const { createDurableProductDraftWorkflow, createProductDraftRepository, generateSkuProposal } =
     await import("./modules/catalog/product-draft.js");
   const { createAdminProduct, createAdminVariant, updateAdminVariant } =
     await import("./modules/catalog/admin-products.js");
@@ -3071,10 +3072,20 @@ async function bootstrap(): Promise<void> {
             input.chatType !== "private"
           )
             return presentAdminDenied("NOT_ROOT_ADMIN");
+          const existing = await productDraftWorkflow.get(input.telegramUserId);
+          if (existing && !existing.existingProductId) {
+            return {
+              text: `⚠️ Bạn đang có một bản nháp tạo sản phẩm chưa hoàn tất: "${existing.name || "Chưa đặt tên"}".\n\nBạn muốn tiếp tục hay huỷ bản nháp để tạo mới?`,
+              buttons: [
+                [{ text: "▶️ Tiếp tục tạo sản phẩm", callbackData: "admin:products:back" }],
+                [{ text: "🗑 Huỷ bản nháp", callbackData: "admin:products:cancel" }],
+              ],
+            };
+          }
           await productDraftWorkflow.start(input.telegramUserId);
           return {
-            text: "Bước 1/8 — Nhập tên sản phẩm. Gõ /cancel để huỷ.",
-            buttons: [[{ text: "Huỷ", callbackData: "admin:products:cancel" }]],
+            text: "Bước 1/8 — Nhập tên sản phẩm.\n\nVí dụ: GPT PLUS BHF 1 tháng, Netflix Premium 4K.",
+            buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
           };
         },
         async messageText(input) {
@@ -3092,15 +3103,58 @@ async function bootstrap(): Promise<void> {
             return this.variantText?.(input) ?? null;
           const current = await productDraftWorkflow.get(input.telegramUserId);
           if (!current) return null;
+          // If currently at SKU step, check duplicate first
+          if (current.step === "sku") {
+            const rawSku = input.text.trim().toUpperCase();
+            const dup = await sql<{
+              id: string;
+            }>`select id from product_variant where sku = ${rawSku} limit 1`.execute(dbHandle.db);
+            if (dup.rows[0]) {
+              const proposal = generateSkuProposal(current.name ?? "");
+              return {
+                text: `❌ SKU "${rawSku}" đã được sử dụng. Hãy nhập SKU khác.\n\nĐề xuất: ${proposal}`,
+                buttons: [
+                  [
+                    {
+                      text: `✨ Dùng SKU đề xuất: ${proposal}`,
+                      callbackData: `admin:products:apply-sku:${proposal}`,
+                    },
+                  ],
+                  [
+                    { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                    { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                  ],
+                ],
+              };
+            }
+          }
+
           const result = await productDraftWorkflow.advance(input.telegramUserId, input.text);
-          if (!result.ok)
+          if (!result.ok) {
+            let errorMsg = "Dữ liệu không hợp lệ, vui lòng thử lại.";
+            if (result.error === "INVALID_PRICE") {
+              errorMsg =
+                "Giá không hợp lệ. Vui lòng nhập số nguyên VND dương (ví dụ: 250000 hoặc 250.000).";
+            } else if (result.error === "INVALID_SKU") {
+              errorMsg =
+                "SKU không hợp lệ. SKU chỉ gồm chữ, số, dấu - hoặc _ (không chứa khoảng trắng).";
+            } else if (result.error === "INVALID_QUANTITY") {
+              errorMsg = "Số lượng không hợp lệ. Vui lòng nhập số nguyên dương.";
+            } else if (result.error === "INVALID_THRESHOLD") {
+              errorMsg = "Ngưỡng cảnh báo tồn kho không hợp lệ. Vui lòng nhập số nguyên không âm.";
+            } else if (result.error === "INVALID_VALUE") {
+              errorMsg = "Dữ liệu không được để trống hoặc vượt quá độ dài cho phép.";
+            }
             return {
-              text:
-                result.error === "INVALID_PRICE"
-                  ? "Giá không hợp lệ. Ví dụ: 120000."
-                  : "Dữ liệu không hợp lệ, vui lòng thử lại.",
-              buttons: [[{ text: "Huỷ", callbackData: "admin:products:cancel" }]],
+              text: `⚠️ ${errorMsg}`,
+              buttons: [
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
             };
+          }
           if (result.draft.step === "confirm") {
             const categoryName = result.draft.categoryId
               ? (
@@ -3130,12 +3184,27 @@ async function bootstrap(): Promise<void> {
               rows.rows.map((row) => ({ id: row.id, name: row.name_vi })),
             );
           }
+          if (result.draft.step === "sku") {
+            const proposal = generateSkuProposal(result.draft.name ?? "");
+            return {
+              text: `Bước 2/8\n🏷 SKU\n\nSKU dùng để quản lý nội bộ.\n\nĐề xuất:\n${proposal}`,
+              buttons: [
+                [
+                  {
+                    text: `✨ Dùng SKU đề xuất: ${proposal}`,
+                    callbackData: `admin:products:apply-sku:${proposal}`,
+                  },
+                ],
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
+            };
+          }
           const prompts: Record<string, string> = {
-            sku: result.draft.existingProductId
-              ? "Bước 2/8 — Nhập SKU biến thể."
-              : "Bước 2/8 — Nhập SKU.",
-            variantName: "Bước 3/8 — Nhập tên biến thể.",
-            price: "Bước 4/8 — Nhập giá bán.",
+            variantName: "Bước 3/8 — Nhập tên biến thể (ví dụ: 1 tháng, Bản quyền).",
+            price: "Bước 4/8 — Nhập giá bán VND (ví dụ: 250000 hoặc 250.000).",
             category: "Bước 5/8 — Chọn danh mục.",
             fileArtifact:
               "Bước 7/8 — Tạo biến thể tệp ở trạng thái tạm dừng. Sau khi tạo, vào Kho hàng → biến thể này để nhập tệp Telegram thật rồi xác nhận kích hoạt.",
@@ -3144,11 +3213,157 @@ async function bootstrap(): Promise<void> {
             serviceInstructions: "Bước 7/8 — Nhập hướng dẫn xử lý cho đơn hàng.",
             initialQuantity: "Bước 8/8 — Nhập số lượng ban đầu.",
             inventoryFields: "Bước 7/8 — Nhập trường kho (vd: username,password,email).",
-            threshold: "Bước 8/8 — Nhập ngưỡng cảnh báo tồn kho.",
+            threshold: "Bước 8/8 — Nhập ngưỡng cảnh báo tồn kho (ví dụ: 5).",
           };
           return {
             text: prompts[result.draft.step] ?? "Tiếp tục.",
-            buttons: [[{ text: "Huỷ", callbackData: "admin:products:cancel" }]],
+            buttons: [
+              [
+                { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+              ],
+            ],
+          };
+        },
+        async applySku(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "sku")
+            return {
+              text: "Phiên tạo sản phẩm không ở bước SKU.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          const rawSku = input.sku.trim().toUpperCase();
+          const dup = await sql<{
+            id: string;
+          }>`select id from product_variant where sku = ${rawSku} limit 1`.execute(dbHandle.db);
+          if (dup.rows[0]) {
+            return {
+              text: `❌ SKU "${rawSku}" đã được sử dụng. Hãy nhập SKU khác.`,
+              buttons: [
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
+            };
+          }
+          const result = await productDraftWorkflow.advance(input.telegramUserId, rawSku);
+          if (!result.ok) {
+            return {
+              text: "Không thể áp dụng SKU này. Vui lòng nhập thủ công.",
+              buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
+            };
+          }
+          return {
+            text: "Bước 3/8 — Nhập tên biến thể (ví dụ: 1 tháng, Tiêu chuẩn).",
+            buttons: [
+              [
+                { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+              ],
+            ],
+          };
+        },
+        async back(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current) return presentAdminMenu();
+
+          let prevStep: typeof current.step = "name";
+          if (current.step === "sku") prevStep = "name";
+          else if (current.step === "variantName") prevStep = "sku";
+          else if (current.step === "price") prevStep = "variantName";
+          else if (current.step === "category") prevStep = "price";
+          else if (current.step === "fulfillmentType")
+            prevStep = current.existingProductId ? "price" : "category";
+          else if (
+            current.step === "inventoryFields" ||
+            current.step === "serviceInstructions" ||
+            current.step === "supplierConfig" ||
+            current.step === "threshold"
+          )
+            prevStep = "fulfillmentType";
+          else if (current.step === "initialQuantity") prevStep = "serviceInstructions";
+          else if (current.step === "confirm") prevStep = "threshold";
+
+          current.step = prevStep;
+          const repo = createProductDraftRepository(dbHandle.db);
+          await repo.save(current);
+
+          if (prevStep === "name") {
+            return {
+              text: `Bước 1/8 — Nhập tên sản phẩm.${current.name ? `\n(Hiện tại: ${current.name})` : ""}`,
+              buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
+            };
+          }
+          if (prevStep === "sku") {
+            const proposal = generateSkuProposal(current.name ?? "");
+            return {
+              text: `Bước 2/8\n🏷 SKU\n\nSKU dùng để quản lý nội bộ.${current.sku ? `\n(Hiện tại: ${current.sku})` : ""}\n\nĐề xuất:\n${proposal}`,
+              buttons: [
+                [
+                  {
+                    text: `✨ Dùng SKU đề xuất: ${proposal}`,
+                    callbackData: `admin:products:apply-sku:${proposal}`,
+                  },
+                ],
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
+            };
+          }
+          if (prevStep === "variantName") {
+            return {
+              text: `Bước 3/8 — Nhập tên biến thể.${current.variantName ? `\n(Hiện tại: ${current.variantName})` : ""}`,
+              buttons: [
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
+            };
+          }
+          if (prevStep === "price") {
+            return {
+              text: `Bước 4/8 — Nhập giá bán VND.${current.priceVnd ? `\n(Hiện tại: ${current.priceVnd.toLocaleString("vi-VN")} ₫)` : ""}`,
+              buttons: [
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
+            };
+          }
+          if (prevStep === "category") {
+            const rows = await sql<{ id: string; name_vi: string }>`
+              select id, name_vi from category where is_active order by sort_order, id limit 20
+            `.execute(dbHandle.db);
+            return presentProductCategoryChoices(
+              rows.rows.map((row) => ({ id: row.id, name: row.name_vi })),
+            );
+          }
+          if (prevStep === "fulfillmentType") {
+            return presentProductFulfillmentTypeChoices();
+          }
+          return {
+            text: "Quay lại bước trước.",
+            buttons: [
+              [
+                { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+              ],
+            ],
           };
         },
         async variantText(input) {
@@ -3259,9 +3474,15 @@ async function bootstrap(): Promise<void> {
             );
             return {
               text: "Bước 5/8 — Chọn danh mục.",
-              buttons: rows.rows.map((row) => [
-                { text: row.name_vi, callbackData: `admin:products:category:${row.id}` },
-              ]),
+              buttons: [
+                ...rows.rows.map((row) => [
+                  { text: row.name_vi, callbackData: `admin:products:category:${row.id}` },
+                ]),
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
             };
           }
           const exists = await sql<{
@@ -3298,12 +3519,22 @@ async function bootstrap(): Promise<void> {
           if (!result.ok)
             return {
               text: "Loại giao hàng không hợp lệ.",
-              buttons: [[{ text: "Huỷ", callbackData: "admin:products:cancel" }]],
+              buttons: [
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
             };
           if (result.draft.step === "threshold")
             return {
               text: "Bước 8/8 — Nhập ngưỡng cảnh báo tồn kho.",
-              buttons: [[{ text: "Huỷ", callbackData: "admin:products:cancel" }]],
+              buttons: [
+                [
+                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+                ],
+              ],
             };
           return {
             text:
@@ -3317,7 +3548,12 @@ async function bootstrap(): Promise<void> {
               (result.draft.fulfillmentType === "DIGITAL_FILE"
                 ? "Bước 8/8 — Tạo biến thể tạm dừng. Sau đó vào Kho hàng để nhập tệp thật và xác nhận kích hoạt."
                 : "Bước 7/8 — Nhập trường kho (vd: username,password,email)."),
-            buttons: [[{ text: "Huỷ", callbackData: "admin:products:cancel" }]],
+            buttons: [
+              [
+                { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+                { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+              ],
+            ],
           };
         },
         async review(input) {
@@ -3439,8 +3675,17 @@ async function bootstrap(): Promise<void> {
                   }
                 : { text: "📦 Kho hàng", callbackData: "admin:inventory" };
             return {
-              text: `✅ Đã ${product.active ? "tạo sản phẩm" : "lưu nháp chưa mở bán"} ${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫`,
-              buttons: [[setupButton, { text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+              text: `✅ ĐÃ TẠO SẢN PHẨM\n\n${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫\nTrạng thái: ${product.active ? "Đang mở bán" : "Nháp / Chưa mở bán"}`,
+              buttons: [
+                [
+                  setupButton,
+                  { text: "👁 Xem như khách", callbackData: `shop:product:${product.id}` },
+                ],
+                [
+                  { text: "➕ Tạo sản phẩm khác", callbackData: "admin:products:create" },
+                  { text: "🏠 Quản trị", callbackData: "admin:menu" },
+                ],
+              ],
             };
           } catch (error) {
             if (error instanceof Error && /23505|CONFLICT|conflict/i.test(error.message))
@@ -3542,13 +3787,15 @@ async function bootstrap(): Promise<void> {
     const result = await processSePayInboxBatch({
       inbox: sepayInbox,
       handler: (evidence) => {
-        const code =
-          (evidence.structuredCode ?? evidence.content ?? evidence.reference)
-            ?.trim()
-            .toUpperCase() ?? "";
-        return code.startsWith("NAPVI")
-          ? applyWalletTopupEvidence(dbHandle.db, evidence)
-          : applyPaymentEvidence(dbHandle.db, evidence);
+        const code = evidence.structuredCode ?? evidence.content ?? evidence.reference;
+        const family = classifyPaymentCode(code);
+        if (family === "WALLET_TOPUP") {
+          return applyWalletTopupEvidence(dbHandle.db, evidence);
+        }
+        if (family === "ORDER") {
+          return applyPaymentEvidence(dbHandle.db, evidence);
+        }
+        throw new Error("PAYMENT_CODE_FAMILY_UNKNOWN");
       },
       owner: sepayOwnerId,
       batchSize: 20,

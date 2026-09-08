@@ -20,6 +20,7 @@ import {
   settleIntent,
 } from "./repository.js";
 import { presentPayment, type PaymentPresentation } from "./vietqr.js";
+import { generateOrderPaymentCode } from "./payment-code.js";
 
 /**
  * Payment settlement service (T053, T128).
@@ -142,8 +143,9 @@ export async function presentPaymentForOrder(
       order.expiresAt !== null
         ? new Date(order.expiresAt)
         : new Date(Date.now() + ttlSeconds * 1000);
-    // Content: strip non-alnum from the order number and keep it short (EMVCo ≤25).
-    const transferContent = order.orderNumber.replace(/[^A-Za-z0-9]/g, "").slice(0, 25);
+    // Direct order payments use their own namespace so wallet and order
+    // evidence cannot share a payment code family.
+    const transferContent = generateOrderPaymentCode(order.orderNumber);
     const intentId = newId();
 
     const inserted = await insertPresentedIntent(trx, {
