@@ -161,9 +161,7 @@ function productionHardeningIssues(config: AppConfig): string[] {
   const normalizedMerchant = config.SEPAY_MERCHANT_ACCOUNT_ID.trim();
   const normalizedVietQr = config.VIETQR_ACCOUNT_NUMBER.trim();
   if (normalizedMerchant !== normalizedVietQr) {
-    issues.push(
-      `SEPAY_MERCHANT_ACCOUNT_ID ("${normalizedMerchant}") must match VIETQR_ACCOUNT_NUMBER ("${normalizedVietQr}") in production`,
-    );
+    issues.push("SEPAY_MERCHANT_ACCOUNT_ID must match VIETQR_ACCOUNT_NUMBER in production");
   }
   return issues;
 }

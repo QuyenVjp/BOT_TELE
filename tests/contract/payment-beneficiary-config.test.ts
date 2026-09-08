@@ -85,7 +85,12 @@ describe("payment beneficiary configuration contract (T171)", () => {
     try {
       loadConfig(prodEnv);
     } catch (err) {
-      expect((err as ConfigError).issues.join("; ")).toContain("must match VIETQR_ACCOUNT_NUMBER");
+      const message = (err as ConfigError).issues.join("; ");
+      expect(message).toBe(
+        "SEPAY_MERCHANT_ACCOUNT_ID must match VIETQR_ACCOUNT_NUMBER in production",
+      );
+      expect(message).not.toContain("0123456789");
+      expect(message).not.toContain("0335920306");
     }
   });
 });

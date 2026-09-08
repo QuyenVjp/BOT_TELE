@@ -8,6 +8,7 @@ import { dispatchTelegramBuyNow } from "../../src/bot/callbacks/telegram-dispatc
 import { createDb, type DbHandle } from "../../src/infrastructure/db/client.js";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
 import { presentPaymentForOrder } from "../../src/modules/payments/service.js";
+import { generateOrderPaymentCode } from "../../src/modules/payments/payment-code.js";
 import { createSearchParser } from "../../src/modules/catalog/search-parser-adapter.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
@@ -280,9 +281,7 @@ describe("Buy Now idempotency and callback safety (T158/T159/T160)", () => {
     });
     expect(first.ok && secondOrder.ok).toBe(true);
     if (!first.ok || !secondOrder.ok) return;
-    const collidingContent = secondOrder.order.orderNumber
-      .replace(/[^A-Za-z0-9]/g, "")
-      .slice(0, 25);
+    const collidingContent = generateOrderPaymentCode(secondOrder.order.orderNumber);
     await sql`
       insert into payment_intent
         (id, order_id, status, amount_vnd, merchant_account_id, transfer_content, expires_at,
@@ -291,6 +290,7 @@ describe("Buy Now idempotency and callback safety (T158/T159/T160)", () => {
         (${newId()}, ${first.order.id}, 'PRESENTED', ${s.price}, '0123456789',
          ${collidingContent}, now() + interval '15 minutes', now())
     `.execute(ctx.db);
+    const before = await counts();
 
     await expect(
       presentPaymentForOrder(second.db, {
@@ -303,7 +303,7 @@ describe("Buy Now idempotency and callback safety (T158/T159/T160)", () => {
         correlationId: "content-collision",
       }),
     ).rejects.toThrow("did not belong to this order");
-    expect(await counts()).toMatchObject({ intents: 1 });
+    expect(await counts()).toEqual(before);
   });
 
   it("carries a signed catalog button through Telegram dispatch without a forgeable customer id", async () => {
