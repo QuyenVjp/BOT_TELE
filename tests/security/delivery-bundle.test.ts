@@ -234,6 +234,67 @@ describe("delivery bundle security (FR-017 / SR-003)", () => {
     expect(row.rows[0]?.status).toBe("CONSUMED");
   });
 
+  it("keeps delivery retryable during a Vault outage and recovers after Vault returns", async () => {
+    const f = await seedReadyAsset();
+    const issued = await issueDeliveryBundle(ctx.db, {
+      orderId: f.orderId,
+      customerId: f.customerId,
+      assetId: f.assetId,
+      ttlSeconds: 900,
+      correlationId: "vault-outage-issue",
+    });
+    if (!issued.ok) throw new Error("issue failed");
+
+    let revealAttempts = 0;
+    const vault = {
+      reveal: async (ref: string) => {
+        revealAttempts += 1;
+        if (revealAttempts === 1) throw new Error("vault unavailable");
+        return ref === f.vaultRef ? f.secret : "WRONG";
+      },
+    };
+
+    await expect(
+      revealDeliveryBundle(ctx.db, {
+        token: issued.token,
+        customerId: f.customerId,
+        correlationId: "vault-outage-first",
+        vault,
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "UNAVAILABLE" });
+
+    const duringOutage = await sql<{ bundle_status: string; asset_status: string }>`
+      select b.status as bundle_status, a.status as asset_status
+      from delivery_bundle b
+      join digital_asset a on a.id = b.asset_id
+      where b.id = ${issued.bundleId}
+    `.execute(ctx.db);
+    expect(duringOutage.rows[0]).toMatchObject({
+      bundle_status: "VIEWED",
+      asset_status: "READY",
+    });
+
+    const recovered = await revealDeliveryBundle(ctx.db, {
+      token: issued.token,
+      customerId: f.customerId,
+      correlationId: "vault-outage-recovered",
+      vault,
+    });
+    expect(recovered.ok).toBe(true);
+    if (recovered.ok) expect(recovered.secret).toBe(f.secret);
+
+    const afterRecovery = await sql<{ bundle_status: string; asset_status: string }>`
+      select b.status as bundle_status, a.status as asset_status
+      from delivery_bundle b
+      join digital_asset a on a.id = b.asset_id
+      where b.id = ${issued.bundleId}
+    `.execute(ctx.db);
+    expect(afterRecovery.rows[0]).toMatchObject({
+      bundle_status: "CONSUMED",
+      asset_status: "DELIVERED",
+    });
+  });
+
   it("does not consume or complete when asset delivery loses its version guard", async () => {
     const f = await seedReadyAsset();
     const issued = await issueDeliveryBundle(ctx.db, {

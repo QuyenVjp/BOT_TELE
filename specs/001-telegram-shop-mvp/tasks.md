@@ -423,7 +423,7 @@ is not complete until T115–T153 AND Phase 10 (T154+) pass with real runtime + 
 - [ ] T137 [P] Write failing authenticated HTTP SupplierPort tests for availability/create/query/cancel/refund, timeout UNKNOWN, response validation, and vault provenance in `tests/contract/http-supplier.test.ts`
 - [ ] T138 [P] Write failing paid/no-local-stock supplier fulfillment and recovery acceptance tests in `tests/acceptance/supplier-fulfillment-journey.test.ts`
 - [x] T139 [P] Write failing Telegram delivery-send failure/retry tests proving the one-time link remains recoverable and targets the real customer in `tests/integration/delivery-notification-retry.test.ts`
-- [ ] T140 [P] Write failing vault-outage reveal tests proving no false `CONSUMED`/`DELIVERED` state and safe recovery in `tests/integration/delivery-vault-failure.test.ts`
+- [x] T140 [P] Write failing vault-outage reveal tests proving no false `CONSUMED`/`DELIVERED` state and safe recovery in `tests/integration/delivery-vault-failure.test.ts`
 - [ ] T141 [P] Write failing Order completion, bundle expiry/reissue, supplier replay, and global credential-fingerprint uniqueness tests in `tests/integration/delivery-completion.test.ts`
 - [x] T142 Correct the external vault adapter so one timeout covers headers plus streamed body parsing, chunked bodies abort at the envelope limit, serialized JSON is measured once, redirects and unsafe endpoint/egress targets fail closed, exact-max material round-trips, every response body is finalized safely, and production health/readiness plus config anti-reuse are enforced in `src/infrastructure/vault/external-adapter.ts`, `src/infrastructure/vault/adapter.ts`, `src/config/`, `src/main.ts`, `src/worker.ts`, and `src/app.ts`
 - [ ] T143 Implement authenticated HTTP SupplierPort plus cancel/refund/reconcile and idempotent supplier-unit ingestion in `src/modules/supplier/adapters/http.ts`, `src/modules/supplier/port.ts`, and `src/modules/supplier/service.ts`
@@ -806,4 +806,3 @@ final-source verification commands passed, then work stopped for reviewer re-che
   4 files on host Node 24.15.0; typecheck, lint, and focused format checks pass. No Docker, full-host,
   build, secret-scan, audit, staging endpoint, Git/SHA, or hosted-CI claim is made. Task truth is
   167 checked / 20 open / 187 rows. Feature 001 remains REQUEST_CHANGES; A1 is next. -->
-

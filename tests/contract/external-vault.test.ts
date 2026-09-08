@@ -70,6 +70,11 @@ const server = createServer(async (request, response) => {
     body,
   });
 
+  if (request.headers.authorization !== `Bearer ${VAULT_TOKEN}`) {
+    json(response, 401, { error: "unauthorized" });
+    return;
+  }
+
   if (url === "/redirect-target") {
     redirectTargetHits += 1;
     json(response, 200, { status: "ok" });
@@ -293,6 +298,7 @@ describe("external vault adapter (T136 reopened RED)", () => {
     const vault = testVault();
     await expect(vault.health?.()).rejects.toBeInstanceOf(ExternalVaultError);
     expect(redirectTargetHits).toBe(0);
+    expect(requests.some((request) => request.url === "/redirect-target")).toBe(false);
   });
 
   it("enforces host, port, mixed-address, and re-resolution egress policy", async () => {
@@ -389,6 +395,17 @@ describe("external vault adapter (T136 reopened RED)", () => {
     const vault = testVault({ maxAttempts: 3 });
     await expect(vault.health?.()).rejects.toBeInstanceOf(ExternalVaultError);
     expect(requests.filter((request) => request.url === "/healthz")).toHaveLength(1);
+  });
+
+  it("fails bounded on invalid or expired bearer authentication without leaking the token", async () => {
+    const invalidToken = ["expired", "test", "token"].join("-");
+    const vault = testVault({ token: invalidToken, maxAttempts: 3 });
+    const error = await vault.health?.().catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(ExternalVaultError);
+    expect(requests.filter((request) => request.url === "/healthz")).toHaveLength(1);
+    expect(String(error)).not.toContain(invalidToken);
+    expect(String(error)).not.toContain(endpoint);
   });
 
   it("rejects a ref from another namespace before provider access", async () => {
