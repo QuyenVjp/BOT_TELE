@@ -213,6 +213,10 @@ function resolveSourceIp(
   if (!peer) return null;
   const trusted = trustedProxyIps.map(normalizeIp).includes(peer);
   if (!trusted) return peer;
+  // Cloudflare carries the original visitor address here. Only read it after
+  // proving the TCP peer is a configured trusted proxy.
+  const cloudflareIp = normalizeIp(request.headers["cf-connecting-ip"] ?? "");
+  if (cloudflareIp) return cloudflareIp;
   const forwarded = request.headers["x-forwarded-for"]?.split(",", 1)[0]?.trim() ?? "";
   return normalizeIp(forwarded);
 }
