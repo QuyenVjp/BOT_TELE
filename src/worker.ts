@@ -3792,10 +3792,7 @@ async function bootstrap(): Promise<void> {
         if (family === "WALLET_TOPUP") {
           return applyWalletTopupEvidence(dbHandle.db, evidence);
         }
-        if (family === "ORDER") {
-          return applyPaymentEvidence(dbHandle.db, evidence);
-        }
-        throw new Error("PAYMENT_CODE_FAMILY_UNKNOWN");
+        return applyPaymentEvidence(dbHandle.db, evidence);
       },
       owner: sepayOwnerId,
       batchSize: 20,

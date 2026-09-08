@@ -117,6 +117,15 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
       headers,
       remoteAddress: request.socket.remoteAddress ?? "",
     });
+    process.stdout.write(
+      `${JSON.stringify({
+        tag: "SEPAY_INGRESS",
+        time: new Date().toISOString(),
+        remoteAddress: request.socket.remoteAddress,
+        cfIp: request.headers["cf-connecting-ip"],
+        status: result.status,
+      })}\n`,
+    );
     return reply.code(result.status).send(result.body);
   });
 

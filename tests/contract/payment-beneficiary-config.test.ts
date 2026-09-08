@@ -60,4 +60,32 @@ describe("payment beneficiary configuration contract (T171)", () => {
     expect(() => loadConfig(validEnv({ VIETQR_BANK_NAME: "   " }))).toThrow(ConfigError);
     expect(() => loadConfig(validEnv({ VIETQR_BANK_NAME: "x".repeat(101) }))).toThrow(ConfigError);
   });
+  it("fails closed in production if SEPAY_MERCHANT_ACCOUNT_ID does not match VIETQR_ACCOUNT_NUMBER", () => {
+    const prodEnv = {
+      ...validEnv({
+        NODE_ENV: "production",
+        APP_BASE_URL: "https://api.tier20.click",
+        VAULT_DRIVER: "external",
+        VAULT_ENDPOINT: "https://127.0.0.1:8443",
+        VAULT_TOKEN: "vault-token-material-12345678901234567890",
+        VAULT_EGRESS_HOST_ALLOWLIST: "127.0.0.1",
+        VAULT_EGRESS_PORT_ALLOWLIST: "8443",
+        VAULT_EGRESS_CIDR_ALLOWLIST: "127.0.0.1/32",
+        SUPPLIER_DRIVER: "http",
+        SUPPLIER_API_BASE_URL: "https://supplier.example.com",
+        SUPPLIER_API_TOKEN: "supplier-token-material-1234567890",
+        SEPAY_API_TOKEN: "sepay-api-token-material-1234567890",
+        DELIVERY_SESSION_HMAC_KEY: "delivery-session-key-material-12345678",
+        BUY_NOW_CALLBACK_HMAC_KEY: "buy-now-callback-key-material-12345678",
+        SEPAY_MERCHANT_ACCOUNT_ID: "0123456789",
+        VIETQR_ACCOUNT_NUMBER: "0335920306",
+      }),
+    };
+    expect(() => loadConfig(prodEnv)).toThrow(ConfigError);
+    try {
+      loadConfig(prodEnv);
+    } catch (err) {
+      expect((err as ConfigError).issues.join("; ")).toContain("must match VIETQR_ACCOUNT_NUMBER");
+    }
+  });
 });
