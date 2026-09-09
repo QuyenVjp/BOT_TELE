@@ -246,7 +246,7 @@ export function presentProductDetail(
       buttons.push([
         {
           text: `💰 ${variant.name_vi} · Đặt cọc giữ suất`,
-          callbackData: `pre:agree:${variant.id}`,
+          callbackData: `preorder:consent:${variant.id}`,
         },
       ]);
     } else {
