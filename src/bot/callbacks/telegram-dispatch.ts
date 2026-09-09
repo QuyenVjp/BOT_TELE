@@ -2171,8 +2171,7 @@ async function shopHome(
       telegramUserId: envelope.actorUserId,
       offset: 0,
       isRootAdmin:
-        deps.adminRootUserId !== undefined &&
-        Number(envelope.actorUserId) === deps.adminRootUserId,
+        deps.adminRootUserId !== undefined && Number(envelope.actorUserId) === deps.adminRootUserId,
     });
   }
   return presentCustomerHome();

@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const vault = createVault({
     driver: config.VAULT_DRIVER,
     endpoint: config.VAULT_ENDPOINT,
-    token: [REDACTED:Generic Password Field],
+    token: config.VAULT_TOKEN,
     namespace: config.VAULT_NAMESPACE,
     timeoutMs: config.VAULT_TIMEOUT_MS,
     maxAttempts: config.VAULT_MAX_ATTEMPTS,

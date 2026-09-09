@@ -16,8 +16,7 @@ const { createVault } = await import("../src/infrastructure/vault/adapter.js");
 const { createAdminProduct } = await import("../src/modules/catalog/admin-products.js");
 const { ensureDefaultCategories, listCategoriesWithCounts } =
   await import("../src/modules/catalog/repository.js");
-const { importDigitalInventory } =
-  await import("../src/modules/digital-goods/inventory-import.js");
+const { importDigitalInventory } = await import("../src/modules/digital-goods/inventory-import.js");
 const { newId } = await import("../src/shared/ids/index.js");
 
 const config = loadConfig(process.env);
@@ -52,8 +51,9 @@ async function categoryIdByName(...fragments: string[]): Promise<string> {
 }
 
 async function existsBySku(sku: string): Promise<boolean> {
-  const r = await sql<{ id: string }>`select id from product_variant where sku = ${sku} limit 1`
-    .execute(db.db);
+  const r = await sql<{
+    id: string;
+  }>`select id from product_variant where sku = ${sku} limit 1`.execute(db.db);
   return r.rows.length > 0;
 }
 
@@ -102,10 +102,7 @@ async function main(): Promise<void> {
     });
     await markTest(p.id);
     const lines = [1, 2, 3, 4, 5]
-      .map(
-        (n) =>
-          `${p.variantId},test.account.00${n}@example.invalid,TEST-PASS-00${n}`,
-      )
+      .map((n) => `${p.variantId},test.account.00${n}@example.invalid,TEST-PASS-00${n}`)
       .join("\n");
     const imported = await importDigitalInventory({
       db: db.db,
@@ -144,9 +141,7 @@ async function main(): Promise<void> {
       correlationId: `seed:${newId()}`,
     });
     await markTest(p.id);
-    const lines = [1, 2, 3, 4, 5]
-      .map((n) => `${p.variantId},TIER20-TEST-000${n}`)
-      .join("\n");
+    const lines = [1, 2, 3, 4, 5].map((n) => `${p.variantId},TIER20-TEST-000${n}`).join("\n");
     const imported = await importDigitalInventory({
       db: db.db,
       vault,

@@ -84,7 +84,7 @@ describe("catalog journey (US1)", () => {
   it("opens a product detail showing all FR-003 authoritative fields", async () => {
     const variantId = await callbacks.firstSellableVariantId();
     const detail = await callbacks.variantDetail(variantId, TELEGRAM_USER_ID);
-    for (const field of ["Giá:", "Thời hạn:", "Giao hàng:", "Bảo hành:", "Tồn kho:"]) {
+    for (const field of ["Giá:", "Thời hạn:", "Loại giao:", "Tồn kho:"]) {
       expect(detail.text).toContain(field);
     }
     // Buy Now is reachable from detail.

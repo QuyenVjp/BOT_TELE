@@ -756,7 +756,8 @@ async function bootstrap(): Promise<void> {
   const { DESCRIPTION_TEMPLATES } = await import("./modules/catalog/description-templates.js");
   const { createAdminProduct, createAdminVariant, updateAdminVariant } =
     await import("./modules/catalog/admin-products.js");
-  const { getStoreMode, setStoreMode, addTestCustomer, removeTestCustomer, listTestCustomers } = await import("./modules/commerce/store-mode.js");
+  const { getStoreMode, setStoreMode, addTestCustomer, listTestCustomers } =
+    await import("./modules/commerce/store-mode.js");
   const { adjustQuantityStock, listVariantInventoryHistory } =
     await import("./modules/catalog/quantity-stock.js");
   const {
@@ -797,8 +798,6 @@ async function bootstrap(): Promise<void> {
     presentInventoryImportTemplate,
     presentFileArtifactImportDone,
     presentFileArtifactImportPreview,
-    presentProductFulfillmentTypeChoices,
-    presentProductCategoryChoices,
     presentProductDraftPreview,
     presentAdminVariantDraft,
     presentAdminVariantMutationDone,
@@ -1063,7 +1062,8 @@ async function bootstrap(): Promise<void> {
     variantName?: string | undefined;
     priceVnd?: bigint | undefined;
     inventoryFields?: InventoryField[] | undefined;
-    deliveryConfig?: { selectedOptionalFields: string[]; customFields: InventoryField[] } | undefined;
+    deliveryConfig?:
+      { selectedOptionalFields: string[]; customFields: InventoryField[] } | undefined;
   }): Promise<PresentedMessage> => {
     switch (draft.step) {
       case "sku":
@@ -1186,11 +1186,11 @@ async function bootstrap(): Promise<void> {
               ? "Cửa hàng đang đóng. Vui lòng quay lại sau."
               : res.code === "STORE_TEST_ONLY"
                 ? "Sản phẩm này chỉ dành cho khách test trong chế độ TEST."
-              : res.code === "QUEUE_FULL"
-                ? "Hàng chờ đặt cọc cho sản phẩm này đã đầy. Vui lòng quay lại sau."
-                : res.code === "ALREADY_PREORDERED"
-                  ? "Bạn đã có một suất đặt cọc đang chờ xử lý cho sản phẩm này."
-                  : "Không thể thực hiện đặt cọc lúc này.";
+                : res.code === "QUEUE_FULL"
+                  ? "Hàng chờ đặt cọc cho sản phẩm này đã đầy. Vui lòng quay lại sau."
+                  : res.code === "ALREADY_PREORDERED"
+                    ? "Bạn đã có một suất đặt cọc đang chờ xử lý cho sản phẩm này."
+                    : "Không thể thực hiện đặt cọc lúc này.";
           return { text: msg, buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]] };
         }
         return {
@@ -2788,7 +2788,9 @@ async function bootstrap(): Promise<void> {
             buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:testlab:testers" }]],
           };
         await addTestCustomer(dbHandle.db, telegramId, input.telegramUserId);
-        await sql`delete from admin_callback_state where id = ${state.rows[0].id}`.execute(dbHandle.db);
+        await sql`delete from admin_callback_state where id = ${state.rows[0].id}`.execute(
+          dbHandle.db,
+        );
         await appendAuditEvent(dbHandle.db, {
           actorType: "ROOT_ADMIN",
           actorId: input.telegramUserId,
@@ -2870,7 +2872,11 @@ async function bootstrap(): Promise<void> {
       },
       async categoryText(input) {
         if (input.chatType !== "private") return null;
-        const state = await sql<{ id: string; kind: string; payload_redacted: Record<string, unknown> }>`
+        const state = await sql<{
+          id: string;
+          kind: string;
+          payload_redacted: Record<string, unknown>;
+        }>`
           select id, kind, payload_redacted from admin_callback_state
           where admin_telegram_user_id = ${input.telegramUserId}
             and kind in ('CATEGORY_CREATE', 'CATEGORY_RENAME') and expires_at > now()
@@ -3711,7 +3717,7 @@ async function bootstrap(): Promise<void> {
           ],
         };
       },
-    workflow: {
+      workflow: {
         async start(input) {
           if (
             Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
@@ -3758,7 +3764,9 @@ async function bootstrap(): Promise<void> {
             const repo = createProductDraftRepository(dbHandle.db);
             const draft = await productDraftWorkflow.get(input.telegramUserId);
             if (!draft) {
-              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(
+                dbHandle.db,
+              );
               return null;
             }
             const text = input.text.trim();
@@ -3779,7 +3787,9 @@ async function bootstrap(): Promise<void> {
                 reason: "Tạo danh mục từ wizard tạo sản phẩm",
                 correlationId: input.correlationId,
               });
-              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(
+                dbHandle.db,
+              );
               const next = {
                 ...draft,
                 categoryId: created.id,
@@ -3797,13 +3807,17 @@ async function bootstrap(): Promise<void> {
                   text: "Tên trường không hợp lệ.",
                   buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
                 };
-              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(
+                dbHandle.db,
+              );
               const next = addCustomField(draft, { label });
               await repo.save(next);
               return renderWizardStep(next);
             }
             if (pendingSub.kind === "WIZARD_ADVANCED") {
-              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(
+                dbHandle.db,
+              );
               const next = applyAdvancedRaw(draft, text);
               await repo.save(next);
               return renderWizardStep(next);
@@ -3815,7 +3829,9 @@ async function bootstrap(): Promise<void> {
                 text: "Mô tả không được để trống.",
                 buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
               };
-            await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+            await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(
+              dbHandle.db,
+            );
             const next = {
               ...draft,
               description,
@@ -3858,8 +3874,7 @@ async function bootstrap(): Promise<void> {
           if (!result.ok) {
             let errorMsg = "Dữ liệu không hợp lệ, vui lòng thử lại.";
             if (result.error === "INVALID_VARIANT") {
-              errorMsg =
-                "Định dạng chưa đúng. Nhập: Tên biến thể | Giá\nVí dụ: 1 tháng | 250000";
+              errorMsg = "Định dạng chưa đúng. Nhập: Tên biến thể | Giá\nVí dụ: 1 tháng | 250000";
             } else if (result.error === "INVALID_SKU") {
               errorMsg =
                 "SKU không hợp lệ. SKU chỉ gồm chữ, số, dấu - hoặc _ (không chứa khoảng trắng).";
@@ -4022,7 +4037,8 @@ async function bootstrap(): Promise<void> {
                   [{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${productId}` }],
                 ],
               };
-        },        async category(input) {
+        },
+        async category(input) {
           if (
             Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
             input.chatType !== "private"

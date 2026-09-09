@@ -280,7 +280,6 @@ describe("root product draft text ingress", () => {
     }
   });
 
-
   it("preserves 8-step description and variant text for the root admin", async () => {
     const accepted: unknown[] = [];
     const ingress = Fastify({ bodyLimit: BODY_LIMIT });
@@ -296,7 +295,11 @@ describe("root product draft text ingress", () => {
       rootProductDraftText: {
         adminTelegramUserId: 123456789,
         activeStep: async (telegramUserId) =>
-          telegramUserId === "123456789" ? (accepted.length === 0 ? "description" : "variant") : null,
+          telegramUserId === "123456789"
+            ? accepted.length === 0
+              ? "description"
+              : "variant"
+            : null,
       },
     });
     await ingress.ready();
