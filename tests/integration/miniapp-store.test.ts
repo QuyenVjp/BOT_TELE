@@ -207,6 +207,42 @@ describe.skipIf(!hasDocker)("Mini App store authenticated flow", () => {
     expect(rows.rows[0]).toEqual({ status: "PAID", balance_vnd: "150000" });
   });
 
+  it("hides is_test SKUs from unauthenticated and normal Mini App catalog", async () => {
+    const ownerInitData = signedInitData(40404);
+    const publicSeed = await seedCatalog();
+    const category = await sql<{ category_id: string }>`
+      select category_id from product limit 1
+    `.execute(ctx.db);
+    const testProduct = newId();
+    const testVariant = newId();
+    await sql`
+      insert into product (id, category_id, name_vi, slug, is_active, sort_order, is_test)
+      values (${testProduct}, ${category.rows[0]!.category_id}, 'Canary Test', ${testProduct.slice(-8)}, true, 9, true)
+    `.execute(ctx.db);
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
+         warranty_days, stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
+      values (${testVariant}, ${testProduct}, 'TEST-CODE-AUTO', 'Test', 100000, 'P1M', 'CREDENTIAL',
+        30, 'LOCAL_ONLY', 'RES-TEST', true, 9, 'STOCK_ACCOUNT')
+    `.execute(ctx.db);
+
+    const anonymous = await app.inject({ method: "GET", url: "/shop/api/catalog" });
+    expect(anonymous.statusCode).toBe(200);
+    const anonymousIds = (anonymous.json().items as Array<{ id: string; sku?: string }>).map((item) => item.id);
+    expect(anonymousIds).toContain(publicSeed.variantId);
+    expect(anonymousIds).not.toContain(testVariant);
+
+    const authed = await app.inject({
+      method: "GET",
+      url: "/shop/api/catalog",
+      headers: { "x-telegram-init-data": ownerInitData },
+    });
+    const authedIds = (authed.json().items as Array<{ id: string }>).map((item) => item.id);
+    expect(authedIds).toContain(publicSeed.variantId);
+    expect(authedIds).not.toContain(testVariant);
+  });
+
   it("keeps zero-quantity catalog items visible but blocks payable order creation", async () => {
     const ownerInitData = signedInitData(30303);
     const seeded = await seedCatalog({ fulfillmentType: "QUANTITY_STOCK", quantity: 0 });

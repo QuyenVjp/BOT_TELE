@@ -3,6 +3,7 @@ import type { Db } from "../../infrastructure/db/transaction.js";
 import { ensureTelegramIdentity } from "../identity/channel-identity.js";
 import { verifyTelegramMiniAppInitData } from "../digital-goods/delivery-route.js";
 import { searchCatalog } from "../catalog/search.js";
+import { resolveCatalogAudience } from "../catalog/visibility.js";
 import { buyNow } from "../commerce/buy-now.js";
 import { createWalletPurchaseService } from "../wallet/purchase.js";
 import { sql } from "kysely";
@@ -12,6 +13,7 @@ export interface MiniAppOptions {
   botToken: string;
   path?: string;
   maxAgeSeconds: number;
+  adminTelegramUserId?: string | undefined;
 }
 
 const NO_CACHE = {
@@ -259,8 +261,25 @@ export async function registerMiniApp(
     setHeaders(reply);
     const query = request.query as { q?: string; cursor?: string };
     try {
+      const raw = initDataFrom(request);
+      const verified = raw
+        ? verifyTelegramMiniAppInitData(raw, {
+            botToken: options.botToken,
+            maxAgeSeconds: options.maxAgeSeconds,
+          })
+        : null;
+      const telegramUserId = verified ? String(verified.telegramUserId) : undefined;
+      const isRootAdmin =
+        telegramUserId !== undefined &&
+        options.adminTelegramUserId !== undefined &&
+        telegramUserId === options.adminTelegramUserId;
+      const audience = await resolveCatalogAudience(
+        options.db,
+        telegramUserId ? { telegramUserId, isRootAdmin } : undefined,
+      );
       const searchOptions = {
         limit: 24,
+        audience,
         ...(typeof query.cursor === "string" ? { cursor: query.cursor } : {}),
       };
       const page = await searchCatalog(

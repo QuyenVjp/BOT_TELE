@@ -3,6 +3,7 @@ import type { Executor } from "../../infrastructure/db/transaction.js";
 import type { DeliveryType, StockPolicy } from "./domain.js";
 import type { FulfillmentType } from "./fulfillment-type.js";
 import { newId } from "../../shared/ids/index.js";
+import { catalogVisibilitySql, type CatalogAudience } from "./visibility.js";
 
 /**
  * Catalog persistence + cursor queries (FR-002).
@@ -260,7 +261,11 @@ function decodeCursor(raw: string): Cursor | null {
  */
 export async function listSellableVariants(
   exec: Executor,
-  options: PageOptions & { productId?: string; categoryId?: string },
+  options: PageOptions & {
+    productId?: string;
+    categoryId?: string;
+    audience?: CatalogAudience | undefined;
+  },
 ): Promise<Page<CatalogVariantRow>> {
   const cursor = options.cursor ? decodeCursor(options.cursor) : null;
   // Fetch one extra row to determine whether a further page exists.
@@ -302,11 +307,9 @@ export async function listSellableVariants(
     left join variant_quantity_stock q on q.variant_id = v.id
     where c.is_active
       and p.is_active
-      and not p.is_test
-      and not p.is_archived
       and v.is_active
       and v.price_vnd > 0
-      and v.resale_evidence_id is not null
+      ${catalogVisibilitySql(options.audience ?? "public")}
       and (
         (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
         or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
@@ -339,6 +342,7 @@ export async function listSellableVariants(
 export async function getVariantById(
   exec: Executor,
   variantId: string,
+  audience: CatalogAudience = "public",
 ): Promise<CatalogVariantRow | null> {
   const result = await sql<CatalogVariantRow>`
     select
@@ -371,9 +375,9 @@ export async function getVariantById(
     where v.id = ${variantId}
       and c.is_active
       and p.is_active
-      and not p.is_archived
       and v.is_active
       and v.price_vnd > 0
+      ${catalogVisibilitySql(audience)}
       and (
         (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
         or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (

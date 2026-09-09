@@ -2,6 +2,7 @@ import { sql } from "kysely";
 import type { Executor } from "../../infrastructure/db/transaction.js";
 import type { CatalogVariantRow, Page } from "./repository.js";
 import type { DeliveryType } from "./domain.js";
+import { catalogVisibilitySql, type CatalogAudience } from "./visibility.js";
 
 /**
  * Deterministic catalog search (FR-004).
@@ -24,6 +25,7 @@ export interface CatalogFilter {
 export interface SearchOptions {
   limit: number;
   cursor?: string | null;
+  audience?: CatalogAudience | undefined;
 }
 
 export const SEARCH_MAX_QUERY = 256;
@@ -179,7 +181,7 @@ export async function searchCatalog(
       and p.is_active
       and v.is_active
       and v.price_vnd > 0
-      and v.resale_evidence_id is not null
+      ${catalogVisibilitySql(options.audience ?? "public")}
       and (
         (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
         or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (

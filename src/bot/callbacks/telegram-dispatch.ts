@@ -83,12 +83,20 @@ export interface TelegramDomainDispatcherDeps {
   catalog: {
     mainMenu(): Promise<PresentedMessage>;
     categoryList(): Promise<PresentedMessage>;
-    categoryView(categoryId: string, cursor?: string): Promise<PresentedMessage>;
+    categoryView(
+      categoryId: string,
+      cursor?: string,
+      identity?: { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
+    ): Promise<PresentedMessage>;
     variantDetail(
       variantId: string,
       telegramUserId: string | bigint | number,
+      identity?: { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
     ): Promise<PresentedMessage>;
-    search(rawQuery: string): Promise<PresentedMessage>;
+    search(
+      rawQuery: string,
+      identity?: { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
+    ): Promise<PresentedMessage>;
     storefront?(input: {
       actorName: string;
       telegramUserId: string;
@@ -98,6 +106,7 @@ export interface TelegramDomainDispatcherDeps {
     productDetail?(
       productId: string,
       telegramUserId: string | bigint | number,
+      identity?: { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
     ): Promise<PresentedMessage>;
   };
   checkout: Pick<CheckoutCallbacks, "buyNowFromCallback" | "refresh" | "reopen" | "cancel">;
@@ -130,6 +139,7 @@ export interface TelegramDomainDispatcherDeps {
     list(customerId: string): Promise<PresentedMessage>;
   };
   adminRootUserId?: number | undefined;
+  sepayReconciliationText?: (() => Promise<string>) | undefined;
   preorder?: {
     consent(variantId: string): Promise<PresentedMessage>;
     create(input: {
@@ -765,7 +775,11 @@ export function createTelegramDomainDispatcher(
       } else if (envelope.callbackData?.startsWith("cat:view:")) {
         const categoryId = envelope.callbackData.slice("cat:view:".length);
         message = isCatalogId(categoryId)
-          ? await deps.catalog.categoryView(categoryId)
+          ? await deps.catalog.categoryView(
+              categoryId,
+              undefined,
+              catalogActorIdentity(deps, envelope.actorUserId),
+            )
           : await deps.catalog.categoryList();
       } else if (envelope.callbackData?.startsWith("shop:page:")) {
         const offset = Number(envelope.callbackData.slice("shop:page:".length));
@@ -787,7 +801,11 @@ export function createTelegramDomainDispatcher(
           ? envelope.callbackData.slice("shop:prod:".length)
           : envelope.callbackData.slice("shop:product:".length);
         message = deps.catalog.productDetail
-          ? await deps.catalog.productDetail(prodId, envelope.actorUserId)
+          ? await deps.catalog.productDetail(
+              prodId,
+              envelope.actorUserId,
+              catalogActorIdentity(deps, envelope.actorUserId),
+            )
           : await deps.catalog.mainMenu();
       } else if (envelope.callbackData === "cust:warranty") {
         message = presentCustomerWarranty();
@@ -1552,7 +1570,9 @@ export function createTelegramDomainDispatcher(
               })
             : safeError("Nhắn khách theo đơn không khả dụng.");
         } else if (route === "payments") {
-          message = presentAdminPaymentsMenu();
+          message = presentAdminPaymentsMenu(
+            deps.sepayReconciliationText ? await deps.sepayReconciliationText() : undefined,
+          );
         } else if (route === "suppliers") {
           message = admin.suppliers
             ? await admin.suppliers({
@@ -1663,7 +1683,11 @@ export function createTelegramDomainDispatcher(
           if (q.startsWith("product_") || q.startsWith("prod_")) {
             const prodId = q.replace(/^prod(uct)?_/u, "");
             message = deps.catalog.productDetail
-              ? await deps.catalog.productDetail(prodId, envelope.actorUserId)
+              ? await deps.catalog.productDetail(
+                  prodId,
+                  envelope.actorUserId,
+                  catalogActorIdentity(deps, envelope.actorUserId),
+                )
               : await deps.catalog.mainMenu();
           } else if (q.startsWith("order_") || q.startsWith("ord_")) {
             const orderNum = q.replace(/^ord(er)?_/u, "");
@@ -1723,7 +1747,10 @@ export function createTelegramDomainDispatcher(
             : safeError("Dùng /pay kèm mã đơn hàng.");
       } else if (command === "/search") {
         message = envelope.searchQuery
-          ? await deps.catalog.search(envelope.searchQuery)
+          ? await deps.catalog.search(
+              envelope.searchQuery,
+              catalogActorIdentity(deps, envelope.actorUserId),
+            )
           : safeError("Dùng /search kèm tên sản phẩm.");
       } else if (command === "/support") {
         message = deps.support.reasonMenu();
@@ -2012,17 +2039,29 @@ async function dispatchVerified(
       return deps.catalog.categoryList();
     case "CATEGORY_VIEW": {
       if (!token.resourceId) return deps.catalog.categoryList();
-      return deps.catalog.categoryView(token.resourceId);
+      return deps.catalog.categoryView(
+        token.resourceId,
+        undefined,
+        catalogActorIdentity(deps, envelope.actorUserId),
+      );
     }
     case "VARIANT_VIEW":
       return token.resourceId
-        ? deps.catalog.variantDetail(token.resourceId, envelope.actorUserId)
+        ? deps.catalog.variantDetail(
+            token.resourceId,
+            envelope.actorUserId,
+            catalogActorIdentity(deps, envelope.actorUserId),
+          )
         : safeError("Sản phẩm không tồn tại.");
     case "CATALOG_PAGE": {
       if (!token.resourceId) return deps.catalog.categoryList();
       const page = await deps.resolveCatalogPage(token.resourceId);
       return page
-        ? deps.catalog.categoryView(page.categoryId, page.cursor)
+        ? deps.catalog.categoryView(
+            page.categoryId,
+            page.cursor,
+            catalogActorIdentity(deps, envelope.actorUserId),
+          )
         : deps.catalog.categoryList();
     }
     case "ORDER_LIST":
@@ -2105,7 +2144,11 @@ async function dispatchVerified(
     }
     case "SHOP_PRODUCT":
       return token.resourceId && deps.catalog.productDetail
-        ? deps.catalog.productDetail(token.resourceId, envelope.actorUserId)
+        ? deps.catalog.productDetail(
+            token.resourceId,
+            envelope.actorUserId,
+            catalogActorIdentity(deps, envelope.actorUserId),
+          )
         : deps.catalog.mainMenu();
     case "CUSTOMER_WARRANTY":
       return presentCustomerWarranty();
@@ -2151,6 +2194,18 @@ async function ownedOrder(
 ): Promise<OrderRef | null> {
   const order = await deps.resolveOrderById(orderId);
   return order?.customerId === customerId ? order : null;
+}
+
+
+function catalogActorIdentity(
+  deps: TelegramDomainDispatcherDeps,
+  actorUserId: string,
+): { telegramUserId: string; isRootAdmin: boolean } {
+  return {
+    telegramUserId: actorUserId,
+    isRootAdmin:
+      deps.adminRootUserId !== undefined && Number(actorUserId) === deps.adminRootUserId,
+  };
 }
 
 function safeError(text: string): PresentedMessage {

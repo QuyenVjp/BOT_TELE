@@ -9,6 +9,7 @@ import { getStoreMode, isTestCustomer } from "../../modules/commerce/store-mode.
 import { getRealStoreStats } from "../../modules/marketing/social-proof.js";
 import { presentStorefront } from "../presenters/customer.js";
 import { searchCatalog } from "../../modules/catalog/search.js";
+import { resolveCatalogAudience, type CatalogIdentity } from "../../modules/catalog/visibility.js";
 import { createCatalogCache, type CatalogCache } from "../../modules/catalog/cache.js";
 import type { SearchParser } from "../../modules/catalog/search-parser-port.js";
 import type { BuyNowCallbackCodec } from "../callback-codec.js";
@@ -46,13 +47,18 @@ export interface CatalogCallbacks {
   mainMenu(): Promise<PresentedMessage>;
   categoryList(): Promise<PresentedMessage>;
   listCategoryIds(): Promise<string[]>;
-  categoryView(categoryId: string, cursor?: string): Promise<PresentedMessage>;
+  categoryView(
+    categoryId: string,
+    cursor?: string,
+    identity?: CatalogIdentity | undefined,
+  ): Promise<PresentedMessage>;
   variantDetail(
     variantId: string,
     telegramUserId: string | bigint | number,
+    identity?: CatalogIdentity | undefined,
   ): Promise<PresentedMessage>;
   firstSellableVariantId(): Promise<string>;
-  search(rawQuery: string): Promise<PresentedMessage>;
+  search(rawQuery: string, identity?: CatalogIdentity | undefined): Promise<PresentedMessage>;
   storefront(input: {
     actorName: string;
     telegramUserId: string;
@@ -62,6 +68,7 @@ export interface CatalogCallbacks {
   productDetail(
     productId: string,
     telegramUserId: string | bigint | number,
+    identity?: CatalogIdentity | undefined,
   ): Promise<PresentedMessage>;
 }
 
@@ -84,19 +91,33 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       return categories.map((c) => c.id);
     },
 
-    async categoryView(categoryId: string, cursor?: string) {
+    async categoryView(
+      categoryId: string,
+      cursor?: string,
+      identity?: CatalogIdentity | undefined,
+    ) {
       // Category view lists sellable variants under that category, keyset-paginated.
       // The repository enforces the sellability invariant (hides unauthorized SKUs).
+      const audience = await resolveCatalogAudience(deps.db, identity);
       const page = await listSellableVariants(deps.db, {
         limit: pageSize,
         cursor: cursor ?? null,
         categoryId,
+        audience,
       });
       return presentVariantList(page.items, { nextCursor: page.nextCursor });
     },
 
-    async variantDetail(variantId: string, telegramUserId: string | bigint | number) {
-      const variant = await getVariantById(deps.db, variantId);
+    async variantDetail(
+      variantId: string,
+      telegramUserId: string | bigint | number,
+      identity?: CatalogIdentity | undefined,
+    ) {
+      const audience = await resolveCatalogAudience(deps.db, {
+        telegramUserId: String(telegramUserId),
+        isRootAdmin: identity?.isRootAdmin === true,
+      });
+      const variant = await getVariantById(deps.db, variantId, audience);
       if (!variant) {
         return {
           text: CATALOG_COPY.genericError,
@@ -128,9 +149,10 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       return first.id;
     },
 
-    async search(rawQuery: string) {
+    async search(rawQuery: string, identity?: CatalogIdentity | undefined) {
       const filter = await deps.parser.parse(rawQuery);
-      const page = await searchCatalog(deps.db, filter, { limit: pageSize });
+      const audience = await resolveCatalogAudience(deps.db, identity);
+      const page = await searchCatalog(deps.db, filter, { limit: pageSize, audience });
       return presentSearchResults(page.items, page.nextCursor);
     },
 
@@ -155,8 +177,12 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       });
     },
 
-    async productDetail(productId, telegramUserId) {
-      const page = await listSellableVariants(deps.db, { limit: 1, productId });
+    async productDetail(productId, telegramUserId, identity?: CatalogIdentity | undefined) {
+      const audience = await resolveCatalogAudience(deps.db, {
+        telegramUserId: String(telegramUserId),
+        isRootAdmin: identity?.isRootAdmin === true,
+      });
+      const page = await listSellableVariants(deps.db, { limit: 1, productId, audience });
       const first = page.items[0];
       if (!first) {
         return {
@@ -164,7 +190,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
           buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]],
         };
       }
-      return this.variantDetail(first.id, telegramUserId);
+      return this.variantDetail(first.id, telegramUserId, identity);
     },
   };
 }
