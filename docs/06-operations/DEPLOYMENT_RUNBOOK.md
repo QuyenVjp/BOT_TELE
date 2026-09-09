@@ -59,7 +59,11 @@ Do not route traffic to a replica that has not finished migrations.
 4. **Contract schema**: add NOT NULL / drop old columns only after the contract step is stable.
 
 All schema lives in `src/infrastructure/db/migrations/*.sql` and is applied by `npm run migrate`
-(idempotent migration runner). Never edit a shipped migration; add a new one.
+locally (loads repo `.env`). Never edit a shipped migration; add a new one.
+
+Production schema changes use `npm run migrate:production` (`node --env-file=` of
+`$HOME/.config/bot-tele-production/production.env`). Do not `source` that file.
+See `docs/06-operations/PRODUCTION_ENV.md`.
 
 ## Deploy steps (pilot)
 
@@ -69,6 +73,13 @@ npm run build
 npm run migrate
 npm run start:worker
 npm run start
+```
+
+## Production migrate
+
+```bash
+npm run preflight:production
+npm run migrate:production
 ```
 
 ## Worker drain
