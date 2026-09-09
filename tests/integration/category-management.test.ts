@@ -59,7 +59,6 @@ describe("category management repository", () => {
     expect(await listAdminCategories(ctx.db)).toHaveLength(first.length);
   });
 
-
   it("maps customer brands under AI/VPN and hides fulfillment buckets", async () => {
     const bucket = await createCategory(ctx.db, { nameVi: "Tài khoản AI" });
     const claudeId = newId();
@@ -81,7 +80,12 @@ describe("category management repository", () => {
     `.execute(ctx.db);
     await ensureDefaultCategories(ctx.db);
     const claude = (
-      await sql<{ category_id: string; parent_id: string | null; slug: string; parent_slug: string | null }>`
+      await sql<{
+        category_id: string;
+        parent_id: string | null;
+        slug: string;
+        parent_slug: string | null;
+      }>`
         select p.category_id, c.parent_id, c.slug, parent.slug as parent_slug
         from product p
         join category c on c.id = p.category_id
@@ -98,7 +102,9 @@ describe("category management repository", () => {
     ).rows[0];
     expect(leftover?.slug).toBe("khac");
     const aliases = (
-      await sql<{ normalized_alias: string }>`select normalized_alias from product_alias`.execute(ctx.db)
+      await sql<{ normalized_alias: string }>`select normalized_alias from product_alias`.execute(
+        ctx.db,
+      )
     ).rows.map((row) => row.normalized_alias);
     expect(aliases).not.toContain("vpn");
     const publicRoots = await listPublicRootCategories(ctx.db);

@@ -5,7 +5,7 @@ import {
   verifyProductLinkToken,
 } from "../../src/modules/catalog/product-link-token.js";
 
-const SECRET = "test-only-product-link-secret-material-32b";
+const SECRET = "test-hmac-key";
 
 describe("opaque product link tokens", () => {
   it("round-trips a product id without embedding the raw ULID", () => {

@@ -204,7 +204,10 @@ export function presentAdminCategories(input: {
     buttons: [
       ...categories.flatMap((c) => [
         [
-          { text: `✏️ ${c.parentId ? "↳ " : ""}${c.nameVi}`, callbackData: `admin:categories:rename:${c.id}` },
+          {
+            text: `✏️ ${c.parentId ? "↳ " : ""}${c.nameVi}`,
+            callbackData: `admin:categories:rename:${c.id}`,
+          },
           { text: "🔁 Bật/Tắt", callbackData: `admin:categories:toggle:${c.id}` },
         ],
         [

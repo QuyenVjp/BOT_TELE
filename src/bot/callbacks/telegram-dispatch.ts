@@ -726,11 +726,7 @@ export interface TelegramDomainDispatcherDeps {
       message: PresentedMessage;
     }): Promise<void>;
   };
-  observeCallback?: (event: {
-    ackMs: number | null;
-    renderMs: number;
-    action: string;
-  }) => void;
+  observeCallback?: (event: { ackMs: number | null; renderMs: number; action: string }) => void;
 }
 
 export interface TelegramActionContext {
@@ -2027,7 +2023,9 @@ export function createTelegramDomainDispatcher(
       await deps.responder.send({
         chatId: envelope.chatId,
         messageId: envelope.messageId,
-        ...(envelope.callbackQueryId && !acked ? { callbackQueryId: envelope.callbackQueryId } : {}),
+        ...(envelope.callbackQueryId && !acked
+          ? { callbackQueryId: envelope.callbackQueryId }
+          : {}),
         message: sealed,
       });
       if (envelope.callbackQueryId) {

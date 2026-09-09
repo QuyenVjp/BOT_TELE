@@ -3,10 +3,7 @@ import type { Db } from "../../infrastructure/db/transaction.js";
 import { ensureTelegramIdentity } from "../identity/channel-identity.js";
 import { verifyTelegramMiniAppInitData } from "../digital-goods/delivery-route.js";
 import { searchCatalog } from "../catalog/search.js";
-import {
-  listFeaturedProducts,
-  listPublicRootCategories,
-} from "../catalog/repository.js";
+import { listFeaturedProducts, listPublicRootCategories } from "../catalog/repository.js";
 import { SHOP_NAME } from "../catalog/shop-profile.js";
 import { resolveCatalogAudience } from "../catalog/visibility.js";
 import { buyNow } from "../commerce/buy-now.js";

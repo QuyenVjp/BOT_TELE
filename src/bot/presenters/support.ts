@@ -1,11 +1,7 @@
 import type { InlineButton, PresentedMessage } from "./catalog.js";
 import type { SupportReasonCode, SupportTicketStatus } from "../../modules/support/domain.js";
 import type { SupportTicket } from "../../modules/support/service.js";
-import {
-  ADMIN_CONTACT_URL,
-  COMMUNITY_URL,
-  SHOP_NAME,
-} from "../../modules/catalog/shop-profile.js";
+import { ADMIN_CONTACT_URL, COMMUNITY_URL, SHOP_NAME } from "../../modules/catalog/shop-profile.js";
 
 /**
  * Vietnamese support presenters (T087, FR-019).
