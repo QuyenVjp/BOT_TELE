@@ -831,6 +831,10 @@ async function bootstrap(): Promise<void> {
   } = await import("./bot/presenters/admin-wizard.js");
   const { loadPreorderVariantConfig, presentPreorderConsent, createPreorderReservation } =
     await import("./modules/commerce/preorder.js");
+  const {
+    formatSePayReconciliationAdminText,
+    getSePayReconciliationStatus,
+  } = await import("./modules/payments/reconciliation-status.js");
   const { presentCustomerNotificationPreferences } = await import("./bot/presenters/customer.js");
   const { presentAdminManualTaskDetail, presentAdminManualTasks } =
     await import("./bot/presenters/manual-fulfillment.js");
@@ -1161,6 +1165,10 @@ async function bootstrap(): Promise<void> {
       },
     },
     adminRootUserId: config.ADMIN_TELEGRAM_USER_ID,
+    sepayReconciliationText: async () => {
+      const status = await getSePayReconciliationStatus(dbHandle.db);
+      return formatSePayReconciliationAdminText(status);
+    },
     preorder: {
       async consent(variantId) {
         const preorderConfig = await loadPreorderVariantConfig(dbHandle.db, variantId);

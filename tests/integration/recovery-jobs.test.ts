@@ -496,6 +496,46 @@ describe("bounded recovery jobs (T167/T168)", () => {
     expect(lateOrder.rows[0]?.status).toBe("PAID");
   });
 
+  it("polls SePay when local unpaid backlog is empty", async () => {
+    const calls: Array<{ from: number; to: number; limit: number | undefined }> = [];
+    const port: SePayReconciliationPort = {
+      listTransactions(from, to, limit) {
+        calls.push({ from, to, limit });
+        return Promise.resolve([]);
+      },
+    };
+    const now = new Date("2026-01-01T00:10:00.000Z");
+    await sql`
+      insert into sepay_reconciliation_cursor
+        (provider, window_from_sec, window_to_sec, page, per_page, generation, updated_at)
+      values ('sepay', 0, 1, 1, 5, 1, '2025-12-31T23:00:00.000Z'::timestamptz)
+    `.execute(ctx.db);
+    const before = await sql<{ updated_at: Date | string }>`
+      select updated_at from sepay_reconciliation_cursor where provider = 'sepay'
+    `.execute(ctx.db);
+
+    const result = await recoverSePayBatch(ctx.db, { batchSize: 5, now, port });
+    const cursor = await sql<{
+      last_success_at: Date | string | null;
+      transactions_scanned: number;
+      consecutive_failures: number;
+      updated_at: Date | string;
+    }>`
+      select last_success_at, transactions_scanned, consecutive_failures, updated_at
+      from sepay_reconciliation_cursor
+      where provider = 'sepay'
+    `.execute(ctx.db);
+
+    expect(calls.length).toBeGreaterThanOrEqual(1);
+    expect(result).toMatchObject({ claimed: 0, succeeded: 0, failed: 0, backlog: 0 });
+    expect(cursor.rows[0]?.last_success_at).not.toBeNull();
+    expect(cursor.rows[0]?.transactions_scanned).toBe(0);
+    expect(cursor.rows[0]?.consecutive_failures).toBe(0);
+    expect(new Date(cursor.rows[0]!.updated_at).getTime()).toBeGreaterThan(
+      new Date(before.rows[0]!.updated_at).getTime(),
+    );
+  });
+
   it("claims supplier UNKNOWN rows once, queries only, and isolates provider failures", async () => {
     const seed = await seedCommerce();
     const orderA = await seedOrder(seed, { status: "PAID" });

@@ -311,8 +311,11 @@ export function presentAdminOrderDetail(order: AdminOrderDetail): PresentedMessa
     ],
   };
 }
-export function presentAdminPaymentsMenu(): PresentedMessage {
-  return presentAdminSection(ADMIN_COPY.payments, "Theo dõi thanh toán và đối soát.");
+export function presentAdminPaymentsMenu(statusText?: string | undefined): PresentedMessage {
+  const body = statusText
+    ? `${statusText}\nTheo dõi thanh toán và đối soát.`
+    : "Theo dõi thanh toán và đối soát.";
+  return presentAdminSection(ADMIN_COPY.payments, body);
 }
 export interface AdminSupplierOverview {
   id: string;

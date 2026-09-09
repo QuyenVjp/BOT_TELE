@@ -211,6 +211,16 @@ export interface ReconcileSummary {
   errors: number;
   pageComplete: boolean;
   windowComplete: boolean;
+  lastProviderCursor: string | null;
+}
+
+const PROVIDER_CURSOR_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+export function sePayProviderCursorId(providerTransactionId: string): string | null {
+  const raw = providerTransactionId.startsWith("api:")
+    ? providerTransactionId.slice(4)
+    : providerTransactionId;
+  return PROVIDER_CURSOR_UUID.test(raw) ? raw : null;
 }
 
 export async function reconcileSePay(db: Db, options: ReconcileOptions): Promise<ReconcileSummary> {
@@ -238,6 +248,7 @@ export async function reconcileSePay(db: Db, options: ReconcileOptions): Promise
     errors: 0,
     pageComplete: fetched.length === 0,
     windowComplete: fetched.length === 0,
+    lastProviderCursor: null,
   };
 
   for (let index = 0; index < txns.length; index += 1) {
@@ -270,6 +281,7 @@ export async function reconcileSePay(db: Db, options: ReconcileOptions): Promise
         summary.discrepancies += 1;
         break;
     }
+    summary.lastProviderCursor = sePayProviderCursorId(txn.providerTransactionId);
   }
 
   summary.pageComplete = fetched.length <= maxTransactions;
