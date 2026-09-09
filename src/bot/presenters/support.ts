@@ -13,7 +13,7 @@ import { ADMIN_CONTACT_URL, COMMUNITY_URL, SHOP_NAME } from "../../modules/catal
 
 export const SUPPORT_COPY = {
   title: `💬 HỖ TRỢ ${SHOP_NAME}`,
-  reasonPrompt: "Chọn lý do bạn cần hỗ trợ:",
+  reasonPrompt: "Vui lòng chọn chủ đề bạn cần hỗ trợ:",
   descriptionPrompt: "Mô tả ngắn gọn vấn đề (không gửi mật khẩu hay ảnh chứa thông tin đăng nhập).",
   openedTitle: "✅ Đã tạo ticket hỗ trợ",
   openedBody:
@@ -47,28 +47,21 @@ const STATUS_LABEL: Record<SupportTicketStatus, string> = {
 /** Reason picker — structured only, no free-form secret invitation. */
 export function presentSupportReasonMenu(orderNumber?: string): PresentedMessage {
   const suffix = orderNumber ? `:${orderNumber}` : "";
-  const buttons: InlineButton[][] = [
-    [{ text: "👨‍💻 Nhắn Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
-    [{ text: "📢 Cộng đồng", url: COMMUNITY_URL, callbackData: "" }],
-    ...(Object.keys(REASON_LABEL) as SupportReasonCode[]).map((code) => [
-      { text: REASON_LABEL[code], callbackData: `sup:reason:${code}${suffix}` },
-    ]),
-    [{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }],
-    [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
-  ];
   return {
-    text: [
-      SUPPORT_COPY.title,
-      "",
-      "Need help with:",
-      "- order",
-      "- payment",
-      "- warranty",
-      "- product usage",
-      "",
-      SUPPORT_COPY.reasonPrompt,
-    ].join("\n"),
-    buttons,
+    text: ["💬 HỖ TRỢ TIER20 SHOP", "", "Vui lòng chọn chủ đề bạn cần hỗ trợ:"].join("\n"),
+    buttons: [
+      [
+        { text: "🧾 Vấn đề đơn hàng", callbackData: `sup:reason:GENERAL_QUESTION${suffix}` },
+        { text: "💳 Thanh toán", callbackData: `sup:reason:PAYMENT_QUESTION${suffix}` },
+      ],
+      [
+        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+        { text: "📦 Sản phẩm / sử dụng", callbackData: `sup:reason:ASSET_NOT_WORKING${suffix}` },
+      ],
+      [{ text: "👨‍💻 Nhắn Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
+      [{ text: "📢 Cộng đồng", url: COMMUNITY_URL, callbackData: "" }],
+      [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+    ],
   };
 }
 

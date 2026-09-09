@@ -831,6 +831,7 @@ async function bootstrap(): Promise<void> {
     presentWizardCategoryCreatePrompt,
     presentWizardCustomFieldPrompt,
     presentWizardAdvancedPrompt,
+    presentWizardVisibilityStep,
   } = await import("./bot/presenters/admin-wizard.js");
   const { loadPreorderVariantConfig, presentPreorderConsent, createPreorderReservation } =
     await import("./modules/commerce/preorder.js");
@@ -1101,6 +1102,8 @@ async function bootstrap(): Promise<void> {
         return presentWizardVariantStep(draft as never);
       case "deliveryConfig":
         return presentWizardDeliveryStep(draft as never);
+      case "visibilityFlags":
+        return presentWizardVisibilityStep(draft as never);
       case "confirm": {
         const categoryName =
           draft.categoryName ??
@@ -4378,6 +4381,68 @@ async function bootstrap(): Promise<void> {
             };
           return renderWizardStep({ ...current, step: "deliveryConfig" });
         },
+        async visibilityAction(input: {
+          telegramUserId: string;
+          chatType: string;
+          correlationId: string;
+          action: string;
+        }) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const draft = await productDraftWorkflow.get(input.telegramUserId);
+          if (!draft || (draft.step !== "visibilityFlags" && draft.step !== "deliveryConfig"))
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước cài đặt hiển thị.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          const repo = createProductDraftRepository(dbHandle.db);
+          const storeMode = await getStoreMode(dbHandle.db);
+
+          if (input.action === "done") {
+            let visibility = draft.visibility ?? "TEST_ONLY";
+            if (visibility === "PUBLIC" && storeMode !== "OPEN") {
+              visibility = "TEST_ONLY";
+              draft.visibility = "TEST_ONLY";
+            }
+            const result = await productDraftWorkflow.advance(
+              input.telegramUserId,
+              JSON.stringify({
+                visibility,
+                isFeatured: draft.isFeatured ?? false,
+                preorderEnabled: draft.preorderEnabled ?? false,
+                lowStockThreshold: draft.lowStockThreshold ?? 3,
+              }),
+            );
+            if (!result.ok) return renderWizardStep(draft);
+            return renderWizardStep(result.draft);
+          }
+          if (input.action === "test") {
+            draft.visibility = "TEST_ONLY";
+          } else if (input.action === "draft") {
+            draft.visibility = "DRAFT";
+          } else if (input.action === "public") {
+            if (storeMode !== "OPEN") {
+              return {
+                text: "⚠️ Cửa hàng đang ở chế độ ĐÓNG hoặc TEST.\nChỉ có thể tạo sản phẩm 'Chỉ test' hoặc 'Bản nháp'.",
+                buttons: [
+                  [{ text: "🧪 Đặt Chỉ test", callbackData: "admin:products:vis:test" }],
+                  [{ text: "📝 Đặt Bản nháp", callbackData: "admin:products:vis:draft" }],
+                  [{ text: "⬅️ Quay lại", callbackData: "admin:products:dc:done" }],
+                ],
+              };
+            }
+            draft.visibility = "PUBLIC";
+          } else if (input.action === "toggle_featured") {
+            draft.isFeatured = draft.isFeatured ? false : true;
+          } else if (input.action === "toggle_preorder") {
+            draft.preorderEnabled = draft.preorderEnabled ? false : true;
+          }
+          await repo.save(draft);
+          return renderWizardStep(draft);
+        },
         async review(input) {
           if (
             Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
@@ -4458,7 +4523,6 @@ async function bootstrap(): Promise<void> {
                   variantName: draft.variantName,
                   fulfillmentType: draft.fulfillmentType,
                   inventoryFields: draft.inventoryFields,
-                  lowStockThreshold: draft.lowStockThreshold ?? null,
                   ...(draft.description === undefined ? {} : { description: draft.description }),
                   ...(draft.descriptionVi === undefined
                     ? {}
@@ -4489,7 +4553,17 @@ async function bootstrap(): Promise<void> {
                   ...(draft.supplierConfig === undefined
                     ? {}
                     : { supplierConfig: draft.supplierConfig }),
-                  active: input.active ?? (draft.fulfillmentType === "DIGITAL_FILE" ? false : true),
+                  isTest: draft.visibility === "TEST_ONLY",
+                  active:
+                    input.active ??
+                    (draft.visibility === "DRAFT" || draft.fulfillmentType === "DIGITAL_FILE"
+                      ? false
+                      : draft.visibility === "PUBLIC"
+                        ? (await getStoreMode(dbHandle.db)) === "OPEN"
+                        : true),
+                  isFeatured: draft.isFeatured ?? false,
+                  preorderEnabled: draft.preorderEnabled ?? false,
+                  lowStockThreshold: draft.lowStockThreshold ?? null,
                   priceVnd: draft.priceVnd,
                   reason: "Admin product creation",
                   correlationId: input.correlationId,
@@ -4521,10 +4595,16 @@ async function bootstrap(): Promise<void> {
                   primaryButton,
                   { text: "✏️ Chỉnh sửa", callbackData: `admin:products:detail:${product.id}` },
                 ],
-                [
-                  { text: "➕ Tạo sản phẩm khác", callbackData: "admin:products:create" },
-                  { text: "🏠 Quản trị", callbackData: "admin:menu" },
-                ],
+                stockBacked
+                  ? [
+                      { text: "👁 Xem như khách", callbackData: `shop:product:${product.id}` },
+                      { text: "➕ Tạo sản phẩm khác", callbackData: "admin:products:create" },
+                    ]
+                  : [
+                      { text: "➕ Tạo sản phẩm khác", callbackData: "admin:products:create" },
+                      { text: "🏠 Quản trị", callbackData: "admin:menu" },
+                    ],
+                ...(stockBacked ? [[{ text: "🏠 Quản trị", callbackData: "admin:menu" }]] : []),
               ],
             };
           } catch (error) {

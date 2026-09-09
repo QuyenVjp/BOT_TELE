@@ -15,6 +15,7 @@ export type ProductDraftStep =
   | "description"
   | "variant"
   | "deliveryConfig"
+  | "visibilityFlags"
   | "confirm"
   | "variantName"
   | "price"
@@ -43,6 +44,7 @@ export interface ProductDraft {
   compareAtPriceVnd?: bigint | undefined;
   description?: string | undefined;
   descriptionVi?: string | undefined;
+  shortDescriptionVi?: string | undefined;
   whatCustomerReceivesVi?: string | undefined;
   usageInstructionsVi?: string | undefined;
   deliveryEtaVi?: string | undefined;
@@ -50,6 +52,9 @@ export interface ProductDraft {
   supportVi?: string | undefined;
   termsVi?: string | undefined;
   tags?: string[] | undefined;
+  visibility?: "PUBLIC" | "TEST_ONLY" | "DRAFT" | undefined;
+  isFeatured?: boolean | undefined;
+  preorderEnabled?: boolean | undefined;
   lowStockThreshold?: number | undefined;
   variantName?: string | undefined;
   fulfillmentType?: FulfillmentType | undefined;
@@ -309,6 +314,7 @@ export function previousStep(draft: ProductDraft): ProductDraft {
     "description",
     "variant",
     "deliveryConfig",
+    "visibilityFlags",
     "confirm",
   ];
   const i = order.indexOf(draft.step);
@@ -410,13 +416,36 @@ export function advanceProductDraft(
       } else if (
         draft.fulfillmentType === "MANUAL_FULFILLMENT" ||
         draft.fulfillmentType === "UNLIMITED_SERVICE"
-      )
+      ) {
         next.serviceInstructions = text;
-      else {
+      } else {
         const parsed = INVENTORY_FIELDS_SCHEMA.safeParse(draft.inventoryFields ?? []);
         if (!parsed.success) return { ok: false, error: "INVALID_INVENTORY_FIELDS", draft };
         next.inventoryFields = parsed.data;
       }
+      next.step = "visibilityFlags";
+      break;
+    }
+    case "visibilityFlags": {
+      let settings: Record<string, unknown> = {};
+      try {
+        const parsed = JSON.parse(text);
+        if (parsed && typeof parsed === "object") settings = parsed as Record<string, unknown>;
+      } catch {
+        const command = text.toUpperCase();
+        if (["PUBLIC", "TEST_ONLY", "DRAFT"].includes(command)) settings.visibility = command;
+        if (command.includes("FEATURED")) settings.isFeatured = !draft.isFeatured;
+        if (command.includes("PREORDER")) settings.preorderEnabled = !draft.preorderEnabled;
+      }
+      next.visibility =
+        settings.visibility === "TEST_ONLY" || settings.visibility === "DRAFT"
+          ? settings.visibility
+          : "PUBLIC";
+      next.isFeatured = typeof settings.isFeatured === "boolean" ? settings.isFeatured : false;
+      next.preorderEnabled =
+        typeof settings.preorderEnabled === "boolean" ? settings.preorderEnabled : false;
+      next.lowStockThreshold =
+        typeof settings.lowStockThreshold === "number" ? settings.lowStockThreshold : 3;
       next.step = "confirm";
       break;
     }
@@ -474,6 +503,7 @@ type DraftRow = {
 type DraftExtra = {
   categoryName?: string;
   compareAtPriceVnd?: string;
+  shortDescriptionVi?: string;
   descriptionVi?: string;
   whatCustomerReceivesVi?: string;
   usageInstructionsVi?: string;
@@ -483,12 +513,16 @@ type DraftExtra = {
   termsVi?: string;
   tags?: string[];
   deliveryConfig?: DeliveryConfigState;
+  visibility?: ProductDraft["visibility"];
+  isFeatured?: boolean;
+  preorderEnabled?: boolean;
 };
 
 function draftExtra(draft: ProductDraft): DraftExtra {
   const extra: DraftExtra = {};
   if (draft.categoryName != null) extra.categoryName = draft.categoryName;
   if (draft.compareAtPriceVnd != null) extra.compareAtPriceVnd = draft.compareAtPriceVnd.toString();
+  if (draft.shortDescriptionVi != null) extra.shortDescriptionVi = draft.shortDescriptionVi;
   if (draft.descriptionVi != null) extra.descriptionVi = draft.descriptionVi;
   if (draft.whatCustomerReceivesVi != null)
     extra.whatCustomerReceivesVi = draft.whatCustomerReceivesVi;
@@ -499,6 +533,9 @@ function draftExtra(draft: ProductDraft): DraftExtra {
   if (draft.termsVi != null) extra.termsVi = draft.termsVi;
   if (draft.tags != null) extra.tags = draft.tags;
   if (draft.deliveryConfig != null) extra.deliveryConfig = draft.deliveryConfig;
+  if (draft.visibility != null) extra.visibility = draft.visibility;
+  if (draft.isFeatured != null) extra.isFeatured = draft.isFeatured;
+  if (draft.preorderEnabled != null) extra.preorderEnabled = draft.preorderEnabled;
   return extra;
 }
 
@@ -508,6 +545,7 @@ function parseDraftExtra(value: unknown): DraftExtra {
   const out: DraftExtra = {};
   if (typeof v.categoryName === "string") out.categoryName = v.categoryName;
   if (typeof v.compareAtPriceVnd === "string") out.compareAtPriceVnd = v.compareAtPriceVnd;
+  if (typeof v.shortDescriptionVi === "string") out.shortDescriptionVi = v.shortDescriptionVi;
   if (typeof v.descriptionVi === "string") out.descriptionVi = v.descriptionVi;
   if (typeof v.whatCustomerReceivesVi === "string")
     out.whatCustomerReceivesVi = v.whatCustomerReceivesVi;
@@ -517,6 +555,10 @@ function parseDraftExtra(value: unknown): DraftExtra {
   if (typeof v.supportVi === "string") out.supportVi = v.supportVi;
   if (typeof v.termsVi === "string") out.termsVi = v.termsVi;
   if (Array.isArray(v.tags)) out.tags = v.tags.filter((t): t is string => typeof t === "string");
+  if (v.visibility === "PUBLIC" || v.visibility === "TEST_ONLY" || v.visibility === "DRAFT")
+    out.visibility = v.visibility;
+  if (typeof v.isFeatured === "boolean") out.isFeatured = v.isFeatured;
+  if (typeof v.preorderEnabled === "boolean") out.preorderEnabled = v.preorderEnabled;
   const dc = v.deliveryConfig;
   if (dc && typeof dc === "object") {
     const d = dc as Record<string, unknown>;
@@ -585,9 +627,15 @@ export function createProductDraftRepository(db: Kysely<Database>): ProductDraft
         ...(extra.whatCustomerReceivesVi == null
           ? {}
           : { whatCustomerReceivesVi: extra.whatCustomerReceivesVi }),
+        ...(extra.shortDescriptionVi == null
+          ? {}
+          : { shortDescriptionVi: extra.shortDescriptionVi }),
         ...(extra.usageInstructionsVi == null
           ? {}
           : { usageInstructionsVi: extra.usageInstructionsVi }),
+        ...(extra.visibility == null ? {} : { visibility: extra.visibility }),
+        ...(extra.isFeatured == null ? {} : { isFeatured: extra.isFeatured }),
+        ...(extra.preorderEnabled == null ? {} : { preorderEnabled: extra.preorderEnabled }),
         ...(extra.deliveryEtaVi == null ? {} : { deliveryEtaVi: extra.deliveryEtaVi }),
         ...(extra.warrantyVi == null ? {} : { warrantyVi: extra.warrantyVi }),
         ...(extra.supportVi == null ? {} : { supportVi: extra.supportVi }),

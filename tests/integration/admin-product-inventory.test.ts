@@ -72,6 +72,7 @@ describe("admin product creation and selected-variant inventory import", () => {
       "Tài khoản Netflix Premium",
       "Premium|120000",
       "ok",
+      "PUBLIC",
     ]) {
       const result = await workflow.advance(String(ROOT_ID), value);
       expect(result.ok).toBe(true);
@@ -519,6 +520,7 @@ describe("admin product creation and selected-variant inventory import", () => {
       "Dịch vụ không giới hạn",
       "Streaming|150000",
       "Provision recurring access",
+      "PUBLIC",
     ]) {
       const result = await workflow.advance(String(ROOT_ID), value);
       expect(result.ok).toBe(true);

@@ -579,6 +579,12 @@ export interface TelegramDomainDispatcherDeps {
         chatType: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
+      visibilityAction?(input: {
+        telegramUserId: string;
+        chatType: string;
+        correlationId: string;
+        action: string;
+      }): Promise<PresentedMessage>;
       fulfillmentType?(input: {
         telegramUserId: string;
         fulfillmentType: string;
@@ -1234,6 +1240,16 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Cấu hình giao hàng không khả dụng.");
+        } else if (route.startsWith("products:vis:")) {
+          const action = route.slice("products:vis:".length);
+          message = admin.workflow?.visibilityAction
+            ? await admin.workflow.visibilityAction({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+                action,
+              })
+            : safeError("Cài đặt hiển thị không khả dụng.");
         } else if (route === "products:review") {
           message = admin.workflow?.review
             ? await admin.workflow.review({
@@ -1858,7 +1874,7 @@ export function createTelegramDomainDispatcher(
         envelope.messageText === CUSTOMER_COPY.browse ||
         envelope.messageText === "🛒 Mua hàng"
       ) {
-        message = await deps.catalog.mainMenu();
+        message = await shopHome(deps, envelope);
       } else if (
         envelope.messageText === CUSTOMER_COPY.account ||
         envelope.messageText === "👤 Tài khoản"
@@ -1880,7 +1896,13 @@ export function createTelegramDomainDispatcher(
           ? await deps.history.list(customerId)
           : safeError("Không xác minh được khách hàng.");
       } else if (
+        envelope.messageText === CUSTOMER_COPY.warranty ||
+        envelope.messageText === "🛡 Bảo hành"
+      ) {
+        message = presentCustomerWarranty();
+      } else if (
         envelope.messageText === CUSTOMER_COPY.support ||
+        envelope.messageText === "💬 Hỗ trợ" ||
         envelope.messageText === "🛟 Hỗ trợ"
       ) {
         message = deps.support.reasonMenu();

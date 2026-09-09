@@ -3,7 +3,6 @@ import type { InlineButton, PresentedMessage, ReplyKeyboard } from "./catalog.js
 import type { StorefrontProductSummary } from "../../modules/catalog/repository.js";
 import {
   ADMIN_CONTACT_URL,
-  COMMUNITY_BUTTON_LABEL,
   COMMUNITY_URL,
   SHOP_NAME,
   SHOP_TAGLINE,
@@ -18,14 +17,15 @@ export const CUSTOMER_COPY = {
   shareContact: "📱 Chia sẻ số điện thoại",
   back: "↩️ Quay lại",
   browse: "🛒 Mua hàng",
+  orders: "🧾 Đơn hàng",
   account: "👤 Tài khoản",
   topup: "💰 Nạp ví",
-  orders: "🧾 Đơn hàng",
+  warranty: "🛡 Bảo hành",
+  support: "💬 Hỗ trợ",
   purchaseActivity: "📣 Hoạt động mua hàng",
   shopUpdates: "🛍 Cập nhật sản phẩm",
   notifications: "🔔 Cài đặt thông báo",
   restock: "🔔 Báo có hàng",
-  support: "🛟 Hỗ trợ",
   openShop: "🌐 Mở cửa hàng",
 } as const;
 export const MAIN_REPLY_KEYBOARD: ReplyKeyboard = {
@@ -34,6 +34,7 @@ export const MAIN_REPLY_KEYBOARD: ReplyKeyboard = {
   buttons: [
     [{ text: CUSTOMER_COPY.browse }, { text: CUSTOMER_COPY.orders }],
     [{ text: CUSTOMER_COPY.account }, { text: CUSTOMER_COPY.topup }],
+    [{ text: CUSTOMER_COPY.warranty }, { text: CUSTOMER_COPY.support }],
   ],
 };
 export function presentShopLaunch(url: string): PresentedMessage {
@@ -88,7 +89,6 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
     "",
     `🛒 ${name}`,
     tagline,
-    "",
     "⚡ Thanh toán VietQR tự động",
     "📦 Giao hàng nhanh",
     "🛡 Hỗ trợ & bảo hành",
@@ -98,7 +98,7 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   if (featured.length) {
     lines.push("", "🔥 SẢN PHẨM NỔI BẬT");
     for (const product of featured.slice(0, 3)) {
-      buttons.push([{ text: product.name_vi, callbackData: `shop:product:${product.id}` }]);
+      buttons.push([{ text: `🔥 ${product.name_vi}`, callbackData: `shop:product:${product.id}` }]);
     }
   }
   const categories = options.categories ?? [];
@@ -116,13 +116,7 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
       { text: "🧾 Đơn hàng", callbackData: "ord:list" },
       { text: "👤 Tài khoản", callbackData: "wallet:account" },
     ],
-    [
-      {
-        text: COMMUNITY_BUTTON_LABEL,
-        url: options.communityUrl ?? COMMUNITY_URL,
-        callbackData: "",
-      },
-    ],
+    [{ text: "📢 AI Codex Việt Nam", url: COMMUNITY_URL, callbackData: "" }],
     [{ text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
   );
   if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);

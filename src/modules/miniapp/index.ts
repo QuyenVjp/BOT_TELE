@@ -50,7 +50,10 @@ async function api(path, opt = {}) {
     },
   });
   const d = await r.json().catch(() => ({}));
-  if (!r.ok) throw Error(d.message || d.error || "request_failed");
+  if (!r.ok) {
+    if (r.status === 401) throw Error("Vui lòng mở ứng dụng từ Telegram để xem thông tin này.");
+    throw Error(d.message || d.error || "Yêu cầu thất bại");
+  }
   return d;
 }
 
@@ -74,7 +77,18 @@ function render(items) {
     const h = document.createElement("h2");
     h.textContent = text(x.productNameVi) + " — " + text(x.nameVi);
     const p = document.createElement("p");
-    p.textContent = money(x.priceVnd) + " · " + text(x.deliveryType);
+    function deliveryLabel(t) {
+  switch (t) {
+    case "CREDENTIAL": return "Tài khoản";
+    case "ACTIVATION_KEY": return "Mã / Key";
+    case "DIGITAL_FILE": return "Tệp số";
+    case "QUANTITY_STOCK": return "Số lượng";
+    case "UNLIMITED_SERVICE": return "Dịch vụ";
+    case "MANUAL_FULFILLMENT": return "Thủ công";
+    default: return "Tự động";
+  }
+}
+    p.textContent = money(x.priceVnd) + " · " + deliveryLabel(x.deliveryType);
     const actions = document.createElement("div");
     actions.className = "actions";
     const buy = document.createElement("button");
@@ -145,6 +159,10 @@ async function load() {
 
 search.oninput = () => load();
 account.onclick = async () => {
+  if (!initData) {
+    setStatus("Vui lòng mở ứng dụng từ Telegram để xem thông tin tài khoản.", true);
+    return;
+  }
   try {
     const d = await api("/api/account");
     setStatus("Số dư ví: " + money(d.balanceVnd) + " · Đơn hàng: " + text(d.orderCount));

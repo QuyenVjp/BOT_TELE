@@ -38,7 +38,7 @@ describe("customer branding presenters", () => {
   it("renders the support screen with admin and community URL buttons", () => {
     const support = presentSupportReasonMenu();
     expect(support.text).toContain(`💬 HỖ TRỢ ${SHOP_NAME}`);
-    expect(support.text).toContain("- order");
+    expect(support.text).toContain("chủ đề");
     expect(support.buttons.flat().find((b) => b.text.includes("Nhắn Admin"))?.url).toBe(
       ADMIN_CONTACT_URL,
     );

@@ -179,6 +179,54 @@ export function presentWizardDeliveryStep(draft: ProductDraft): PresentedMessage
   };
 }
 
+/** Bước 8/8 — cài đặt hiển thị và bán hàng. */
+export function presentWizardVisibilityStep(draft: ProductDraft): PresentedMessage {
+  const visibility =
+    draft.visibility === "TEST_ONLY"
+      ? "Chỉ test"
+      : draft.visibility === "DRAFT"
+        ? "Bản nháp"
+        : "Công khai";
+  return {
+    text: `Bước 8/8 — ⚙️ CÀI ĐẶT HIỂN THỊ & BÁN HÀNG\n\nHiển thị: ${visibility}\nGhim nổi bật: ${draft.isFeatured ? "Có" : "Không"}\nĐặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}\nCảnh báo sắp hết: ${draft.lowStockThreshold ?? 3}`,
+    buttons: [
+      [
+        {
+          text: draft.visibility === "TEST_ONLY" ? "🧪 Chỉ test (Đang chọn)" : "🧪 Đặt Chỉ test",
+          callbackData: "admin:products:vis:test",
+        },
+        {
+          text: draft.visibility === "DRAFT" ? "📝 Bản nháp (Đang chọn)" : "📝 Đặt Bản nháp",
+          callbackData: "admin:products:vis:draft",
+        },
+      ],
+      [
+        {
+          text:
+            draft.visibility === "PUBLIC" || !draft.visibility
+              ? "🟢 Công khai (Đang chọn)"
+              : "🟢 Đặt Công khai",
+          callbackData: "admin:products:vis:public",
+        },
+      ],
+      [
+        {
+          text: `${draft.isFeatured ? "⭐" : "☆"} Ghim nổi bật: ${draft.isFeatured ? "Bật" : "Tắt"}`,
+          callbackData: "admin:products:vis:toggle_featured",
+        },
+      ],
+      [
+        {
+          text: `💰 Đặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}`,
+          callbackData: "admin:products:vis:toggle_preorder",
+        },
+      ],
+      [{ text: "✅ Tiếp tục xem trước", callbackData: "admin:products:vis:done" }],
+      ...BACK_CANCEL,
+    ],
+  };
+}
+
 /** Custom-field flags editor. */
 export function presentWizardCustomFieldFlags(
   fieldName: string,

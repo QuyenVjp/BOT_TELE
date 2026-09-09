@@ -127,6 +127,7 @@ function setup() {
     .mockResolvedValue({ text: "variant create", buttons: [] });
   const adminVariantEditPrompt = vi.fn().mockResolvedValue({ text: "variant edit", buttons: [] });
   const workflowVariantText = vi.fn().mockResolvedValue(null);
+  const visibilityAction = vi.fn().mockResolvedValue({ text: "visibility step", buttons: [] });
   const supportReasonMenu = vi.fn().mockReturnValue({ text: "support menu", buttons: [] });
   const adminSupport = vi.fn().mockResolvedValue({ text: "support queue", buttons: [] });
   const adminSupportApprove = vi
@@ -240,6 +241,7 @@ function setup() {
         category: vi.fn(),
         confirm: vi.fn(),
         cancel: workflowCancel,
+        visibilityAction,
       },
     },
     responder: { send },
@@ -306,6 +308,7 @@ function setup() {
     restockList,
     send,
     order,
+    visibilityAction,
   };
 }
 
@@ -1758,5 +1761,60 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(categoryView).not.toHaveBeenCalled();
     expect(categoryList).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0]![0].message.text).toBe("categories");
+  });
+
+  it("routes products:vis:<action> to workflow.visibilityAction", async () => {
+    const { dispatcher, visibilityAction, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "vis-cb-1",
+      action: "ADMIN",
+      callbackData: "admin:products:vis:test",
+    });
+
+    expect(visibilityAction).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      correlationId: "telegram:vis-cb-1",
+      action: "test",
+    });
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ message: { text: "visibility step", buttons: [] } }),
+    );
+  });
+
+  it("routes persistent keyboard '🛒 Mua hàng' directly to storefront", async () => {
+    const { dispatcher, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "browse-msg-1",
+      action: "UNKNOWN",
+      messageText: "🛒 Mua hàng",
+    });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]![0].message.text).toContain("TIER20 SHOP");
+  });
+
+  it("routes persistent keyboard '🛡 Bảo hành' to customer warranty", async () => {
+    const { dispatcher, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "warranty-msg-1",
+      action: "UNKNOWN",
+      messageText: "🛡 Bảo hành",
+    });
+
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]![0].message.text).toContain("CHÍNH SÁCH BẢO HÀNH & HỖ TRỢ");
   });
 });

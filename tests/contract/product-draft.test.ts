@@ -32,7 +32,8 @@ const ACCOUNT_FLOW = [
   "ACCOUNT", // productType
   "Tài khoản GPT Plus dùng 1 tháng", // description
   "Gói 1 tháng|250000", // variant name|price
-  "", // (unused — deliveryConfig for ACCOUNT validates preset fields)
+  "ok", // deliveryConfig (ACCOUNT validates preset fields)
+  "PUBLIC", // visibilityFlags (Step 8)
 ];
 
 describe("admin product draft — 8-step wizard", () => {
@@ -50,10 +51,13 @@ describe("admin product draft — 8-step wizard", () => {
     expect(steps).toEqual(["name", "sku", "category", "productType", "description", "variant"]);
     expect(draft.step).toBe("deliveryConfig");
 
-    // ACCOUNT deliveryConfig validates preset inventory fields, then confirm.
+    // ACCOUNT deliveryConfig validates preset inventory fields, then visibilityFlags.
     const res = advanceProductDraft(draft, "ignored");
     expect(res.ok).toBe(true);
-    expect(res.draft.step).toBe("confirm");
+    expect(res.draft.step).toBe("visibilityFlags");
+    const res2 = advanceProductDraft(res.draft, "PUBLIC");
+    expect(res2.ok).toBe(true);
+    expect(res2.draft.step).toBe("confirm");
   });
 
   it("stores account fulfillment with deliverable credential presets", () => {
@@ -107,7 +111,10 @@ describe("admin product draft — 8-step wizard", () => {
     const res = advanceProductDraft(draft, "10");
     expect(res.ok).toBe(true);
     expect(res.draft.initialQuantity).toBe(10);
-    expect(res.draft.step).toBe("confirm");
+    expect(res.draft.step).toBe("visibilityFlags");
+    const res2 = advanceProductDraft(res.draft, "PUBLIC");
+    expect(res2.ok).toBe(true);
+    expect(res2.draft.step).toBe("confirm");
   });
 
   it("rejects non-numeric quantity without advancing", () => {
@@ -137,7 +144,10 @@ describe("admin product draft — 8-step wizard", () => {
     const res = advanceProductDraft(draft, "Liên hệ khách trong 24h");
     expect(res.ok).toBe(true);
     expect(res.draft.serviceInstructions).toBe("Liên hệ khách trong 24h");
-    expect(res.draft.step).toBe("confirm");
+    expect(res.draft.step).toBe("visibilityFlags");
+    const res2 = advanceProductDraft(res.draft, "PUBLIC");
+    expect(res2.ok).toBe(true);
+    expect(res2.draft.step).toBe("confirm");
   });
 
   it("stores unlimited service instructions without stock", () => {
@@ -173,7 +183,10 @@ describe("admin product draft — 8-step wizard", () => {
       costVnd: 50000n,
       region: "VN",
     });
-    expect(res.draft.step).toBe("confirm");
+    expect(res.draft.step).toBe("visibilityFlags");
+    const res2 = advanceProductDraft(res.draft, "PUBLIC");
+    expect(res2.ok).toBe(true);
+    expect(res2.draft.step).toBe("confirm");
   });
 
   it("parses structured description JSON into commercial fields", () => {
@@ -219,10 +232,9 @@ describe("admin product draft — 8-step wizard", () => {
   });
 
   it("keeps draft stable once confirmation is reached", () => {
-    const draft = advanceAll(ACCOUNT_FLOW.slice(0, 6));
-    const confirmed = advanceProductDraft(draft, "x");
-    expect(confirmed.draft.step).toBe("confirm");
-    const again = advanceProductDraft(confirmed.draft, "x");
+    const draft = advanceAll(ACCOUNT_FLOW);
+    expect(draft.step).toBe("confirm");
+    const again = advanceProductDraft(draft, "x");
     expect(again).toMatchObject({ ok: false, error: "DRAFT_READY" });
     expect(again.draft.step).toBe("confirm");
   });
@@ -335,6 +347,7 @@ describe("delivery config helpers", () => {
       "description",
       "variant",
       "deliveryConfig",
+      "visibilityFlags",
       "confirm",
     ] as const;
     let draft: ProductDraft = { ...startProductDraft("1"), step: "confirm" };

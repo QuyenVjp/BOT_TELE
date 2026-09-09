@@ -663,6 +663,9 @@ export function presentProductDraftPreview(draft: {
   compareAtPriceVnd?: bigint | undefined;
   fulfillmentType: FulfillmentType;
   inventoryFields: InventoryField[];
+  visibility?: "PUBLIC" | "TEST_ONLY" | "DRAFT";
+  isFeatured?: boolean;
+  preorderEnabled?: boolean;
   lowStockThreshold?: number | undefined;
   descriptionVi?: string | undefined;
   warrantyVi?: string | undefined;
@@ -671,8 +674,7 @@ export function presentProductDraftPreview(draft: {
   initialQuantity?: number | undefined;
   fileArtifact?: { filename: string } | undefined;
   supplierConfig?:
-    | { supplierId: string; externalSku: string; costVnd: bigint; region?: string | undefined }
-    | undefined;
+    { supplierId: string; externalSku: string; costVnd: bigint; region?: string } | undefined;
 }): PresentedMessage {
   const deliveryLine =
     draft.fulfillmentType === "UNLIMITED_SERVICE"
@@ -693,29 +695,17 @@ export function presentProductDraftPreview(draft: {
       ...(draft.name ? [`Tên: ${draft.name}`] : []),
       `Biến thể: ${draft.variantName}`,
       `SKU: ${draft.sku}`,
-      draft.existingProductId
-        ? `Sản phẩm cha: ${draft.existingProductId}`
-        : `Danh mục: ${draft.categoryName ?? draft.categoryId ?? "Chưa chọn"}`,
+      `Danh mục: ${draft.categoryName ?? "Chưa phân loại"}`,
       `Loại: ${FULFILLMENT_TYPE_LABELS[draft.fulfillmentType]}`,
       `Giá: ${draft.priceVnd.toLocaleString("vi-VN")} ₫${draft.compareAtPriceVnd ? ` (gốc ${draft.compareAtPriceVnd.toLocaleString("vi-VN")} ₫)` : ""}`,
       `Giao hàng: ${deliveryLine}`,
       ...(draft.descriptionVi ? [`Mô tả: ${draft.descriptionVi}`] : []),
       ...(draft.deliveryEtaVi ? [`Thời gian giao: ${draft.deliveryEtaVi}`] : []),
       `Bảo hành: ${draft.warrantyVi ?? "Theo chính sách cửa hàng"}`,
-      "Hiển thị: Nháp — chỉ admin thấy cho tới khi kích hoạt",
-      ...(draft.lowStockThreshold === undefined ? [] : [`Ngưỡng tồn: ${draft.lowStockThreshold}`]),
-      ...(draft.serviceInstructions ? [`Hướng dẫn xử lý:\n${draft.serviceInstructions}`] : []),
-      ...(draft.initialQuantity === undefined
-        ? []
-        : [`Số lượng ban đầu:\n${draft.initialQuantity}`]),
-      ...(draft.fileArtifact
-        ? [`Tệp đăng ký:\n${draft.fileArtifact.filename} (chưa kích hoạt/chưa bán)`]
-        : []),
-      ...(draft.supplierConfig
-        ? [
-            `Nhà cung cấp:\n${draft.supplierConfig.supplierId} · SKU ${draft.supplierConfig.externalSku} · Giá vốn ${draft.supplierConfig.costVnd.toLocaleString("vi-VN")} ₫${draft.supplierConfig.region ? ` · ${draft.supplierConfig.region}` : ""}`,
-          ]
-        : []),
+      `Hiển thị: ${draft.visibility === "TEST_ONLY" ? "🧪 Chỉ test" : draft.visibility === "DRAFT" ? "📝 Bản nháp" : "🟢 Công khai"}`,
+      `Ghim trang chủ: ${draft.isFeatured ? "⭐ Có" : "Không"}`,
+      `Đặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}`,
+      `Cảnh báo hết hàng: ${draft.lowStockThreshold ?? "Mặc định"}`,
     ].join("\n"),
     buttons: [
       [
