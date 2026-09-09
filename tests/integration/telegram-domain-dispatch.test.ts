@@ -143,6 +143,7 @@ function setup() {
   const restockSubscribe = vi.fn().mockResolvedValue({ text: "subscribed", buttons: [] });
   const restockUnsubscribe = vi.fn().mockResolvedValue({ text: "unsubscribed", buttons: [] });
   const restockList = vi.fn().mockResolvedValue({ text: "restock list", buttons: [] });
+  const preorderConsent = vi.fn().mockResolvedValue({ text: "preorder consent", buttons: [] });
 
   const dispatcher = createTelegramDomainDispatcher({
     codec,
@@ -244,6 +245,10 @@ function setup() {
         visibilityAction,
       },
     },
+    preorder: {
+      consent: preorderConsent,
+      create: vi.fn(),
+    },
     responder: { send },
   });
 
@@ -309,6 +314,7 @@ function setup() {
     send,
     order,
     visibilityAction,
+    preorderConsent,
   };
 }
 
@@ -1816,5 +1822,23 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
 
     expect(send).toHaveBeenCalledTimes(1);
     expect(send.mock.calls[0]![0].message.text).toContain("CHÍNH SÁCH BẢO HÀNH & HỖ TRỢ");
+  });
+
+  it("routes preorder:consent:<variantId> to preorder.consent", async () => {
+    const { dispatcher, preorderConsent, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "preorder-cb-1",
+      action: "UNKNOWN",
+      callbackData: "preorder:consent:var-123",
+    });
+
+    expect(preorderConsent).toHaveBeenCalledWith("var-123");
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ message: { text: "preorder consent", buttons: [] } }),
+    );
   });
 });
