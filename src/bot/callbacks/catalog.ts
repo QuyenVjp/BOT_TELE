@@ -12,7 +12,7 @@ import { verifyProductLinkToken } from "../../modules/catalog/product-link-token
 import { presentStorefront } from "../presenters/customer.js";
 import { searchCatalog } from "../../modules/catalog/search.js";
 import { resolveCatalogAudience, type CatalogIdentity } from "../../modules/catalog/visibility.js";
-import { createCatalogCache, type CatalogCache } from "../../modules/catalog/cache.js";
+import type { CatalogCache } from "../../modules/catalog/cache.js";
 import type { SearchParser } from "../../modules/catalog/search-parser-port.js";
 import type { BuyNowCallbackCodec } from "../callback-codec.js";
 import { isId } from "../../shared/ids/index.js";
@@ -31,15 +31,15 @@ import {
  * Catalog callback layer (T035) — the customer-facing US1 journey:
  * storefront -> category (brand) -> product detail with duration Buy Now.
  *
- * Thin orchestration: reads authoritative catalog rows (repository/search, with a
- * versioned cache in front of categories) and hands them to presenters. Creates
+ * Thin orchestration: reads authoritative catalog rows (repository/search)
+ * and hands them to presenters. Creates
  * NO Order and has no payment/supplier/credential capability — US1 stands alone.
  */
 
 export interface CatalogCallbackDeps {
   db: Executor;
   parser: SearchParser;
-  /** Optional injected cache (tests may share one); a default is created otherwise. */
+  /** Optional injected cache; listing no longer falls back to it. */
   cache?: CatalogCache;
   /** Default page size for variant lists. */
   pageSize?: number;
@@ -49,8 +49,8 @@ export interface CatalogCallbackDeps {
 
 export interface CatalogCallbacks {
   mainMenu(): Promise<PresentedMessage>;
-  categoryList(): Promise<PresentedMessage>;
-  listCategoryIds(): Promise<string[]>;
+  categoryList(identity?: CatalogIdentity | undefined): Promise<PresentedMessage>;
+  listCategoryIds(identity?: CatalogIdentity | undefined): Promise<string[]>;
   categoryView(
     categoryId: string,
     cursor?: string,
@@ -92,7 +92,6 @@ function parsePage(cursor?: string): number {
 
 export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallbacks {
   const pageSize = deps.pageSize ?? 5;
-  const cache = deps.cache ?? createCatalogCache();
 
   const issueBuyNow = (
     telegramUserId: string | bigint | number,
@@ -123,18 +122,16 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       return presentMainMenu();
     },
 
-    async categoryList() {
-      const audience = await resolveCatalogAudience(deps.db);
+    async categoryList(identity?: CatalogIdentity | undefined) {
+      const audience = await resolveCatalogAudience(deps.db, identity);
       const categories = await listPublicRootCategories(deps.db, audience);
       return presentCategoryList(categories);
     },
 
-    async listCategoryIds() {
-      const audience = await resolveCatalogAudience(deps.db);
+    async listCategoryIds(identity?: CatalogIdentity | undefined) {
+      const audience = await resolveCatalogAudience(deps.db, identity);
       const categories = await listPublicRootCategories(deps.db, audience);
-      if (categories.length > 0) return categories.map((c) => c.id);
-      const fallback = await cache.getActiveCategories(deps.db);
-      return fallback.map((c) => c.id);
+      return categories.map((c) => c.id);
     },
 
     async categoryView(
