@@ -24,6 +24,19 @@ export const FULFILLMENT_TYPE_LABELS = {
   QUANTITY_STOCK: "Tồn kho số lượng",
   UNLIMITED_SERVICE: "Dịch vụ không giới hạn",
 } satisfies Record<FulfillmentType, string>;
+export const PRODUCT_TYPE_CHOICES = [
+  { code: "ACCOUNT", fulfillmentType: "STOCK_ACCOUNT", label: "Tài khoản" },
+  { code: "CODE", fulfillmentType: "STOCK_CODE", label: "Mã kích hoạt" },
+  { code: "FILE", fulfillmentType: "DIGITAL_FILE", label: "Tệp số" },
+  { code: "QUANTITY", fulfillmentType: "QUANTITY_STOCK", label: "Theo số lượng" },
+  {
+    code: "UNLIMITED_SERVICE",
+    fulfillmentType: "UNLIMITED_SERVICE",
+    label: "Dịch vụ không giới hạn",
+  },
+  { code: "MANUAL", fulfillmentType: "MANUAL_FULFILLMENT", label: "Xử lý thủ công" },
+  { code: "SUPPLIER", fulfillmentType: "SUPPLIER_API", label: "Nhà cung cấp" },
+] as const;
 
 export const INVENTORY_FIELD_SCHEMA = z
   .object({

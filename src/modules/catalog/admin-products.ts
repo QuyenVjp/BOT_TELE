@@ -16,7 +16,16 @@ export interface AdminProductInput {
   name: string;
   slug: string;
   sku: string;
-  description?: string;
+  description?: string | undefined;
+  descriptionVi?: string | undefined;
+  whatCustomerReceivesVi?: string | undefined;
+  usageInstructionsVi?: string | undefined;
+  deliveryEtaVi?: string | undefined;
+  warrantyVi?: string | undefined;
+  supportVi?: string | undefined;
+  termsVi?: string | undefined;
+  tags?: string[] | undefined;
+  compareAtPriceVnd?: bigint | undefined;
   priceVnd: bigint;
   reason: string;
   variantName: string;
@@ -160,12 +169,12 @@ export async function createAdminProduct(input: AdminProductInput): Promise<Admi
     const variantId = newId();
     const product = await sql<{
       id: string;
-    }>`insert into product (id, category_id, name_vi, slug, short_description_vi) values (${productId}, ${input.categoryId}, ${input.name.trim()}, ${input.slug}, ${input.description ?? null}) returning id`.execute(
+    }>`insert into product (id, category_id, name_vi, slug, short_description_vi, description_vi, what_customer_receives_vi, usage_instructions_vi, delivery_eta_vi, warranty_vi, support_vi, terms_vi, tags) values (${productId}, ${input.categoryId}, ${input.name.trim()}, ${input.slug}, ${input.description ?? null}, ${input.descriptionVi ?? null}, ${input.whatCustomerReceivesVi ?? null}, ${input.usageInstructionsVi ?? null}, ${input.deliveryEtaVi ?? null}, ${input.warrantyVi ?? null}, ${input.supportVi ?? null}, ${input.termsVi ?? null}, ${input.tags ?? null}) returning id`.execute(
       trx,
     );
     if (!product.rows[0]) throw new Error("CATEGORY_NOT_FOUND");
     const routing = legacyRoutingFor(input.fulfillmentType);
-    await sql`insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields, low_stock_threshold, is_active) values (${variantId}, ${productId}, ${input.sku}, ${input.variantName.trim()}, ${input.priceVnd.toString()}, 'CUSTOM', ${routing.deliveryType}, ${routing.stockPolicy}, ${input.fulfillmentType}, ${JSON.stringify(input.inventoryFields)}::jsonb, ${input.lowStockThreshold}, ${input.active ?? true})`.execute(
+    await sql`insert into product_variant (id, product_id, sku, name_vi, price_vnd, compare_at_price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields, low_stock_threshold, is_active) values (${variantId}, ${productId}, ${input.sku}, ${input.variantName.trim()}, ${input.priceVnd.toString()}, ${input.compareAtPriceVnd?.toString() ?? null}, 'CUSTOM', ${routing.deliveryType}, ${routing.stockPolicy}, ${input.fulfillmentType}, ${JSON.stringify(input.inventoryFields)}::jsonb, ${input.lowStockThreshold}, ${input.active ?? true})`.execute(
       trx,
     );
     if (

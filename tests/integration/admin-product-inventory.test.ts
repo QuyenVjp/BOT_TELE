@@ -67,12 +67,11 @@ describe("admin product creation and selected-variant inventory import", () => {
     for (const value of [
       "Netflix",
       "NF_PREM",
-      "Premium",
-      "120000",
       categoryId,
       "STOCK_ACCOUNT",
-      "username,password",
-      "2",
+      "Tài khoản Netflix Premium",
+      "Premium|120000",
+      "ok",
     ]) {
       const result = await workflow.advance(String(ROOT_ID), value);
       expect(result.ok).toBe(true);
@@ -83,9 +82,12 @@ describe("admin product creation and selected-variant inventory import", () => {
       step: "confirm",
       variantName: "Premium",
       fulfillmentType: "STOCK_ACCOUNT",
-      lowStockThreshold: 2,
     });
-    expect(draft?.inventoryFields?.map((field) => field.name)).toEqual(["username", "password"]);
+    expect(draft?.inventoryFields?.map((field) => field.name)).toEqual([
+      "email",
+      "username",
+      "password",
+    ]);
 
     const created = await createAdminProduct({
       actor: rootActor,
@@ -98,7 +100,7 @@ describe("admin product creation and selected-variant inventory import", () => {
       variantName: draft!.variantName!,
       fulfillmentType: draft!.fulfillmentType!,
       inventoryFields: draft!.inventoryFields!,
-      lowStockThreshold: draft!.lowStockThreshold!,
+      lowStockThreshold: 2,
       priceVnd: draft!.priceVnd!,
       reason: "integration product create",
       correlationId: "admin-product-inventory:create",
@@ -128,7 +130,7 @@ describe("admin product creation and selected-variant inventory import", () => {
     });
     expect(
       (variant.inventory_fields as Array<{ name: string }>).map((field) => field.name),
-    ).toEqual(["username", "password"]);
+    ).toEqual(["email", "username", "password"]);
 
     const vault = createInMemoryVault();
     await expect(
@@ -235,10 +237,10 @@ describe("admin product creation and selected-variant inventory import", () => {
     for (const value of [
       "Manual",
       "MANUAL_1",
-      "Setup",
-      "120000",
       categoryId,
       "MANUAL_FULFILLMENT",
+      "Xử lý thủ công",
+      "Setup|120000",
       "Activate account manually",
     ]) {
       const result = await workflow.advance(String(ROOT_ID), value);
@@ -256,7 +258,7 @@ describe("admin product creation and selected-variant inventory import", () => {
       variantName: manualDraft!.variantName!,
       fulfillmentType: manualDraft!.fulfillmentType!,
       inventoryFields: manualDraft!.inventoryFields!,
-      lowStockThreshold: manualDraft!.lowStockThreshold!,
+      lowStockThreshold: null,
       serviceInstructions: manualDraft!.serviceInstructions!,
       priceVnd: manualDraft!.priceVnd!,
       reason: "integration manual product create",
@@ -274,13 +276,11 @@ describe("admin product creation and selected-variant inventory import", () => {
     for (const value of [
       "Quantity",
       "QTY_1",
-      "Voucher",
-      "120000",
       categoryId,
       "QUANTITY_STOCK",
-      "Hand over voucher",
+      "Voucher số lượng",
+      "Voucher|120000",
       "5",
-      "1",
     ]) {
       const result = await workflow.advance(String(ROOT_ID), value);
       expect(result.ok).toBe(true);
@@ -297,8 +297,8 @@ describe("admin product creation and selected-variant inventory import", () => {
       variantName: quantityDraft!.variantName!,
       fulfillmentType: quantityDraft!.fulfillmentType!,
       inventoryFields: quantityDraft!.inventoryFields!,
-      lowStockThreshold: quantityDraft!.lowStockThreshold!,
-      serviceInstructions: quantityDraft!.serviceInstructions!,
+      lowStockThreshold: null,
+      serviceInstructions: "Hand over voucher",
       initialQuantity: quantityDraft!.initialQuantity!,
       priceVnd: quantityDraft!.priceVnd!,
       reason: "integration quantity product create",
@@ -324,7 +324,15 @@ describe("admin product creation and selected-variant inventory import", () => {
     });
 
     await workflow.start(String(ROOT_ID));
-    for (const value of ["File", "FILE_1", "Download", "120000", categoryId, "DIGITAL_FILE"]) {
+    for (const value of [
+      "File",
+      "FILE_1",
+      categoryId,
+      "DIGITAL_FILE",
+      "Tệp tải xuống",
+      "Download|120000",
+      "ok",
+    ]) {
       const result = await workflow.advance(String(ROOT_ID), value);
       expect(result.ok).toBe(true);
     }
@@ -340,7 +348,7 @@ describe("admin product creation and selected-variant inventory import", () => {
       variantName: fileDraft!.variantName!,
       fulfillmentType: fileDraft!.fulfillmentType!,
       inventoryFields: fileDraft!.inventoryFields!,
-      lowStockThreshold: fileDraft!.lowStockThreshold!,
+      lowStockThreshold: null,
       active: false,
       priceVnd: fileDraft!.priceVnd!,
       reason: "integration file product create",
@@ -367,10 +375,10 @@ describe("admin product creation and selected-variant inventory import", () => {
     for (const value of [
       "Supplier",
       "SUP_1",
-      "Remote",
-      "120000",
       categoryId,
       "SUPPLIER_API",
+      "Nhà cung cấp",
+      "Remote|120000",
       `${supplierId}|EXT-SKU|80000|VN`,
     ]) {
       const result = await workflow.advance(String(ROOT_ID), value);
@@ -388,8 +396,13 @@ describe("admin product creation and selected-variant inventory import", () => {
       variantName: supplierDraft!.variantName!,
       fulfillmentType: supplierDraft!.fulfillmentType!,
       inventoryFields: supplierDraft!.inventoryFields!,
-      lowStockThreshold: supplierDraft!.lowStockThreshold!,
-      supplierConfig: supplierDraft!.supplierConfig!,
+      lowStockThreshold: null,
+      supplierConfig: {
+        supplierId: supplierDraft!.supplierConfig!.supplierId,
+        externalSku: supplierDraft!.supplierConfig!.externalSku,
+        costVnd: supplierDraft!.supplierConfig!.costVnd,
+        region: supplierDraft!.supplierConfig!.region ?? "VN",
+      },
       priceVnd: supplierDraft!.priceVnd!,
       reason: "integration supplier product create",
       correlationId: "admin-product-inventory:create-supplier",
@@ -502,9 +515,9 @@ describe("admin product creation and selected-variant inventory import", () => {
     await workflow.startVariant(String(ROOT_ID), created.id);
     for (const value of [
       "NF_STREAM",
-      "Streaming",
-      "150000",
       "UNLIMITED_SERVICE",
+      "Dịch vụ không giới hạn",
+      "Streaming|150000",
       "Provision recurring access",
     ]) {
       const result = await workflow.advance(String(ROOT_ID), value);
@@ -528,7 +541,7 @@ describe("admin product creation and selected-variant inventory import", () => {
       name: variantDraft!.variantName!,
       fulfillmentType: variantDraft!.fulfillmentType!,
       inventoryFields: variantDraft!.inventoryFields!,
-      lowStockThreshold: variantDraft!.lowStockThreshold!,
+      lowStockThreshold: null,
       serviceInstructions: variantDraft!.serviceInstructions!,
       priceVnd: variantDraft!.priceVnd!,
       reason: "integration restarted variant draft",

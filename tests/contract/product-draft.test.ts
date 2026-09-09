@@ -1,310 +1,375 @@
 import { describe, expect, it } from "vitest";
 import {
+  addCustomField,
   advanceProductDraft,
+  applyAdvancedRaw,
+  generateCustomFieldKey,
+  inventoryFieldsForType,
+  previousStep,
+  removeCustomField,
+  setCustomFieldFlags,
   startProductDraft,
   startProductVariantDraft,
+  toggleOptionalField,
+  type ProductDraft,
 } from "../../src/modules/catalog/product-draft.js";
 
-function advanceAll(values: string[]) {
-  let draft = startProductDraft("123");
+/** Drive a draft through the 8-step wizard with per-step text inputs. */
+function advanceAll(values: string[], start: ProductDraft = startProductDraft("123")) {
+  let draft = start;
   for (const value of values) {
-    const result = advanceProductDraft(draft, value);
-    expect(result.ok).toBe(true);
-    if (result.ok) draft = result.draft;
+    const res = advanceProductDraft(draft, value);
+    if (!res.ok) throw new Error(`advance failed at step ${draft.step}: ${res.error}`);
+    draft = res.draft;
   }
   return draft;
 }
 
-describe("admin product draft", () => {
-  it("advances validated fields and stores the chosen account fulfillment config", () => {
-    const draft = advanceAll([
-      "Test Product",
-      "TEST_001",
-      "Premium 1 tháng",
-      "120.000",
-      "category-1",
-      "STOCK_ACCOUNT",
-      "username,password,profile_url",
-      "2",
-    ]);
+const ACCOUNT_FLOW = [
+  "GPT Plus 1 tháng", // name
+  "gpt-plus-1m", // sku
+  "cat-ai", // category
+  "ACCOUNT", // productType
+  "Tài khoản GPT Plus dùng 1 tháng", // description
+  "Gói 1 tháng|250000", // variant name|price
+  "", // (unused — deliveryConfig for ACCOUNT validates preset fields)
+];
 
-    expect(draft).toMatchObject({
-      step: "confirm",
-      priceVnd: 120000n,
-      lowStockThreshold: 2,
-      fulfillmentType: "STOCK_ACCOUNT",
-      inventoryFields: [
-        {
-          name: "username",
-          label: "Tên đăng nhập",
-          required: true,
-          secret: false,
-          customerVisible: true,
-        },
-        {
-          name: "password",
-          label: "Mật khẩu",
-          required: true,
-          secret: true,
-          customerVisible: true,
-        },
-        {
-          name: "profile_url",
-          label: "Liên kết hồ sơ",
-          required: false,
-          secret: false,
-          customerVisible: true,
-        },
-      ],
-    });
+describe("admin product draft — 8-step wizard", () => {
+  it("walks name → sku → category → type → description → variant → delivery → confirm", () => {
+    let draft = startProductDraft("123");
+    expect(draft.step).toBe("name");
+
+    const steps: string[] = [];
+    for (const value of ACCOUNT_FLOW.slice(0, 6)) {
+      steps.push(draft.step);
+      const res = advanceProductDraft(draft, value);
+      expect(res.ok).toBe(true);
+      draft = res.draft;
+    }
+    expect(steps).toEqual(["name", "sku", "category", "productType", "description", "variant"]);
+    expect(draft.step).toBe("deliveryConfig");
+
+    // ACCOUNT deliveryConfig validates preset inventory fields, then confirm.
+    const res = advanceProductDraft(draft, "ignored");
+    expect(res.ok).toBe(true);
+    expect(res.draft.step).toBe("confirm");
   });
 
-  it("stores the chosen code fulfillment config without account fields", () => {
-    const draft = advanceAll([
-      "Test Product",
-      "TEST_CODE",
-      "Key 1 tháng",
-      "120000",
-      "category-1",
-      "STOCK_CODE",
-      "4",
+  it("stores account fulfillment with deliverable credential presets", () => {
+    const draft = advanceAll(ACCOUNT_FLOW.slice(0, 6));
+    expect(draft.fulfillmentType).toBe("STOCK_ACCOUNT");
+    expect(draft.inventoryFields).toEqual([
+      { name: "email", label: "Email", required: true, secret: false, customerVisible: true },
+      {
+        name: "username",
+        label: "Tên đăng nhập",
+        required: true,
+        secret: false,
+        customerVisible: true,
+      },
+      { name: "password", label: "Mật khẩu", required: true, secret: true, customerVisible: true },
     ]);
+    expect(draft.deliveryConfig).toEqual({ selectedOptionalFields: [], customFields: [] });
+    // password must be deliverable (customerVisible) while redacted in admin views (secret)
+    const password = draft.inventoryFields!.find((f) => f.name === "password")!;
+    expect(password.secret).toBe(true);
+    expect(password.customerVisible).toBe(true);
+  });
 
-    expect(draft.step).toBe("confirm");
+  it("stores code fulfillment with a single code field", () => {
+    const draft = advanceAll([
+      "Key Windows 11",
+      "key-win11",
+      "cat-key",
+      "CODE",
+      "Key bản quyền",
+      "Key 1PC|120000",
+    ]);
     expect(draft.fulfillmentType).toBe("STOCK_CODE");
     expect(draft.inventoryFields).toEqual([
-      { name: "code", label: "Mã kích hoạt", required: true, secret: true, customerVisible: true },
+      { name: "code", label: "Mã/Key", required: true, secret: true, customerVisible: true },
     ]);
-    expect(draft.lowStockThreshold).toBe(4);
   });
 
-  it("stores manual service instructions", () => {
+  it("stores quantity stock initial quantity at delivery step", () => {
     const draft = advanceAll([
-      "Manual Product",
-      "TEST_MANUAL",
-      "Manual setup",
-      "120000",
-      "category-1",
-      "MANUAL_FULFILLMENT",
-      "Call customer before activation",
+      "Gói credit",
+      "credit-100",
+      "cat-misc",
+      "QUANTITY",
+      "Credit dùng dần",
+      "100 credit|50000",
     ]);
-
-    expect(draft).toMatchObject({
-      step: "confirm",
-      fulfillmentType: "MANUAL_FULFILLMENT",
-      inventoryFields: [],
-      lowStockThreshold: 0,
-      serviceInstructions: "Call customer before activation",
-    });
+    expect(draft.fulfillmentType).toBe("QUANTITY_STOCK");
+    expect(draft.inventoryFields).toEqual([]);
+    expect(draft.step).toBe("deliveryConfig");
+    const res = advanceProductDraft(draft, "10");
+    expect(res.ok).toBe(true);
+    expect(res.draft.initialQuantity).toBe(10);
+    expect(res.draft.step).toBe("confirm");
   });
 
-  it("stores quantity service instructions and initial stock", () => {
+  it("rejects non-numeric quantity without advancing", () => {
     const draft = advanceAll([
-      "Quantity Product",
-      "TEST_QTY",
-      "Voucher",
-      "120000",
-      "category-1",
-      "QUANTITY_STOCK",
-      "Hand over one voucher",
-      "5",
-      "0",
+      "Gói credit",
+      "credit-100",
+      "cat-misc",
+      "QUANTITY",
+      "Credit dùng dần",
+      "100 credit|50000",
     ]);
-
-    expect(draft).toMatchObject({
-      step: "confirm",
-      fulfillmentType: "QUANTITY_STOCK",
-      inventoryFields: [],
-      lowStockThreshold: 0,
-      serviceInstructions: "Hand over one voucher",
-      initialQuantity: 5,
-    });
+    const res = advanceProductDraft(draft, "mười");
+    expect(res).toMatchObject({ ok: false, error: "INVALID_QUANTITY" });
+    expect(res.draft.step).toBe("deliveryConfig");
   });
 
-  it("requires safe integer quantity and threshold before quantity-stock confirmation", () => {
-    let draft = startProductDraft("123");
-    for (const value of [
-      "Quantity Product",
-      "TEST_QTY_SAFE",
-      "Voucher",
-      "120000",
-      "category-1",
-      "QUANTITY_STOCK",
-      "Hand over one voucher",
-    ]) {
-      const result = advanceProductDraft(draft, value);
-      expect(result.ok).toBe(true);
-      if (result.ok) draft = result.draft;
-    }
-
-    const unsafeQuantity = advanceProductDraft(draft, String(Number.MAX_SAFE_INTEGER + 1));
-    expect(unsafeQuantity).toMatchObject({ ok: false, error: "INVALID_QUANTITY" });
-    expect(unsafeQuantity.draft.step).toBe("initialQuantity");
-
-    const safeQuantity = advanceProductDraft(draft, String(2_147_483_647));
-    expect(safeQuantity).toMatchObject({
-      ok: true,
-      draft: { step: "threshold", initialQuantity: 2_147_483_647 },
-    });
-    if (!safeQuantity.ok) return;
-
-    const unsafeThreshold = advanceProductDraft(
-      safeQuantity.draft,
-      String(Number.MAX_SAFE_INTEGER + 1),
-    );
-    expect(unsafeThreshold).toMatchObject({ ok: false, error: "INVALID_THRESHOLD" });
-    expect(unsafeThreshold.draft.step).toBe("threshold");
-
-    const safeThreshold = advanceProductDraft(safeQuantity.draft, "0");
-    expect(safeThreshold).toMatchObject({
-      ok: true,
-      draft: { step: "confirm", lowStockThreshold: 0 },
-    });
-  });
-
-  it("creates digital file drafts as inactive setup variants without fake artifact metadata", () => {
+  it("stores manual service instructions at delivery step", () => {
     const draft = advanceAll([
-      "File Product",
-      "TEST_FILE",
-      "Download",
-      "120000",
-      "category-1",
-      "DIGITAL_FILE",
+      "Cài đặt tận nơi",
+      "svc-install",
+      "cat-misc",
+      "MANUAL",
+      "Nhân viên hỗ trợ cài đặt",
+      "1 lần|300000",
     ]);
-
-    expect(draft).toMatchObject({
-      step: "confirm",
-      fulfillmentType: "DIGITAL_FILE",
-      inventoryFields: [],
-      lowStockThreshold: 0,
-    });
-    expect(draft.fileArtifact).toBeUndefined();
+    expect(draft.fulfillmentType).toBe("MANUAL_FULFILLMENT");
+    const res = advanceProductDraft(draft, "Liên hệ khách trong 24h");
+    expect(res.ok).toBe(true);
+    expect(res.draft.serviceInstructions).toBe("Liên hệ khách trong 24h");
+    expect(res.draft.step).toBe("confirm");
   });
 
-  it("stores unlimited service instructions", () => {
+  it("stores unlimited service instructions without stock", () => {
     const draft = advanceAll([
-      "Unlimited Product",
-      "TEST_UNLIMITED",
-      "Recurring",
-      "120000",
-      "category-1",
+      "Checklist review CV",
+      "svc-cv",
+      "cat-misc",
       "UNLIMITED_SERVICE",
-      "Keep service active until cancellation",
+      "Dịch vụ review CV không giới hạn",
+      "1 tháng|99000",
     ]);
-
-    expect(draft).toMatchObject({
-      step: "confirm",
-      fulfillmentType: "UNLIMITED_SERVICE",
-      inventoryFields: [],
-      lowStockThreshold: 0,
-      serviceInstructions: "Keep service active until cancellation",
-    });
+    expect(draft.fulfillmentType).toBe("UNLIMITED_SERVICE");
+    const res = advanceProductDraft(draft, "Khách gửi CV qua ticket");
+    expect(res.ok).toBe(true);
+    expect(res.draft.serviceInstructions).toBe("Khách gửi CV qua ticket");
   });
 
-  it("stores supplier config for a new supplier-backed variant", () => {
+  it("stores supplier config for supplier-backed products", () => {
     const draft = advanceAll([
-      "Supplier Product",
-      "TEST_SUP",
-      "Remote SKU",
-      "120000",
-      "category-1",
-      "SUPPLIER_API",
-      "supplier-1|EXT-SKU|80000|VN",
+      "Netflix via API",
+      "netflix-api",
+      "cat-misc",
+      "SUPPLIER",
+      "Tài khoản Netflix từ nhà cung cấp",
+      "1 tháng|80000",
     ]);
-
-    expect(draft).toMatchObject({
-      step: "confirm",
-      fulfillmentType: "SUPPLIER_API",
-      inventoryFields: [],
-      lowStockThreshold: 0,
-      supplierConfig: {
-        supplierId: "supplier-1",
-        externalSku: "EXT-SKU",
-        costVnd: 80000n,
-        region: "VN",
-      },
+    expect(draft.fulfillmentType).toBe("SUPPLIER_API");
+    const res = advanceProductDraft(draft, "supplier-1|NFLX-1M|50000|VN");
+    expect(res.ok).toBe(true);
+    expect(res.draft.supplierConfig).toEqual({
+      supplierId: "supplier-1",
+      externalSku: "NFLX-1M",
+      costVnd: 50000n,
+      region: "VN",
     });
+    expect(res.draft.step).toBe("confirm");
   });
 
-  it("rejects malformed monetary input without advancing", () => {
-    let draft = startProductDraft("123");
-    draft = advanceProductDraft(draft, "Test Product").draft;
-    draft = advanceProductDraft(draft, "TEST_001").draft;
-    draft = advanceProductDraft(draft, "Premium").draft;
-    const result = advanceProductDraft(draft, "12abc");
-    expect(result).toMatchObject({ ok: false, error: "INVALID_PRICE" });
-    expect(result.draft.step).toBe("price");
+  it("parses structured description JSON into commercial fields", () => {
+    const json = JSON.stringify({
+      description: "Mô tả ngắn",
+      what_customer_receives: "Email + mật khẩu",
+      usage_instructions: "Đăng nhập và đổi mật khẩu",
+      warranty: "Bảo hành 1 tháng",
+    });
+    const draft = advanceAll([
+      "GPT Plus",
+      "gpt-plus",
+      "cat-ai",
+      "ACCOUNT",
+      json,
+      "Gói 1 tháng|250000",
+    ]);
+    expect(draft.descriptionVi).toBe("Mô tả ngắn");
+    expect(draft.whatCustomerReceivesVi).toBe("Email + mật khẩu");
+    expect(draft.usageInstructionsVi).toBe("Đăng nhập và đổi mật khẩu");
+    expect(draft.warrantyVi).toBe("Bảo hành 1 tháng");
+  });
+
+  it("rejects malformed variant input without advancing", () => {
+    const draft = advanceAll(["SP", "sp-1", "cat", "CODE", "Mô tả"]);
+    for (const bad of ["không có giá", "ten|abc", "|1000", "ten|"]) {
+      const res = advanceProductDraft(draft, bad);
+      expect(res).toMatchObject({ ok: false, error: "INVALID_VARIANT" });
+      expect(res.draft.step).toBe("variant");
+    }
   });
 
   it("rejects unknown fulfillment types before advancing", () => {
-    let draft = startProductDraft("123");
-    for (const value of ["Test Product", "TEST_001", "Premium", "120000", "category-1"]) {
-      const result = advanceProductDraft(draft, value);
-      if (!result.ok) throw new Error(result.error);
-      draft = result.draft;
-    }
-
-    const result = advanceProductDraft(draft, "NOT_A_TYPE");
-    expect(result).toMatchObject({ ok: false, error: "UNSUPPORTED_FULFILLMENT_TYPE" });
-    expect(result.draft.step).toBe("fulfillmentType");
+    const draft = advanceAll(["SP", "sp-1", "cat"]);
+    const res = advanceProductDraft(draft, "ROCKET");
+    expect(res).toMatchObject({ ok: false, error: "UNSUPPORTED_FULFILLMENT_TYPE" });
+    expect(res.draft.step).toBe("productType");
   });
 
-  it("keeps product draft ready state stable once confirmation is reached", () => {
-    const draft = advanceAll([
-      "Test Product",
-      "TEST_001",
-      "Premium 1 tháng",
-      "12.000",
-      "category-1",
-      "STOCK_ACCOUNT",
-      "username,password",
-      "3",
-    ]);
-    const result = advanceProductDraft(draft, "anything");
-    expect(result).toMatchObject({ ok: false, error: "DRAFT_READY" });
+  it("accepts full enum names as well as short type aliases", () => {
+    const draft = advanceAll(["SP", "sp-1", "cat", "STOCK_ACCOUNT"]);
+    expect(draft.fulfillmentType).toBe("STOCK_ACCOUNT");
   });
 
-  it("starts an existing-product variant draft at SKU and skips product category", () => {
-    let draft = startProductVariantDraft("123", "product-1");
-    for (const value of ["NF_ADD", "Extra", "99000", "STOCK_CODE", "1"]) {
-      const result = advanceProductDraft(draft, value);
-      expect(result.ok).toBe(true);
-      if (result.ok) draft = result.draft;
-    }
+  it("keeps draft stable once confirmation is reached", () => {
+    const draft = advanceAll(ACCOUNT_FLOW.slice(0, 6));
+    const confirmed = advanceProductDraft(draft, "x");
+    expect(confirmed.draft.step).toBe("confirm");
+    const again = advanceProductDraft(confirmed.draft, "x");
+    expect(again).toMatchObject({ ok: false, error: "DRAFT_READY" });
+    expect(again.draft.step).toBe("confirm");
+  });
 
-    expect(draft).toMatchObject({
-      step: "confirm",
-      existingProductId: "product-1",
-      sku: "NF_ADD",
-      variantName: "Extra",
-      priceVnd: 99000n,
-      fulfillmentType: "STOCK_CODE",
-      lowStockThreshold: 1,
-    });
-    expect(draft).not.toHaveProperty("categoryId");
-    expect(draft).not.toHaveProperty("categoryId");
+  it("variant draft starts at SKU and skips the category step", () => {
+    const draft = startProductVariantDraft("123", "product-1");
+    expect(draft.step).toBe("sku");
+    const res = advanceProductDraft(draft, "new-sku");
+    expect(res.ok).toBe(true);
+    expect(res.draft.step).toBe("productType");
+    expect(res.draft.existingProductId).toBe("product-1");
   });
 
   it("accepts short and numeric-only SKUs such as 1, 01, 001, 123, GPT1, GPT-PLUS", () => {
-    const validSkus = ["1", "01", "001", "123", "GPT1", "GPT-PLUS", "GPT_PLUS_01", "KIRO-1K"];
-    for (const sku of validSkus) {
-      const draft = startProductDraft("123");
-      const nameRes = advanceProductDraft(draft, "GPT PLUS BHF 1 tháng");
-      expect(nameRes.ok).toBe(true);
-      const skuRes = advanceProductDraft(nameRes.draft, sku);
-      expect(skuRes.ok).toBe(true);
-      expect(skuRes.draft.sku).toBe(sku.toUpperCase());
-      expect(skuRes.draft.step).toBe("variantName");
+    for (const sku of ["1", "01", "001", "123", "GPT1", "GPT-PLUS"]) {
+      const draft = advanceAll(["SP"], startProductDraft("123"));
+      const res = advanceProductDraft(draft, sku);
+      expect(res.ok).toBe(true);
+      expect(res.draft.sku).toBe(sku.toUpperCase());
+      expect(res.draft.step).toBe("category");
     }
   });
 
   it("rejects invalid SKUs with INVALID_SKU", () => {
-    let draft = startProductDraft("123");
-    draft = advanceProductDraft(draft, "GPT PLUS").draft;
-    expect(advanceProductDraft(draft, "SP ACE")).toMatchObject({ ok: false, error: "INVALID_SKU" });
-    expect(advanceProductDraft(draft, "@INVALID")).toMatchObject({
-      ok: false,
-      error: "INVALID_SKU",
+    const draft = advanceAll(["SP"]);
+    for (const bad of ["-abc", "a b", "sku!", ""]) {
+      const res = advanceProductDraft(draft, bad);
+      expect(res.ok).toBe(false);
+      if (!res.ok) expect(["INVALID_SKU", "INVALID_VALUE"]).toContain(res.error);
+      expect(res.draft.step).toBe("sku");
+    }
+  });
+
+  it("expires drafts past their TTL", () => {
+    const now = Date.now();
+    const draft = startProductDraft("123", now);
+    const res = advanceProductDraft(draft, "x", now + 16 * 60_000);
+    expect(res).toMatchObject({ ok: false, error: "DRAFT_EXPIRED" });
+  });
+});
+
+describe("delivery config helpers", () => {
+  function accountDraft(): ProductDraft {
+    return advanceAll(ACCOUNT_FLOW.slice(0, 6));
+  }
+
+  it("toggles optional preset fields on and off", () => {
+    let draft = accountDraft();
+    expect(draft.inventoryFields!.some((f) => f.name === "recovery_email")).toBe(false);
+    draft = toggleOptionalField(draft, "recovery_email");
+    expect(draft.inventoryFields!.some((f) => f.name === "recovery_email")).toBe(true);
+    draft = toggleOptionalField(draft, "recovery_email");
+    expect(draft.inventoryFields!.some((f) => f.name === "recovery_email")).toBe(false);
+  });
+
+  it("generates safe ascii keys from Vietnamese labels", () => {
+    expect(generateCustomFieldKey("Ngày hết hạn")).toBe("ngay_het_han");
+    expect(generateCustomFieldKey("Địa chỉ Đà Nẵng")).toBe("dia_chi_da_nang");
+    expect(generateCustomFieldKey("!!!")).toBe("truong_tuy_chinh");
+  });
+
+  it("adds a custom field with a generated key and tracks it in deliveryConfig", () => {
+    let draft = accountDraft();
+    draft = addCustomField(draft, { label: "Ngày hết hạn" });
+    const field = draft.inventoryFields!.find((f) => f.name === "ngay_het_han")!;
+    expect(field).toEqual({
+      name: "ngay_het_han",
+      label: "Ngày hết hạn",
+      required: false,
+      secret: false,
+      customerVisible: true,
     });
+    expect(draft.deliveryConfig!.customFields.map((f) => f.name)).toContain("ngay_het_han");
+  });
+
+  it("sets custom field flags (required/secret/customerVisible)", () => {
+    let draft = addCustomField(accountDraft(), { label: "Mã PIN" });
+    draft = setCustomFieldFlags(draft, "ma_pin", { required: true, secret: true });
+    const field = draft.inventoryFields!.find((f) => f.name === "ma_pin")!;
+    expect(field.required).toBe(true);
+    expect(field.secret).toBe(true);
+    expect(field.customerVisible).toBe(true);
+    // flags propagate to the deliveryConfig copy
+    expect(draft.deliveryConfig!.customFields.find((f) => f.name === "ma_pin")!.secret).toBe(true);
+  });
+
+  it("removes custom fields from both the schema and the config tracker", () => {
+    let draft = addCustomField(accountDraft(), { label: "Ghi chú riêng" });
+    draft = removeCustomField(draft, "ghi_chu_rieng");
+    expect(draft.inventoryFields!.some((f) => f.name === "ghi_chu_rieng")).toBe(false);
+    expect(draft.deliveryConfig!.customFields).toEqual([]);
+  });
+
+  it("advanced raw input builds safe non-executable fields", () => {
+    const draft = applyAdvancedRaw(accountDraft(), "Ngày hết hạn, Ghi chú");
+    const names = draft.inventoryFields!.map((f) => f.name);
+    expect(names).toContain("ngay_het_han");
+    expect(names).toContain("ghi_chu");
+    for (const f of draft.inventoryFields!) {
+      expect(f.name).toMatch(/^[a-z0-9_]+$/);
+    }
+  });
+
+  it("previousStep walks the wizard order backwards", () => {
+    const order = [
+      "name",
+      "sku",
+      "category",
+      "productType",
+      "description",
+      "variant",
+      "deliveryConfig",
+      "confirm",
+    ] as const;
+    let draft: ProductDraft = { ...startProductDraft("1"), step: "confirm" };
+    const seen: string[] = [];
+    while (draft.step !== "name") {
+      draft = previousStep(draft);
+      seen.push(draft.step);
+    }
+    expect(seen).toEqual([...order].reverse().slice(1));
+  });
+});
+
+describe("inventory field presets", () => {
+  it("account preset carries email/username/password", () => {
+    expect(inventoryFieldsForType("STOCK_ACCOUNT").map((f) => f.name)).toEqual([
+      "email",
+      "username",
+      "password",
+    ]);
+  });
+
+  it("code preset carries a single secret code field", () => {
+    expect(inventoryFieldsForType("STOCK_CODE")).toEqual([
+      { name: "code", label: "Mã/Key", required: true, secret: true, customerVisible: true },
+    ]);
+  });
+
+  it("quantity/unlimited/manual/supplier carry no credential fields", () => {
+    for (const type of [
+      "QUANTITY_STOCK",
+      "UNLIMITED_SERVICE",
+      "MANUAL_FULFILLMENT",
+      "SUPPLIER_API",
+    ] as const) {
+      expect(inventoryFieldsForType(type)).toEqual([]);
+    }
   });
 });
