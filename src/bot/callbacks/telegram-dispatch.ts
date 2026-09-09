@@ -82,7 +82,10 @@ export interface TelegramDomainDispatcherDeps {
   ): Promise<{ categoryId: string; cursor: string } | null>;
   catalog: {
     mainMenu(): Promise<PresentedMessage>;
-    categoryList(): Promise<PresentedMessage>;
+    categoryList(
+      identity?:
+        { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
+    ): Promise<PresentedMessage>;
     categoryView(
       categoryId: string,
       cursor?: string,
@@ -829,7 +832,7 @@ export function createTelegramDomainDispatcher(
       } else if (envelope.callbackData === "shop:home" || envelope.callbackData === "menu:main") {
         message = await shopHome(deps, envelope);
       } else if (envelope.callbackData === "cat:list") {
-        message = await deps.catalog.categoryList();
+        message = await deps.catalog.categoryList(catalogActorIdentity(deps, envelope.actorUserId));
       } else if (envelope.callbackData?.startsWith("cat:view:")) {
         const categoryId = envelope.callbackData.slice("cat:view:".length);
         message = isCatalogId(categoryId)
@@ -838,7 +841,7 @@ export function createTelegramDomainDispatcher(
               undefined,
               catalogActorIdentity(deps, envelope.actorUserId),
             )
-          : await deps.catalog.categoryList();
+          : await deps.catalog.categoryList(catalogActorIdentity(deps, envelope.actorUserId));
       } else if (envelope.callbackData?.startsWith("shop:page:")) {
         const offset = Number(envelope.callbackData.slice("shop:page:".length));
         message = deps.catalog.storefront
@@ -2113,9 +2116,10 @@ async function dispatchVerified(
     case "MAIN_MENU":
       return shopHome(deps, envelope);
     case "CATEGORY_LIST":
-      return deps.catalog.categoryList();
+      return deps.catalog.categoryList(catalogActorIdentity(deps, envelope.actorUserId));
     case "CATEGORY_VIEW": {
-      if (!token.resourceId) return deps.catalog.categoryList();
+      if (!token.resourceId)
+        return deps.catalog.categoryList(catalogActorIdentity(deps, envelope.actorUserId));
       return deps.catalog.categoryView(
         token.resourceId,
         token.option != null ? String(token.option) : undefined,
@@ -2131,7 +2135,8 @@ async function dispatchVerified(
           )
         : safeError("Sản phẩm không tồn tại.");
     case "CATALOG_PAGE": {
-      if (!token.resourceId) return deps.catalog.categoryList();
+      if (!token.resourceId)
+        return deps.catalog.categoryList(catalogActorIdentity(deps, envelope.actorUserId));
       const page = await deps.resolveCatalogPage(token.resourceId);
       return page
         ? deps.catalog.categoryView(
@@ -2139,7 +2144,7 @@ async function dispatchVerified(
             page.cursor,
             catalogActorIdentity(deps, envelope.actorUserId),
           )
-        : deps.catalog.categoryList();
+        : deps.catalog.categoryList(catalogActorIdentity(deps, envelope.actorUserId));
     }
     case "ORDER_LIST":
       return deps.history.list(customerId);

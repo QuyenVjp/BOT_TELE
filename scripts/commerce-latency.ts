@@ -240,6 +240,19 @@ async function measureCatalogCallbackLayer(ctx: PgTestContext): Promise<void> {
     insert into category (id, name_vi, slug, is_active, sort_order)
     values (${categoryId}, 'Latency Category', 'latency-category', true, 1)
   `.execute(ctx.db);
+
+  await sql`
+    insert into product (id, category_id, name_vi, slug, is_active, sort_order, is_test, is_archived)
+    values ('commerce-latency-product', ${categoryId}, 'Latency Product', 'latency-product', true, 1, false, false)
+  `.execute(ctx.db);
+  await sql`
+    insert into product_variant
+      (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
+       stock_policy, resale_evidence_id, is_active, sort_order)
+    values
+      ('commerce-latency-variant', 'commerce-latency-product', 'LAT-1M', '1 tháng', 250000, 'P1M',
+       'CREDENTIAL', 30, 'LOCAL_ONLY', 'RES-LAT', true, 1)
+  `.execute(ctx.db);
   const callbacks = createCatalogCallbacks({
     db: ctx.db,
     pageSize: 10,
