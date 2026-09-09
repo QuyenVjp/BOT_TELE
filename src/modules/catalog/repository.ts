@@ -51,6 +51,7 @@ export interface CatalogVariantRow {
   compare_at_price_vnd?: string | null;
   stock_display_mode?: "BAND" | "EXACT" | null;
   category_id?: string;
+  preorder_enabled?: boolean;
 }
 
 export interface PageOptions {
@@ -317,6 +318,7 @@ export async function listSellableVariants(
       v.stock_policy, v.sort_order, v.fulfillment_type,
       q.available_quantity::int as available_quantity,
       ${VARIANT_READY_SQL} as is_ready,
+      coalesce(v.preorder_enabled, false) as preorder_enabled,
       p.category_id
     from product_variant v
     join product p on p.id = v.product_id

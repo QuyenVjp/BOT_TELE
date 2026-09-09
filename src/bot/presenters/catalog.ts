@@ -242,6 +242,13 @@ export function presentProductDetail(
       });
     if (canBuy && buyNow) {
       buttons.push([{ text: `🛒 ${variant.name_vi} · ${price}`, callbackData: buyNow }]);
+    } else if (variant.preorder_enabled) {
+      buttons.push([
+        {
+          text: `💰 ${variant.name_vi} · Đặt cọc giữ suất`,
+          callbackData: `pre:agree:${variant.id}`,
+        },
+      ]);
     } else {
       buttons.push([
         {
