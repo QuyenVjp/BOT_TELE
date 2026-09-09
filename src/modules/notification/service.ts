@@ -733,6 +733,34 @@ export async function queueManualFulfillmentNotification(
   });
 }
 
+function shopCancelNotification(
+  event: OutboxEvent,
+): { campaignId: string; customerId: string; content: string } | null {
+  if (event.eventType !== "PreorderShopCancelled") return null;
+  const { customerId, amountDue } = event.payloadRedacted;
+  if (typeof customerId !== "string" || !customerId.trim()) return null;
+  const amount =
+    typeof amountDue === "number"
+      ? amountDue
+      : typeof amountDue === "string" && /^[0-9]{1,19}$/.test(amountDue)
+        ? Number(amountDue)
+        : 0;
+  if (!Number.isSafeInteger(amount) || amount < 0) return null;
+  const lines = [
+    "Shop không thể cung cấp sản phẩm này.",
+    "Yêu cầu của bạn đã được huỷ.",
+  ];
+  if (amount > 0) {
+    lines.push(`Số tiền cần hoàn: ${amount.toLocaleString("vi-VN")} đ`);
+    lines.push("Đang chờ hoàn tiền");
+  }
+  return {
+    campaignId: `preorder-shop-cancelled:${event.aggregateId}`,
+    customerId,
+    content: lines.join("\n"),
+  };
+}
+
 export async function handleNotificationOutboxEvent(
   db: Db,
   event: OutboxEvent,
@@ -749,11 +777,13 @@ export async function handleNotificationOutboxEvent(
     event.eventType === "WalletTopupCredited" ||
     event.eventType === "WalletRefunded";
   const wallet = walletNotification(event);
+  const shopCancel = shopCancelNotification(event);
   if (walletEvent && !wallet)
     return { kind: "TERMINAL_REVIEW", errorCode: "WALLET_NOTIFICATION_PAYLOAD_INVALID" };
-  if (!stock && !lowStock && !wallet) return { kind: "PUBLISHED" };
+  if (!stock && !lowStock && !wallet && !shopCancel) return { kind: "PUBLISHED" };
   let missingWalletTarget = false;
   let missingLowStockTarget = false;
+  let missingShopCancelTarget = false;
   await withTransaction(db, async (trx) => {
     if (stock) {
       const snapshot = await restockCampaignSnapshot(trx, stock);
@@ -781,10 +811,15 @@ export async function handleNotificationOutboxEvent(
     ) {
       missingLowStockTarget = true;
     }
+    if (shopCancel && !(await queueCustomerCriticalNotification(trx, shopCancel))) {
+      missingShopCancelTarget = true;
+    }
   });
   if (missingWalletTarget)
     return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
   if (missingLowStockTarget)
     return { kind: "RETRY", errorCode: "LOW_STOCK_ROOT_NOTIFICATION_TARGET_MISSING" };
+  if (missingShopCancelTarget)
+    return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
   return { kind: "PUBLISHED" };
 }

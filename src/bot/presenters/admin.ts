@@ -1014,9 +1014,24 @@ export function presentAdminPreorders(input: {
         )),
   ];
 
+  const cancelButtons = input.items
+    .filter((item) =>
+      ["CREATED", "WAITING_DEPOSIT", "DEPOSIT_PAID", "ALLOCATED", "BALANCE_DUE", "FULLY_PAID"].includes(
+        item.status,
+      ),
+    )
+    .slice(0, 8)
+    .map((item) => [
+      {
+        text: `Huỷ shop · ${item.variantName}`.slice(0, 64),
+        callbackData: `admin:preorders:cancel:${item.id}`,
+      },
+    ]);
+
   return {
     text: lines.join("\n"),
     buttons: [
+      ...cancelButtons,
       [
         { text: "Tất cả", callbackData: "admin:preorders:filter:all" },
         { text: "Chờ cọc", callbackData: "admin:preorders:filter:waiting_deposit" },

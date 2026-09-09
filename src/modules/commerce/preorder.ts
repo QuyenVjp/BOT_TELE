@@ -425,10 +425,10 @@ export async function allocateRestockToPreorders(
       ) values (
         ${eventId}, 'PreorderReservation', ${preorder.id}, 1, 'PreorderStockAllocated',
         jsonb_build_object(
-          'preorderId', ${preorder.id},
-          'customerId', ${preorder.customer_id},
-          'variantId', ${variantId},
-          'holdHours', ${holdHours}
+          'preorderId', ${preorder.id}::text,
+          'customerId', ${preorder.customer_id}::text,
+          'variantId', ${variantId}::text,
+          'holdHours', ${holdHours}::int
         )
       )
     `.execute(exec);
@@ -505,9 +505,9 @@ export async function releaseExpiredPreorderHolds(
         ) values (
           ${eventId}, 'PreorderReservation', ${row.id}, 1, 'PreorderHoldForfeited',
           jsonb_build_object(
-            'preorderId', ${row.id},
-            'customerId', ${row.customer_id},
-            'variantId', ${row.variant_id}
+            'preorderId', ${row.id}::text,
+            'customerId', ${row.customer_id}::text,
+            'variantId', ${row.variant_id}::text
           )
         )
       `.execute(trx);

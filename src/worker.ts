@@ -23,7 +23,7 @@ import {
 } from "./modules/catalog/repository.js";
 import { pathToFileURL } from "node:url";
 import { sql } from "kysely";
-import { newId } from "./shared/ids/index.js";
+import { isId, newId } from "./shared/ids/index.js";
 import { sealPresentedMessageCallbacks } from "./bot/callback-sealer.js";
 import type { CallbackTokenCodec } from "./bot/callback-codec.js";
 import type { Db } from "./infrastructure/db/transaction.js";
@@ -831,6 +831,8 @@ async function bootstrap(): Promise<void> {
   } = await import("./bot/presenters/admin-wizard.js");
   const { loadPreorderVariantConfig, presentPreorderConsent, createPreorderReservation } =
     await import("./modules/commerce/preorder.js");
+  const { shopCancelPreorder } = await import("./modules/commerce/shop-cancel.js");
+  const { generateCustomerAlias } = await import("./modules/marketing/social-proof.js");
   const {
     formatSePayReconciliationAdminText,
     getSePayReconciliationStatus,
@@ -2937,6 +2939,18 @@ async function bootstrap(): Promise<void> {
       async preorders(input, route) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        if (route?.startsWith("preorders:cancel:")) {
+          const preorderId = route.slice("preorders:cancel:".length);
+          if (isId(preorderId)) {
+            await shopCancelPreorder(dbHandle.db, {
+              preorderId,
+              actorTelegramUserId: input.telegramUserId,
+              reason: "Shop không thể cung cấp sản phẩm này.",
+              correlationId: input.correlationId,
+            });
+          }
+          route = "preorders:filter:refund_due";
+        }
         const filter = route ? route.replace(/^preorders(:filter:)?/u, "") || "all" : "all";
         let whereClause = sql`true`;
         if (filter === "waiting_deposit") whereClause = sql`pr.status = 'WAITING_DEPOSIT'`;
@@ -2958,19 +2972,18 @@ async function bootstrap(): Promise<void> {
           status: string;
           deposit_amount_vnd: string;
           balance_amount_vnd: string;
-          customer_name: string;
+          customer_id: string;
           hold_until: Date | string | null;
         }>`
           select
             pr.id, pr.variant_id, p.name_vi as product_name, v.name_vi as variant_name,
             pr.status, pr.deposit_amount_vnd::text, pr.balance_amount_vnd::text,
-            coalesce(ci.observed_username, c.id) as customer_name,
+            pr.customer_id,
             pr.hold_until
           from preorder_reservation pr
           join product_variant v on v.id = pr.variant_id
           join product p on p.id = v.product_id
           join customer c on c.id = pr.customer_id
-          left join channel_identity ci on ci.customer_id = c.id
           where ${whereClause}
           order by pr.created_at desc
           limit 15
@@ -2985,7 +2998,7 @@ async function bootstrap(): Promise<void> {
             status: r.status,
             depositVnd: Number(r.deposit_amount_vnd),
             balanceVnd: Number(r.balance_amount_vnd),
-            customerName: r.customer_name,
+            customerName: generateCustomerAlias(r.customer_id),
             holdUntil: r.hold_until,
           })),
           filter,
