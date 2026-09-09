@@ -17,6 +17,7 @@ import type { PresentedMessage } from "./presenters/catalog.js";
 import type { TelegramDocumentSender } from "../modules/digital-goods/file-delivery.js";
 
 export interface TelegramResponder {
+  ack?(callbackQueryId: string): Promise<void>;
   send(input: {
     chatId: string;
     messageId: string | null;
@@ -232,10 +233,23 @@ export function createGrammyResponder(
     throw new Error("Invalid Telegram bot token");
   }
   const telegramApi = api ?? new Api(botToken);
+  const answered = new Set<string>();
+  const ack = async (callbackQueryId: string) => {
+    if (answered.has(callbackQueryId)) return;
+    answered.add(callbackQueryId);
+    if (answered.size > 4000) {
+      const oldest = answered.values().next().value;
+      if (oldest) answered.delete(oldest);
+    }
+    await telegramApi.answerCallbackQuery(callbackQueryId).catch(() => undefined);
+  };
   return {
+    async ack(callbackQueryId) {
+      await ack(callbackQueryId);
+    },
     async send(input) {
       if (input.callbackQueryId) {
-        await telegramApi.answerCallbackQuery(input.callbackQueryId).catch(() => undefined);
+        await ack(input.callbackQueryId);
       }
       const replyMarkup = buildReplyMarkup(input.message);
       const editReplyMarkup = buildEditReplyMarkup(replyMarkup);

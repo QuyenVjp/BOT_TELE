@@ -1,6 +1,11 @@
 import type { InlineButton, PresentedMessage } from "./catalog.js";
 import type { SupportReasonCode, SupportTicketStatus } from "../../modules/support/domain.js";
 import type { SupportTicket } from "../../modules/support/service.js";
+import {
+  ADMIN_CONTACT_URL,
+  COMMUNITY_URL,
+  SHOP_NAME,
+} from "../../modules/catalog/shop-profile.js";
 
 /**
  * Vietnamese support presenters (T087, FR-019).
@@ -11,7 +16,7 @@ import type { SupportTicket } from "../../modules/support/service.js";
  */
 
 export const SUPPORT_COPY = {
-  title: "💬 Hỗ trợ",
+  title: `💬 HỖ TRỢ ${SHOP_NAME}`,
   reasonPrompt: "Chọn lý do bạn cần hỗ trợ:",
   descriptionPrompt: "Mô tả ngắn gọn vấn đề (không gửi mật khẩu hay ảnh chứa thông tin đăng nhập).",
   openedTitle: "✅ Đã tạo ticket hỗ trợ",
@@ -46,12 +51,27 @@ const STATUS_LABEL: Record<SupportTicketStatus, string> = {
 /** Reason picker — structured only, no free-form secret invitation. */
 export function presentSupportReasonMenu(orderNumber?: string): PresentedMessage {
   const suffix = orderNumber ? `:${orderNumber}` : "";
-  const buttons: InlineButton[][] = (Object.keys(REASON_LABEL) as SupportReasonCode[]).map(
-    (code) => [{ text: REASON_LABEL[code], callbackData: `sup:reason:${code}${suffix}` }],
-  );
-  buttons.push([{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }]);
+  const buttons: InlineButton[][] = [
+    [{ text: "👨‍💻 Nhắn Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
+    [{ text: "📢 Cộng đồng", url: COMMUNITY_URL, callbackData: "" }],
+    ...(Object.keys(REASON_LABEL) as SupportReasonCode[]).map((code) => [
+      { text: REASON_LABEL[code], callbackData: `sup:reason:${code}${suffix}` },
+    ]),
+    [{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }],
+    [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
+  ];
   return {
-    text: [SUPPORT_COPY.title, "", SUPPORT_COPY.reasonPrompt].join("\n"),
+    text: [
+      SUPPORT_COPY.title,
+      "",
+      "Need help with:",
+      "- order",
+      "- payment",
+      "- warranty",
+      "- product usage",
+      "",
+      SUPPORT_COPY.reasonPrompt,
+    ].join("\n"),
     buttons,
   };
 }

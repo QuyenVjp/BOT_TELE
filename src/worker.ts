@@ -21,6 +21,7 @@ import {
   ensureDefaultCategories,
   getOrCreateUncategorizedCategory,
 } from "./modules/catalog/repository.js";
+import { createCatalogCache } from "./modules/catalog/cache.js";
 import { pathToFileURL } from "node:url";
 import { sql } from "kysely";
 import { isId, newId } from "./shared/ids/index.js";
@@ -920,6 +921,9 @@ async function bootstrap(): Promise<void> {
   const callbackCodec = createCallbackTokenCodec(callbackConfig);
   const resolveCustomerId = (telegramUserId: string): Promise<string | null> =>
     resolveTelegramCustomerId(dbHandle.db, telegramUserId);
+  const catalogCache = createCatalogCache({ ttlMs: 15_000 });
+  await ensureDefaultCategories(dbHandle.db);
+  catalogCache.invalidate();
   const catalog = createCatalogCallbacks({
     db: dbHandle.db,
     parser: createSearchParser({
@@ -927,6 +931,8 @@ async function bootstrap(): Promise<void> {
       timeoutMs: config.SEARCH_PARSER_TIMEOUT_MS,
     }),
     callbackCodec: buyNowCodec,
+    cache: catalogCache,
+    productLinkSecret: config.BUY_NOW_CALLBACK_HMAC_KEY,
   });
   const checkout = createCheckoutCallbacks({
     db: dbHandle.db,
@@ -1076,11 +1082,15 @@ async function bootstrap(): Promise<void> {
         return presentWizardSkuStep(draft as never, generateSkuProposal(draft.name ?? ""));
       case "category": {
         await ensureDefaultCategories(dbHandle.db);
-        const rows = await sql<{ id: string; name_vi: string }>`
-          select id, name_vi from category where is_active order by sort_order, id limit 20
+        const rows = await sql<{ id: string; name_vi: string; parent_id: string | null }>`
+          select id, name_vi, parent_id from category where is_active
+          order by coalesce(parent_id, id), sort_order, id limit 40
         `.execute(dbHandle.db);
         return presentWizardCategoryStep(
-          rows.rows.map((row) => ({ id: row.id, name: row.name_vi })),
+          rows.rows.map((row) => ({
+            id: row.id,
+            name: row.parent_id ? `↳ ${row.name_vi}` : row.name_vi,
+          })),
         );
       }
       case "productType":
@@ -1167,6 +1177,12 @@ async function bootstrap(): Promise<void> {
       },
     },
     adminRootUserId: config.ADMIN_TELEGRAM_USER_ID,
+    observeCallback: (event) => {
+      logger.info(
+        { ack_ms: event.ackMs, render_ms: event.renderMs, action: event.action },
+        "catalog.callback.timing",
+      );
+    },
     sepayReconciliationText: async () => {
       const status = await getSePayReconciliationStatus(dbHandle.db);
       return formatSePayReconciliationAdminText(status);
@@ -2827,6 +2843,7 @@ async function bootstrap(): Promise<void> {
             nameVi: c.name_vi,
             active: c.is_active,
             productCount: c.product_count,
+            parentId: c.parent_id ?? null,
           })),
         });
       },
@@ -2872,10 +2889,12 @@ async function bootstrap(): Promise<void> {
             select is_active from category where id = ${input.ref} limit 1
           `.execute(dbHandle.db);
           if (cur.rows[0]) await setCategoryActive(dbHandle.db, input.ref, !cur.rows[0].is_active);
+          catalogCache.invalidate();
           return renderList();
         }
         if (input.action === "up" || input.action === "down") {
           await reorderCategory(dbHandle.db, input.ref, input.action);
+          catalogCache.invalidate();
           return renderList();
         }
         return renderList();
@@ -2902,6 +2921,7 @@ async function bootstrap(): Promise<void> {
           };
         if (row.kind === "CATEGORY_CREATE") {
           await createCategory(dbHandle.db, { nameVi: name });
+          catalogCache.invalidate();
           await appendAuditEvent(dbHandle.db, {
             actorType: "ROOT_ADMIN",
             actorId: input.telegramUserId,
@@ -2915,6 +2935,7 @@ async function bootstrap(): Promise<void> {
           const categoryId = row.payload_redacted.categoryId;
           if (typeof categoryId !== "string") return null;
           await renameCategory(dbHandle.db, categoryId, name);
+          catalogCache.invalidate();
           await appendAuditEvent(dbHandle.db, {
             actorType: "ROOT_ADMIN",
             actorId: input.telegramUserId,
@@ -2933,6 +2954,7 @@ async function bootstrap(): Promise<void> {
             nameVi: c.name_vi,
             active: c.is_active,
             productCount: c.product_count,
+            parentId: c.parent_id ?? null,
           })),
         });
       },

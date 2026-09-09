@@ -4,6 +4,11 @@ import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 import { listStorefrontProducts } from "../../src/modules/catalog/repository.js";
 import {
+  ADMIN_CONTACT_URL,
+  COMMUNITY_URL,
+  SHOP_NAME,
+} from "../../src/modules/catalog/shop-profile.js";
+import {
   presentStorefront,
   presentCustomerWarranty,
   presentCustomerNotificationPreferences,
@@ -98,15 +103,18 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
 
       // Greeting & Brand
       expect(customerHome.text).toContain("👋 Chào Anh Quyền!");
-      expect(customerHome.text).toContain("🛒 TIER20 DIGITAL SHOP");
-      expect(customerHome.text).toContain("Kho sản phẩm số & dịch vụ AI");
-      expect(customerHome.text).toContain("📢 Cộng đồng: AI CODEX VIỆT NAM");
+      expect(customerHome.text).toContain(`🛒 ${SHOP_NAME}`);
+      expect(customerHome.text).toContain("AI • Coding • VPN • Phần mềm số");
+      expect(customerHome.text).not.toContain("SHOP DIGITAL");
 
       // Buttons check
       const buttonsFlat = customerHome.buttons.flat();
-      const communityBtn = buttonsFlat.find((b) => b.text.includes("AI Codex VN"));
+      const communityBtn = buttonsFlat.find((b) => b.text.includes("AI Codex Việt Nam"));
       expect(communityBtn).toBeDefined();
-      expect(communityBtn?.url).toBe("https://t.me/aicodexvn");
+      expect(communityBtn?.url).toBe(COMMUNITY_URL);
+      const adminBtn = buttonsFlat.find((b) => b.text.includes("Liên hệ Admin"));
+      expect(adminBtn?.url).toBe(ADMIN_CONTACT_URL);
+      expect(adminBtn?.callbackData).toBe("");
 
       // Customer must NOT see admin button
       const adminBtnForCustomer = buttonsFlat.find((b) => b.text.includes("Quản trị"));
@@ -146,7 +154,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
       });
       expect(thankYou.text).toContain("CẢM ƠN BẠN ĐÃ MUA HÀNG");
       expect(thankYou.text).toContain("ORD-2026-TEST-123");
-      expect(thankYou.text).toContain("250.000 ₫");
+      expect(thankYou.text.replace(/\u00a0/g, " ")).toContain("250.000 ₫");
     });
   });
 

@@ -1,10 +1,17 @@
+import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import type { InlineButton, PresentedMessage, ReplyKeyboard } from "./catalog.js";
 import type { StorefrontProductSummary } from "../../modules/catalog/repository.js";
+import {
+  ADMIN_CONTACT_URL,
+  COMMUNITY_BUTTON_LABEL,
+  COMMUNITY_URL,
+  SHOP_NAME,
+  SHOP_TAGLINE,
+} from "../../modules/catalog/shop-profile.js";
 
 export const CUSTOMER_COPY = {
-  homeTitle: "🛒 SHOP DIGITAL",
-  homeBody:
-    "Chọn tác vụ phía dưới. Số điện thoại chỉ được lưu khi bạn tự chia sẻ trong chat riêng.",
+  homeTitle: `🛒 ${SHOP_NAME}`,
+  homeBody: SHOP_TAGLINE,
   accountTitle: "👤 Tài khoản",
   accountBody:
     "Chia sẻ số điện thoại để nhận hỗ trợ và cập nhật hồ sơ. Bạn có thể quay lại shop bất cứ lúc nào.",
@@ -21,35 +28,22 @@ export const CUSTOMER_COPY = {
   support: "🛟 Hỗ trợ",
   openShop: "🌐 Mở cửa hàng",
 } as const;
-
 export const MAIN_REPLY_KEYBOARD: ReplyKeyboard = {
   persistent: true,
   resizeKeyboard: true,
   buttons: [
-    [{ text: CUSTOMER_COPY.browse }, { text: CUSTOMER_COPY.account }],
-    [{ text: CUSTOMER_COPY.topup }, { text: "🛡 Bảo hành" }],
-    [{ text: CUSTOMER_COPY.orders }, { text: CUSTOMER_COPY.notifications }],
-    [{ text: CUSTOMER_COPY.restock }, { text: CUSTOMER_COPY.support }],
-    [{ text: CUSTOMER_COPY.openShop }],
+    [{ text: CUSTOMER_COPY.browse }, { text: CUSTOMER_COPY.orders }],
+    [{ text: CUSTOMER_COPY.account }, { text: CUSTOMER_COPY.topup }],
   ],
 };
-
 export function presentShopLaunch(url: string): PresentedMessage {
   if (!/^https:\/\//i.test(url)) return presentCustomerHome();
   return {
-    text: "🌐 Mở cửa hàng",
-    buttons: [
-      [
-        {
-          text: "Mở Mini App",
-          callbackData: "shop:open",
-          webAppUrl: `${url.replace(/\/$/, "")}/shop`,
-        },
-      ],
-    ],
+    text: [`🛒 ${SHOP_NAME}`, "", "Mở cửa hàng Mini App để xem sản phẩm."].join("\n"),
+    buttons: [[{ text: CUSTOMER_COPY.openShop, url, callbackData: "" }]],
+    replyKeyboard: MAIN_REPLY_KEYBOARD,
   };
 }
-
 export function presentCustomerHome(): PresentedMessage {
   return {
     text: [CUSTOMER_COPY.homeTitle, "", CUSTOMER_COPY.homeBody].join("\n"),
@@ -57,7 +51,6 @@ export function presentCustomerHome(): PresentedMessage {
     replyKeyboard: MAIN_REPLY_KEYBOARD,
   };
 }
-
 export function presentCustomerAccountPrompt(): PresentedMessage {
   return {
     text: [CUSTOMER_COPY.accountTitle, "", CUSTOMER_COPY.accountBody].join("\n"),
@@ -78,128 +71,69 @@ export interface StorefrontDisplayOptions {
   shopName?: string | undefined;
   shopTagline?: string | undefined;
   communityUrl?: string | undefined;
-  products: StorefrontProductSummary[];
-  totalProducts: number;
-  offset: number;
-  limit: number;
-  stats?: { completedOrders?: number | undefined; totalCustomers?: number | undefined } | undefined;
-  testProducts?: StorefrontProductSummary[] | undefined;
+  categories?: ReadonlyArray<{ id: string; name: string; icon?: string | null }>;
+  featuredProducts?: StorefrontProductSummary[];
+  products?: StorefrontProductSummary[];
+  totalProducts?: number;
+  offset?: number;
+  limit?: number;
+  stats?: unknown;
+  testProducts?: StorefrontProductSummary[];
 }
-
 export function presentStorefront(options: StorefrontDisplayOptions): PresentedMessage {
-  const shopName = options.shopName ?? "TIER20 DIGITAL SHOP";
-  const shopTagline = options.shopTagline ?? "Kho sản phẩm số & dịch vụ AI";
-  const communityUrl = options.communityUrl ?? "https://t.me/aicodexvn";
+  const name = options.shopName ?? SHOP_NAME;
+  const tagline = options.shopTagline ?? CUSTOMER_COPY.homeBody;
   const lines = [
     `👋 Chào ${options.actorName}!`,
     "",
-    `🛒 ${shopName}`,
-    `${shopTagline}.`,
-    "⚡ Thanh toán tự động",
+    `🛒 ${name}`,
+    tagline,
+    "",
+    "⚡ Thanh toán VietQR tự động",
     "📦 Giao hàng nhanh",
-    "🛡 Hỗ trợ & bảo hành theo sản phẩm",
-    "",
-    "📢 Cộng đồng: AI CODEX VIỆT NAM",
-    "",
-    "───────────────",
-    "🔥 DANH MỤC SẢN PHẨM:",
-    "",
+    "🛡 Hỗ trợ & bảo hành",
   ];
   const buttons: InlineButton[][] = [];
-  appendProducts(lines, buttons, options.products, false);
-  if (options.testProducts?.length) {
-    lines.push("", "───────────────", "🧪 SẢN PHẨM TEST:", "");
-    appendProducts(lines, buttons, options.testProducts, true);
+  const featured = options.featuredProducts ?? [];
+  if (featured.length) {
+    lines.push("", "🔥 SẢN PHẨM NỔI BẬT");
+    for (const product of featured.slice(0, 3)) {
+      buttons.push([{ text: product.name_vi, callbackData: `shop:product:${product.id}` }]);
+    }
   }
-  if (options.stats?.completedOrders && options.stats.completedOrders > 0)
-    lines.push(`⭐ ${options.stats.completedOrders} đơn đã hoàn tất · 📦 Giao tự động`);
-  const navRow: InlineButton[] = [];
-  if (options.offset > 0)
-    navRow.push({
-      text: "⬅️ Trang trước",
-      callbackData: `shop:page:${Math.max(0, options.offset - options.limit)}`,
-    });
-  if (options.offset + options.limit < options.totalProducts)
-    navRow.push({
-      text: "Xem thêm ➡️",
-      callbackData: `shop:page:${options.offset + options.limit}`,
-    });
-  if (navRow.length) buttons.push(navRow);
+  const categories = options.categories ?? [];
+  for (let i = 0; i < categories.length; i += 2) {
+    buttons.push(
+      categories.slice(i, i + 2).map((category) => ({
+        text: category.name,
+        callbackData: `cat:view:${category.id}`,
+      })),
+    );
+  }
   buttons.push(
-    [{ text: "📢 Tham gia nhóm AI Codex VN", url: communityUrl, callbackData: "community:url" }],
+    [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
     [
-      { text: "👤 Tài khoản", callbackData: "wallet:account" },
       { text: "🧾 Đơn hàng", callbackData: "ord:list" },
+      { text: "👤 Tài khoản", callbackData: "wallet:account" },
     ],
     [
-      { text: "💰 Nạp ví", callbackData: "wallet:topup" },
-      { text: "🔔 Cài đặt thông báo", callbackData: "cust:notify" },
+      {
+        text: COMMUNITY_BUTTON_LABEL,
+        url: options.communityUrl ?? COMMUNITY_URL,
+        callbackData: "",
+      },
     ],
-    [
-      { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
-      { text: "💬 Hỗ trợ", callbackData: "supp:open" },
-    ],
+    [{ text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
   );
   if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);
   return { text: lines.join("\n"), buttons, replyKeyboard: MAIN_REPLY_KEYBOARD };
 }
-
-function appendProducts(
-  lines: string[],
-  buttons: InlineButton[][],
-  products: StorefrontProductSummary[],
-  test = false,
-): void {
-  if (!products.length) {
-    lines.push("Hiện chưa có sản phẩm nào được mở bán.");
-    return;
-  }
-  for (const p of products) {
-    const price = Number(p.min_price_vnd).toLocaleString("vi-VN") + " ₫";
-    const stock =
-      p.total_available > 0
-        ? `📦 Còn ${p.total_available}`
-        : p.preorder_enabled
-          ? "📦 Hết hàng (Nhận đặt cọc giữ suất)"
-          : "📦 Hết hàng";
-    lines.push(`🔹 ${p.name_vi}`, `💰 Giá từ: ${price}`, stock);
-    if (p.short_description_vi) lines.push(`ℹ️ ${p.short_description_vi}`);
-    lines.push("");
-    if (p.total_available > 0)
-      buttons.push([
-        {
-          text: `🛒 Mua: ${p.name_vi} (${price})`,
-          callbackData: test ? `var:view:${p.primary_variant_id}` : `shop:product:${p.id}`,
-        },
-      ]);
-    else if (p.preorder_enabled)
-      buttons.push([
-        {
-          text: `💰 Đặt cọc: ${p.name_vi}`,
-          callbackData: `preorder:consent:${p.primary_variant_id}`,
-        },
-        { text: "🔔 Báo có hàng", callbackData: `restock:sub:${p.primary_variant_id}` },
-      ]);
-    else
-      buttons.push([
-        {
-          text: `🔔 Báo có hàng: ${p.name_vi}`,
-          callbackData: `restock:sub:${p.primary_variant_id}`,
-        },
-      ]);
-  }
-}
-
 export function presentCustomerWarranty(summary?: string): PresentedMessage {
   return {
     text: [
       "🛡 CHÍNH SÁCH BẢO HÀNH & HỖ TRỢ",
       "",
-      summary ?? "• Bảo hành 1 đổi 1 trong suốt thời hạn sử dụng nếu phát sinh lỗi từ hệ thống.",
-      "• Hỗ trợ kích hoạt, hướng dẫn sử dụng và xử lý kỹ thuật 24/7.",
-      "• Mọi đơn hàng đều lưu nhật ký kiểm toán và hóa đơn điện tử minh bạch.",
-      "",
-      "Nếu cần hỗ trợ, vui lòng bấm nút bên dưới để liên hệ ban quản trị.",
+      summary ?? "Vui lòng liên hệ để được hỗ trợ.",
     ].join("\n"),
     buttons: [
       [{ text: "💬 Nhắn tin hỗ trợ", callbackData: "supp:open" }],
@@ -207,61 +141,61 @@ export function presentCustomerWarranty(summary?: string): PresentedMessage {
     ],
   };
 }
-
 export function presentCustomerNotificationPreferences(prefs: {
   marketing: boolean;
   socialProof: boolean;
 }): PresentedMessage {
   return {
     text: [
-      "🔔 CÀI ĐẶT THÔNG BÁO",
+      "CÀI ĐẶT THÔNG BÁO",
       "",
-      "Bạn có thể tùy chỉnh các loại thông báo nhận từ Bot:",
-      `• Thông báo sản phẩm mới / Khuyến mãi: ${prefs.marketing ? "🟢 Bật" : "🔴 Tắt"}`,
-      `• Cho phép hiển thị mua hàng ẩn danh: ${prefs.socialProof ? "🟢 Bật" : "🔴 Tắt"}`,
-      "",
-      "Lưu ý: Các thông báo dịch vụ (thanh toán, giao hàng, bảo hành) luôn được gửi để đảm bảo quyền lợi của bạn.",
+      `Cập nhật sản phẩm: ${prefs.marketing ? "Bật" : "Tắt"}`,
+      `Thông tin đơn hàng: ${prefs.socialProof ? "Bật" : "Tắt"}`,
     ].join("\n"),
     buttons: [
       [
         {
-          text: prefs.marketing ? "🔕 Tắt khuyến mãi" : "🔔 Bật khuyến mãi",
+          text: prefs.marketing ? "Tắt cập nhật sản phẩm" : "Bật cập nhật sản phẩm",
           callbackData: `cust:notify:marketing:${prefs.marketing ? "off" : "on"}`,
         },
+      ],
+      [
         {
-          text: prefs.socialProof ? "🔒 Ẩn danh hoàn toàn" : "🌐 Bật ẩn danh mua hàng",
+          text: prefs.socialProof ? "Tắt thông tin đơn" : "Bật thông tin đơn",
           callbackData: `cust:notify:social:${prefs.socialProof ? "off" : "on"}`,
         },
       ],
-      [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+      [{ text: CUSTOMER_COPY.back, callbackData: "shop:home" }],
     ],
   };
 }
-
 export function presentPurchaseThankYou(input: {
   orderNumber: string;
   productName: string;
-  variantName: string;
-  priceVnd: number;
+  variantName?: string;
+  priceVnd?: number;
+  amountVnd?: string;
 }): PresentedMessage {
+  const price =
+    input.priceVnd != null
+      ? formatVnd(makeVnd(BigInt(input.priceVnd)))
+      : input.amountVnd
+        ? `${input.amountVnd} ₫`
+        : "";
   return {
     text: [
-      "🎉 CẢM ƠN BẠN ĐÃ MUA HÀNG!",
+      "CẢM ƠN BẠN ĐÃ MUA HÀNG",
       "",
-      `Đơn hàng: ${input.orderNumber}`,
-      `Sản phẩm: ${input.productName} · ${input.variantName}`,
-      `Tổng thanh toán: ${input.priceVnd.toLocaleString("vi-VN")} ₫`,
-      "",
-      "✅ Đơn hàng đã được hoàn tất và giao thành công.",
-      "Cảm ơn bạn đã tin tưởng và đồng hành cùng TIER20 ❤️",
-    ].join("\n"),
+      input.productName,
+      input.variantName,
+      `Mã đơn: ${input.orderNumber}`,
+      price,
+    ]
+      .filter(Boolean)
+      .join("\n"),
     buttons: [
-      [{ text: "🧾 Xem đơn hàng", callbackData: `ord:view:${input.orderNumber}` }],
-      [
-        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
-        { text: "💬 Hỗ trợ", callbackData: "supp:open" },
-      ],
-      [{ text: "🛒 Mua thêm", callbackData: "shop:home" }],
+      [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
+      [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
     ],
   };
 }

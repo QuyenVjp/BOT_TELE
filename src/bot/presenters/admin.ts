@@ -169,15 +169,42 @@ export function presentAdminTestCustomerPrompt(): PresentedMessage {
     buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:testlab:testers" }]],
   };
 }
+function orderCategoryTree<T extends { id: string; parentId?: string | null }>(rows: T[]): T[] {
+  const children = new Map<string | null, T[]>();
+  for (const row of rows) {
+    const key = row.parentId ?? null;
+    const list = children.get(key) ?? [];
+    list.push(row);
+    children.set(key, list);
+  }
+  const out: T[] = [];
+  const walk = (parentId: string | null) => {
+    for (const row of children.get(parentId) ?? []) {
+      out.push(row);
+      walk(row.id);
+    }
+  };
+  walk(null);
+  for (const row of rows) if (!out.includes(row)) out.push(row);
+  return out;
+}
+
 export function presentAdminCategories(input: {
-  categories: Array<{ id: string; nameVi: string; active: boolean; productCount: number }>;
+  categories: Array<{
+    id: string;
+    nameVi: string;
+    active: boolean;
+    productCount: number;
+    parentId?: string | null;
+  }>;
 }): PresentedMessage {
+  const categories = orderCategoryTree(input.categories);
   return {
-    text: `🏷 DANH MỤC\n\n${input.categories.length ? input.categories.map((c) => `• ${c.nameVi} · ${c.productCount} sản phẩm · ${c.active ? "đang bật" : "đang tắt"}`).join("\n") : "Chưa có danh mục."}`,
+    text: `🏷 DANH MỤC\n\n${categories.length ? categories.map((c) => `${c.parentId ? "  ↳ " : "• "}${c.nameVi} · ${c.productCount} sản phẩm · ${c.active ? "đang bật" : "đang tắt"}`).join("\n") : "Chưa có danh mục."}`,
     buttons: [
-      ...input.categories.flatMap((c) => [
+      ...categories.flatMap((c) => [
         [
-          { text: `✏️ ${c.nameVi}`, callbackData: `admin:categories:rename:${c.id}` },
+          { text: `✏️ ${c.parentId ? "↳ " : ""}${c.nameVi}`, callbackData: `admin:categories:rename:${c.id}` },
           { text: "🔁 Bật/Tắt", callbackData: `admin:categories:toggle:${c.id}` },
         ],
         [

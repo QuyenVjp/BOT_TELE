@@ -423,7 +423,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(workflowMessageText).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
     const sent = send.mock.calls[0]![0] as { message: { text: string } };
-    expect(sent.message.text).toContain("SHOP DIGITAL");
+    expect(sent.message.text).toContain("TIER20 SHOP");
   });
 
   it("routes the customer account reply keyboard label to the account prompt", async () => {
@@ -542,7 +542,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(restockSubscribe).toHaveBeenCalledTimes(1);
     expect(restockUnsubscribe).toHaveBeenCalledWith(CUSTOMER, variantId);
     expect(restockUnsubscribe).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls.at(-1)![0].message.text).toContain("không hợp lệ");
+    expect(send.mock.calls.at(-1)![0].message.text).toContain("Phiên này đã cũ");
   });
 
   it("routes the customer back reply keyboard label to the home screen", async () => {
@@ -559,7 +559,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
 
     expect(send).toHaveBeenCalledTimes(1);
     const sent = send.mock.calls[0]![0] as { message: { text: string } };
-    expect(sent.message.text).toContain("Chọn tác vụ phía dưới");
+    expect(sent.message.text).toContain("TIER20 SHOP");
   });
 
   it("routes /admin to the Vietnamese admin root menu with inline keyboard", async () => {

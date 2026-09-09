@@ -4,6 +4,7 @@ import type { DeliveryType, StockPolicy } from "./domain.js";
 import type { FulfillmentType } from "./fulfillment-type.js";
 import { newId } from "../../shared/ids/index.js";
 import { catalogVisibilitySql, type CatalogAudience } from "./visibility.js";
+import { ensureTaxonomy, isFulfillmentTaxonomyNode } from "./taxonomy.js";
 
 /**
  * Catalog persistence + cursor queries (FR-002).
@@ -22,6 +23,8 @@ export interface CatalogCategoryRow {
   name_vi: string;
   slug: string;
   sort_order: number;
+  parent_id?: string | null;
+  icon?: string | null;
 }
 
 export interface CatalogVariantRow {
@@ -39,6 +42,15 @@ export interface CatalogVariantRow {
   fulfillment_type: FulfillmentType;
   available_quantity: number | null;
   is_ready: boolean;
+  description_vi?: string | null;
+  what_customer_receives_vi?: string | null;
+  usage_instructions_vi?: string | null;
+  delivery_eta_vi?: string | null;
+  warranty_vi?: string | null;
+  support_vi?: string | null;
+  compare_at_price_vnd?: string | null;
+  stock_display_mode?: "BAND" | "EXACT" | null;
+  category_id?: string;
 }
 
 export interface PageOptions {
@@ -51,10 +63,41 @@ export interface Page<T> {
   nextCursor: string | null;
 }
 
+const VARIANT_READY_SQL = sql`
+  case
+    when v.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then exists (
+      select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE'
+    )
+    when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0) > 0
+    when v.fulfillment_type = 'DIGITAL_FILE' then exists (
+      select 1 from variant_file_artifact f where f.variant_id = v.id and f.is_active
+    )
+    when v.fulfillment_type = 'SUPPLIER_API' then exists (
+      select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
+      where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
+    )
+    when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
+      select 1 from variant_service_fulfillment sf
+      where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
+    )
+    else false
+  end
+`;
+
+const SELLABLE_ROUTE_SQL = sql`
+  (
+    (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
+    or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
+      select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
+      where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
+    ))
+  )
+`;
+
 /** List active categories in stable (sort_order, id) order. */
 export async function listActiveCategories(exec: Executor): Promise<CatalogCategoryRow[]> {
   const result = await sql<CatalogCategoryRow>`
-    select id, name_vi, slug, sort_order
+    select id, name_vi, slug, sort_order, parent_id, icon
     from category
     where is_active
     order by sort_order asc, id asc
@@ -71,15 +114,16 @@ export interface CategoryWithCountsRow {
   is_active: boolean;
   sort_order: number;
   product_count: number;
+  parent_id?: string | null;
 }
 
 export async function listCategoriesWithCounts(exec: Executor): Promise<CategoryWithCountsRow[]> {
   const result = await sql<CategoryWithCountsRow>`
-    select c.id, c.name_vi, c.is_active, c.sort_order,
+    select c.id, c.name_vi, c.is_active, c.sort_order, c.parent_id,
            count(p.id)::int as product_count
     from category c
     left join product p on p.category_id = c.id and p.is_archived = false
-    group by c.id, c.name_vi, c.is_active, c.sort_order
+    group by c.id, c.name_vi, c.is_active, c.sort_order, c.parent_id
     order by c.sort_order asc, c.id asc
   `.execute(exec);
   return result.rows;
@@ -98,16 +142,19 @@ function categorySlug(nameVi: string): string {
 
 export async function createCategory(
   exec: Executor,
-  input: { nameVi: string },
+  input: { nameVi: string; parentId?: string | null; icon?: string | null },
 ): Promise<CategoryWithCountsRow> {
   const nameVi = input.nameVi.trim();
   if (!nameVi) throw new Error("CATEGORY_NAME_REQUIRED");
+  if (input.parentId) await assertValidParent(exec, null, input.parentId);
   const id = newId();
   const result = await sql<CategoryWithCountsRow>`
-    insert into category (id, name_vi, slug, is_active, sort_order)
+    insert into category (id, name_vi, slug, is_active, sort_order, parent_id, icon, display_name_vi)
     values (${id}, ${nameVi}, ${categorySlug(nameVi)}, true,
-      (select coalesce(max(sort_order), 0) + 1 from category))
-    returning id, name_vi, is_active, sort_order, 0::int as product_count
+      (select coalesce(max(sort_order), 0) + 1 from category
+       where parent_id is not distinct from ${input.parentId ?? null}),
+      ${input.parentId ?? null}, ${input.icon ?? null}, ${nameVi})
+    returning id, name_vi, is_active, sort_order, parent_id, 0::int as product_count
   `.execute(exec);
   return result.rows[0]!;
 }
@@ -115,7 +162,7 @@ export async function createCategory(
 export async function renameCategory(exec: Executor, id: string, nameVi: string): Promise<void> {
   const name = nameVi.trim();
   if (!name) throw new Error("CATEGORY_NAME_REQUIRED");
-  await sql`update category set name_vi = ${name}, slug = ${categorySlug(name)}, updated_at = now(), version = version + 1 where id = ${id}`.execute(
+  await sql`update category set name_vi = ${name}, display_name_vi = ${name}, slug = ${categorySlug(name)}, updated_at = now(), version = version + 1 where id = ${id}`.execute(
     exec,
   );
 }
@@ -137,9 +184,11 @@ export async function reorderCategory(
 ): Promise<void> {
   const delta = direction === "up" ? -1 : 1;
   await sql`
-    with current as (select sort_order from category where id = ${id}), adjacent as (
+    with current as (select sort_order, parent_id from category where id = ${id}), adjacent as (
       select c.id, c.sort_order from category c, current
-      where c.id <> ${id} and ((${delta} = -1 and c.sort_order < current.sort_order)
+      where c.id <> ${id}
+        and c.parent_id is not distinct from current.parent_id
+        and ((${delta} = -1 and c.sort_order < current.sort_order)
         or (${delta} = 1 and c.sort_order > current.sort_order))
       order by c.sort_order ${delta === -1 ? sql`desc` : sql`asc`}, c.id
       limit 1
@@ -150,30 +199,15 @@ export async function reorderCategory(
   `.execute(exec);
 }
 
-const DEFAULT_CATEGORIES = [
-  "🤖 AI / ChatGPT",
-  "💻 Coding / IDE",
-  "🔑 Key & License",
-  "☁️ Cloud / VPS",
-  "📦 Khác",
-] as const;
-
 export async function ensureDefaultCategories(exec: Executor): Promise<void> {
-  const existing = await sql<{
-    count: number;
-  }>`select count(*)::int as count from category where is_active`.execute(exec);
-  if ((existing.rows[0]?.count ?? 0) > 0) return;
-  for (const [index, nameVi] of DEFAULT_CATEGORIES.entries()) {
-    await sql`insert into category (id, name_vi, slug, is_active, sort_order)
-      values (${newId()}, ${nameVi}, ${categorySlug(nameVi)}, true, ${index + 1})`.execute(exec);
-  }
+  await ensureTaxonomy(exec);
 }
 
 export async function getOrCreateUncategorizedCategory(
   exec: Executor,
 ): Promise<CategoryWithCountsRow> {
   const found = await sql<CategoryWithCountsRow>`
-    select id, name_vi, is_active, sort_order,
+    select id, name_vi, is_active, sort_order, parent_id,
       (select count(*)::int from product p where p.category_id = c.id and p.is_archived = false) as product_count
     from category c where c.slug = 'khac' order by c.is_active desc, c.sort_order asc limit 1
   `.execute(exec);
@@ -181,7 +215,7 @@ export async function getOrCreateUncategorizedCategory(
     if (!found.rows[0].is_active) await setCategoryActive(exec, found.rows[0].id, true);
     return { ...found.rows[0], is_active: true };
   }
-  return createCategory(exec, { nameVi: "📁 Khác" });
+  return createCategory(exec, { nameVi: "📦 Khác" });
 }
 
 export interface CatalogProductRow {
@@ -268,7 +302,6 @@ export async function listSellableVariants(
   },
 ): Promise<Page<CatalogVariantRow>> {
   const cursor = options.cursor ? decodeCursor(options.cursor) : null;
-  // Fetch one extra row to determine whether a further page exists.
   const fetchLimit = options.limit + 1;
 
   const productFilter = options.productId ? sql`and v.product_id = ${options.productId}` : sql``;
@@ -283,24 +316,8 @@ export async function listSellableVariants(
       v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
       v.stock_policy, v.sort_order, v.fulfillment_type,
       q.available_quantity::int as available_quantity,
-      case
-        when v.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then exists (
-          select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE'
-        )
-        when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0) > 0
-        when v.fulfillment_type = 'DIGITAL_FILE' then exists (
-          select 1 from variant_file_artifact f where f.variant_id = v.id and f.is_active
-        )
-        when v.fulfillment_type = 'SUPPLIER_API' then exists (
-          select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-          where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-        )
-        when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
-          select 1 from variant_service_fulfillment sf
-          where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
-        )
-        else false
-      end as is_ready
+      ${VARIANT_READY_SQL} as is_ready,
+      p.category_id
     from product_variant v
     join product p on p.id = v.product_id
     join category c on c.id = p.category_id
@@ -310,13 +327,7 @@ export async function listSellableVariants(
       and v.is_active
       and v.price_vnd > 0
       ${catalogVisibilitySql(options.audience ?? "public")}
-      and (
-        (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
-        or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
-          select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-          where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-        ))
-      )
+      and ${SELLABLE_ROUTE_SQL}
       ${productFilter}
       ${categoryFilter}
       ${cursorFilter}
@@ -350,24 +361,11 @@ export async function getVariantById(
       v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
       v.stock_policy, v.sort_order, v.fulfillment_type,
       q.available_quantity::int as available_quantity,
-      case
-        when v.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then exists (
-          select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE'
-        )
-        when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0) > 0
-        when v.fulfillment_type = 'DIGITAL_FILE' then exists (
-          select 1 from variant_file_artifact f where f.variant_id = v.id and f.is_active
-        )
-        when v.fulfillment_type = 'SUPPLIER_API' then exists (
-          select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-          where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-        )
-        when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
-          select 1 from variant_service_fulfillment sf
-          where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
-        )
-        else false
-      end as is_ready
+      ${VARIANT_READY_SQL} as is_ready,
+      p.description_vi, p.what_customer_receives_vi, p.usage_instructions_vi,
+      p.delivery_eta_vi, p.warranty_vi, p.support_vi,
+      v.compare_at_price_vnd::text as compare_at_price_vnd,
+      p.stock_display_mode, p.category_id
     from product_variant v
     join product p on p.id = v.product_id
     join category c on c.id = p.category_id
@@ -378,16 +376,11 @@ export async function getVariantById(
       and v.is_active
       and v.price_vnd > 0
       ${catalogVisibilitySql(audience)}
-      and (
-        (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
-        or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
-          select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-          where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-        ))
-      )
+      and ${SELLABLE_ROUTE_SQL}
   `.execute(exec);
   return result.rows[0] ?? null;
 }
+
 export interface StorefrontProductSummary {
   id: string;
   name_vi: string;
@@ -527,4 +520,335 @@ export async function listTestCatalogProducts(
     from product_summary order by sort_order asc, id asc limit ${limit} offset ${offset}
   `.execute(exec);
   return { items: result.rows, total: result.rows[0]?.total_count ?? 0 };
+}
+
+export interface CatalogCategoryNode extends CatalogCategoryRow {
+  icon: string | null;
+  display_name_vi: string | null;
+  parent_id: string | null;
+  is_active: boolean;
+  is_featured: boolean;
+  featured_rank: number | null;
+  child_count: number;
+  public_product_count: number;
+}
+
+function subtreeProductCountSql(audience: CatalogAudience) {
+  return sql`(
+    select count(distinct p.id)::int
+    from product p
+    join product_variant v on v.product_id = p.id
+    join category leaf on leaf.id = p.category_id
+    where (leaf.id = c.id or leaf.parent_id = c.id)
+      and leaf.is_active
+      and p.is_active
+      and v.is_active
+      and v.price_vnd > 0
+      ${catalogVisibilitySql(audience)}
+      and ${SELLABLE_ROUTE_SQL}
+  )`;
+}
+
+const CATEGORY_NODE_COLUMNS = sql`
+  c.id, c.name_vi, c.slug, c.sort_order, c.parent_id, c.icon, c.display_name_vi,
+  c.is_active, c.is_featured, c.featured_rank
+`;
+
+export async function listPublicRootCategories(
+  exec: Executor,
+  audience: CatalogAudience = "public",
+): Promise<CatalogCategoryNode[]> {
+  const result = await sql<CatalogCategoryNode>`
+    select ${CATEGORY_NODE_COLUMNS},
+      (select count(*)::int from category x where x.parent_id = c.id and x.is_active) as child_count,
+      ${subtreeProductCountSql(audience)} as public_product_count
+    from category c
+    where c.parent_id is null and c.is_active
+    order by c.sort_order asc, c.id asc
+  `.execute(exec);
+  return result.rows.filter(
+    (row) => row.public_product_count > 0 && !isFulfillmentTaxonomyNode(row.slug, row.name_vi),
+  );
+}
+
+export async function listFeaturedProducts(
+  exec: Executor,
+  audience: CatalogAudience = "public",
+  limit = 3,
+): Promise<StorefrontProductSummary[]> {
+  return listScopedProducts(exec, audience, {
+    featuredOnly: true,
+    limit,
+    offset: 0,
+  });
+}
+
+async function listScopedProducts(
+  exec: Executor,
+  audience: CatalogAudience,
+  options: {
+    categoryId?: string;
+    includeChildren?: boolean;
+    featuredOnly?: boolean;
+    categoryFeaturedFirst?: boolean;
+    limit: number;
+    offset: number;
+  },
+): Promise<StorefrontProductSummary[]> {
+  const categoryFilter = options.categoryId
+    ? options.includeChildren
+      ? sql`and (p.category_id = ${options.categoryId} or c.parent_id = ${options.categoryId})`
+      : sql`and p.category_id = ${options.categoryId}`
+    : sql``;
+  const featuredFilter = options.featuredOnly ? sql`and p.is_featured` : sql``;
+  const orderBy = options.categoryFeaturedFirst
+    ? sql`p.is_category_featured desc, p.category_featured_rank nulls last, p.sort_order asc, p.id asc`
+    : options.featuredOnly
+      ? sql`p.featured_rank nulls last, p.sort_order asc, p.id asc`
+      : sql`p.sort_order asc, p.id asc`;
+  const result = await sql<StorefrontProductSummary>`
+    select
+      p.id, p.name_vi, p.slug, p.short_description_vi,
+      min(v.price_vnd)::text as min_price_vnd,
+      0::int as total_available,
+      coalesce(bool_or(v.preorder_enabled), false) as preorder_enabled,
+      (array_agg(v.id order by v.sort_order, v.id))[1] as primary_variant_id,
+      (array_agg(v.sku order by v.sort_order, v.id))[1] as primary_variant_sku,
+      (array_agg(v.name_vi order by v.sort_order, v.id))[1] as primary_variant_name
+    from product p
+    join category c on c.id = p.category_id
+    join product_variant v on v.product_id = p.id
+    where c.is_active
+      and p.is_active
+      and v.is_active
+      and v.price_vnd > 0
+      ${catalogVisibilitySql(audience)}
+      and ${SELLABLE_ROUTE_SQL}
+      ${categoryFilter}
+      ${featuredFilter}
+    group by p.id, p.name_vi, p.slug, p.short_description_vi, p.sort_order,
+      p.is_featured, p.featured_rank, p.is_category_featured, p.category_featured_rank
+    order by ${orderBy}
+    limit ${options.limit} offset ${options.offset}
+  `.execute(exec);
+  return result.rows;
+}
+
+export interface PublicCategoryPage {
+  category: CatalogCategoryNode;
+  parent: CatalogCategoryNode | null;
+  children: CatalogCategoryNode[];
+  products: StorefrontProductSummary[];
+  featured: StorefrontProductSummary[];
+  page: number;
+  totalPages: number;
+  pageSize: number;
+}
+
+async function loadCategoryNode(
+  exec: Executor,
+  categoryId: string,
+  audience: CatalogAudience,
+): Promise<CatalogCategoryNode | null> {
+  const result = await sql<CatalogCategoryNode>`
+    select ${CATEGORY_NODE_COLUMNS},
+      (select count(*)::int from category x where x.parent_id = c.id and x.is_active) as child_count,
+      ${subtreeProductCountSql(audience)} as public_product_count
+    from category c
+    where c.id = ${categoryId} and c.is_active
+    limit 1
+  `.execute(exec);
+  return result.rows[0] ?? null;
+}
+
+export async function listPublicCategoryPage(
+  exec: Executor,
+  categoryId: string,
+  audience: CatalogAudience = "public",
+  page = 0,
+  pageSize = 8,
+): Promise<PublicCategoryPage | null> {
+  const category = await loadCategoryNode(exec, categoryId, audience);
+  if (!category) return null;
+  if (isFulfillmentTaxonomyNode(category.slug, category.name_vi)) return null;
+  const parent = category.parent_id
+    ? await loadCategoryNode(exec, category.parent_id, audience)
+    : null;
+  const childResult = await sql<CatalogCategoryNode>`
+    select ${CATEGORY_NODE_COLUMNS},
+      (select count(*)::int from category x where x.parent_id = c.id and x.is_active) as child_count,
+      ${subtreeProductCountSql(audience)} as public_product_count
+    from category c
+    where c.parent_id = ${categoryId} and c.is_active
+    order by c.sort_order asc, c.id asc
+  `.execute(exec);
+  const visibleChildren = childResult.rows.filter(
+    (row) => row.public_product_count > 0 && !isFulfillmentTaxonomyNode(row.slug, row.name_vi),
+  );
+  const safePage = Math.max(0, page);
+  const featured = await listScopedProducts(exec, audience, {
+    categoryId,
+    includeChildren: true,
+    featuredOnly: true,
+    limit: 3,
+    offset: 0,
+  });
+  if (visibleChildren.length > 0) {
+    const totalPages = Math.max(1, Math.ceil(visibleChildren.length / pageSize));
+    const start = safePage * pageSize;
+    return {
+      category,
+      parent,
+      children: visibleChildren.slice(start, start + pageSize),
+      products: [],
+      featured,
+      page: safePage,
+      totalPages,
+      pageSize,
+    };
+  }
+  const products = await listScopedProducts(exec, audience, {
+    categoryId,
+    includeChildren: false,
+    categoryFeaturedFirst: true,
+    limit: pageSize,
+    offset: safePage * pageSize,
+  });
+  const countResult = await sql<{ n: number }>`
+    select count(distinct p.id)::int as n
+    from product p
+    join category c on c.id = p.category_id
+    join product_variant v on v.product_id = p.id
+    where p.category_id = ${categoryId}
+      and c.is_active and p.is_active and v.is_active and v.price_vnd > 0
+      ${catalogVisibilitySql(audience)}
+      and ${SELLABLE_ROUTE_SQL}
+  `.execute(exec);
+  const total = countResult.rows[0]?.n ?? 0;
+  return {
+    category,
+    parent,
+    children: [],
+    products,
+    featured,
+    page: safePage,
+    totalPages: Math.max(1, Math.ceil(total / pageSize)),
+    pageSize,
+  };
+}
+
+export interface ProductDetailView {
+  id: string;
+  name_vi: string;
+  slug: string;
+  short_description_vi: string | null;
+  description_vi: string | null;
+  what_customer_receives_vi: string | null;
+  usage_instructions_vi: string | null;
+  delivery_eta_vi: string | null;
+  warranty_vi: string | null;
+  support_vi: string | null;
+  category_id: string;
+  category_name: string;
+  parent_category_id: string | null;
+  parent_category_name: string | null;
+  stock_display_mode: "BAND" | "EXACT" | null;
+  variants: CatalogVariantRow[];
+}
+
+export async function getProductDetail(
+  exec: Executor,
+  productId: string,
+  audience: CatalogAudience = "public",
+): Promise<ProductDetailView | null> {
+  const result = await sql<{
+    id: string;
+    name_vi: string;
+    slug: string;
+    short_description_vi: string | null;
+    description_vi: string | null;
+    what_customer_receives_vi: string | null;
+    usage_instructions_vi: string | null;
+    delivery_eta_vi: string | null;
+    warranty_vi: string | null;
+    support_vi: string | null;
+    category_id: string;
+    category_name: string;
+    parent_category_id: string | null;
+    parent_category_name: string | null;
+    stock_display_mode: "BAND" | "EXACT" | null;
+  }>`
+    select p.id, p.name_vi, p.slug, p.short_description_vi, p.description_vi,
+      p.what_customer_receives_vi, p.usage_instructions_vi, p.delivery_eta_vi,
+      p.warranty_vi, p.support_vi, p.category_id, c.name_vi as category_name,
+      c.parent_id as parent_category_id, parent.name_vi as parent_category_name,
+      p.stock_display_mode
+    from product p
+    join category c on c.id = p.category_id
+    left join category parent on parent.id = c.parent_id
+    join product_variant v on v.product_id = p.id
+    where p.id = ${productId}
+      and c.is_active and p.is_active
+      ${catalogVisibilitySql(audience)}
+    limit 1
+  `.execute(exec);
+  const product = result.rows[0];
+  if (!product) return null;
+  const variants = await listSellableVariants(exec, { limit: 24, productId, audience });
+  if (variants.items.length === 0) return null;
+  return { ...product, variants: variants.items };
+}
+
+async function assertValidParent(
+  exec: Executor,
+  id: string | null,
+  newParentId: string,
+): Promise<void> {
+  if (id && id === newParentId) throw new Error("SELF");
+  const parent = await sql<{ id: string; parent_id: string | null }>`
+    select id, parent_id from category where id = ${newParentId} limit 1
+  `.execute(exec);
+  if (!parent.rows[0]) throw new Error("INVALID_PARENT");
+  if (parent.rows[0].parent_id) throw new Error("DEPTH");
+  if (id) {
+    const children = await sql<{ id: string }>`
+      select id from category where parent_id = ${id} limit 1
+    `.execute(exec);
+    if (children.rows[0]) throw new Error("DEPTH");
+    let cursor: string | null = newParentId;
+    for (let hop = 0; hop < 8 && cursor; hop++) {
+      if (cursor === id) throw new Error("CYCLE");
+      const row = await sql<{ parent_id: string | null }>`
+        select parent_id from category where id = ${cursor} limit 1
+      `.execute(exec);
+      cursor = row.rows[0]?.parent_id ?? null;
+    }
+  }
+}
+
+export async function moveCategory(
+  exec: Executor,
+  id: string,
+  newParentId: string | null,
+): Promise<void> {
+  if (newParentId) await assertValidParent(exec, id, newParentId);
+  await sql`update category set parent_id = ${newParentId}, updated_at = now(), version = version + 1 where id = ${id}`.execute(
+    exec,
+  );
+}
+
+export async function setProductFeatured(
+  exec: Executor,
+  productId: string,
+  featured: boolean,
+  rank?: number | null,
+): Promise<void> {
+  await sql`
+    update product
+    set is_featured = ${featured},
+        featured_rank = ${featured ? (rank ?? 0) : null},
+        updated_at = now(),
+        version = version + 1
+    where id = ${productId}
+  `.execute(exec);
 }

@@ -3,6 +3,11 @@ import type { Db } from "../../infrastructure/db/transaction.js";
 import { ensureTelegramIdentity } from "../identity/channel-identity.js";
 import { verifyTelegramMiniAppInitData } from "../digital-goods/delivery-route.js";
 import { searchCatalog } from "../catalog/search.js";
+import {
+  listFeaturedProducts,
+  listPublicRootCategories,
+} from "../catalog/repository.js";
+import { SHOP_NAME } from "../catalog/shop-profile.js";
 import { resolveCatalogAudience } from "../catalog/visibility.js";
 import { buyNow } from "../commerce/buy-now.js";
 import { createWalletPurchaseService } from "../wallet/purchase.js";
@@ -176,7 +181,7 @@ load();
 function shell(path: string): string {
   const safePath = JSON.stringify(path);
   const appJs = JSON.stringify(`${path}/app.js`);
-  return `<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Cửa hàng</title><style>${STYLE}</style><script src="https://telegram.org/js/telegram-web-app.js"></script><script src=${appJs} defer></script></head><body data-api-base=${safePath}><header><h1>Cửa hàng</h1><button id="account">Tài khoản</button></header><main><label for="search">Tìm sản phẩm</label><input id="search" autocomplete="off" placeholder="Nhập tên sản phẩm"><section id="status" class="muted" aria-live="polite">Đang tải…</section><section id="products"></section></main></body></html>`;
+  return `<!doctype html><html lang="vi"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TIER20 SHOP</title><style>${STYLE}</style><script src="https://telegram.org/js/telegram-web-app.js"></script><script src=${appJs} defer></script></head><body data-api-base=${safePath}><header><h1>TIER20 SHOP</h1><button id="account">Tài khoản</button></header><main><label for="search">Tìm sản phẩm</label><input id="search" autocomplete="off" placeholder="Nhập tên sản phẩm"><section id="status" class="muted" aria-live="polite">Đang tải…</section><section id="products"></section></main></body></html>`;
 }
 
 function setHeaders(reply: { header(name: string, value: string): unknown }): void {
@@ -287,7 +292,25 @@ export async function registerMiniApp(
         { query: typeof query.q === "string" ? query.q : undefined },
         searchOptions,
       );
-      return reply.send({ items: page.items.map(presentVariant), nextCursor: page.nextCursor });
+      const [categories, featured] = await Promise.all([
+        listPublicRootCategories(options.db, audience),
+        listFeaturedProducts(options.db, audience, 3),
+      ]);
+      return reply.send({
+        shopName: SHOP_NAME,
+        categories: categories.map((category) => ({
+          id: category.id,
+          nameVi: category.display_name_vi || category.name_vi,
+          icon: category.icon,
+        })),
+        featured: featured.map((product) => ({
+          id: product.id,
+          nameVi: product.name_vi,
+          minPriceVnd: product.min_price_vnd,
+        })),
+        items: page.items.map(presentVariant),
+        nextCursor: page.nextCursor,
+      });
     } catch {
       return reply.code(400).send({ ok: false, error: "invalid_request" });
     }

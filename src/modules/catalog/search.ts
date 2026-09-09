@@ -126,6 +126,8 @@ export async function searchCatalog(
             @@ to_tsquery('simple', ${prefixTsQuery})
           or to_tsvector('simple', translate(lower(c.name_vi), ${FOLD_FROM}, ${FOLD_TO}))
             @@ to_tsquery('simple', ${prefixTsQuery})
+          or to_tsvector('simple', translate(lower(coalesce(parent.name_vi, '')), ${FOLD_FROM}, ${FOLD_TO}))
+            @@ to_tsquery('simple', ${prefixTsQuery})
           or exists (
             select 1 from product_alias a
             where a.product_id = p.id
@@ -176,6 +178,7 @@ export async function searchCatalog(
     from product_variant v
     join product p on p.id = v.product_id
     join category c on c.id = p.category_id
+    left join category parent on parent.id = c.parent_id
     left join variant_quantity_stock q on q.variant_id = v.id
     where c.is_active
       and p.is_active

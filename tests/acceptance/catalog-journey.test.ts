@@ -57,7 +57,7 @@ beforeEach(async () => {
 describe("catalog journey (US1)", () => {
   it("presents a retail-only main menu (FR-001)", async () => {
     const menu = await callbacks.mainMenu();
-    expect(menu.text).toContain("SHOP DIGITAL");
+    expect(menu.text).toContain("TIER20 SHOP");
     const labels = menu.buttons.flat().map((b) => b.text.toLowerCase());
     // Retail-only: no wallet/top-up/reseller/api/supplier/admin controls.
     for (const forbidden of ["ví", "nạp", "đại lý", "api", "admin", "supplier"]) {
@@ -75,10 +75,10 @@ describe("catalog journey (US1)", () => {
   it("browses a category to sellable variants, hiding the unauthorized SKU (FR-002/SR-007)", async () => {
     const categories = await callbacks.listCategoryIds();
     const first = categories[0]!;
-    const variants = await callbacks.categoryView(first);
-    expect(variants.buttons.length).toBeGreaterThan(0);
-    // The unauthorized SKU name must never appear.
-    expect(variants.text).not.toContain("Chưa được phép");
+    const page = await callbacks.categoryView(first);
+    expect(page.buttons.length).toBeGreaterThan(0);
+    expect(page.text).not.toContain("Chưa được phép");
+    expect(page.text.toLowerCase()).not.toContain("tài khoản");
   });
 
   it("opens a product detail showing all FR-003 authoritative fields", async () => {
@@ -93,18 +93,14 @@ describe("catalog journey (US1)", () => {
   });
 
   it("reaches Buy Now within 4 deliberate actions (SC-002)", async () => {
-    // 1: open menu
     const menu = await callbacks.mainMenu();
     expect(menu).toBeTruthy();
-    // 2: browse categories -> pick first
     const categories = await callbacks.listCategoryIds();
-    // 3: view category -> variant list
     const list = await callbacks.categoryView(categories[0]!);
-    const variantBtn = list.buttons.flat().find((b) => b.callbackData.startsWith("var:view:"));
-    expect(variantBtn).toBeTruthy();
-    const variantId = variantBtn!.callbackData.split(":")[2]!;
-    // 4: open detail -> Buy Now present
-    const detail = await callbacks.variantDetail(variantId, TELEGRAM_USER_ID);
+    const productBtn = list.buttons.flat().find((b) => b.callbackData.startsWith("shop:product:"));
+    expect(productBtn).toBeTruthy();
+    const productId = productBtn!.callbackData.split(":")[2]!;
+    const detail = await callbacks.productDetail(productId, TELEGRAM_USER_ID);
     const buyBtn = detail.buttons.flat().find((b) => b.callbackData.startsWith("buy:"));
     expect(buyBtn).toBeTruthy();
   });

@@ -73,6 +73,7 @@ async function parseLegacyCallback(
     "cat:search": "SEARCH_PROMPT",
     "ord:list": "ORDER_LIST",
     "sup:open": "SUPPORT_MENU",
+    "supp:open": "SUPPORT_MENU",
     "shop:home": "SHOP_HOME",
     "shop:open": "SHOP_OPEN",
     "cust:notify": "CUSTOMER_NOTIFICATIONS",
@@ -80,8 +81,17 @@ async function parseLegacyCallback(
   };
   if (noResource[value]) return { action: noResource[value] };
 
+  if (value.startsWith("cat:view:")) {
+    const rest = value.slice("cat:view:".length);
+    const [categoryId, page] = rest.split(":");
+    if (!categoryId || !/^[0-9A-Z]{26}$/.test(categoryId)) return null;
+    const option = page && /^\d{1,6}$/.test(page) ? Number(page) : undefined;
+    return option === undefined
+      ? { action: "CATEGORY_VIEW", resourceId: categoryId }
+      : { action: "CATEGORY_VIEW", resourceId: categoryId, option };
+  }
+
   for (const [prefix, action] of [
-    ["cat:view:", "CATEGORY_VIEW"],
     ["var:view:", "VARIANT_VIEW"],
     ["sup:view:", "SUPPORT_TICKET_VIEW"],
     ["rst:sub:", "RESTOCK_SUBSCRIBE"],

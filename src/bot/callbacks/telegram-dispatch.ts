@@ -112,6 +112,14 @@ export interface TelegramDomainDispatcherDeps {
       identity?:
         { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
     ): Promise<PresentedMessage>;
+    openStartPayload?(
+      payload: string,
+      input: {
+        actorName: string;
+        telegramUserId: string;
+        isRootAdmin?: boolean;
+      },
+    ): Promise<PresentedMessage>;
   };
   checkout: Pick<CheckoutCallbacks, "buyNowFromCallback" | "refresh" | "reopen" | "cancel">;
   history: {
@@ -710,6 +718,7 @@ export interface TelegramDomainDispatcherDeps {
     ): Promise<PresentedMessage>;
   };
   responder: {
+    ack?(callbackQueryId: string): Promise<void>;
     send(input: {
       chatId: string;
       messageId: string | null;
@@ -717,6 +726,11 @@ export interface TelegramDomainDispatcherDeps {
       message: PresentedMessage;
     }): Promise<void>;
   };
+  observeCallback?: (event: {
+    ackMs: number | null;
+    renderMs: number;
+    action: string;
+  }) => void;
 }
 
 export interface TelegramActionContext {
@@ -737,10 +751,54 @@ export function createTelegramDomainDispatcher(
   return {
     async handle(envelope) {
       if (envelope.chatType !== "private") return;
+      const startedAt = Date.now();
       const correlationId = `telegram:${envelope.messageId ?? envelope.actorUserId}`;
       const command = normalizeTelegramCommand(envelope.command);
       let message: PresentedMessage;
       const ctx = actionContext(envelope, correlationId);
+      let acked = false;
+      let ackMs: number | null = null;
+      const ackIfNeeded = async () => {
+        if (acked || !envelope.callbackQueryId || !deps.responder.ack) return;
+        await deps.responder.ack(envelope.callbackQueryId);
+        acked = true;
+        ackMs = Date.now() - startedAt;
+      };
+
+      if (envelope.callbackData?.startsWith("cb:")) {
+        const verified = deps.codec.verify(envelope.callbackData, {
+          telegramUserId: envelope.actorUserId,
+        });
+        await ackIfNeeded();
+        if (!verified.ok) {
+          const home = await shopHome(deps, envelope);
+          message = {
+            text: `Phiên này đã cũ. Đã tải lại danh mục mới nhất.\n\n${home.text}`,
+            buttons: home.buttons,
+            ...(home.replyKeyboard ? { replyKeyboard: home.replyKeyboard } : {}),
+          };
+        } else {
+          message = await dispatchVerified(deps, envelope, verified.value, correlationId);
+        }
+        const sealedEarly = await sealPresentedMessageCallbacks(message, {
+          codec: deps.codec,
+          telegramUserId: envelope.actorUserId,
+          resolveOrderId: deps.resolveOrderIdByNumber,
+        });
+        await deps.responder.send({
+          chatId: envelope.chatId,
+          messageId: envelope.messageId,
+          message: sealedEarly,
+        });
+        deps.observeCallback?.({
+          ackMs,
+          renderMs: Date.now() - startedAt,
+          action: verified.ok ? verified.value.action : "STALE",
+        });
+        return;
+      }
+
+      await ackIfNeeded();
 
       if (envelope.callbackData?.startsWith("buy:")) {
         message = await deps.checkout.buyNowFromCallback({
@@ -1685,14 +1743,24 @@ export function createTelegramDomainDispatcher(
         if (envelope.searchQuery) {
           const q = envelope.searchQuery.trim();
           if (q.startsWith("product_") || q.startsWith("prod_")) {
-            const prodId = q.replace(/^prod(uct)?_/u, "");
-            message = deps.catalog.productDetail
-              ? await deps.catalog.productDetail(
-                  prodId,
-                  envelope.actorUserId,
-                  catalogActorIdentity(deps, envelope.actorUserId),
-                )
-              : await deps.catalog.mainMenu();
+            message = deps.catalog.openStartPayload
+              ? await deps.catalog.openStartPayload(q, {
+                  actorName: envelope.firstName ?? envelope.actorUsername ?? "bạn",
+                  telegramUserId: envelope.actorUserId,
+                  isRootAdmin:
+                    deps.adminRootUserId !== undefined &&
+                    Number(envelope.actorUserId) === deps.adminRootUserId,
+                })
+              : deps.catalog.storefront
+                ? await deps.catalog.storefront({
+                    actorName: envelope.firstName ?? envelope.actorUsername ?? "bạn",
+                    telegramUserId: envelope.actorUserId,
+                    offset: 0,
+                    isRootAdmin:
+                      deps.adminRootUserId !== undefined &&
+                      Number(envelope.actorUserId) === deps.adminRootUserId,
+                  })
+                : presentCustomerHome();
           } else if (q.startsWith("order_") || q.startsWith("ord_")) {
             const orderNum = q.replace(/^ord(er)?_/u, "");
             const customerId = await deps.resolveCustomerId(envelope.actorUserId);
@@ -1959,9 +2027,16 @@ export function createTelegramDomainDispatcher(
       await deps.responder.send({
         chatId: envelope.chatId,
         messageId: envelope.messageId,
-        ...(envelope.callbackQueryId ? { callbackQueryId: envelope.callbackQueryId } : {}),
+        ...(envelope.callbackQueryId && !acked ? { callbackQueryId: envelope.callbackQueryId } : {}),
         message: sealed,
       });
+      if (envelope.callbackQueryId) {
+        deps.observeCallback?.({
+          ackMs,
+          renderMs: Date.now() - startedAt,
+          action: envelope.callbackData?.split(":")[0] ?? "callback",
+        });
+      }
     },
   };
 }
@@ -2045,7 +2120,7 @@ async function dispatchVerified(
       if (!token.resourceId) return deps.catalog.categoryList();
       return deps.catalog.categoryView(
         token.resourceId,
-        undefined,
+        token.option != null ? String(token.option) : undefined,
         catalogActorIdentity(deps, envelope.actorUserId),
       );
     }

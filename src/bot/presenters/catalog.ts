@@ -1,7 +1,14 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
-import type { CatalogCategoryRow, CatalogVariantRow } from "../../modules/catalog/repository.js";
+import type {
+  CatalogCategoryRow,
+  CatalogVariantRow,
+  PublicCategoryPage,
+  ProductDetailView,
+  StorefrontProductSummary,
+} from "../../modules/catalog/repository.js";
 import type { StockOutcomeCode } from "../../modules/commerce/buy-now.js";
 import { isSupportedCatalogRoute } from "../../modules/catalog/domain.js";
+import { ADMIN_CONTACT_URL, SHOP_NAME } from "../../modules/catalog/shop-profile.js";
 
 /**
  * Authoritative product-card presenters + Vietnamese state/error copy (FR-001–FR-003,
@@ -13,7 +20,7 @@ import { isSupportedCatalogRoute } from "../../modules/catalog/domain.js";
  */
 
 export const CATALOG_COPY = {
-  mainMenuTitle: "🛒 SHOP DIGITAL",
+  mainMenuTitle: `🛒 ${SHOP_NAME}`,
   browse: "🛍 Danh sách sản phẩm",
   search: "🔍 Tìm sản phẩm",
   orders: "📦 Đơn hàng",
@@ -22,11 +29,13 @@ export const CATALOG_COPY = {
   mainMenu: "Menu chính",
   buyNow: "Mua ngay",
   emptyCatalog: "Hiện chưa có sản phẩm nào đang bán.",
+  emptyCategory: "Hiện chưa có sản phẩm trong mục này.",
   emptySearch: "Không tìm thấy sản phẩm phù hợp. Thử từ khóa khác nhé.",
   rateLimited: "Bạn thao tác hơi nhanh. Vui lòng thử lại sau giây lát.",
   genericError: "Có lỗi xảy ra. Vui lòng thử lại hoặc liên hệ hỗ trợ.",
   viewAlternatives: "🔎 Xem sản phẩm khác",
   restockSubscribe: "🔔 Báo khi có hàng",
+  contactAdmin: "👨‍💻 Liên hệ Admin",
 } as const;
 
 export interface InlineButton {
@@ -75,6 +84,17 @@ const STOCK_OUTCOME_COPY: Readonly<Record<StockOutcomeCode, string>> = Object.fr
     "Đang có nhiều người đặt sản phẩm này. Vui lòng thử lại sau vài giây. Bạn chưa bị trừ tiền và chưa có phiên thanh toán.",
 });
 
+function adminContactButton(): InlineButton {
+  return { text: CATALOG_COPY.contactAdmin, url: ADMIN_CONTACT_URL, callbackData: "" };
+}
+
+function navHome(): InlineButton[][] {
+  return [
+    [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
+    [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+  ];
+}
+
 /** Main retail menu (FR-001). No wallet/top-up/reseller/admin controls. */
 export function presentMainMenu(): PresentedMessage {
   return {
@@ -103,6 +123,115 @@ export function presentCategoryList(categories: CatalogCategoryRow[]): Presented
   ]);
   buttons.push([{ text: CATALOG_COPY.mainMenu, callbackData: "menu:main" }]);
   return { text: "Chọn danh mục:", buttons };
+}
+
+export function presentCategoryPage(page: PublicCategoryPage): PresentedMessage {
+  const title = page.category.display_name_vi || page.category.name_vi;
+  const hasItems = page.children.length > 0 || page.products.length > 0 || page.featured.length > 0;
+  const lines = [`🛒 ${SHOP_NAME}`, title];
+  const buttons: InlineButton[][] = [];
+  if (!hasItems) {
+    lines.push("", CATALOG_COPY.emptyCategory);
+  }
+  if (page.featured.length > 0 && page.children.length > 0) {
+    lines.push("", "🔥 Nổi bật");
+    for (const product of page.featured) {
+      buttons.push([
+        {
+          text: `🔥 ${product.name_vi}`,
+          callbackData: `shop:product:${product.id}`,
+        },
+      ]);
+    }
+  }
+  for (let i = 0; i < page.children.length; i += 2) {
+    buttons.push(
+      page.children.slice(i, i + 2).map((child) => ({
+        text: child.display_name_vi || child.name_vi,
+        callbackData: `cat:view:${child.id}`,
+      })),
+    );
+  }
+  for (const product of page.products) {
+    const price = formatVnd(makeVnd(BigInt(product.min_price_vnd)));
+    buttons.push([
+      {
+        text: `${product.name_vi} · ${price}`,
+        callbackData: `shop:product:${product.id}`,
+      },
+    ]);
+  }
+  if (page.totalPages > 1) {
+    const nav: InlineButton[] = [];
+    if (page.page > 0) {
+      nav.push({
+        text: "‹ Trước",
+        callbackData: `cat:view:${page.category.id}:${page.page - 1}`,
+      });
+    }
+    if (page.page + 1 < page.totalPages) {
+      nav.push({
+        text: "Trang sau ›",
+        callbackData: `cat:view:${page.category.id}:${page.page + 1}`,
+      });
+    }
+    if (nav.length) buttons.push(nav);
+  }
+  const back = page.parent
+    ? {
+        text: `⬅️ ${page.parent.display_name_vi || page.parent.name_vi}`,
+        callbackData: `cat:view:${page.parent.id}`,
+      }
+    : { text: "⬅️ Trang chủ", callbackData: "shop:home" };
+  buttons.push([back]);
+  buttons.push(...navHome());
+  return { text: lines.join("\n"), buttons };
+}
+
+export function presentProductDetail(
+  detail: ProductDetailView,
+  buyNowByVariantId: Record<string, string | undefined>,
+): PresentedMessage {
+  const lines = [`📦 ${detail.name_vi}`];
+  if (detail.short_description_vi) lines.push(detail.short_description_vi);
+  if (detail.description_vi) lines.push("", detail.description_vi);
+  if (detail.what_customer_receives_vi) {
+    lines.push("", "📦 Bạn nhận được:", ...bulletLines(detail.what_customer_receives_vi));
+  }
+  if (detail.usage_instructions_vi) lines.push("", `📘 ${detail.usage_instructions_vi}`);
+  if (detail.warranty_vi) lines.push(`🛡 ${detail.warranty_vi}`);
+  lines.push("", "Chọn thời hạn:");
+  const buttons: InlineButton[][] = [];
+  for (const variant of detail.variants) {
+    const price = formatVnd(makeVnd(BigInt(variant.price_vnd)));
+    const buyNow = buyNowByVariantId[variant.id];
+    const canBuy =
+      variant.is_ready &&
+      Boolean(buyNow) &&
+      isSupportedCatalogRoute({
+        stockPolicy: variant.stock_policy,
+        fulfillmentType: variant.fulfillment_type,
+      });
+    if (canBuy && buyNow) {
+      buttons.push([{ text: `🛒 ${variant.name_vi} · ${price}`, callbackData: buyNow }]);
+    } else {
+      buttons.push([
+        {
+          text: `${variant.is_ready ? "" : "🔴 "}${variant.name_vi} · ${price}`,
+          callbackData: `var:view:${variant.id}`,
+        },
+      ]);
+    }
+  }
+  buttons.push([{ text: "💬 Hỗ trợ", callbackData: "supp:open" }, adminContactButton()]);
+  buttons.push([
+    {
+      text: `⬅️ ${detail.category_name}`,
+      callbackData: `cat:view:${detail.category_id}`,
+    },
+  ]);
+  buttons.push([{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]);
+  return { text: lines.join("\n"), buttons };
 }
 
 /** Paginated sellable variant cards. */
@@ -152,21 +281,13 @@ export function presentVariantDetail(
   restockSubscribeCallbackData = `rst:sub:${variant.id}`,
   preorderCallbackData?: string,
 ): PresentedMessage {
-  const commercial = variant as CatalogVariantRow & {
-    description_vi?: string | null;
-    what_customer_receives_vi?: string | null;
-    usage_instructions_vi?: string | null;
-    delivery_eta_vi?: string | null;
-    warranty_vi?: string | null;
-    compare_at_price_vnd?: string | bigint | null;
-  };
   const price = formatVnd(makeVnd(BigInt(variant.price_vnd)));
   const compareAt =
-    commercial.compare_at_price_vnd == null
+    variant.compare_at_price_vnd == null
       ? null
-      : formatVnd(makeVnd(BigInt(commercial.compare_at_price_vnd)));
+      : formatVnd(makeVnd(BigInt(variant.compare_at_price_vnd)));
   const fulfillment = fulfillmentLabel(variant.fulfillment_type);
-  const eta = commercial.delivery_eta_vi ?? deliveryEtaFallback(variant.fulfillment_type);
+  const eta = variant.delivery_eta_vi ?? deliveryEtaFallback(variant.fulfillment_type);
   const stock = stockLabel(variant);
   const textLines = [
     `📦 ${variant.product_name_vi}`,
@@ -175,13 +296,13 @@ export function presentVariantDetail(
     `📦 Tồn kho: ${stock}`,
     `⚡ Giao tự động: ${eta}`,
   ];
-  if (commercial.description_vi) textLines.push(`📝 Mô tả: ${commercial.description_vi}`);
-  if (commercial.what_customer_receives_vi) {
-    textLines.push("📦 Bạn nhận được:", ...bulletLines(commercial.what_customer_receives_vi));
+  if (variant.description_vi) textLines.push(`📝 Mô tả: ${variant.description_vi}`);
+  if (variant.what_customer_receives_vi) {
+    textLines.push("📦 Bạn nhận được:", ...bulletLines(variant.what_customer_receives_vi));
   }
-  if (commercial.usage_instructions_vi)
-    textLines.push(`📘 Hướng dẫn: ${commercial.usage_instructions_vi}`);
-  if (commercial.warranty_vi) textLines.push(`🛡 Bảo hành: ${commercial.warranty_vi}`);
+  if (variant.usage_instructions_vi)
+    textLines.push(`📘 Hướng dẫn: ${variant.usage_instructions_vi}`);
+  if (variant.warranty_vi) textLines.push(`🛡 Bảo hành: ${variant.warranty_vi}`);
   textLines.push(`Thời hạn: ${variant.duration_code ?? "—"}`, `Loại giao: ${fulfillment}`);
 
   const buttons: InlineButton[][] = [];
@@ -205,10 +326,13 @@ export function presentVariantDetail(
     });
     buttons.push(actionRow);
   }
-  buttons.push(
-    [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
-    [{ text: `⬅️ ${CATALOG_COPY.back}`, callbackData: "cat:list" }],
-  );
+  buttons.push([{ text: "💬 Hỗ trợ", callbackData: "supp:open" }, adminContactButton()]);
+  buttons.push([
+    {
+      text: `⬅️ ${CATALOG_COPY.back}`,
+      callbackData: variant.category_id ? `cat:view:${variant.category_id}` : "shop:home",
+    },
+  ]);
   return { text: textLines.join("\n"), buttons };
 }
 
@@ -302,18 +426,21 @@ function stockLabel(variant: CatalogVariantRow): string {
   if (variant.fulfillment_type === "UNLIMITED_SERVICE") return "Không giới hạn";
   if (variant.fulfillment_type === "MANUAL_FULFILLMENT") return "Xử lý thủ công";
   if (variant.fulfillment_type === "QUANTITY_STOCK") return `${variant.available_quantity ?? 0}`;
+  if (variant.stock_display_mode === "EXACT" && variant.available_quantity != null) {
+    return String(variant.available_quantity);
+  }
+  if (!variant.is_ready) return "🔴 Hết hàng";
+  if (variant.available_quantity != null && variant.available_quantity <= 2) return "🟡 Sắp hết";
   switch (variant.stock_policy) {
-    case "LOCAL_ONLY":
-      return variant.is_ready ? "Đang có hàng" : "Hết hàng";
     case "SUPPLIER_ONLY":
-      return variant.fulfillment_type === "SUPPLIER_API" && variant.is_ready
-        ? "Nhà cung cấp"
+      return variant.fulfillment_type === "SUPPLIER_API"
+        ? "🟢 Còn hàng"
         : "Chưa mở bán (nhà cung cấp)";
-    case "LOCAL_THEN_SUPPLIER":
-      return variant.is_ready ? "Đang có hàng" : "Hết hàng";
     case "PAUSED":
       return "Tạm dừng";
     default:
-      return "Chưa rõ";
+      return "🟢 Còn hàng";
   }
 }
+
+export type { StorefrontProductSummary };
