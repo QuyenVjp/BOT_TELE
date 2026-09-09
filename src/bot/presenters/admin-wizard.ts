@@ -141,7 +141,7 @@ export function presentWizardDeliveryStep(draft: ProductDraft): PresentedMessage
     };
   if (type === "SUPPLIER_API")
     return {
-      text: `${intro}\n\nNhập cấu hình nhà cung cấp đã ACTIVE:\nsupplierId | externalSku | costVnd | region`,
+      text: `${intro}\n\n🔌 CẤU HÌNH NHÀ CUNG CẤP / ĐỐI TÁC\nNhập thông tin kết nối API theo định dạng:\nTên đối tác | Mã gói đối tác | Giá vốn | Khu vực\nVí dụ: NCC_A | PRO_1M | 50000 | VN\n\n(Lưu ý: Chỉ áp dụng với nhà cung cấp đã được kích hoạt trong hệ thống)`,
       buttons: BACK_CANCEL,
     };
 

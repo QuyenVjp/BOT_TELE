@@ -192,15 +192,43 @@ export function presentProductDetail(
   detail: ProductDetailView,
   buyNowByVariantId: Record<string, string | undefined>,
 ): PresentedMessage {
-  const lines = [`📦 ${detail.name_vi}`];
-  if (detail.short_description_vi) lines.push(detail.short_description_vi);
-  if (detail.description_vi) lines.push("", detail.description_vi);
-  if (detail.what_customer_receives_vi) {
-    lines.push("", "📦 Bạn nhận được:", ...bulletLines(detail.what_customer_receives_vi));
+  const prices = detail.variants.map((v) => BigInt(v.price_vnd)).filter((p) => p > 0n);
+  const minPrice = prices.length ? prices.reduce((a, b) => (a < b ? a : b)) : null;
+  const anyReady = detail.variants.some((v) => v.is_ready);
+  const totalQty = detail.variants.reduce(
+    (sum, v) => sum + (v.available_quantity ?? (v.is_ready ? 1 : 0)),
+    0,
+  );
+  const stockState = anyReady
+    ? totalQty > 0 && totalQty <= 3
+      ? "🟡 Sắp hết hàng"
+      : "🟢 Còn hàng"
+    : "🔴 Tạm hết hàng";
+
+  const lines = [
+    `📦 ${detail.name_vi}`,
+    ...(detail.short_description_vi ? [detail.short_description_vi] : []),
+    "",
+    ...(minPrice != null ? [`💰 Giá: từ ${formatVnd(makeVnd(minPrice))}`] : []),
+    `Tình trạng: ${stockState}`,
+    "⚡ Giao hàng: Tự động",
+    `⏱ Dự kiến: ${detail.delivery_eta_vi || "vài giây sau khi thanh toán"}`,
+  ];
+
+  if (detail.description_vi) {
+    lines.push("", "📝 MÔ TẢ", detail.description_vi);
   }
-  if (detail.usage_instructions_vi) lines.push("", `📘 ${detail.usage_instructions_vi}`);
-  if (detail.warranty_vi) lines.push(`🛡 ${detail.warranty_vi}`);
-  lines.push("", "Chọn thời hạn:");
+  if (detail.what_customer_receives_vi) {
+    lines.push("", "📦 BẠN NHẬN ĐƯỢC:", ...bulletLines(detail.what_customer_receives_vi));
+  }
+  if (detail.usage_instructions_vi) {
+    lines.push("", "📘 HƯỚNG DẪN SỬ DỤNG:", ...bulletLines(detail.usage_instructions_vi));
+  }
+  if (detail.warranty_vi) {
+    lines.push("", `🛡 BẢO HÀNH:\n${detail.warranty_vi}`);
+  }
+
+  lines.push("", "Chọn gói thời hạn:");
   const buttons: InlineButton[][] = [];
   for (const variant of detail.variants) {
     const price = formatVnd(makeVnd(BigInt(variant.price_vnd)));
@@ -217,8 +245,8 @@ export function presentProductDetail(
     } else {
       buttons.push([
         {
-          text: `${variant.is_ready ? "" : "🔴 "}${variant.name_vi} · ${price}`,
-          callbackData: `var:view:${variant.id}`,
+          text: `🔔 ${variant.name_vi} · Báo khi có hàng`,
+          callbackData: `rst:sub:${variant.id}`,
         },
       ]);
     }
