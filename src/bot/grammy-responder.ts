@@ -165,7 +165,12 @@ function buildReplyMarkup(message: PresentedMessage): SendReplyMarkup {
     }
     inline.row();
   }
-  return message.replyKeyboard ? buildReplyKeyboard(message.replyKeyboard) : inline;
+  // Telegram allows only one reply_markup. Catalog /start and shop home carry both
+  // inline URL buttons and a persistent reply keyboard — prefer the inline keyboard
+  // or community/admin URL buttons never reach the customer.
+  if (message.buttons.length > 0) return inline;
+  if (message.replyKeyboard) return buildReplyKeyboard(message.replyKeyboard);
+  return inline;
 }
 
 function buildEditReplyMarkup(replyMarkup: SendReplyMarkup): EditReplyMarkup {

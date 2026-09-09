@@ -4,7 +4,9 @@ import { presentAdminMenu } from "../../src/bot/presenters/admin.js";
 import {
   presentCustomerAccountPrompt,
   presentCustomerHome,
+  presentStorefront,
 } from "../../src/bot/presenters/customer.js";
+import { ADMIN_CONTACT_URL, COMMUNITY_URL } from "../../src/modules/catalog/shop-profile.js";
 
 const BOT_TOKEN = ["1234567890", "test-token-value-for-grammy-responder"].join(":");
 
@@ -75,14 +77,54 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(options.reply_markup?.is_persistent).toBe(true);
     expect(options.reply_markup?.resize_keyboard).toBe(true);
     expect(options.reply_markup?.keyboard?.flat().map((button) => button.text)).toEqual(
-      expect.arrayContaining([
-        "🛒 Mua hàng",
-        "👤 Tài khoản",
-        "🧾 Đơn hàng",
-        "🛟 Hỗ trợ",
-        "🌐 Mở cửa hàng",
-      ]),
+      expect.arrayContaining(["🛒 Mua hàng", "👤 Tài khoản", "🧾 Đơn hàng", "💰 Nạp ví"]),
     );
+  });
+
+  it("keeps /start URL buttons when storefront also has a reply keyboard", async () => {
+    const calls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return { message_id: 4 };
+      }),
+      editMessageText: vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return true;
+      }),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const message = presentStorefront({ actorName: "An", isRootAdmin: false });
+
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message,
+    });
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: "42",
+      message,
+    });
+
+    const sendOptions = calls[0]?.at(-1) as {
+      reply_markup?: { inline_keyboard?: Array<Array<{ text: string; url?: string }>> };
+    };
+    const editOptions = calls[1]?.at(-1) as {
+      reply_markup?: { inline_keyboard?: Array<Array<{ text: string; url?: string }>> };
+    };
+    for (const options of [sendOptions, editOptions]) {
+      const buttons = options.reply_markup?.inline_keyboard?.flat() ?? [];
+      expect(buttons.find((button) => button.text.includes("AI Codex Việt Nam"))?.url).toBe(
+        COMMUNITY_URL,
+      );
+      expect(buttons.find((button) => button.text.includes("Liên hệ Admin"))?.url).toBe(
+        ADMIN_CONTACT_URL,
+      );
+      expect(buttons.every((button) => !button.url || !("callback_data" in button))).toBe(true);
+    }
   });
 
   it("renders contact-request reply keyboard for the account screen", async () => {
