@@ -17,6 +17,7 @@ import {
 } from "../digital-goods/repository.js";
 import type { TypedStockKind } from "../digital-goods/repository.js";
 import { isSupportedCatalogRoute } from "../catalog/domain.js";
+import { canPurchase } from "./store-mode.js";
 
 /**
  * BuyNow command (FR-006, FR-007, FR-008, FR-010).
@@ -43,6 +44,7 @@ export type BuyNowErrorCode =
   | "ALREADY_PAID"
   | "ORDER_NOT_CANCELLABLE"
   | "STORE_CLOSED"
+  | "STORE_TEST_ONLY"
   | "NOT_FOUND";
 
 /**
@@ -75,6 +77,8 @@ export interface BuyNowInput {
   correlationId: string;
   /** Payment intent TTL in seconds (default 900). */
   ttlSeconds?: number;
+  telegramUserId?: string;
+  isRootAdmin?: boolean;
   /** Admin explicit test bypass. */
   skipStoreStatusCheck?: boolean;
 }
@@ -91,6 +95,7 @@ interface LiveVariant {
   stock_policy: string;
   resale_evidence_id: string | null;
   fulfillment_type: TypedStockKind;
+  is_test: boolean;
   is_active: boolean;
   product_active: boolean;
   category_active: boolean;
@@ -117,30 +122,22 @@ async function loadLiveVariant(
   variantId: string,
   lockRows = false,
 ): Promise<LiveVariant | null> {
-  const result = lockRows
-    ? await sql<LiveVariant>`
-        select
-          v.id, v.product_id, p.name_vi as product_name_vi, v.name_vi,
-          v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
-          v.stock_policy, v.fulfillment_type, v.resale_evidence_id, v.is_active,
-          p.is_active as product_active, c.is_active as category_active
-        from product_variant v
-        join product p on p.id = v.product_id
-        join category c on c.id = p.category_id
-        where v.id = ${variantId}
-        for share of v, p, c
-      `.execute(exec)
-    : await sql<LiveVariant>`
-        select
-          v.id, v.product_id, p.name_vi as product_name_vi, v.name_vi,
-          v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
-          v.stock_policy, v.fulfillment_type, v.resale_evidence_id, v.is_active,
-          p.is_active as product_active, c.is_active as category_active
-        from product_variant v
-        join product p on p.id = v.product_id
-        join category c on c.id = p.category_id
-        where v.id = ${variantId}
-      `.execute(exec);
+  // One projection for both lock modes so product/category sellability flags
+  // cannot drift out of the SELECT (undefined is falsy → VARIANT_UNAVAILABLE).
+  const result = await sql<LiveVariant>`
+    select
+      v.id, v.product_id, p.name_vi as product_name_vi, v.name_vi,
+      v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
+      v.stock_policy, v.fulfillment_type, v.resale_evidence_id, p.is_test,
+      v.is_active,
+      p.is_active as product_active,
+      c.is_active as category_active
+    from product_variant v
+    join product p on p.id = v.product_id
+    join category c on c.id = p.category_id
+    where v.id = ${variantId}
+    ${lockRows ? sql`for share of v, p, c` : sql``}
+  `.execute(exec);
   return result.rows[0] ?? null;
 }
 
@@ -157,7 +154,7 @@ function revalidate(live: LiveVariant, expectedPriceVnd: number): BuyNowErrorCod
   ) {
     return "POLICY_BLOCKED";
   }
-  if (!live.resale_evidence_id) return "POLICY_BLOCKED";
+  if (!live.is_test && !live.resale_evidence_id) return "POLICY_BLOCKED";
   if (Number(live.price_vnd) !== expectedPriceVnd) return "PRICE_CHANGED";
   if (Number(live.price_vnd) <= 0) return "VARIANT_UNAVAILABLE";
   return null;
@@ -190,6 +187,7 @@ const BUY_NOW_MESSAGES: Record<BuyNowErrorCode, string> = {
   ALREADY_PAID: "Đơn hàng đã được thanh toán.",
   ORDER_NOT_CANCELLABLE: "Đơn hàng không thể hủy.",
   STORE_CLOSED: "Cửa hàng hiện đang tạm đóng cửa. Vui lòng quay lại sau.",
+  STORE_TEST_ONLY: "Cửa hàng đang ở chế độ thử nghiệm.",
   NOT_FOUND: "Không tìm thấy.",
 };
 
@@ -204,19 +202,6 @@ function waitOutsideTransaction(ms: number): Promise<void> {
 }
 
 export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> {
-  // Global store kill-switch check (unless explicitly bypassed for admin canaries)
-  if (!input.skipStoreStatusCheck) {
-    const storeState = await sql<{ status: string }>`
-      select status from store_control where id = 'main' limit 1
-    `.execute(db);
-    if (storeState.rows[0]?.status === "CLOSED") {
-      return {
-        ok: false,
-        code: "STORE_CLOSED",
-        message: BUY_NOW_MESSAGES.STORE_CLOSED,
-      };
-    }
-  }
   // 1. Idempotency short-circuit (FR-010) — cheap pre-transaction read.
   const existing = await findOrderByIdempotency(db, input.customerId, input.idempotencyKey);
   if (existing) {
@@ -262,7 +247,14 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
       // between validation and reservation.
       const live = await loadLiveVariant(trx, input.variantId, true);
       if (!live) return { kind: "REJECT", code: "VARIANT_UNAVAILABLE" };
-
+      if (!input.skipStoreStatusCheck) {
+        const gate = await canPurchase(trx, {
+          telegramUserId: input.telegramUserId ?? input.customerId,
+          isRootAdmin: input.isRootAdmin ?? false,
+          variantIsTest: live.is_test,
+        });
+        if (!gate.ok) return { kind: "REJECT", code: gate.code as BuyNowErrorCode };
+      }
       const rejection = revalidate(live, input.expectedPriceVnd);
       if (rejection) return { kind: "REJECT", code: rejection };
 

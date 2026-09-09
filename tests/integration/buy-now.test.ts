@@ -46,6 +46,8 @@ async function seed(
     stockPolicy?: string;
     resale?: string | null;
     active?: boolean;
+    productActive?: boolean;
+    categoryActive?: boolean;
     assetCount?: number;
     fulfillmentType?: string;
     quantity?: number;
@@ -57,14 +59,15 @@ async function seed(
   const productId = newId();
   const variantId = newId();
   const price = overrides.price ?? 120000;
+  const slug = `cat-${categoryId.slice(-10)}`;
 
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
     ctx.db,
   );
-  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Giải trí', 'giai-tri', true, 1)`.execute(
+  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Giải trí', ${slug}, ${overrides.categoryActive ?? true}, 1)`.execute(
     ctx.db,
   );
-  await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Netflix', 'netflix', true, 1)`.execute(
+  await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Netflix', ${"p-" + slug}, ${overrides.productActive ?? true}, 1)`.execute(
     ctx.db,
   );
   await sql`
@@ -252,6 +255,53 @@ describe("Buy Now revalidation (FR-006)", () => {
     });
     expect(result.ok).toBe(false);
     expect((result as Extract<BuyNowResult, { ok: false }>).code).toBe("VARIANT_UNAVAILABLE");
+  });
+
+  it("creates an order only when product_active and category_active are selected as true", async () => {
+    const s = await seed({ active: true, productActive: true, categoryActive: true });
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-sellable-aggregate",
+      correlationId: "corr-sellable",
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.order.status).toBe("PENDING_PAYMENT");
+  });
+
+  it("rejects an inactive product without creating an order", async () => {
+    const s = await seed({ productActive: false });
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-inactive-product",
+      correlationId: "corr-inactive-product",
+    });
+    expect(result.ok).toBe(false);
+    expect((result as Extract<BuyNowResult, { ok: false }>).code).toBe("VARIANT_UNAVAILABLE");
+    const count = await sql<{ count: number }>`select count(*)::int as count from "order"`.execute(
+      ctx.db,
+    );
+    expect(count.rows[0]?.count).toBe(0);
+  });
+
+  it("rejects an inactive category without creating an order", async () => {
+    const s = await seed({ categoryActive: false });
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-inactive-category",
+      correlationId: "corr-inactive-category",
+    });
+    expect(result.ok).toBe(false);
+    expect((result as Extract<BuyNowResult, { ok: false }>).code).toBe("VARIANT_UNAVAILABLE");
+    const count = await sql<{ count: number }>`select count(*)::int as count from "order"`.execute(
+      ctx.db,
+    );
+    expect(count.rows[0]?.count).toBe(0);
   });
 });
 
