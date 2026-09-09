@@ -48,6 +48,13 @@ Prints safe metadata only: `NODE_ENV`, URLs/hosts/ports, database
 merchant MATCH YES/NO, VietQR bank alias, store status, migration head.
 Secrets are `CONFIGURED` or `MISSING`. Never values.
 
+Empty or unparseable `REDIS_URL` fails preflight (`ok: false`). Runtime
+`loadConfig` still allows an empty `REDIS_URL` because the shop process
+does not consume Redis yet (Postgres is the source of truth; Redis is
+reserved for rate-limit/cache). Preflight still requires it configured
+so a missing production Redis cannot report PASS. Do not add Redis to
+API/worker hardening until a named runtime consumer exists.
+
 ## Migrate
 
 ```bash

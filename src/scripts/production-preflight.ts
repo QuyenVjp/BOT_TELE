@@ -21,6 +21,7 @@ export interface ProductionPreflightResult {
     database: DatabaseFingerprint | null;
     databaseTarget: string | null;
     redis: { host: string; port: string } | null;
+    redisStatus: "CONFIGURED" | "MISSING";
     telegramToken: "CONFIGURED" | "MISSING";
     telegramWebhook: "CONFIGURED" | "MISSING";
     sepayBaseHost: string | null;
@@ -44,6 +45,7 @@ function emptyFingerprint(): ProductionPreflightResult["fingerprint"] {
     database: null,
     databaseTarget: null,
     redis: null,
+    redisStatus: "MISSING",
     telegramToken: "MISSING",
     telegramWebhook: "MISSING",
     sepayBaseHost: null,
@@ -75,6 +77,7 @@ function fillSafeFingerprint(
   fingerprint.supplierBaseHost = parseEndpointHost(env.SUPPLIER_API_BASE_URL ?? "");
   fingerprint.supplierToken = secretStatus(env.SUPPLIER_API_TOKEN);
   fingerprint.redis = parseRedisUrl(env.REDIS_URL ?? "");
+  fingerprint.redisStatus = fingerprint.redis ? "CONFIGURED" : "MISSING";
   const merchant = env.SEPAY_MERCHANT_ACCOUNT_ID?.trim() ?? "";
   const vietQr = env.VIETQR_ACCOUNT_NUMBER?.trim() ?? "";
   fingerprint.merchantMatch = merchant.length > 0 && merchant === vietQr ? "YES" : "NO";
@@ -110,6 +113,7 @@ export async function runProductionPreflight(
   if (fingerprint.httpHost !== "127.0.0.1") issues.push("HTTP_HOST must be 127.0.0.1");
   if (!env.HTTP_PORT?.trim()) issues.push("HTTP_PORT must be set");
   if (!fingerprint.database) issues.push("DATABASE_URL fingerprint is invalid");
+  if (!fingerprint.redis) issues.push("REDIS_URL is missing or invalid");
   if (fingerprint.telegramToken === "MISSING") issues.push("TELEGRAM_BOT_TOKEN is missing");
   if (fingerprint.telegramWebhook === "MISSING") issues.push("TELEGRAM_WEBHOOK_SECRET is missing");
   if (fingerprint.merchantMatch === "NO") {

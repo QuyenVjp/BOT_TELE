@@ -34,6 +34,7 @@ export function parseRedisUrl(url: string): { host: string; port: string } | nul
     return null;
   }
   if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") return null;
+  if (!parsed.hostname) return null;
   return { host: parsed.hostname, port: parsed.port || "6379" };
 }
 

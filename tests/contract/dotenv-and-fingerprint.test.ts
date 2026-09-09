@@ -45,6 +45,9 @@ describe("safe fingerprint and Node dotenv contracts", () => {
     expect(JSON.stringify(parseRedisUrl("redis://:secret@127.0.0.1:6379/0"))).not.toContain(
       "secret",
     );
+    expect(parseRedisUrl("")).toBeNull();
+    expect(parseRedisUrl("http://127.0.0.1:6379")).toBeNull();
+    expect(parseRedisUrl("redis://")).toBeNull();
     expect(secretStatus(" token ")).toBe("CONFIGURED");
     expect(secretStatus("")).toBe("MISSING");
   });

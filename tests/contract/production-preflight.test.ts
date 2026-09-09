@@ -59,6 +59,7 @@ describe("production preflight", () => {
       user: "shop",
     });
     expect(result.fingerprint.redis).toEqual({ host: "127.0.0.1", port: "6379" });
+    expect(result.fingerprint.redisStatus).toBe("CONFIGURED");
     expect(result.fingerprint.telegramToken).toBe("CONFIGURED");
     expect(result.fingerprint.telegramWebhook).toBe("CONFIGURED");
     expect(result.fingerprint.merchantMatch).toBe("YES");
@@ -78,6 +79,24 @@ describe("production preflight", () => {
     expect(result.issues.join("; ")).toMatch(/TELEGRAM_BOT_TOKEN/);
     expect(result.fingerprint.telegramToken).toBe("MISSING");
     expect(JSON.stringify(result)).not.toContain(DB_PASS);
+  });
+
+  it("fails closed when REDIS_URL is missing or unparseable", async () => {
+    const missing = await runProductionPreflight(productionEnv({ REDIS_URL: "" }));
+    expect(missing.ok).toBe(false);
+    expect(missing.issues.join("; ")).toMatch(/REDIS_URL/);
+    expect(missing.fingerprint.redis).toBeNull();
+    expect(missing.fingerprint.redisStatus).toBe("MISSING");
+    expect(JSON.stringify(missing)).not.toContain(DB_PASS);
+
+    const invalid = await runProductionPreflight(
+      productionEnv({ REDIS_URL: "http://127.0.0.1:6379" }),
+    );
+    expect(invalid.ok).toBe(false);
+    expect(invalid.issues.join("; ")).toMatch(/REDIS_URL/);
+    expect(invalid.fingerprint.redis).toBeNull();
+    expect(invalid.fingerprint.redisStatus).toBe("MISSING");
+    expect(JSON.stringify(invalid)).not.toContain(DB_PASS);
   });
 
   it("reports merchant mismatch without account numbers", async () => {
