@@ -149,6 +149,9 @@ export async function registerDeliveryRoute(
           owner: "mini-app-redemption",
           generation: 0,
           attemptCount: 0,
+          productName: null,
+          usageInstructionsVi: null,
+          warrantyVi: null,
         });
         const claims = verifyDeliverySessionToken(capability.sessionToken, options.session);
         if (

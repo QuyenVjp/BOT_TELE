@@ -24,6 +24,10 @@ export interface DeliveryNotificationClaim {
   owner: string;
   generation: number;
   attemptCount: number;
+  /** Non-secret commercial context for the delivery message (never credentials). */
+  productName: string | null;
+  usageInstructionsVi: string | null;
+  warrantyVi: string | null;
 }
 
 export interface DeliveryNotificationCapability {
@@ -56,7 +60,16 @@ async function sendDeliveryNotificationWithTimeout(
       signal: AbortSignal;
     }): Promise<void>;
   },
-  input: { chatId: string; miniAppUrl: string; idempotencyKey: string },
+  input: {
+    chatId: string;
+    miniAppUrl: string;
+    idempotencyKey: string;
+    product?: {
+      name: string | null;
+      usageInstructionsVi: string | null;
+      warrantyVi: string | null;
+    };
+  },
   timeoutMs: number,
 ): Promise<void> {
   const controller = new AbortController();
@@ -740,6 +753,9 @@ export async function claimDeliveryNotifications(
     claimed_by: string;
     claim_generation: string;
     attempt_count: number;
+    product_name: string | null;
+    usage_instructions_vi: string | null;
+    warranty_vi: string | null;
   }>`
     with due as (
       select id
@@ -749,17 +765,27 @@ export async function claimDeliveryNotifications(
       order by next_attempt_at, id
       for update skip locked
       limit ${options.batchSize}
+    ), claimed as (
+      update delivery_notification_handoff h
+      set status = 'PROCESSING',
+          claimed_by = ${options.owner},
+          claim_generation = h.claim_generation + 1,
+          claim_expires_at = now() + (${options.leaseSeconds} * interval '1 second'),
+          attempt_count = h.attempt_count + 1
+      from due
+      where h.id = due.id
+      returning h.id, h.bundle_id, h.customer_id, h.telegram_chat_id,
+        h.capability_ref, h.claimed_by, h.claim_generation, h.attempt_count
     )
-    update delivery_notification_handoff h
-    set status = 'PROCESSING',
-        claimed_by = ${options.owner},
-        claim_generation = h.claim_generation + 1,
-        claim_expires_at = now() + (${options.leaseSeconds} * interval '1 second'),
-        attempt_count = h.attempt_count + 1
-    from due
-    where h.id = due.id
-    returning h.id, h.bundle_id, h.customer_id, h.telegram_chat_id,
-      h.capability_ref, h.claimed_by, h.claim_generation, h.attempt_count
+    select c.id, c.bundle_id, c.customer_id, c.telegram_chat_id,
+      c.capability_ref, c.claimed_by, c.claim_generation, c.attempt_count,
+      o.product_name_vi as product_name,
+      p.usage_instructions_vi, p.warranty_vi
+    from claimed c
+    left join delivery_bundle b on b.id = c.bundle_id
+    left join "order" o on o.id = b.order_id
+    left join product_variant v on v.id = o.variant_id
+    left join product p on p.id = v.product_id
   `.execute(db);
   return rows.rows.map((row) => ({
     id: row.id,
@@ -770,6 +796,9 @@ export async function claimDeliveryNotifications(
     owner: row.claimed_by,
     generation: Number(row.claim_generation),
     attemptCount: row.attempt_count,
+    productName: row.product_name,
+    usageInstructionsVi: row.usage_instructions_vi,
+    warrantyVi: row.warranty_vi,
   }));
 }
 
@@ -998,6 +1027,11 @@ export async function processDeliveryNotificationBatch(input: {
       miniAppUrl: string;
       idempotencyKey: string;
       signal: AbortSignal;
+      product?: {
+        name: string | null;
+        usageInstructionsVi: string | null;
+        warrantyVi: string | null;
+      };
     }): Promise<void>;
   };
   miniAppBaseUrl: string;
@@ -1079,6 +1113,11 @@ export async function processDeliveryNotificationBatch(input: {
             return url.toString();
           })(),
           idempotencyKey: claim.id,
+          product: {
+            name: claim.productName,
+            usageInstructionsVi: claim.usageInstructionsVi,
+            warrantyVi: claim.warrantyVi,
+          },
         },
         sendTimeoutMs,
       );

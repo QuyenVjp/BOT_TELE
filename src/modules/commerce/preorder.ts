@@ -3,6 +3,7 @@ import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
 import type { PresentedMessage } from "../../bot/presenters/catalog.js";
+import { canPurchase } from "./store-mode.js";
 
 export type PreorderStatus =
   | "CREATED"
@@ -52,6 +53,7 @@ export interface PreorderVariantConfig {
   sku: string;
   priceVnd: number;
   preorderEnabled: boolean;
+  isTest?: boolean;
   depositMode: "FIXED" | "PERCENT";
   depositAmountVnd: number;
   depositPercent: number;
@@ -74,6 +76,7 @@ export async function loadPreorderVariantConfig(
     sku: string;
     price_vnd: string;
     preorder_enabled: boolean;
+    is_test: boolean;
     deposit_mode: "FIXED" | "PERCENT";
     deposit_amount_vnd: string;
     deposit_percent: number;
@@ -91,6 +94,7 @@ export async function loadPreorderVariantConfig(
       v.sku,
       v.price_vnd::text,
       coalesce(v.preorder_enabled, false) as preorder_enabled,
+      coalesce(p.is_test, false) as is_test,
       coalesce(v.deposit_mode, 'FIXED') as deposit_mode,
       coalesce(v.deposit_amount_vnd, 0)::text as deposit_amount_vnd,
       coalesce(v.deposit_percent, 0) as deposit_percent,
@@ -117,6 +121,7 @@ export async function loadPreorderVariantConfig(
     sku: row.sku,
     priceVnd: Number(row.price_vnd),
     preorderEnabled: row.preorder_enabled,
+    isTest: row.is_test,
     depositMode: row.deposit_mode,
     depositAmountVnd: Number(row.deposit_amount_vnd),
     depositPercent: row.deposit_percent,
@@ -195,6 +200,8 @@ export async function createPreorderReservation(
   input: {
     customerId: string;
     variantId: string;
+    telegramUserId?: string;
+    isRootAdmin?: boolean;
   },
 ): Promise<
   | {
@@ -204,10 +211,25 @@ export async function createPreorderReservation(
       balanceVnd: number;
       config: PreorderVariantConfig;
     }
-  | { ok: false; code: "NOT_FOUND" | "PREORDER_DISABLED" | "QUEUE_FULL" | "ALREADY_PREORDERED" }
+  | {
+      ok: false;
+      code:
+        | "NOT_FOUND"
+        | "PREORDER_DISABLED"
+        | "STORE_CLOSED"
+        | "STORE_TEST_ONLY"
+        | "QUEUE_FULL"
+        | "ALREADY_PREORDERED";
+    }
 > {
   const config = await loadPreorderVariantConfig(db, input.variantId);
   if (!config) return { ok: false, code: "NOT_FOUND" };
+  const gate = await canPurchase(db, {
+    telegramUserId: input.telegramUserId ?? "",
+    isRootAdmin: input.isRootAdmin ?? false,
+    variantIsTest: config.isTest ?? false,
+  });
+  if (!gate.ok) return { ok: false, code: gate.code as "STORE_CLOSED" | "STORE_TEST_ONLY" };
   if (!config.preorderEnabled) return { ok: false, code: "PREORDER_DISABLED" };
 
   return await withTransaction(db, async (trx) => {
