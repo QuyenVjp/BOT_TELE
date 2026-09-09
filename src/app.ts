@@ -10,6 +10,7 @@ import {
 import { registerDeliveryRoute } from "./modules/digital-goods/delivery-route.js";
 import type { DeliverySessionCodecConfig } from "./modules/digital-goods/delivery-session.js";
 import { registerMiniApp } from "./modules/miniapp/index.js";
+import { healthPayload, loadBuildIdentity } from "./shared/build-identity.js";
 
 /**
  * HTTP application composition (T118, FR-024, SR-004).
@@ -82,7 +83,7 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
   });
 
   // --- Health / readiness -------------------------------------------------
-  app.get("/health", async () => ({ status: "ok" }));
+  app.get("/health", async () => healthPayload(loadBuildIdentity(import.meta.url)));
 
   app.get("/ready", async (_req, reply) => {
     try {

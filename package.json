@@ -20,7 +20,7 @@
     "test:integration": "vitest run tests/integration",
     "test:acceptance": "vitest run tests/acceptance",
     "test:performance": "vitest run tests/performance",
-    "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs",
+    "build": "tsc -p tsconfig.build.json && node scripts/copy-migrations.mjs && node scripts/write-build-identity.mjs",
     "start": "node dist/main.js",
     "start:worker": "node dist/worker.js",
     "dev": "tsx src/main.ts",
