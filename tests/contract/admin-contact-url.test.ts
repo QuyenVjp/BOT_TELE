@@ -12,7 +12,8 @@ import {
 
 const ROOT = join(import.meta.dirname, "../..");
 const CANONICAL_ADMIN_CONTACT_URL = "https://t.me/Quyenvjp";
-const FORBIDDEN_ADMIN_CONTACT_TYPO = "https://t.me/Quyenvvp";
+const FORBIDDEN_ADMIN_HANDLE = ["Quyen", "vvp"].join("");
+const FORBIDDEN_ADMIN_CONTACT_TYPO = `https://t.me/${FORBIDDEN_ADMIN_HANDLE}`;
 
 const URL_LITERAL_ALLOWLIST = new Set([
   "src/modules/catalog/shop-profile.ts",
@@ -24,20 +25,7 @@ function rg(pattern: string, paths: string[], extraArgs: string[] = []): string 
   try {
     return execFileSync(
       "rg",
-      [
-        "-n",
-        "--glob",
-        "!node_modules/**",
-        "--glob",
-        "!dist/**",
-        "--glob",
-        "!outputs/**",
-        "--glob",
-        "!tests/contract/admin-contact-url.test.ts",
-        ...extraArgs,
-        pattern,
-        ...paths,
-      ],
+      ["-n", "--glob", "!node_modules/**", "--glob", "!dist/**", ...extraArgs, pattern, ...paths],
       {
         cwd: ROOT,
         encoding: "utf8",
@@ -60,8 +48,8 @@ describe("canonical admin contact URL", () => {
     expect(ADMIN_CONTACT_URL).not.toBe(FORBIDDEN_ADMIN_CONTACT_TYPO);
   });
 
-  it("rejects the Quyenvvp typo anywhere in runtime or tests", () => {
-    const hits = rg("Quyenvvp", ["src", "tests", "scripts"]);
+  it("rejects the forbidden admin-handle typo anywhere in runtime or tests", () => {
+    const hits = rg(FORBIDDEN_ADMIN_HANDLE, ["src", "tests", "scripts"]);
     expect(hits).toBe("");
   });
 
