@@ -82,19 +82,14 @@ export interface StorefrontDisplayOptions {
   totalProducts: number;
   offset: number;
   limit: number;
-  stats?:
-    | {
-        completedOrders?: number | undefined;
-        totalCustomers?: number | undefined;
-      }
-    | undefined;
+  stats?: { completedOrders?: number | undefined; totalCustomers?: number | undefined } | undefined;
+  testProducts?: StorefrontProductSummary[] | undefined;
 }
 
 export function presentStorefront(options: StorefrontDisplayOptions): PresentedMessage {
   const shopName = options.shopName ?? "TIER20 DIGITAL SHOP";
   const shopTagline = options.shopTagline ?? "Kho sản phẩm số & dịch vụ AI";
   const communityUrl = options.communityUrl ?? "https://t.me/aicodexvn";
-
   const lines = [
     `👋 Chào ${options.actorName}!`,
     "",
@@ -110,101 +105,89 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
     "🔥 DANH MỤC SẢN PHẨM:",
     "",
   ];
-
-  if (options.products.length === 0) {
-    lines.push("Hiện chưa có sản phẩm nào được mở bán.");
-  } else {
-    for (const p of options.products) {
-      const priceFormatted = Number(p.min_price_vnd).toLocaleString("vi-VN") + " ₫";
-      const stockText =
-        p.total_available > 0
-          ? `📦 Còn ${p.total_available}`
-          : p.preorder_enabled
-            ? "📦 Hết hàng (Nhận đặt cọc giữ suất)"
-            : "📦 Hết hàng";
-      lines.push(`🔹 ${p.name_vi}`);
-      lines.push(`💰 Giá từ: ${priceFormatted}`);
-      lines.push(stockText);
-      if (p.short_description_vi) {
-        lines.push(`ℹ️ ${p.short_description_vi}`);
-      }
-      lines.push("");
-    }
-  }
-
-  if (options.stats && options.stats.completedOrders && options.stats.completedOrders > 0) {
-    lines.push(`⭐ ${options.stats.completedOrders} đơn đã hoàn tất · 📦 Giao tự động`);
-  }
-
   const buttons: InlineButton[][] = [];
+  appendProducts(lines, buttons, options.products, false);
+  if (options.testProducts?.length) {
+    lines.push("", "───────────────", "🧪 SẢN PHẨM TEST:", "");
+    appendProducts(lines, buttons, options.testProducts, true);
+  }
+  if (options.stats?.completedOrders && options.stats.completedOrders > 0)
+    lines.push(`⭐ ${options.stats.completedOrders} đơn đã hoàn tất · 📦 Giao tự động`);
+  const navRow: InlineButton[] = [];
+  if (options.offset > 0)
+    navRow.push({
+      text: "⬅️ Trang trước",
+      callbackData: `shop:page:${Math.max(0, options.offset - options.limit)}`,
+    });
+  if (options.offset + options.limit < options.totalProducts)
+    navRow.push({
+      text: "Xem thêm ➡️",
+      callbackData: `shop:page:${options.offset + options.limit}`,
+    });
+  if (navRow.length) buttons.push(navRow);
+  buttons.push(
+    [{ text: "📢 Tham gia nhóm AI Codex VN", url: communityUrl, callbackData: "community:url" }],
+    [
+      { text: "👤 Tài khoản", callbackData: "wallet:account" },
+      { text: "🧾 Đơn hàng", callbackData: "ord:list" },
+    ],
+    [
+      { text: "💰 Nạp ví", callbackData: "wallet:topup" },
+      { text: "🔔 Cài đặt thông báo", callbackData: "cust:notify" },
+    ],
+    [
+      { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+      { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+    ],
+  );
+  if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);
+  return { text: lines.join("\n"), buttons, replyKeyboard: MAIN_REPLY_KEYBOARD };
+}
 
-  for (const p of options.products) {
-    if (p.total_available > 0) {
+function appendProducts(
+  lines: string[],
+  buttons: InlineButton[][],
+  products: StorefrontProductSummary[],
+  test = false,
+): void {
+  if (!products.length) {
+    lines.push("Hiện chưa có sản phẩm nào được mở bán.");
+    return;
+  }
+  for (const p of products) {
+    const price = Number(p.min_price_vnd).toLocaleString("vi-VN") + " ₫";
+    const stock =
+      p.total_available > 0
+        ? `📦 Còn ${p.total_available}`
+        : p.preorder_enabled
+          ? "📦 Hết hàng (Nhận đặt cọc giữ suất)"
+          : "📦 Hết hàng";
+    lines.push(`🔹 ${p.name_vi}`, `💰 Giá từ: ${price}`, stock);
+    if (p.short_description_vi) lines.push(`ℹ️ ${p.short_description_vi}`);
+    lines.push("");
+    if (p.total_available > 0)
       buttons.push([
         {
-          text: `🛒 Mua: ${p.name_vi} (${Number(p.min_price_vnd).toLocaleString("vi-VN")} ₫)`,
-          callbackData: `shop:product:${p.id}`,
+          text: `🛒 Mua: ${p.name_vi} (${price})`,
+          callbackData: test ? `var:view:${p.primary_variant_id}` : `shop:product:${p.id}`,
         },
       ]);
-    } else if (p.preorder_enabled) {
+    else if (p.preorder_enabled)
       buttons.push([
         {
           text: `💰 Đặt cọc: ${p.name_vi}`,
           callbackData: `preorder:consent:${p.primary_variant_id}`,
         },
-        {
-          text: `🔔 Báo có hàng`,
-          callbackData: `restock:sub:${p.primary_variant_id}`,
-        },
+        { text: "🔔 Báo có hàng", callbackData: `restock:sub:${p.primary_variant_id}` },
       ]);
-    } else {
+    else
       buttons.push([
         {
           text: `🔔 Báo có hàng: ${p.name_vi}`,
           callbackData: `restock:sub:${p.primary_variant_id}`,
         },
       ]);
-    }
   }
-
-  const navRow: InlineButton[] = [];
-  if (options.offset > 0) {
-    const prevOffset = Math.max(0, options.offset - options.limit);
-    navRow.push({ text: "⬅️ Trang trước", callbackData: `shop:page:${prevOffset}` });
-  }
-  if (options.offset + options.limit < options.totalProducts) {
-    const nextOffset = options.offset + options.limit;
-    navRow.push({ text: "Xem thêm ➡️", callbackData: `shop:page:${nextOffset}` });
-  }
-  if (navRow.length > 0) {
-    buttons.push(navRow);
-  }
-
-  buttons.push([
-    { text: "📢 Tham gia nhóm AI Codex VN", url: communityUrl, callbackData: "community:url" },
-  ]);
-  buttons.push([
-    { text: "👤 Tài khoản", callbackData: "wallet:account" },
-    { text: "🧾 Đơn hàng", callbackData: "ord:list" },
-  ]);
-  buttons.push([
-    { text: "💰 Nạp ví", callbackData: "wallet:topup" },
-    { text: "🔔 Cài đặt thông báo", callbackData: "cust:notify" },
-  ]);
-  buttons.push([
-    { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
-    { text: "💬 Hỗ trợ", callbackData: "supp:open" },
-  ]);
-
-  if (options.isRootAdmin) {
-    buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);
-  }
-
-  return {
-    text: lines.join("\n"),
-    buttons,
-    replyKeyboard: MAIN_REPLY_KEYBOARD,
-  };
 }
 
 export function presentCustomerWarranty(summary?: string): PresentedMessage {

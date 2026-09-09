@@ -36,6 +36,8 @@ export interface CheckoutCallbackDeps {
   callbackCodec?: BuyNowCallbackCodec;
   /** Authoritative channel-identity lookup; callers never supply customerId. */
   resolveCustomerId?: (telegramUserId: string) => Promise<string | null>;
+  /** Configured root admin Telegram id; never taken from client input. */
+  adminTelegramUserId?: number | string;
 }
 
 interface BuyNowCallbackInput {
@@ -44,6 +46,8 @@ interface BuyNowCallbackInput {
   expectedPriceVnd: number;
   correlationId: string;
   idempotencyKey: string;
+  telegramUserId: string;
+  isRootAdmin: boolean;
 }
 
 export interface SignedBuyNowCallbackInput {
@@ -91,6 +95,8 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       expectedPriceVnd: input.expectedPriceVnd,
       idempotencyKey: input.idempotencyKey,
       correlationId: input.correlationId,
+      telegramUserId: input.telegramUserId,
+      isRootAdmin: input.isRootAdmin,
     });
     if (!result.ok) {
       if (isStockOutcomeCode(result.code)) return presentStockOutcome(result.code);
@@ -134,12 +140,17 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       if (!customerId) {
         return errorMessage("Không tìm thấy tài khoản khách hàng. Vui lòng mở lại cửa hàng.");
       }
+      const isRootAdmin =
+        deps.adminTelegramUserId !== undefined &&
+        String(deps.adminTelegramUserId) === telegramUserId;
       return handleBuyNow({
         customerId,
         variantId: verified.value.variantId,
         expectedPriceVnd: verified.value.expectedPriceVnd,
         idempotencyKey: verified.value.idempotencyKey,
         correlationId: input.correlationId,
+        telegramUserId,
+        isRootAdmin,
       });
     },
 

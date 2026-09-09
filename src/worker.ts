@@ -12,13 +12,22 @@
  *
  * See plan.md "Delivery Phases" and contracts/application-commands.md.
  */
+import {
+  listCategoriesWithCounts,
+  createCategory,
+  renameCategory,
+  setCategoryActive,
+  reorderCategory,
+  ensureDefaultCategories,
+  getOrCreateUncategorizedCategory,
+} from "./modules/catalog/repository.js";
 import { pathToFileURL } from "node:url";
 import { sql } from "kysely";
 import { newId } from "./shared/ids/index.js";
 import { sealPresentedMessageCallbacks } from "./bot/callback-sealer.js";
 import type { CallbackTokenCodec } from "./bot/callback-codec.js";
 import type { Db } from "./infrastructure/db/transaction.js";
-import type { FulfillmentType } from "./modules/catalog/fulfillment-type.js";
+import type { FulfillmentType, InventoryField } from "./modules/catalog/fulfillment-type.js";
 import type {
   presentAdminOrderDetail,
   presentAdminOrders as presentAdminOrdersPresenter,
@@ -82,7 +91,7 @@ import {
   resolveAdminOrderState,
   resolveOrderCustomerForRelay,
 } from "./modules/admin/order-operations.js";
-import { listAuditEvents } from "./modules/identity/audit.js";
+import { appendAuditEvent, listAuditEvents } from "./modules/identity/audit.js";
 
 export function marketingBroadcastClassForAudience(
   audience: BroadcastAudience,
@@ -733,11 +742,21 @@ async function bootstrap(): Promise<void> {
   } = await import("./modules/digital-goods/file-artifact-import-session.js");
   const { getManualTaskById, listManualFulfillmentTasks } =
     await import("./modules/digital-goods/manual-fulfillment.js");
-  const { createDurableProductDraftWorkflow, createProductDraftRepository, generateSkuProposal } =
-    await import("./modules/catalog/product-draft.js");
+  const {
+    createDurableProductDraftWorkflow,
+    createProductDraftRepository,
+    generateSkuProposal,
+    toggleOptionalField,
+    addCustomField,
+    setCustomFieldFlags,
+    removeCustomField,
+    applyAdvancedRaw,
+    previousStep,
+  } = await import("./modules/catalog/product-draft.js");
+  const { DESCRIPTION_TEMPLATES } = await import("./modules/catalog/description-templates.js");
   const { createAdminProduct, createAdminVariant, updateAdminVariant } =
     await import("./modules/catalog/admin-products.js");
-  const { isStoreOpen } = await import("./modules/commerce/buy-now.js");
+  const { getStoreMode, setStoreMode, addTestCustomer, removeTestCustomer, listTestCustomers } = await import("./modules/commerce/store-mode.js");
   const { adjustQuantityStock, listVariantInventoryHistory } =
     await import("./modules/catalog/quantity-stock.js");
   const {
@@ -763,8 +782,14 @@ async function bootstrap(): Promise<void> {
     presentQuantityStockAdjustDone,
     presentAdminMarketingMenu,
     presentAdminMenu,
-    presentAdminProductDetail,
     presentAdminProducts,
+    presentAdminProductDetail,
+    presentAdminStoreMode,
+    presentAdminStoreOpenConfirmation,
+    presentAdminTestCustomers,
+    presentAdminTestCustomerPrompt,
+    presentAdminCategories,
+    presentAdminCategoryPrompt,
     presentHighRiskChallenge,
     presentHighRiskDone,
     presentInventoryImportPreview,
@@ -791,6 +816,20 @@ async function bootstrap(): Promise<void> {
     presentAdminTestLab,
     presentAdminPreorders,
   } = await import("./bot/presenters/admin.js");
+  const {
+    presentWizardNameStep,
+    presentWizardSkuStep,
+    presentWizardCategoryStep,
+    presentFulfillmentTypeChoices,
+    presentWizardDescriptionStep,
+    presentWizardDescriptionCustomPrompt,
+    presentWizardVariantStep,
+    presentWizardDeliveryStep,
+    presentWizardCustomFieldFlags,
+    presentWizardCategoryCreatePrompt,
+    presentWizardCustomFieldPrompt,
+    presentWizardAdvancedPrompt,
+  } = await import("./bot/presenters/admin-wizard.js");
   const { loadPreorderVariantConfig, presentPreorderConsent, createPreorderReservation } =
     await import("./modules/commerce/preorder.js");
   const { presentCustomerNotificationPreferences } = await import("./bot/presenters/customer.js");
@@ -897,6 +936,7 @@ async function bootstrap(): Promise<void> {
     },
     callbackCodec: buyNowCodec,
     resolveCustomerId,
+    adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
   });
   const history = createHistoryCallbacks({ db: dbHandle.db });
   const notificationService = { getNotificationPreferences, setNotificationPreferences };
@@ -1013,6 +1053,58 @@ async function bootstrap(): Promise<void> {
   const productDraftWorkflow = createDurableProductDraftWorkflow(
     createProductDraftRepository(dbHandle.db),
   );
+  const renderWizardStep = async (draft: {
+    step: string;
+    name?: string | undefined;
+    sku?: string | undefined;
+    categoryId?: string | undefined;
+    categoryName?: string | undefined;
+    fulfillmentType?: FulfillmentType | undefined;
+    variantName?: string | undefined;
+    priceVnd?: bigint | undefined;
+    inventoryFields?: InventoryField[] | undefined;
+    deliveryConfig?: { selectedOptionalFields: string[]; customFields: InventoryField[] } | undefined;
+  }): Promise<PresentedMessage> => {
+    switch (draft.step) {
+      case "sku":
+        return presentWizardSkuStep(draft as never, generateSkuProposal(draft.name ?? ""));
+      case "category": {
+        await ensureDefaultCategories(dbHandle.db);
+        const rows = await sql<{ id: string; name_vi: string }>`
+          select id, name_vi from category where is_active order by sort_order, id limit 20
+        `.execute(dbHandle.db);
+        return presentWizardCategoryStep(
+          rows.rows.map((row) => ({ id: row.id, name: row.name_vi })),
+        );
+      }
+      case "productType":
+        return presentFulfillmentTypeChoices();
+      case "description":
+        return presentWizardDescriptionStep(draft.fulfillmentType);
+      case "variant":
+        return presentWizardVariantStep(draft as never);
+      case "deliveryConfig":
+        return presentWizardDeliveryStep(draft as never);
+      case "confirm": {
+        const categoryName =
+          draft.categoryName ??
+          (draft.categoryId
+            ? (
+                await sql<{ name: string }>`
+                  select name_vi as name from category where id = ${draft.categoryId} limit 1
+                `.execute(dbHandle.db)
+              ).rows[0]?.name
+            : undefined);
+        return presentProductDraftPreview({
+          ...(draft as Required<typeof draft>),
+          ...(categoryName ? { categoryName } : {}),
+        } as Parameters<typeof presentProductDraftPreview>[0]);
+      }
+      case "name":
+      default:
+        return presentWizardNameStep(draft as never);
+    }
+  };
   const telegramInbox = createPostgresTelegramInbox(dbHandle.db);
   const sepayInbox = createPostgresSePayInbox(dbHandle.db);
   const telegramLimiter = createPostgresRateLimiter(
@@ -1079,15 +1171,26 @@ async function bootstrap(): Promise<void> {
           };
         return presentPreorderConsent(preorderConfig);
       },
-      async create(customerId, variantId) {
-        const res = await createPreorderReservation(dbHandle.db, { customerId, variantId });
+      async create(input) {
+        const res = await createPreorderReservation(dbHandle.db, {
+          customerId: input.customerId,
+          variantId: input.variantId,
+          telegramUserId: input.telegramUserId,
+          isRootAdmin:
+            config.ADMIN_TELEGRAM_USER_ID !== undefined &&
+            String(input.telegramUserId) === String(config.ADMIN_TELEGRAM_USER_ID),
+        });
         if (!res.ok) {
           const msg =
-            res.code === "QUEUE_FULL"
-              ? "Hàng chờ đặt cọc cho sản phẩm này đã đầy. Vui lòng quay lại sau."
-              : res.code === "ALREADY_PREORDERED"
-                ? "Bạn đã có một suất đặt cọc đang chờ xử lý cho sản phẩm này."
-                : "Không thể thực hiện đặt cọc lúc này.";
+            res.code === "STORE_CLOSED"
+              ? "Cửa hàng đang đóng. Vui lòng quay lại sau."
+              : res.code === "STORE_TEST_ONLY"
+                ? "Sản phẩm này chỉ dành cho khách test trong chế độ TEST."
+              : res.code === "QUEUE_FULL"
+                ? "Hàng chờ đặt cọc cho sản phẩm này đã đầy. Vui lòng quay lại sau."
+                : res.code === "ALREADY_PREORDERED"
+                  ? "Bạn đã có một suất đặt cọc đang chờ xử lý cho sản phẩm này."
+                  : "Không thể thực hiện đặt cọc lúc này.";
           return { text: msg, buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]] };
         }
         return {
@@ -1655,42 +1758,113 @@ async function bootstrap(): Promise<void> {
           correlationId: input.correlationId,
         });
         return result.ok
-          ? presentAdminMenu(await isStoreOpen(dbHandle.db))
+          ? presentAdminMenu(await getStoreMode(dbHandle.db))
           : presentAdminDenied(
               result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
             );
       },
-      async storeOpen(input) {
+      async storeMode(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
-        const result = await adminCallbacks.handle({
-          command: "store.open",
-          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+      },
+      async storeTest(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        await setStoreMode(dbHandle.db, "TEST", input.telegramUserId);
+        await appendAuditEvent(dbHandle.db, {
+          actorType: "ROOT_ADMIN",
+          actorId: input.telegramUserId,
+          action: "store.test",
+          targetType: "StoreControl",
           targetId: "main",
-          reason: "Yêu cầu mở cửa hàng bán công khai",
+          reason: "Bật chế độ TEST — chỉ khách test mua được sản phẩm test",
           correlationId: input.correlationId,
         });
-        if (result.ok && result.needsConfirmation) {
-          return presentHighRiskChallenge({
-            confirmationId: result.confirmationId,
-            challenge: result.challenge,
-            expiresAt: result.expiresAt,
-            action: "store.open",
-          });
-        }
-        return presentAdminMenu(await isStoreOpen(dbHandle.db));
+        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+      },
+      async storeOpen(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        const counts = await sql<{ active_products: number; in_stock_variants: number }>`
+          with public_variants as (
+            select v.id, v.fulfillment_type
+            from product_variant v
+            join product p on p.id = v.product_id
+            where v.is_active and p.is_active and not p.is_test and not p.is_archived
+              and v.price_vnd > 0
+          ),
+          stock as (
+            select pv.id,
+              case
+                when pv.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then (
+                  select count(*)::int from digital_asset a where a.variant_id = pv.id and a.status = 'AVAILABLE'
+                )
+                when pv.fulfillment_type = 'QUANTITY_STOCK' then coalesce((
+                  select q.available_quantity from variant_quantity_stock q where q.variant_id = pv.id
+                ), 0)::int
+                when pv.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then 1
+                when pv.fulfillment_type = 'DIGITAL_FILE' then (
+                  select count(*)::int from variant_file_artifact f where f.variant_id = pv.id and f.is_active
+                )
+                else 0
+              end as available
+            from public_variants pv
+          )
+          select
+            (select count(distinct p.id)::int from product p
+              join product_variant v on v.product_id = p.id and v.is_active
+              where p.is_active and not p.is_test and not p.is_archived) as active_products,
+            (select count(*)::int from stock where available > 0) as in_stock_variants
+        `.execute(dbHandle.db);
+        const row = counts.rows[0] ?? { active_products: 0, in_stock_variants: 0 };
+        if (row.active_products === 0)
+          return {
+            text: "Không thể mở bán: chưa có sản phẩm public đang hoạt động.\n\nTạo và kích hoạt ít nhất một sản phẩm public trước, hoặc dùng 🧪 Chế độ TEST để thử luồng mua.",
+            buttons: [
+              [{ text: "🧪 Chế độ TEST", callbackData: "admin:store:test" }],
+              [{ text: "⬅️ Quay lại", callbackData: "admin:store:mode" }],
+            ],
+          };
+        return presentAdminStoreOpenConfirmation({
+          activeProducts: row.active_products,
+          inStockVariants: row.in_stock_variants,
+        });
+      },
+      async storeOpenConfirm(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        await setStoreMode(dbHandle.db, "OPEN", input.telegramUserId);
+        await appendAuditEvent(dbHandle.db, {
+          actorType: "ROOT_ADMIN",
+          actorId: input.telegramUserId,
+          action: "store.open",
+          targetType: "StoreControl",
+          targetId: "main",
+          reason: "Mở bán công khai (xác nhận qua nút)",
+          correlationId: input.correlationId,
+        });
+        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
       },
       async storeClose(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
-        await adminCallbacks.handle({
-          command: "store.close",
-          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        await setStoreMode(dbHandle.db, "CLOSED", input.telegramUserId);
+        await appendAuditEvent(dbHandle.db, {
+          actorType: "ROOT_ADMIN",
+          actorId: input.telegramUserId,
+          action: "store.close",
+          targetType: "StoreControl",
           targetId: "main",
           reason: "Đóng cửa hàng tạm dừng bán",
           correlationId: input.correlationId,
         });
-        return presentAdminMenu(false);
+        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
       },
       async dashboard(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -2555,6 +2729,197 @@ async function bootstrap(): Promise<void> {
           })),
         });
       },
+      async testCustomers(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        const customers = await listTestCustomers(dbHandle.db);
+        return presentAdminTestCustomers({
+          customers: customers.map((c) => ({ id: c.id, telegramUserId: c.telegramUserId })),
+        });
+      },
+      async testCustomerAddPrompt(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "TEST_CUSTOMER_ADD",
+          payload: {},
+        });
+        return presentAdminTestCustomerPrompt();
+      },
+      async testCustomerDelete(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        const row = await sql<{ telegram_user_id: string }>`
+          delete from test_customer_allowlist where id = ${input.ref} returning telegram_user_id
+        `.execute(dbHandle.db);
+        const removed = row.rows[0]?.telegram_user_id;
+        if (removed)
+          await appendAuditEvent(dbHandle.db, {
+            actorType: "ROOT_ADMIN",
+            actorId: input.telegramUserId,
+            action: "test_customer.remove",
+            targetType: "TestCustomer",
+            targetId: removed,
+            reason: "Xoá khách test khỏi allowlist",
+            correlationId: input.correlationId,
+          });
+        const customers = await listTestCustomers(dbHandle.db);
+        return presentAdminTestCustomers({
+          customers: customers.map((c) => ({ id: c.id, telegramUserId: c.telegramUserId })),
+        });
+      },
+      async testCustomerText(input) {
+        if (input.chatType !== "private") return null;
+        const state = await sql<{ id: string }>`
+          select id from admin_callback_state
+          where admin_telegram_user_id = ${input.telegramUserId}
+            and kind = 'TEST_CUSTOMER_ADD' and expires_at > now()
+          order by created_at desc limit 1
+        `.execute(dbHandle.db);
+        if (!state.rows[0]) return null;
+        const telegramId = input.text.trim();
+        if (!/^\d{5,15}$/u.test(telegramId))
+          return {
+            text: "Telegram ID không hợp lệ. Chỉ gồm chữ số (vd: 123456789).",
+            buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:testlab:testers" }]],
+          };
+        await addTestCustomer(dbHandle.db, telegramId, input.telegramUserId);
+        await sql`delete from admin_callback_state where id = ${state.rows[0].id}`.execute(dbHandle.db);
+        await appendAuditEvent(dbHandle.db, {
+          actorType: "ROOT_ADMIN",
+          actorId: input.telegramUserId,
+          action: "test_customer.add",
+          targetType: "TestCustomer",
+          targetId: telegramId,
+          reason: "Thêm khách test vào allowlist",
+          correlationId: input.correlationId,
+        });
+        const customers = await listTestCustomers(dbHandle.db);
+        return presentAdminTestCustomers({
+          customers: customers.map((c) => ({ id: c.id, telegramUserId: c.telegramUserId })),
+        });
+      },
+      async categories(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        await ensureDefaultCategories(dbHandle.db);
+        const rows = await listCategoriesWithCounts(dbHandle.db);
+        return presentAdminCategories({
+          categories: rows.map((c) => ({
+            id: c.id,
+            nameVi: c.name_vi,
+            active: c.is_active,
+            productCount: c.product_count,
+          })),
+        });
+      },
+      async categoryCreatePrompt(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "CATEGORY_CREATE",
+          payload: {},
+        });
+        return presentAdminCategoryPrompt();
+      },
+      async categoryAction(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        const renderList = async () => {
+          const rows = await listCategoriesWithCounts(dbHandle.db);
+          return presentAdminCategories({
+            categories: rows.map((c) => ({
+              id: c.id,
+              nameVi: c.name_vi,
+              active: c.is_active,
+              productCount: c.product_count,
+            })),
+          });
+        };
+        if (input.action === "rename") {
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "CATEGORY_RENAME",
+            payload: { categoryId: input.ref },
+          });
+          return {
+            text: "Nhập tên mới cho danh mục.",
+            buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:categories" }]],
+          };
+        }
+        if (input.action === "toggle") {
+          const cur = await sql<{ is_active: boolean }>`
+            select is_active from category where id = ${input.ref} limit 1
+          `.execute(dbHandle.db);
+          if (cur.rows[0]) await setCategoryActive(dbHandle.db, input.ref, !cur.rows[0].is_active);
+          return renderList();
+        }
+        if (input.action === "up" || input.action === "down") {
+          await reorderCategory(dbHandle.db, input.ref, input.action);
+          return renderList();
+        }
+        return renderList();
+      },
+      async categoryText(input) {
+        if (input.chatType !== "private") return null;
+        const state = await sql<{ id: string; kind: string; payload_redacted: Record<string, unknown> }>`
+          select id, kind, payload_redacted from admin_callback_state
+          where admin_telegram_user_id = ${input.telegramUserId}
+            and kind in ('CATEGORY_CREATE', 'CATEGORY_RENAME') and expires_at > now()
+          order by created_at desc limit 1
+        `.execute(dbHandle.db);
+        const row = state.rows[0];
+        if (!row) return null;
+        const name = input.text.trim().slice(0, 80);
+        if (!name)
+          return {
+            text: "Tên danh mục không hợp lệ.",
+            buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:categories" }]],
+          };
+        if (row.kind === "CATEGORY_CREATE") {
+          await createCategory(dbHandle.db, { nameVi: name });
+          await appendAuditEvent(dbHandle.db, {
+            actorType: "ROOT_ADMIN",
+            actorId: input.telegramUserId,
+            action: "category.create",
+            targetType: "Category",
+            targetId: name,
+            reason: "Tạo danh mục từ admin UI",
+            correlationId: input.correlationId,
+          });
+        } else {
+          const categoryId = row.payload_redacted.categoryId;
+          if (typeof categoryId !== "string") return null;
+          await renameCategory(dbHandle.db, categoryId, name);
+          await appendAuditEvent(dbHandle.db, {
+            actorType: "ROOT_ADMIN",
+            actorId: input.telegramUserId,
+            action: "category.rename",
+            targetType: "Category",
+            targetId: categoryId,
+            reason: `Đổi tên danh mục thành: ${name}`,
+            correlationId: input.correlationId,
+          });
+        }
+        await sql`delete from admin_callback_state where id = ${row.id}`.execute(dbHandle.db);
+        const rows = await listCategoriesWithCounts(dbHandle.db);
+        return presentAdminCategories({
+          categories: rows.map((c) => ({
+            id: c.id,
+            nameVi: c.name_vi,
+            active: c.is_active,
+            productCount: c.product_count,
+          })),
+        });
+      },
       async preorders(input, route) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
@@ -3346,7 +3711,7 @@ async function bootstrap(): Promise<void> {
           ],
         };
       },
-      workflow: {
+    workflow: {
         async start(input) {
           if (
             Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
@@ -3363,11 +3728,8 @@ async function bootstrap(): Promise<void> {
               ],
             };
           }
-          await productDraftWorkflow.start(input.telegramUserId);
-          return {
-            text: "Bước 1/8 — Nhập tên sản phẩm.\n\nVí dụ: GPT PLUS BHF 1 tháng, Netflix Premium 4K.",
-            buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
-          };
+          const draft = await productDraftWorkflow.start(input.telegramUserId);
+          return renderWizardStep(draft);
         },
         async messageText(input) {
           if (
@@ -3382,9 +3744,91 @@ async function bootstrap(): Promise<void> {
           });
           if (variantState?.kind === "ADMIN_VARIANT_UPDATE")
             return this.variantText?.(input) ?? null;
+
+          // Wizard sub-flow text states (category create / custom field / advanced / custom description).
+          const subState = await sql<{ id: string; kind: string }>`
+            select id, kind from admin_callback_state
+            where admin_telegram_user_id = ${input.telegramUserId}
+              and kind in ('WIZARD_CATEGORY_CREATE','WIZARD_CUSTOM_FIELD','WIZARD_ADVANCED','WIZARD_DESC_CUSTOM')
+              and expires_at > now()
+            order by created_at desc limit 1
+          `.execute(dbHandle.db);
+          const pendingSub = subState.rows[0];
+          if (pendingSub) {
+            const repo = createProductDraftRepository(dbHandle.db);
+            const draft = await productDraftWorkflow.get(input.telegramUserId);
+            if (!draft) {
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+              return null;
+            }
+            const text = input.text.trim();
+            if (pendingSub.kind === "WIZARD_CATEGORY_CREATE") {
+              const name = text.slice(0, 80);
+              if (!name)
+                return {
+                  text: "Tên danh mục không hợp lệ.",
+                  buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
+                };
+              const created = await createCategory(dbHandle.db, { nameVi: name });
+              await appendAuditEvent(dbHandle.db, {
+                actorType: "ROOT_ADMIN",
+                actorId: input.telegramUserId,
+                action: "category.create",
+                targetType: "Category",
+                targetId: created.id,
+                reason: "Tạo danh mục từ wizard tạo sản phẩm",
+                correlationId: input.correlationId,
+              });
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+              const next = {
+                ...draft,
+                categoryId: created.id,
+                categoryName: created.name_vi,
+                step: "productType" as const,
+                expiresAt: Date.now() + 15 * 60_000,
+              };
+              await repo.save(next);
+              return renderWizardStep(next);
+            }
+            if (pendingSub.kind === "WIZARD_CUSTOM_FIELD") {
+              const label = text.slice(0, 60);
+              if (!label)
+                return {
+                  text: "Tên trường không hợp lệ.",
+                  buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
+                };
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+              const next = addCustomField(draft, { label });
+              await repo.save(next);
+              return renderWizardStep(next);
+            }
+            if (pendingSub.kind === "WIZARD_ADVANCED") {
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+              const next = applyAdvancedRaw(draft, text);
+              await repo.save(next);
+              return renderWizardStep(next);
+            }
+            // WIZARD_DESC_CUSTOM
+            const description = text.slice(0, 2000);
+            if (!description)
+              return {
+                text: "Mô tả không được để trống.",
+                buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
+              };
+            await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(dbHandle.db);
+            const next = {
+              ...draft,
+              description,
+              descriptionVi: description,
+              step: "variant" as const,
+              expiresAt: Date.now() + 15 * 60_000,
+            };
+            await repo.save(next);
+            return renderWizardStep(next);
+          }
+
           const current = await productDraftWorkflow.get(input.telegramUserId);
           if (!current) return null;
-          // If currently at SKU step, check duplicate first
           if (current.step === "sku") {
             const rawSku = input.text.trim().toUpperCase();
             const dup = await sql<{
@@ -3413,16 +3857,21 @@ async function bootstrap(): Promise<void> {
           const result = await productDraftWorkflow.advance(input.telegramUserId, input.text);
           if (!result.ok) {
             let errorMsg = "Dữ liệu không hợp lệ, vui lòng thử lại.";
-            if (result.error === "INVALID_PRICE") {
+            if (result.error === "INVALID_VARIANT") {
               errorMsg =
-                "Giá không hợp lệ. Vui lòng nhập số nguyên VND dương (ví dụ: 250000 hoặc 250.000).";
+                "Định dạng chưa đúng. Nhập: Tên biến thể | Giá\nVí dụ: 1 tháng | 250000";
             } else if (result.error === "INVALID_SKU") {
               errorMsg =
                 "SKU không hợp lệ. SKU chỉ gồm chữ, số, dấu - hoặc _ (không chứa khoảng trắng).";
             } else if (result.error === "INVALID_QUANTITY") {
               errorMsg = "Số lượng không hợp lệ. Vui lòng nhập số nguyên dương.";
-            } else if (result.error === "INVALID_THRESHOLD") {
-              errorMsg = "Ngưỡng cảnh báo tồn kho không hợp lệ. Vui lòng nhập số nguyên không âm.";
+            } else if (result.error === "INVALID_SUPPLIER_CONFIG") {
+              errorMsg =
+                "Cấu hình nhà cung cấp chưa đúng. Định dạng: supplierId | externalSku | costVnd | region";
+            } else if (result.error === "INVALID_INVENTORY_FIELDS") {
+              errorMsg = "Cấu trúc kho chưa hợp lệ. Hãy kiểm tra lại các trường đã chọn.";
+            } else if (result.error === "DRAFT_EXPIRED") {
+              errorMsg = "Phiên tạo sản phẩm đã hết hạn. Hãy bắt đầu lại.";
             } else if (result.error === "INVALID_VALUE") {
               errorMsg = "Dữ liệu không được để trống hoặc vượt quá độ dài cho phép.";
             }
@@ -3436,75 +3885,7 @@ async function bootstrap(): Promise<void> {
               ],
             };
           }
-          if (result.draft.step === "confirm") {
-            const categoryName = result.draft.categoryId
-              ? (
-                  await sql<{
-                    name: string;
-                  }>`select name_vi as name from category where id = ${result.draft.categoryId} limit 1`.execute(
-                    dbHandle.db,
-                  )
-                ).rows[0]?.name
-              : undefined;
-            return presentProductDraftPreview({
-              ...(result.draft as Required<typeof result.draft>),
-              ...(categoryName ? { categoryName } : {}),
-            });
-          }
-          if (result.draft.step === "fulfillmentType")
-            return presentProductFulfillmentTypeChoices();
-          if (result.draft.step === "category") {
-            const rows = await sql<{ id: string; name_vi: string }>`
-              select id, name_vi
-              from category
-              where is_active
-              order by sort_order, id
-              limit 20
-            `.execute(dbHandle.db);
-            return presentProductCategoryChoices(
-              rows.rows.map((row) => ({ id: row.id, name: row.name_vi })),
-            );
-          }
-          if (result.draft.step === "sku") {
-            const proposal = generateSkuProposal(result.draft.name ?? "");
-            return {
-              text: `Bước 2/8\n🏷 SKU\n\nSKU dùng để quản lý nội bộ.\n\nĐề xuất:\n${proposal}`,
-              buttons: [
-                [
-                  {
-                    text: `✨ Dùng SKU đề xuất: ${proposal}`,
-                    callbackData: `admin:products:apply-sku:${proposal}`,
-                  },
-                ],
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
-              ],
-            };
-          }
-          const prompts: Record<string, string> = {
-            variantName: "Bước 3/8 — Nhập tên biến thể (ví dụ: 1 tháng, Bản quyền).",
-            price: "Bước 4/8 — Nhập giá bán VND (ví dụ: 250000 hoặc 250.000).",
-            category: "Bước 5/8 — Chọn danh mục.",
-            fileArtifact:
-              "Bước 7/8 — Tạo biến thể tệp ở trạng thái tạm dừng. Sau khi tạo, vào Kho hàng → biến thể này để nhập tệp Telegram thật rồi xác nhận kích hoạt.",
-            supplierConfig:
-              "Bước 7/8 — Nhập cấu hình nhà cung cấp: supplierId|externalSku|costVnd|region.",
-            serviceInstructions: "Bước 7/8 — Nhập hướng dẫn xử lý cho đơn hàng.",
-            initialQuantity: "Bước 8/8 — Nhập số lượng ban đầu.",
-            inventoryFields: "Bước 7/8 — Nhập trường kho (vd: username,password,email).",
-            threshold: "Bước 8/8 — Nhập ngưỡng cảnh báo tồn kho (ví dụ: 5).",
-          };
-          return {
-            text: prompts[result.draft.step] ?? "Tiếp tục.",
-            buttons: [
-              [
-                { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-              ],
-            ],
-          };
+          return renderWizardStep(result.draft);
         },
         async applySku(input) {
           if (
@@ -3540,15 +3921,7 @@ async function bootstrap(): Promise<void> {
               buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
             };
           }
-          return {
-            text: "Bước 3/8 — Nhập tên biến thể (ví dụ: 1 tháng, Tiêu chuẩn).",
-            buttons: [
-              [
-                { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-              ],
-            ],
-          };
+          return renderWizardStep(result.draft);
         },
         async back(input) {
           if (
@@ -3557,95 +3930,11 @@ async function bootstrap(): Promise<void> {
           )
             return presentAdminDenied("NOT_ROOT_ADMIN");
           const current = await productDraftWorkflow.get(input.telegramUserId);
-          if (!current) return presentAdminMenu();
-
-          let prevStep: typeof current.step = "name";
-          if (current.step === "sku") prevStep = "name";
-          else if (current.step === "variantName") prevStep = "sku";
-          else if (current.step === "price") prevStep = "variantName";
-          else if (current.step === "category") prevStep = "price";
-          else if (current.step === "fulfillmentType")
-            prevStep = current.existingProductId ? "price" : "category";
-          else if (
-            current.step === "inventoryFields" ||
-            current.step === "serviceInstructions" ||
-            current.step === "supplierConfig" ||
-            current.step === "threshold"
-          )
-            prevStep = "fulfillmentType";
-          else if (current.step === "initialQuantity") prevStep = "serviceInstructions";
-          else if (current.step === "confirm") prevStep = "threshold";
-
-          current.step = prevStep;
+          if (!current) return presentAdminMenu(await getStoreMode(dbHandle.db));
+          const prev = previousStep(current);
           const repo = createProductDraftRepository(dbHandle.db);
-          await repo.save(current);
-
-          if (prevStep === "name") {
-            return {
-              text: `Bước 1/8 — Nhập tên sản phẩm.${current.name ? `\n(Hiện tại: ${current.name})` : ""}`,
-              buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
-            };
-          }
-          if (prevStep === "sku") {
-            const proposal = generateSkuProposal(current.name ?? "");
-            return {
-              text: `Bước 2/8\n🏷 SKU\n\nSKU dùng để quản lý nội bộ.${current.sku ? `\n(Hiện tại: ${current.sku})` : ""}\n\nĐề xuất:\n${proposal}`,
-              buttons: [
-                [
-                  {
-                    text: `✨ Dùng SKU đề xuất: ${proposal}`,
-                    callbackData: `admin:products:apply-sku:${proposal}`,
-                  },
-                ],
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
-              ],
-            };
-          }
-          if (prevStep === "variantName") {
-            return {
-              text: `Bước 3/8 — Nhập tên biến thể.${current.variantName ? `\n(Hiện tại: ${current.variantName})` : ""}`,
-              buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
-              ],
-            };
-          }
-          if (prevStep === "price") {
-            return {
-              text: `Bước 4/8 — Nhập giá bán VND.${current.priceVnd ? `\n(Hiện tại: ${current.priceVnd.toLocaleString("vi-VN")} ₫)` : ""}`,
-              buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
-              ],
-            };
-          }
-          if (prevStep === "category") {
-            const rows = await sql<{ id: string; name_vi: string }>`
-              select id, name_vi from category where is_active order by sort_order, id limit 20
-            `.execute(dbHandle.db);
-            return presentProductCategoryChoices(
-              rows.rows.map((row) => ({ id: row.id, name: row.name_vi })),
-            );
-          }
-          if (prevStep === "fulfillmentType") {
-            return presentProductFulfillmentTypeChoices();
-          }
-          return {
-            text: "Quay lại bước trước.",
-            buttons: [
-              [
-                { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-              ],
-            ],
-          };
+          await repo.save(prev);
+          return renderWizardStep(prev);
         },
         async variantText(input) {
           if (
@@ -3733,8 +4022,7 @@ async function bootstrap(): Promise<void> {
                   [{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${productId}` }],
                 ],
               };
-        },
-        async category(input) {
+        },        async category(input) {
           if (
             Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
             input.chatType !== "private"
@@ -3743,43 +4031,64 @@ async function bootstrap(): Promise<void> {
           const current = await productDraftWorkflow.get(input.telegramUserId);
           if (!current || current.step !== "category")
             return {
-              text: "Phiên tạo sản phẩm không còn hợp lệ.",
+              text: "Phiên tạo sản phẩm không còn ở bước chọn danh mục.",
               buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
             };
-          if (!input.categoryId) {
-            const rows = await sql<{
-              id: string;
-              name_vi: string;
-            }>`select id, name_vi from category where is_active order by sort_order, id limit 20`.execute(
-              dbHandle.db,
-            );
+          if (!input.categoryId) return renderWizardStep(current);
+          const found = await sql<{ id: string; name_vi: string }>`
+            select id, name_vi from category where id = ${input.categoryId} and is_active limit 1
+          `.execute(dbHandle.db);
+          const row = found.rows[0];
+          if (!row)
             return {
-              text: "Bước 5/8 — Chọn danh mục.",
-              buttons: [
-                ...rows.rows.map((row) => [
-                  { text: row.name_vi, callbackData: `admin:products:category:${row.id}` },
-                ]),
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
-              ],
+              text: "Danh mục không hợp lệ hoặc đã bị tắt.",
+              buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }]],
             };
-          }
-          const exists = await sql<{
-            id: string;
-          }>`select id from category where id = ${input.categoryId} and is_active`.execute(
-            dbHandle.db,
-          );
-          if (!exists.rows[0])
+          const result = await productDraftWorkflow.advance(input.telegramUserId, row.id);
+          if (!result.ok) return { text: "Không thể chọn danh mục.", buttons: [] };
+          const repo = createProductDraftRepository(dbHandle.db);
+          const named = { ...result.draft, categoryName: row.name_vi };
+          await repo.save(named);
+          return renderWizardStep(named);
+        },
+        async categoryNew(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "category")
             return {
-              text: "Danh mục không hợp lệ.",
+              text: "Phiên tạo sản phẩm không còn ở bước chọn danh mục.",
               buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
             };
-          const result = await productDraftWorkflow.advance(input.telegramUserId, input.categoryId);
-          return result.ok
-            ? presentProductFulfillmentTypeChoices()
-            : { text: "Không thể chọn danh mục.", buttons: [] };
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "WIZARD_CATEGORY_CREATE",
+            payload: {},
+          });
+          return presentWizardCategoryCreatePrompt();
+        },
+        async categoryNone(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "category")
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước chọn danh mục.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          const uncategorized = await getOrCreateUncategorizedCategory(dbHandle.db);
+          const result = await productDraftWorkflow.advance(input.telegramUserId, uncategorized.id);
+          if (!result.ok) return { text: "Không thể chọn danh mục.", buttons: [] };
+          const repo = createProductDraftRepository(dbHandle.db);
+          const named = { ...result.draft, categoryName: uncategorized.name_vi };
+          await repo.save(named);
+          return renderWizardStep(named);
         },
         async fulfillmentType(input) {
           if (
@@ -3788,9 +4097,9 @@ async function bootstrap(): Promise<void> {
           )
             return presentAdminDenied("NOT_ROOT_ADMIN");
           const current = await productDraftWorkflow.get(input.telegramUserId);
-          if (!current || current.step !== "fulfillmentType")
+          if (!current || current.step !== "productType")
             return {
-              text: "Phiên tạo sản phẩm không còn hợp lệ.",
+              text: "Phiên tạo sản phẩm không còn ở bước chọn loại.",
               buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
             };
           const result = await productDraftWorkflow.advance(
@@ -3799,7 +4108,7 @@ async function bootstrap(): Promise<void> {
           );
           if (!result.ok)
             return {
-              text: "Loại giao hàng không hợp lệ.",
+              text: "Loại sản phẩm không hợp lệ.",
               buttons: [
                 [
                   { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
@@ -3807,35 +4116,208 @@ async function bootstrap(): Promise<void> {
                 ],
               ],
             };
-          if (result.draft.step === "threshold")
+          return renderWizardStep(result.draft);
+        },
+        async descriptionTemplate(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "description" || !current.fulfillmentType)
             return {
-              text: "Bước 8/8 — Nhập ngưỡng cảnh báo tồn kho.",
-              buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
-              ],
+              text: "Phiên tạo sản phẩm không còn ở bước mô tả.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
             };
-          return {
-            text:
-              (
-                {
-                  supplierConfig:
-                    "Bước 7/8 — Nhập cấu hình nhà cung cấp đã ACTIVE: supplierId|externalSku|costVnd|region.",
-                  serviceInstructions: "Bước 7/8 — Nhập hướng dẫn xử lý cho đơn hàng.",
-                } as Record<string, string>
-              )[result.draft.step] ??
-              (result.draft.fulfillmentType === "DIGITAL_FILE"
-                ? "Bước 8/8 — Tạo biến thể tạm dừng. Sau đó vào Kho hàng để nhập tệp thật và xác nhận kích hoạt."
-                : "Bước 7/8 — Nhập trường kho (vd: username,password,email)."),
-            buttons: [
-              [
-                { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-              ],
-            ],
+          const template = DESCRIPTION_TEMPLATES[current.fulfillmentType];
+          const repo = createProductDraftRepository(dbHandle.db);
+          const next = {
+            ...current,
+            description: template.description,
+            descriptionVi: template.description,
+            whatCustomerReceivesVi: template.whatCustomerReceives,
+            usageInstructionsVi: template.usageInstructions,
+            warrantyVi: template.warranty,
+            step: "variant" as const,
+            expiresAt: Date.now() + 15 * 60_000,
           };
+          await repo.save(next);
+          return renderWizardStep(next);
+        },
+        async descriptionCustom(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "description")
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước mô tả.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "WIZARD_DESC_CUSTOM",
+            payload: {},
+          });
+          return presentWizardDescriptionCustomPrompt();
+        },
+        async deliveryToggle(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "deliveryConfig")
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước cấu hình giao hàng.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          const repo = createProductDraftRepository(dbHandle.db);
+          const next = toggleOptionalField(current, input.fieldName);
+          await repo.save(next);
+          return renderWizardStep(next);
+        },
+        async deliveryFlags(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          const field = (current?.inventoryFields ?? []).find((f) => f.name === input.fieldName);
+          if (!current || !field)
+            return {
+              text: "Trường tùy chỉnh không còn tồn tại.",
+              buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:products:dc:back" }]],
+            };
+          return presentWizardCustomFieldFlags(field.name, field.label, {
+            required: field.required,
+            secret: field.secret,
+            customerVisible: field.customerVisible,
+          });
+        },
+        async deliveryFlag(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          const field = (current?.inventoryFields ?? []).find((f) => f.name === input.fieldName);
+          if (!current || !field)
+            return {
+              text: "Trường tùy chỉnh không còn tồn tại.",
+              buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:products:dc:back" }]],
+            };
+          const key = input.flagKey;
+          if (key !== "required" && key !== "secret" && key !== "customerVisible")
+            return presentWizardCustomFieldFlags(field.name, field.label, {
+              required: field.required,
+              secret: field.secret,
+              customerVisible: field.customerVisible,
+            });
+          const repo = createProductDraftRepository(dbHandle.db);
+          const next = setCustomFieldFlags(current, field.name, { [key]: !field[key] });
+          await repo.save(next);
+          const updated = (next.inventoryFields ?? []).find((f) => f.name === field.name)!;
+          return presentWizardCustomFieldFlags(updated.name, updated.label, {
+            required: updated.required,
+            secret: updated.secret,
+            customerVisible: updated.customerVisible,
+          });
+        },
+        async deliveryRemove(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current)
+            return {
+              text: "Phiên tạo sản phẩm đã hết hạn.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          const repo = createProductDraftRepository(dbHandle.db);
+          const next = removeCustomField(current, input.fieldName);
+          await repo.save(next);
+          return renderWizardStep(next);
+        },
+        async deliveryCustom(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "deliveryConfig")
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước cấu hình giao hàng.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "WIZARD_CUSTOM_FIELD",
+            payload: {},
+          });
+          return presentWizardCustomFieldPrompt();
+        },
+        async deliveryAdvanced(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "deliveryConfig")
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước cấu hình giao hàng.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "WIZARD_ADVANCED",
+            payload: {},
+          });
+          return presentWizardAdvancedPrompt();
+        },
+        async deliveryDone(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "deliveryConfig")
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước cấu hình giao hàng.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          const result = await productDraftWorkflow.advance(input.telegramUserId, "done");
+          if (!result.ok)
+            return {
+              text: "Cấu trúc kho chưa hợp lệ. Hãy kiểm tra lại các trường đã chọn.",
+              buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:products:dc:back" }]],
+            };
+          return renderWizardStep(result.draft);
+        },
+        async deliveryBack(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current)
+            return {
+              text: "Phiên tạo sản phẩm đã hết hạn.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          return renderWizardStep({ ...current, step: "deliveryConfig" });
         },
         async review(input) {
           if (
@@ -3849,19 +4331,7 @@ async function bootstrap(): Promise<void> {
               text: "Chưa có nháp sản phẩm sẵn sàng xác nhận.",
               buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
             };
-          const categoryName = draft.categoryId
-            ? (
-                await sql<{
-                  name: string;
-                }>`select name_vi as name from category where id = ${draft.categoryId} limit 1`.execute(
-                  dbHandle.db,
-                )
-              ).rows[0]?.name
-            : undefined;
-          return presentProductDraftPreview({
-            ...(draft as Required<typeof draft>),
-            ...(categoryName ? { categoryName } : {}),
-          });
+          return renderWizardStep(draft);
         },
         async confirm(input) {
           if (
@@ -3878,7 +4348,6 @@ async function bootstrap(): Promise<void> {
             draft.priceVnd === undefined ||
             !draft.fulfillmentType ||
             !draft.inventoryFields ||
-            draft.lowStockThreshold === undefined ||
             (!draft.existingProductId && (!draft.name || !draft.slug || !draft.categoryId))
           )
             return {
@@ -3900,7 +4369,7 @@ async function bootstrap(): Promise<void> {
                   name: draft.variantName,
                   fulfillmentType: draft.fulfillmentType,
                   inventoryFields: draft.inventoryFields,
-                  lowStockThreshold: draft.lowStockThreshold,
+                  lowStockThreshold: draft.lowStockThreshold ?? null,
                   ...(draft.serviceInstructions === undefined
                     ? {}
                     : { serviceInstructions: draft.serviceInstructions }),
@@ -3915,7 +4384,7 @@ async function bootstrap(): Promise<void> {
                   priceVnd: draft.priceVnd,
                   reason: "Admin variant creation",
                   correlationId: input.correlationId,
-                })
+                } as Parameters<typeof createAdminVariant>[0])
               : await createAdminProduct({
                   actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
                   config: {
@@ -3930,8 +4399,27 @@ async function bootstrap(): Promise<void> {
                   variantName: draft.variantName,
                   fulfillmentType: draft.fulfillmentType,
                   inventoryFields: draft.inventoryFields,
-                  lowStockThreshold: draft.lowStockThreshold,
+                  lowStockThreshold: draft.lowStockThreshold ?? null,
                   ...(draft.description === undefined ? {} : { description: draft.description }),
+                  ...(draft.descriptionVi === undefined
+                    ? {}
+                    : { descriptionVi: draft.descriptionVi }),
+                  ...(draft.whatCustomerReceivesVi === undefined
+                    ? {}
+                    : { whatCustomerReceivesVi: draft.whatCustomerReceivesVi }),
+                  ...(draft.usageInstructionsVi === undefined
+                    ? {}
+                    : { usageInstructionsVi: draft.usageInstructionsVi }),
+                  ...(draft.deliveryEtaVi === undefined
+                    ? {}
+                    : { deliveryEtaVi: draft.deliveryEtaVi }),
+                  ...(draft.warrantyVi === undefined ? {} : { warrantyVi: draft.warrantyVi }),
+                  ...(draft.supportVi === undefined ? {} : { supportVi: draft.supportVi }),
+                  ...(draft.termsVi === undefined ? {} : { termsVi: draft.termsVi }),
+                  ...(draft.tags === undefined ? {} : { tags: draft.tags }),
+                  ...(draft.compareAtPriceVnd === undefined
+                    ? {}
+                    : { compareAtPriceVnd: draft.compareAtPriceVnd }),
                   ...(draft.serviceInstructions === undefined
                     ? {}
                     : { serviceInstructions: draft.serviceInstructions }),
@@ -3946,21 +4434,33 @@ async function bootstrap(): Promise<void> {
                   priceVnd: draft.priceVnd,
                   reason: "Admin product creation",
                   correlationId: input.correlationId,
-                });
+                } as Parameters<typeof createAdminProduct>[0]);
             await productDraftWorkflow.cancel(input.telegramUserId);
-            const setupButton =
+            const stockBacked =
+              product.fulfillmentType === "STOCK_ACCOUNT" ||
+              product.fulfillmentType === "STOCK_CODE" ||
+              product.fulfillmentType === "QUANTITY_STOCK";
+            const primaryButton =
               product.fulfillmentType === "DIGITAL_FILE"
                 ? {
                     text: "📎 Nhập tệp để kích hoạt",
                     callbackData: `admin:inventory:variant:${product.variantId}`,
                   }
-                : { text: "📦 Kho hàng", callbackData: "admin:inventory" };
+                : stockBacked
+                  ? {
+                      text: "📦 Nhập kho ngay",
+                      callbackData: `admin:inventory:variant:${product.variantId}`,
+                    }
+                  : {
+                      text: "👁 Xem như khách",
+                      callbackData: `shop:product:${product.id}`,
+                    };
             return {
               text: `✅ ĐÃ TẠO SẢN PHẨM\n\n${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫\nTrạng thái: ${product.active ? "Đang mở bán" : "Nháp / Chưa mở bán"}`,
               buttons: [
                 [
-                  setupButton,
-                  { text: "👁 Xem như khách", callbackData: `shop:product:${product.id}` },
+                  primaryButton,
+                  { text: "✏️ Chỉnh sửa", callbackData: `admin:products:detail:${product.id}` },
                 ],
                 [
                   { text: "➕ Tạo sản phẩm khác", callbackData: "admin:products:create" },
@@ -4014,11 +4514,22 @@ async function bootstrap(): Promise<void> {
         vault,
         sender: {
           send: async (input) => {
+            const lines = [
+              "✅ GIAO HÀNG THÀNH CÔNG",
+              "",
+              input.product?.name ? `📦 ${input.product.name}` : "📦 Đơn hàng của bạn",
+              "",
+              "Nhấn nút bên dưới để xem thông tin nhận hàng (liên kết bảo mật, chỉ xem được một lần).",
+            ];
+            if (input.product?.usageInstructionsVi)
+              lines.push("", `📘 Hướng dẫn: ${input.product.usageInstructionsVi}`);
+            if (input.product?.warrantyVi)
+              lines.push("", `🛡 Bảo hành: ${input.product.warrantyVi}`);
             await telegramResponder.send({
               chatId: input.chatId,
               messageId: null,
               message: {
-                text: "🎁 ĐƠN HÀNG CỦA BẠN ĐÃ SẴN SÀNG!\n\nNhấn nút bên dưới để nhận tài khoản / mã kích hoạt của bạn:",
+                text: lines.join("\n"),
                 buttons: [
                   [
                     {
@@ -4028,6 +4539,7 @@ async function bootstrap(): Promise<void> {
                     },
                   ],
                   [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
+                  [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
                 ],
               },
             });

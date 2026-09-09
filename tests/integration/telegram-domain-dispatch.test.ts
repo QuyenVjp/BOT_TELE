@@ -30,6 +30,14 @@ function setup() {
     text: "menu",
     buttons: [[{ text: "orders", callbackData: "ord:list" }]],
   });
+  const categoryList = vi.fn().mockResolvedValue({
+    text: "categories",
+    buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
+  });
+  const categoryView = vi.fn().mockResolvedValue({
+    text: "category page",
+    buttons: [[{ text: "Quay lại", callbackData: "cat:list" }]],
+  });
   const adminMainMenu = vi.fn().mockResolvedValue(presentAdminMenu());
   const adminDashboard = vi.fn().mockResolvedValue({
     text: "dashboard",
@@ -149,8 +157,8 @@ function setup() {
     resolveCatalogPage: vi.fn().mockResolvedValue(null),
     catalog: {
       mainMenu,
-      categoryList: vi.fn(),
-      categoryView: vi.fn(),
+      categoryList,
+      categoryView,
       variantDetail: vi.fn(),
       search: vi.fn(),
     },
@@ -241,6 +249,8 @@ function setup() {
     codec,
     dispatcher,
     mainMenu,
+    categoryList,
+    categoryView,
     adminMainMenu,
     adminDashboard,
     adminAudit,
@@ -1677,5 +1687,73 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData: stolen,
     });
     expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it("opens a category from a sealed CATEGORY_VIEW token without treating it as a variant cursor", async () => {
+    const { codec, dispatcher, categoryList, categoryView, send } = setup();
+    const categoryId = newId();
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "cat-view-sealed",
+      action: "CATALOG",
+      callbackData: codec.issue({
+        action: "CATEGORY_VIEW",
+        resourceId: categoryId,
+        telegramUserId: USER,
+      }),
+    });
+    expect(categoryView).toHaveBeenCalledWith(categoryId);
+    expect(categoryList).not.toHaveBeenCalled();
+    const categorySent = send.mock.calls[0]![0];
+    expect(categorySent.message.text).toBe("category page");
+    expect(categorySent.message.text).not.toMatch(/không tồn tại|không được hỗ trợ/i);
+  });
+
+  it("routes back and main-menu callbacks to catalog or shop home instead of error copy", async () => {
+    const { codec, dispatcher, categoryList, send } = setup();
+    const payloads = [
+      "cat:list",
+      "menu:main",
+      codec.issue({ action: "CATEGORY_LIST", telegramUserId: USER }),
+      codec.issue({ action: "MAIN_MENU", telegramUserId: USER }),
+      codec.issue({ action: "SHOP_HOME", telegramUserId: USER }),
+    ];
+    for (const [index, callbackData] of payloads.entries()) {
+      await dispatcher.handle({
+        actorUserId: USER,
+        chatId: USER,
+        chatType: "private",
+        messageId: `nav-back-${index}`,
+        action: "CATALOG",
+        callbackData,
+      });
+    }
+    expect(categoryList).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledTimes(payloads.length);
+    for (const call of send.mock.calls) {
+      expect(call[0].message.text).not.toMatch(/không tồn tại|không được hỗ trợ|không hợp lệ/i);
+      expect(call[0].message.text.trim()).not.toBe("");
+    }
+  });
+
+  it("falls back to the category list when a catalog page cursor cannot be resolved", async () => {
+    const { codec, dispatcher, categoryList, categoryView, send } = setup();
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "catalog-page-miss",
+      action: "CATALOG",
+      callbackData: codec.issue({
+        action: "CATALOG_PAGE",
+        resourceId: newId(),
+        telegramUserId: USER,
+      }),
+    });
+    expect(categoryView).not.toHaveBeenCalled();
+    expect(categoryList).toHaveBeenCalledTimes(1);
+    expect(send.mock.calls[0]![0].message.text).toBe("categories");
   });
 });

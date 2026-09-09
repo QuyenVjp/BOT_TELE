@@ -257,6 +257,15 @@ export const CALLBACK_ACTION_CODES = {
   RESTOCK_SUBSCRIBE: 16,
   RESTOCK_UNSUBSCRIBE: 17,
   RESTOCK_LIST: 18,
+  SHOP_HOME: 19,
+  SHOP_OPEN: 20,
+  SHOP_PRODUCT: 21,
+  SHOP_PAGE: 22,
+  CUSTOMER_NOTIFICATIONS: 23,
+  CUSTOMER_NOTIFICATION_TOGGLE: 24,
+  CUSTOMER_WARRANTY: 25,
+  PREORDER_CONSENT: 26,
+  PREORDER_CREATE: 27,
 } as const;
 
 export type CallbackAction = keyof typeof CALLBACK_ACTION_CODES;
@@ -405,6 +414,10 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "CATEGORY_LIST":
     case "ORDER_LIST":
     case "RESTOCK_LIST":
+    case "SHOP_HOME":
+    case "SHOP_OPEN":
+    case "CUSTOMER_NOTIFICATIONS":
+    case "CUSTOMER_WARRANTY":
       assertNoPayload(input);
       return Buffer.alloc(0);
     case "CATEGORY_VIEW":
@@ -417,12 +430,18 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "SUPPORT_TICKET_VIEW":
     case "RESTOCK_SUBSCRIBE":
     case "RESTOCK_UNSUBSCRIBE":
+    case "SHOP_PRODUCT":
+    case "SHOP_PAGE":
+    case "PREORDER_CONSENT":
+    case "PREORDER_CREATE":
+      assertOnlyResource(input);
+      return encodeResourceId(input.resourceId!);
+    case "CUSTOMER_NOTIFICATION_TOGGLE":
       assertOnlyResource(input);
       return encodeResourceId(input.resourceId!);
     case "CATALOG_PAGE":
-      if (!input.resourceId || input.option !== undefined) {
+      if (!input.resourceId || input.option !== undefined)
         throw new Error("Invalid catalog page callback payload");
-      }
       return input.secondaryResourceId
         ? Buffer.concat([
             encodeResourceId(input.resourceId),
@@ -430,9 +449,8 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
           ])
         : encodeResourceId(input.resourceId);
     case "SUPPORT_MENU":
-      if (input.secondaryResourceId !== undefined || input.option !== undefined) {
+      if (input.secondaryResourceId !== undefined || input.option !== undefined)
         throw new Error("Invalid support menu callback payload");
-      }
       return input.resourceId ? encodeResourceId(input.resourceId) : Buffer.alloc(0);
     case "SUPPORT_REASON":
     case "ADMIN_COMMAND": {
@@ -442,9 +460,8 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
         input.option! < 0 ||
         input.option! > 255 ||
         (input.action === "ADMIN_COMMAND" && !input.resourceId)
-      ) {
+      )
         throw new Error("Invalid callback option payload");
-      }
       const option = Buffer.from([input.option!]);
       return input.resourceId
         ? Buffer.concat([encodeResourceId(input.resourceId), option])
@@ -459,7 +476,17 @@ function decodeActionPayload(
   payload: Buffer,
 ): Omit<VerifiedCallbackToken, "action" | "expiresAt"> | null {
   if (
-    ["SEARCH_PROMPT", "MAIN_MENU", "CATEGORY_LIST", "ORDER_LIST", "RESTOCK_LIST"].includes(action)
+    [
+      "SEARCH_PROMPT",
+      "MAIN_MENU",
+      "CATEGORY_LIST",
+      "ORDER_LIST",
+      "RESTOCK_LIST",
+      "SHOP_HOME",
+      "SHOP_OPEN",
+      "CUSTOMER_NOTIFICATIONS",
+      "CUSTOMER_WARRANTY",
+    ].includes(action)
   ) {
     return payload.byteLength === 0 ? {} : null;
   }
@@ -475,9 +502,15 @@ function decodeActionPayload(
       "SUPPORT_TICKET_VIEW",
       "RESTOCK_SUBSCRIBE",
       "RESTOCK_UNSUBSCRIBE",
+      "SHOP_PRODUCT",
+      "SHOP_PAGE",
+      "PREORDER_CONSENT",
+      "PREORDER_CREATE",
+      "CUSTOMER_NOTIFICATION_TOGGLE",
     ].includes(action)
   ) {
-    return payload.byteLength === 16 ? { resourceId: decodeUlid(payload) } : null;
+    if (payload.byteLength === 16) return { resourceId: decodeUlid(payload) };
+    return payload.byteLength === 26 ? { resourceId: payload.toString("utf8") } : null;
   }
   if (action === "CATALOG_PAGE") {
     if (payload.byteLength === 16) return { resourceId: decodeUlid(payload) };
@@ -523,8 +556,9 @@ function assertOnlyResource(input: IssueCallbackTokenInput): void {
 }
 
 function encodeResourceId(resourceId: string): Buffer {
-  if (!isId(resourceId)) throw new Error("Invalid callback resource id");
-  return encodeUlid(resourceId);
+  if (isId(resourceId)) return encodeUlid(resourceId);
+  if (/^[0-9A-Z]{26}$/.test(resourceId)) return Buffer.from(resourceId, "ascii");
+  throw new Error("Invalid callback resource id");
 }
 
 function signUnified(key: Buffer, telegramUserId: string, payload: Buffer): Buffer {
@@ -539,14 +573,12 @@ function signUnified(key: Buffer, telegramUserId: string, payload: Buffer): Buff
 
 /** Untrusted action hint used only to select a rate-limit bucket before verification. */
 export function peekCallbackAction(callbackData: string): CallbackAction | null {
-  if (!callbackData.startsWith(UNIFIED_PREFIX) || Buffer.byteLength(callbackData, "utf8") > 64) {
+  if (!callbackData.startsWith(UNIFIED_PREFIX) || Buffer.byteLength(callbackData, "utf8") > 64)
     return null;
-  }
   const encoded = callbackData.slice(UNIFIED_PREFIX.length);
   if (!/^[A-Za-z0-9_-]+$/.test(encoded)) return null;
   const raw = Buffer.from(encoded, "base64url");
-  if (raw.byteLength < 5 + UNIFIED_SIGNATURE_BYTES || raw.toString("base64url") !== encoded) {
+  if (raw.byteLength < 5 + UNIFIED_SIGNATURE_BYTES || raw.toString("base64url") !== encoded)
     return null;
-  }
   return ACTION_BY_CODE.get(raw[0]! >> 4) ?? null;
 }

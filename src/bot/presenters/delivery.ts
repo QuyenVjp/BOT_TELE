@@ -58,22 +58,47 @@ export function presentDeliveryProcessing(orderNumber: string): PresentedMessage
  * surface — the secret itself is never embedded in the message body as a
  * credential, only as a time-limited link the customer can open once.
  */
+export interface DeliveryCredentialField {
+  name: string;
+  label: string;
+  value: string;
+  secret?: boolean;
+  customerVisible?: boolean;
+}
+
+export interface DeliveryCompletedOptions {
+  productName?: string;
+  fulfillmentType?: string;
+  fields?: DeliveryCredentialField[];
+  code?: string;
+  usageInstructionsVi?: string | null;
+  warrantyVi?: string | null;
+}
+
 export function presentDeliveryCompleted(
   orderNumber: string,
   deliveryUrl: string,
+  options?: DeliveryCompletedOptions,
 ): PresentedMessage {
+  const lines = [
+    "✅ GIAO HÀNG THÀNH CÔNG",
+    "",
+    options?.productName ?? "Sản phẩm",
+    `Đơn: ${orderNumber}`,
+  ];
+  const fields = options?.fields?.filter((field) => field.customerVisible !== false) ?? [];
+  if (options?.code) lines.push(`🔑 Mã: ${options.code}`);
+  for (const field of fields)
+    lines.push(`${field.secret ? "🔐 " : "👤 "}${field.label}: ${field.value}`);
+  if (options?.usageInstructionsVi) lines.push("", `📘 Hướng dẫn: ${options.usageInstructionsVi}`);
+  if (options?.warrantyVi) lines.push("", `🛡 Bảo hành: ${options.warrantyVi}`);
+  lines.push("", deliveryUrl);
   return {
-    text: [
-      DELIVERY_COPY.completedTitle,
-      "",
-      `Đơn: ${orderNumber}`,
-      DELIVERY_COPY.completedBody,
-      "",
-      deliveryUrl,
-    ].join("\n"),
+    text: lines.join("\n"),
     buttons: [
-      [{ text: DELIVERY_COPY.openDelivery, callbackData: `dlv:open:${orderNumber}` }],
-      ...nav(orderNumber),
+      [{ text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` }],
+      [{ text: "🛡 Bảo hành", callbackData: "cust:warranty" }],
+      [{ text: "💬 Hỗ trợ", callbackData: `sup:open:${orderNumber}` }],
     ],
   };
 }

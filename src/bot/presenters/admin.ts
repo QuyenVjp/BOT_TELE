@@ -1,6 +1,10 @@
 import type { InlineButton, PresentedMessage } from "./catalog.js";
-import type { FulfillmentType, InventoryField } from "../../modules/catalog/fulfillment-type.js";
-import { FULFILLMENT_TYPE_LABELS } from "../../modules/catalog/fulfillment-type.js";
+import {
+  FULFILLMENT_TYPE_LABELS,
+  type FulfillmentType,
+  type InventoryField,
+} from "../../modules/catalog/fulfillment-type.js";
+import type { StoreMode } from "../../modules/commerce/store-mode.js";
 import type { AuditEvent } from "../../modules/identity/audit.js";
 import type {
   AdminOrderDetail,
@@ -103,14 +107,93 @@ const visibleAdminButtons = (): InlineButton[][] =>
   }, []);
 
 /** Compact root: only live operational areas are shown. */
-export function presentAdminMenu(storeOpen: boolean = false): PresentedMessage {
-  const storeBanner = storeOpen ? "🟢 CỬA HÀNG ĐANG MỞ" : "🔴 CỬA HÀNG ĐANG ĐÓNG";
-  const storeButton: InlineButton[] = storeOpen
-    ? [{ text: "🔴 Đóng cửa hàng", callbackData: "admin:store:close" }]
-    : [{ text: "🟢 Mở cửa hàng", callbackData: "admin:store:open" }];
+export function presentAdminMenu(storeMode: StoreMode = "CLOSED"): PresentedMessage {
+  const storeBanner =
+    storeMode === "OPEN"
+      ? "🟢 ĐANG MỞ BÁN"
+      : storeMode === "TEST"
+        ? "🟡 CHẾ ĐỘ TEST"
+        : "🔴 CỬA HÀNG ĐANG ĐÓNG";
+  const storeButton: InlineButton[] =
+    storeMode === "CLOSED"
+      ? [{ text: "🏪 Trạng thái cửa hàng", callbackData: "admin:store:mode" }]
+      : [{ text: "🏪 Trạng thái cửa hàng", callbackData: "admin:store:mode" }];
   return {
     text: `${ADMIN_COPY.adminMenu}\n\n${storeBanner}`,
     buttons: [storeButton, ...visibleAdminButtons()],
+  };
+}
+
+export function presentAdminStoreMode(mode: StoreMode): PresentedMessage {
+  const buttons: InlineButton[][] = [];
+  if (mode === "CLOSED")
+    buttons.push([{ text: "🧪 Chế độ TEST", callbackData: "admin:store:test" }]);
+  if (mode !== "OPEN") buttons.push([{ text: "🟢 Mở bán", callbackData: "admin:store:open" }]);
+  if (mode !== "CLOSED")
+    buttons.push([{ text: "🔴 Đóng cửa hàng", callbackData: "admin:store:close" }]);
+  buttons.push([{ text: "⬅️ Quay lại", callbackData: "admin:menu" }]);
+  return {
+    text: `🏪 Trạng thái cửa hàng\n\n${mode === "OPEN" ? "🟢 ĐANG MỞ BÁN" : mode === "TEST" ? "🟡 CHẾ ĐỘ TEST" : "🔴 CỬA HÀNG ĐANG ĐÓNG"}`,
+    buttons,
+  };
+}
+export function presentAdminStoreOpenConfirmation(input: {
+  activeProducts: number;
+  inStockVariants: number;
+}): PresentedMessage {
+  return {
+    text: `⚠️ XÁC NHẬN MỞ BÁN\n\nSản phẩm public đang hoạt động: ${input.activeProducts}\nBiến thể đang còn hàng: ${input.inStockVariants}`,
+    buttons: [
+      [{ text: "✅ MỞ BÁN", callbackData: "admin:store:open:confirm" }],
+      [{ text: "❌ Huỷ", callbackData: "admin:store:mode" }],
+    ],
+  };
+}
+export function presentAdminTestCustomers(input: {
+  customers: Array<{ id: string; telegramUserId: string }>;
+}): PresentedMessage {
+  return {
+    text: `👥 KHÁCH TEST\n\n${input.customers.length ? input.customers.map((c) => `• ${c.telegramUserId.replace(/^(\d{2})\d+(\d{2})$/u, "$1••••$2")}`).join("\n") : "Chưa có khách test."}`,
+    buttons: [
+      [{ text: "➕ Thêm", callbackData: "admin:testlab:testers:add" }],
+      ...input.customers.map((c) => [
+        { text: "➖ Xoá", callbackData: `admin:testlab:testers:del:${c.id}` },
+      ]),
+      [{ text: "⬅️ Quay lại", callbackData: "admin:testlab" }],
+    ],
+  };
+}
+export function presentAdminTestCustomerPrompt(): PresentedMessage {
+  return {
+    text: "Nhập Telegram ID khách test (chỉ chữ số).",
+    buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:testlab:testers" }]],
+  };
+}
+export function presentAdminCategories(input: {
+  categories: Array<{ id: string; nameVi: string; active: boolean; productCount: number }>;
+}): PresentedMessage {
+  return {
+    text: `🏷 DANH MỤC\n\n${input.categories.length ? input.categories.map((c) => `• ${c.nameVi} · ${c.productCount} sản phẩm · ${c.active ? "đang bật" : "đang tắt"}`).join("\n") : "Chưa có danh mục."}`,
+    buttons: [
+      ...input.categories.flatMap((c) => [
+        [
+          { text: `✏️ ${c.nameVi}`, callbackData: `admin:categories:rename:${c.id}` },
+          { text: "🔁 Bật/Tắt", callbackData: `admin:categories:toggle:${c.id}` },
+        ],
+        [
+          { text: "⬆️", callbackData: `admin:categories:up:${c.id}` },
+          { text: "⬇️", callbackData: `admin:categories:down:${c.id}` },
+        ],
+      ]),
+      [{ text: "➕ Tạo danh mục", callbackData: "admin:categories:create" }],
+      [{ text: "⬅️ Quay lại", callbackData: "admin:products" }],
+    ],
+  };
+}
+export function presentAdminCategoryPrompt(): PresentedMessage {
+  return {
+    text: "Nhập tên danh mục mới.",
+    buttons: [[{ text: "⬅️ Quay lại", callbackData: "admin:categories" }]],
   };
 }
 
@@ -537,21 +620,39 @@ export function presentProductFulfillmentTypeChoices(): PresentedMessage {
 }
 
 export function presentProductDraftPreview(draft: {
-  name?: string;
-  existingProductId?: string;
+  name?: string | undefined;
+  existingProductId?: string | undefined;
   sku: string;
   variantName: string;
-  categoryId?: string;
-  categoryName?: string;
+  categoryId?: string | undefined;
+  categoryName?: string | undefined;
   priceVnd: bigint;
+  compareAtPriceVnd?: bigint | undefined;
   fulfillmentType: FulfillmentType;
   inventoryFields: InventoryField[];
-  lowStockThreshold: number;
-  serviceInstructions?: string;
-  initialQuantity?: number;
-  fileArtifact?: { filename: string };
-  supplierConfig?: { supplierId: string; externalSku: string; costVnd: bigint; region?: string };
+  lowStockThreshold?: number | undefined;
+  descriptionVi?: string | undefined;
+  warrantyVi?: string | undefined;
+  deliveryEtaVi?: string | undefined;
+  serviceInstructions?: string | undefined;
+  initialQuantity?: number | undefined;
+  fileArtifact?: { filename: string } | undefined;
+  supplierConfig?:
+    | { supplierId: string; externalSku: string; costVnd: bigint; region?: string | undefined }
+    | undefined;
 }): PresentedMessage {
+  const deliveryLine =
+    draft.fulfillmentType === "UNLIMITED_SERVICE"
+      ? "♾ Dịch vụ không giới hạn — không cần nhập kho"
+      : draft.fulfillmentType === "MANUAL_FULFILLMENT"
+        ? "🧑‍💻 Nhân viên xử lý thủ công"
+        : draft.fulfillmentType === "SUPPLIER_API"
+          ? "🔌 Giao qua nhà cung cấp/API"
+          : draft.fulfillmentType === "QUANTITY_STOCK"
+            ? "📦 Hàng số lượng — không có thông tin đăng nhập"
+            : draft.fulfillmentType === "DIGITAL_FILE"
+              ? "📁 Giao tệp số"
+              : draft.inventoryFields.map((field) => field.label).join(", ") || "Chưa cấu hình";
   return {
     text: [
       "📋 XEM TRƯỚC SẢN PHẨM",
@@ -561,12 +662,15 @@ export function presentProductDraftPreview(draft: {
       `SKU: ${draft.sku}`,
       draft.existingProductId
         ? `Sản phẩm cha: ${draft.existingProductId}`
-        : `Danh mục: ${draft.categoryName ?? draft.categoryId}`,
-      `Giá: ${draft.priceVnd.toLocaleString("vi-VN")} ₫`,
+        : `Danh mục: ${draft.categoryName ?? draft.categoryId ?? "Chưa chọn"}`,
       `Loại: ${FULFILLMENT_TYPE_LABELS[draft.fulfillmentType]}`,
-      `Trường kho: ${draft.inventoryFields.map((field) => field.label).join(", ") || "Chưa nhập"}`,
-      `Ngưỡng tồn: ${draft.lowStockThreshold}`,
-      "Trạng thái: Nháp / Chưa mở bán",
+      `Giá: ${draft.priceVnd.toLocaleString("vi-VN")} ₫${draft.compareAtPriceVnd ? ` (gốc ${draft.compareAtPriceVnd.toLocaleString("vi-VN")} ₫)` : ""}`,
+      `Giao hàng: ${deliveryLine}`,
+      ...(draft.descriptionVi ? [`Mô tả: ${draft.descriptionVi}`] : []),
+      ...(draft.deliveryEtaVi ? [`Thời gian giao: ${draft.deliveryEtaVi}`] : []),
+      `Bảo hành: ${draft.warrantyVi ?? "Theo chính sách cửa hàng"}`,
+      "Hiển thị: Nháp — chỉ admin thấy cho tới khi kích hoạt",
+      ...(draft.lowStockThreshold === undefined ? [] : [`Ngưỡng tồn: ${draft.lowStockThreshold}`]),
       ...(draft.serviceInstructions ? [`Hướng dẫn xử lý:\n${draft.serviceInstructions}`] : []),
       ...(draft.initialQuantity === undefined
         ? []
@@ -587,13 +691,11 @@ export function presentProductDraftPreview(draft: {
           callbackData: "admin:products:confirm",
         },
       ],
+      [{ text: "✏️ Chỉnh sửa", callbackData: "admin:products:back" }],
       ...(!draft.existingProductId
         ? [[{ text: "💾 Lưu nháp", callbackData: "admin:products:draft" }]]
         : []),
-      [
-        { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-        { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-      ],
+      [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
     ],
   };
 }
@@ -873,6 +975,7 @@ export function presentAdminTestLab(input: {
           )),
     ].join("\n"),
     buttons: [
+      [{ text: "👥 Khách test", callbackData: "admin:testlab:testers" }],
       [
         { text: "📦 Quản lý kho", callbackData: "admin:inventory" },
         { text: "🏠 Quản trị", callbackData: "admin:menu" },

@@ -3,13 +3,16 @@ import {
   listSellableVariants,
   getVariantById,
   listStorefrontProducts,
+  listTestCatalogProducts,
 } from "../../modules/catalog/repository.js";
+import { getStoreMode, isTestCustomer } from "../../modules/commerce/store-mode.js";
 import { getRealStoreStats } from "../../modules/marketing/social-proof.js";
 import { presentStorefront } from "../presenters/customer.js";
 import { searchCatalog } from "../../modules/catalog/search.js";
 import { createCatalogCache, type CatalogCache } from "../../modules/catalog/cache.js";
 import type { SearchParser } from "../../modules/catalog/search-parser-port.js";
 import type { BuyNowCallbackCodec } from "../callback-codec.js";
+import { isId } from "../../shared/ids/index.js";
 import {
   presentMainMenu,
   presentCategoryList,
@@ -100,12 +103,22 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
           buttons: [[{ text: CATALOG_COPY.mainMenu, callbackData: "menu:main" }]],
         };
       }
-      const callbackData = deps.callbackCodec.issue({
-        telegramUserId,
-        variantId: variant.id,
-        expectedPriceVnd: Number(variant.price_vnd),
-      });
-      return presentVariantDetail(variant, callbackData);
+      let buyNowCallbackData: string | undefined;
+      const expectedPriceVnd = Number(variant.price_vnd);
+      if (isId(variant.id) && Number.isSafeInteger(expectedPriceVnd) && expectedPriceVnd > 0) {
+        try {
+          buyNowCallbackData = deps.callbackCodec.issue({
+            telegramUserId,
+            variantId: variant.id,
+            expectedPriceVnd,
+          });
+        } catch {
+          buyNowCallbackData = undefined;
+        }
+      }
+      return buyNowCallbackData
+        ? presentVariantDetail(variant, buyNowCallbackData)
+        : presentVariantDetail(variant);
     },
 
     async firstSellableVariantId() {
@@ -125,6 +138,11 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       const offset = input.offset ?? 0;
       const { items, total } = await listStorefrontProducts(deps.db, 6, offset);
       const stats = await getRealStoreStats(deps.db);
+      const mode = await getStoreMode(deps.db);
+      const maySeeTest =
+        mode === "TEST" &&
+        (input.isRootAdmin === true || (await isTestCustomer(deps.db, input.telegramUserId)));
+      const testProducts = maySeeTest ? (await listTestCatalogProducts(deps.db, 6, 0)).items : [];
       return presentStorefront({
         actorName: input.actorName,
         isRootAdmin: input.isRootAdmin,
@@ -133,6 +151,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
         offset,
         limit: 6,
         stats,
+        testProducts,
       });
     },
 

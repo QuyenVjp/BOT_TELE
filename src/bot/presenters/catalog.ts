@@ -145,27 +145,44 @@ export function presentVariantList(
   };
 }
 
-/** Product detail with all FR-003 authoritative fields before Buy Now. */
+/** Product detail with commercial fields and Vietnamese delivery copy. */
 export function presentVariantDetail(
   variant: CatalogVariantRow,
   buyNowCallbackData?: string,
   restockSubscribeCallbackData = `rst:sub:${variant.id}`,
   preorderCallbackData?: string,
 ): PresentedMessage {
+  const commercial = variant as CatalogVariantRow & {
+    description_vi?: string | null;
+    what_customer_receives_vi?: string | null;
+    usage_instructions_vi?: string | null;
+    delivery_eta_vi?: string | null;
+    warranty_vi?: string | null;
+    compare_at_price_vnd?: string | bigint | null;
+  };
   const price = formatVnd(makeVnd(BigInt(variant.price_vnd)));
-  const text = [
+  const compareAt =
+    commercial.compare_at_price_vnd == null
+      ? null
+      : formatVnd(makeVnd(BigInt(commercial.compare_at_price_vnd)));
+  const fulfillment = fulfillmentLabel(variant.fulfillment_type);
+  const eta = commercial.delivery_eta_vi ?? deliveryEtaFallback(variant.fulfillment_type);
+  const stock = stockLabel(variant);
+  const textLines = [
     `📦 ${variant.product_name_vi}`,
     `Gói: ${variant.name_vi}`,
-    `Giá: ${price}`,
-    `Thời hạn: ${variant.duration_code ?? "—"}`,
-    `Giao hàng: ${deliveryLabel(variant.delivery_type)}`,
-    `Bảo hành: ${variant.warranty_days} ngày`,
-    `Tồn kho: ${stockLabel(variant)}`,
-    "",
-    variant.is_ready
-      ? "Nhấn Mua ngay để tạo đơn (1 gói = 1 đơn)."
-      : "Sản phẩm đang chờ bổ sung nguồn hàng.",
-  ].join("\n");
+    `💰 Giá: ${price}${compareAt ? ` ~~${compareAt}~~` : ""}`,
+    `📦 Tồn kho: ${stock}`,
+    `⚡ Giao tự động: ${eta}`,
+  ];
+  if (commercial.description_vi) textLines.push(`📝 Mô tả: ${commercial.description_vi}`);
+  if (commercial.what_customer_receives_vi) {
+    textLines.push("📦 Bạn nhận được:", ...bulletLines(commercial.what_customer_receives_vi));
+  }
+  if (commercial.usage_instructions_vi)
+    textLines.push(`📘 Hướng dẫn: ${commercial.usage_instructions_vi}`);
+  if (commercial.warranty_vi) textLines.push(`🛡 Bảo hành: ${commercial.warranty_vi}`);
+  textLines.push(`Thời hạn: ${variant.duration_code ?? "—"}`, `Loại giao: ${fulfillment}`);
 
   const buttons: InlineButton[][] = [];
   if (
@@ -176,13 +193,12 @@ export function presentVariantDetail(
     }) &&
     buyNowCallbackData !== undefined
   ) {
-    buttons.push([{ text: CATALOG_COPY.buyNow, callbackData: buyNowCallbackData }]);
+    buttons.push([{ text: `🛒 ${CATALOG_COPY.buyNow}`, callbackData: buyNowCallbackData }]);
   }
   if (!variant.is_ready) {
     const actionRow: InlineButton[] = [];
-    if (preorderCallbackData) {
+    if (preorderCallbackData)
       actionRow.push({ text: "💰 Đặt cọc giữ suất", callbackData: preorderCallbackData });
-    }
     actionRow.push({
       text: CATALOG_COPY.restockSubscribe,
       callbackData: restockSubscribeCallbackData,
@@ -190,10 +206,45 @@ export function presentVariantDetail(
     buttons.push(actionRow);
   }
   buttons.push(
-    [{ text: CATALOG_COPY.back, callbackData: "cat:list" }],
-    [{ text: CATALOG_COPY.mainMenu, callbackData: "menu:main" }],
+    [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
+    [{ text: `⬅️ ${CATALOG_COPY.back}`, callbackData: "cat:list" }],
   );
-  return { text, buttons };
+  return { text: textLines.join("\n"), buttons };
+}
+
+function bulletLines(value: string): string[] {
+  return value
+    .split(/\r?\n|,/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => `• ${line}`);
+}
+
+function fulfillmentLabel(type: string): string {
+  switch (type) {
+    case "STOCK_ACCOUNT":
+      return "Tài khoản";
+    case "STOCK_CODE":
+      return "Mã kích hoạt";
+    case "DIGITAL_FILE":
+      return "Tệp số";
+    case "SUPPLIER_API":
+      return "Nhà cung cấp";
+    case "QUANTITY_STOCK":
+      return "Số lượng";
+    case "UNLIMITED_SERVICE":
+      return "Không giới hạn";
+    case "MANUAL_FULFILLMENT":
+      return "Xử lý thủ công";
+    default:
+      return "Sản phẩm số";
+  }
+}
+
+function deliveryEtaFallback(type: string): string {
+  if (type === "MANUAL_FULFILLMENT") return "Xử lý thủ công";
+  if (type === "UNLIMITED_SERVICE") return "Theo lịch dịch vụ";
+  return "Ngay sau khi thanh toán";
 }
 
 /** Search results; empty matches get a clear empty state, never a fabricated product. */
@@ -248,19 +299,21 @@ function deliveryLabel(type: string): string {
 }
 
 function stockLabel(variant: CatalogVariantRow): string {
+  if (variant.fulfillment_type === "UNLIMITED_SERVICE") return "Không giới hạn";
+  if (variant.fulfillment_type === "MANUAL_FULFILLMENT") return "Xử lý thủ công";
   if (variant.fulfillment_type === "QUANTITY_STOCK") return `${variant.available_quantity ?? 0}`;
   switch (variant.stock_policy) {
     case "LOCAL_ONLY":
-      return variant.is_ready ? "Kho local" : "Hết hàng";
+      return variant.is_ready ? "Đang có hàng" : "Hết hàng";
     case "SUPPLIER_ONLY":
       return variant.fulfillment_type === "SUPPLIER_API" && variant.is_ready
         ? "Nhà cung cấp"
         : "Chưa mở bán (nhà cung cấp)";
     case "LOCAL_THEN_SUPPLIER":
-      return variant.is_ready ? "Kho local" : "Hết hàng";
+      return variant.is_ready ? "Đang có hàng" : "Hết hàng";
     case "PAUSED":
       return "Tạm dừng";
     default:
-      return variant.stock_policy;
+      return "Chưa rõ";
   }
 }
