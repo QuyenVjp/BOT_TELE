@@ -1704,7 +1704,10 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
         telegramUserId: USER,
       }),
     });
-    expect(categoryView).toHaveBeenCalledWith(categoryId);
+    expect(categoryView).toHaveBeenCalledWith(categoryId, undefined, {
+      telegramUserId: USER,
+      isRootAdmin: false,
+    });
     expect(categoryList).not.toHaveBeenCalled();
     const categorySent = send.mock.calls[0]![0];
     expect(categorySent.message.text).toBe("category page");

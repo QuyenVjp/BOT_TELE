@@ -314,9 +314,11 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
 
       expect(panel.text).toContain("💰 ĐẶT CỌC / GIỮ HÀNG");
       expect(panel.text).toContain("Kiro Pro");
-      expect(panel.buttons[0]?.[0]?.callbackData).toBe("admin:preorders:filter:all");
-      expect(panel.buttons[0]?.[1]?.callbackData).toBe("admin:preorders:filter:waiting_deposit");
-      expect(panel.buttons[0]?.[2]?.callbackData).toBe("admin:preorders:filter:deposit_paid");
+      const callbacks = panel.buttons.flat().map((button) => button.callbackData);
+      expect(callbacks).toContain("admin:preorders:cancel:pre-1");
+      expect(callbacks).toContain("admin:preorders:filter:all");
+      expect(callbacks).toContain("admin:preorders:filter:waiting_deposit");
+      expect(callbacks).toContain("admin:preorders:filter:deposit_paid");
     });
   });
 
