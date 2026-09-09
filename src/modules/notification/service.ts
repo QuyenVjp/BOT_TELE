@@ -746,10 +746,7 @@ function shopCancelNotification(
         ? Number(amountDue)
         : 0;
   if (!Number.isSafeInteger(amount) || amount < 0) return null;
-  const lines = [
-    "Shop không thể cung cấp sản phẩm này.",
-    "Yêu cầu của bạn đã được huỷ.",
-  ];
+  const lines = ["Shop không thể cung cấp sản phẩm này.", "Yêu cầu của bạn đã được huỷ."];
   if (amount > 0) {
     lines.push(`Số tiền cần hoàn: ${amount.toLocaleString("vi-VN")} đ`);
     lines.push("Đang chờ hoàn tiền");

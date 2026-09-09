@@ -1016,9 +1016,14 @@ export function presentAdminPreorders(input: {
 
   const cancelButtons = input.items
     .filter((item) =>
-      ["CREATED", "WAITING_DEPOSIT", "DEPOSIT_PAID", "ALLOCATED", "BALANCE_DUE", "FULLY_PAID"].includes(
-        item.status,
-      ),
+      [
+        "CREATED",
+        "WAITING_DEPOSIT",
+        "DEPOSIT_PAID",
+        "ALLOCATED",
+        "BALANCE_DUE",
+        "FULLY_PAID",
+      ].includes(item.status),
     )
     .slice(0, 8)
     .map((item) => [

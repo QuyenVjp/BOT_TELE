@@ -229,7 +229,9 @@ describe.skipIf(!hasDocker)("Mini App store authenticated flow", () => {
 
     const anonymous = await app.inject({ method: "GET", url: "/shop/api/catalog" });
     expect(anonymous.statusCode).toBe(200);
-    const anonymousIds = (anonymous.json().items as Array<{ id: string; sku?: string }>).map((item) => item.id);
+    const anonymousIds = (anonymous.json().items as Array<{ id: string; sku?: string }>).map(
+      (item) => item.id,
+    );
     expect(anonymousIds).toContain(publicSeed.variantId);
     expect(anonymousIds).not.toContain(testVariant);
 

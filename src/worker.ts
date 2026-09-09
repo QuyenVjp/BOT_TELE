@@ -833,10 +833,8 @@ async function bootstrap(): Promise<void> {
     await import("./modules/commerce/preorder.js");
   const { shopCancelPreorder } = await import("./modules/commerce/shop-cancel.js");
   const { generateCustomerAlias } = await import("./modules/marketing/social-proof.js");
-  const {
-    formatSePayReconciliationAdminText,
-    getSePayReconciliationStatus,
-  } = await import("./modules/payments/reconciliation-status.js");
+  const { formatSePayReconciliationAdminText, getSePayReconciliationStatus } =
+    await import("./modules/payments/reconciliation-status.js");
   const { presentCustomerNotificationPreferences } = await import("./bot/presenters/customer.js");
   const { presentAdminManualTaskDetail, presentAdminManualTasks } =
     await import("./bot/presenters/manual-fulfillment.js");

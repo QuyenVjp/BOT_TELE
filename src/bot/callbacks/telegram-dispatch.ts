@@ -86,16 +86,19 @@ export interface TelegramDomainDispatcherDeps {
     categoryView(
       categoryId: string,
       cursor?: string,
-      identity?: { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
+      identity?:
+        { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
     ): Promise<PresentedMessage>;
     variantDetail(
       variantId: string,
       telegramUserId: string | bigint | number,
-      identity?: { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
+      identity?:
+        { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
     ): Promise<PresentedMessage>;
     search(
       rawQuery: string,
-      identity?: { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
+      identity?:
+        { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
     ): Promise<PresentedMessage>;
     storefront?(input: {
       actorName: string;
@@ -106,7 +109,8 @@ export interface TelegramDomainDispatcherDeps {
     productDetail?(
       productId: string,
       telegramUserId: string | bigint | number,
-      identity?: { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
+      identity?:
+        { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
     ): Promise<PresentedMessage>;
   };
   checkout: Pick<CheckoutCallbacks, "buyNowFromCallback" | "refresh" | "reopen" | "cancel">;
@@ -2196,15 +2200,13 @@ async function ownedOrder(
   return order?.customerId === customerId ? order : null;
 }
 
-
 function catalogActorIdentity(
   deps: TelegramDomainDispatcherDeps,
   actorUserId: string,
 ): { telegramUserId: string; isRootAdmin: boolean } {
   return {
     telegramUserId: actorUserId,
-    isRootAdmin:
-      deps.adminRootUserId !== undefined && Number(actorUserId) === deps.adminRootUserId,
+    isRootAdmin: deps.adminRootUserId !== undefined && Number(actorUserId) === deps.adminRootUserId,
   };
 }
 
