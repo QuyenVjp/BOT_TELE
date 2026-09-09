@@ -4,6 +4,7 @@ import { pathToFileURL, fileURLToPath } from "node:url";
 import { sql, type Kysely } from "kysely";
 import pg from "pg";
 import type { Database, DbHandle } from "./client.js";
+import { formatDatabaseFingerprint, parseDatabaseUrl } from "../../config/safe-fingerprint.js";
 
 /**
  * Minimal forward-only SQL migration runner + CLI entrypoint (T117 / T120).
@@ -164,24 +165,67 @@ function isPgQueryable(db: Kysely<Database> | PgQueryable): db is PgQueryable {
 // CLI entrypoint — `npm run migrate`
 // ---------------------------------------------------------------------------
 
+async function schemaReceipt(client: pg.Client): Promise<{ count: number; max: string | null }> {
+  const exists = await client.query<{ exists: boolean }>(
+    "select to_regclass('public.schema_migrations') is not null as exists",
+  );
+  if (!exists.rows[0]?.exists) return { count: 0, max: null };
+  const result = await client.query<{ count: string; max: string | null }>(
+    "select count(*)::text as count, max(filename) as max from schema_migrations",
+  );
+  return { count: Number(result.rows[0]?.count ?? 0), max: result.rows[0]?.max ?? null };
+}
+
 async function cliMain(): Promise<void> {
-  // Local `.env` for development; production injects DATABASE_URL.
-  await import("dotenv/config");
+  const production =
+    process.argv.includes("--production") || process.env.BOT_TELE_PRODUCTION_MIGRATE === "1";
+  if (!production) await import("dotenv/config");
 
   const connectionString = process.env.DATABASE_URL;
-  if (!connectionString || connectionString.trim().length === 0) {
-    process.stderr.write("migrate failed: DATABASE_URL is required\n");
-    process.exit(1);
+  if (!connectionString?.trim()) throw new Error("DATABASE_URL is required");
+
+  const fingerprint = parseDatabaseUrl(connectionString);
+  if (production) {
+    if (process.env.NODE_ENV !== "production") throw new Error("NODE_ENV=production is required");
+    if (
+      !process.argv.includes("--confirm-production") &&
+      process.env.BOT_TELE_CONFIRM_PRODUCTION !== "1"
+    ) {
+      throw new Error("--confirm-production (or BOT_TELE_CONFIRM_PRODUCTION=1) is required");
+    }
+    const expected = process.env.BOT_TELE_EXPECTED_DB?.trim();
+    if (!expected) throw new Error("BOT_TELE_EXPECTED_DB is required");
+    const actual = formatDatabaseFingerprint(fingerprint);
+    if (expected !== actual)
+      throw new Error(`database target mismatch: expected ${expected}, actual ${actual}`);
   }
 
-  // Never log the connection string (it carries credentials).
-  process.stdout.write("migrate: acquiring advisory lock and applying pending files…\n");
-  const result = await runMigrationsOnPinnedConnection(connectionString);
-  process.stdout.write(
-    `migrate: applied=${result.applied.length} already=${result.alreadyApplied.length}\n`,
-  );
-  if (result.applied.length > 0) {
-    process.stdout.write(`migrate: new files: ${result.applied.join(", ")}\n`);
+  const receiptClient = production ? new pg.Client({ connectionString }) : undefined;
+  if (receiptClient) await receiptClient.connect();
+  try {
+    if (production) {
+      const before = await schemaReceipt(receiptClient!);
+      process.stdout.write(
+        `migrate: target host=${fingerprint.host} port=${fingerprint.port} database=${fingerprint.database} user=${fingerprint.user}\n`,
+      );
+      process.stdout.write(`migrate: head_before=${before.max ?? "none"} count=${before.count}\n`);
+    }
+    process.stdout.write("migrate: acquiring advisory lock and applying pending files…\n");
+    const result = await runMigrationsOnPinnedConnection(connectionString);
+    process.stdout.write(
+      `migrate: applied=${result.applied.length} already=${result.alreadyApplied.length}\n`,
+    );
+    if (result.applied.length > 0)
+      process.stdout.write(`migrate: new files: ${result.applied.join(", ")}\n`);
+    if (production) {
+      const after = await schemaReceipt(receiptClient!);
+      process.stdout.write(
+        `migrate: applied names=${result.applied.join(", ") || "none"} already=${result.alreadyApplied.length}\n`,
+      );
+      process.stdout.write(`migrate: head_after=${after.max ?? "none"} count=${after.count}\n`);
+    }
+  } finally {
+    await receiptClient?.end();
   }
 }
 

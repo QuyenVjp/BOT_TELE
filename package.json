@@ -27,6 +27,8 @@
     "dev:worker": "tsx src/worker.ts",
     "migrate": "tsx src/infrastructure/db/migrate.ts",
     "migrate:prod": "node dist/infrastructure/db/migrate.js",
+    "migrate:production": "node scripts/run-production-migrate.mjs",
+    "preflight:production": "node scripts/run-production-preflight.mjs",
     "secret-scan": "node scripts/secret-scan.mjs",
     "audit": "npm audit --omit=dev --audit-level=high"
   },
