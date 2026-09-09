@@ -671,7 +671,6 @@ export async function listPublicCategoryPage(
   const category = await loadCategoryNode(exec, categoryId, audience);
   if (!category) return null;
   if (isFulfillmentTaxonomyNode(category.slug, category.name_vi)) return null;
-  if (category.public_product_count <= 0) return null;
   const parent = category.parent_id
     ? await loadCategoryNode(exec, category.parent_id, audience)
     : null;

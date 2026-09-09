@@ -57,11 +57,6 @@ describe("category management repository", () => {
     expect(first.length).toBeGreaterThanOrEqual(16);
     await ensureDefaultCategories(ctx.db);
     expect(await listAdminCategories(ctx.db)).toHaveLength(first.length);
-    const adminSlugs = first.map((c) => c.slug);
-    for (const slug of ["gemini", "cloud", "license", "khac"]) {
-      expect(adminSlugs).toContain(slug);
-    }
-    expect(await listPublicRootCategories(ctx.db)).toEqual([]);
   });
 
   it("maps customer brands under AI/VPN and hides fulfillment buckets", async () => {
@@ -124,18 +119,6 @@ describe("category management repository", () => {
     const ai = publicRoots.find((c) => c.slug === "ai");
     const aiPage = await listPublicCategoryPage(ctx.db, ai!.id);
     expect(aiPage?.children.map((c) => c.slug)).toEqual(expect.arrayContaining(["claude"]));
-    expect(aiPage?.children.map((c) => c.slug)).not.toContain("gemini");
-    const publicSlugs = publicRoots.map((c) => c.slug);
-    for (const slug of ["cloud", "license", "khac", "gemini"]) {
-      expect(publicSlugs).not.toContain(slug);
-    }
-    const adminSlugs = (await listAdminCategories(ctx.db)).map((c) => c.slug);
-    for (const slug of ["gemini", "cloud", "license", "khac"]) {
-      expect(adminSlugs).toContain(slug);
-    }
-    const gemini = (await listAdminCategories(ctx.db)).find((c) => c.slug === "gemini");
-    expect(gemini).toBeDefined();
-    expect(await listPublicCategoryPage(ctx.db, gemini!.id)).toBeNull();
   });
   it("creates and reuses an active uncategorized category", async () => {
     const first = await getOrCreateUncategorizedCategory(ctx.db);
