@@ -31,7 +31,7 @@ async function main(): Promise<void> {
   const vault = createVault({
     driver: config.VAULT_DRIVER,
     endpoint: config.VAULT_ENDPOINT,
-    token: config.VAULT_TOKEN,
+    token: [REDACTED:Generic Password Field],
     namespace: config.VAULT_NAMESPACE,
     timeoutMs: config.VAULT_TIMEOUT_MS,
     maxAttempts: config.VAULT_MAX_ATTEMPTS,
@@ -67,25 +67,22 @@ async function main(): Promise<void> {
         adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
         async activeStep(telegramUserId: string) {
           if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return null;
+          const { isRootProductDraftTextStep } = await import("./bot/webhook.js");
           const row = (
             await sql<{ step: string }>`
               select step
               from admin_workflow
               where admin_telegram_user_id = ${telegramUserId}
                 and expires_at > now()
-                and step in ('name','sku','variantName','price','inventoryFields','threshold','initialQuantity')
+                and step in (
+                  'name','sku','description','variant','deliveryConfig',
+                  'variantName','price','inventoryFields','threshold','initialQuantity',
+                  'serviceInstructions'
+                )
               limit 1
             `.execute(dbHandle.db)
           ).rows[0];
-          return row?.step === "name" ||
-            row?.step === "sku" ||
-            row?.step === "variantName" ||
-            row?.step === "price" ||
-            row?.step === "inventoryFields" ||
-            row?.step === "threshold" ||
-            row?.step === "initialQuantity"
-            ? row.step
-            : null;
+          return row && isRootProductDraftTextStep(row.step) ? row.step : null;
         },
       },
     },

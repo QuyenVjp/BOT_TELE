@@ -280,6 +280,91 @@ describe("root product draft text ingress", () => {
     }
   });
 
+
+  it("preserves 8-step description and variant text for the root admin", async () => {
+    const accepted: unknown[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      rootProductDraftText: {
+        adminTelegramUserId: 123456789,
+        activeStep: async (telegramUserId) =>
+          telegramUserId === "123456789" ? (accepted.length === 0 ? "description" : "variant") : null,
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9010, 123456789, "Tài khoản GPT Plus dùng 1 tháng"),
+      });
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9011, 123456789, "1 tháng | 250000"),
+      });
+
+      expect(accepted).toHaveLength(2);
+      expect(accepted[0]).toMatchObject({
+        messageText: "Tài khoản GPT Plus dùng 1 tháng",
+        rootProductDraftText: true,
+      });
+      expect(accepted[1]).toMatchObject({
+        messageText: "1 tháng | 250000",
+        rootProductDraftText: true,
+      });
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("preserves deliveryConfig supplier text only at that step", async () => {
+    const accepted: unknown[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      rootProductDraftText: {
+        adminTelegramUserId: 123456789,
+        activeStep: async (telegramUserId) =>
+          telegramUserId === "123456789" ? "deliveryConfig" : null,
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9012, 123456789, "sup-1 | EXT-SKU | 120000 | VN"),
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]).toMatchObject({
+        messageText: "sup-1 | EXT-SKU | 120000 | VN",
+        rootProductDraftText: true,
+      });
+    } finally {
+      await ingress.close();
+    }
+  });
+
   it("does not persist arbitrary root inventory paste without a product metadata step", async () => {
     const accepted: unknown[] = [];
     const ingress = Fastify({ bodyLimit: BODY_LIMIT });

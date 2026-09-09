@@ -97,8 +97,27 @@ export function createInMemoryUpdateInbox(): UpdateInbox {
     },
   };
 }
-export type RootProductDraftTextStep =
-  "name" | "sku" | "variantName" | "price" | "inventoryFields" | "threshold" | "initialQuantity";
+export const ROOT_PRODUCT_DRAFT_TEXT_STEPS = [
+  "name",
+  "sku",
+  "description",
+  "variant",
+  "deliveryConfig",
+  "variantName",
+  "price",
+  "inventoryFields",
+  "threshold",
+  "initialQuantity",
+  "serviceInstructions",
+] as const;
+
+export type RootProductDraftTextStep = (typeof ROOT_PRODUCT_DRAFT_TEXT_STEPS)[number];
+
+const ROOT_PRODUCT_DRAFT_TEXT_STEP_SET = new Set<string>(ROOT_PRODUCT_DRAFT_TEXT_STEPS);
+
+export function isRootProductDraftTextStep(step: string): step is RootProductDraftTextStep {
+  return ROOT_PRODUCT_DRAFT_TEXT_STEP_SET.has(step);
+}
 
 export interface RootProductDraftTextIngress {
   adminTelegramUserId: number;
@@ -384,6 +403,17 @@ async function normalizeSafeMessageText(
     : null;
 }
 
+const MAX_DRAFT_PROSE_CHARS = 2000;
+
+function isSafeDraftProse(normalized: string, maxBytes: number): boolean {
+  return (
+    normalized.length > 0 &&
+    normalized.length <= MAX_DRAFT_PROSE_CHARS &&
+    Buffer.byteLength(normalized, "utf8") <= maxBytes &&
+    !/[\p{Cc}\p{Cf}\0]/u.test(normalized)
+  );
+}
+
 function normalizeRootProductDraftText(
   normalized: string,
   step: RootProductDraftTextStep,
@@ -391,11 +421,21 @@ function normalizeRootProductDraftText(
   switch (step) {
     case "name":
     case "variantName":
-      return Buffer.byteLength(normalized, "utf8") <= 200 && !/[\p{Cc}\p{Cf}\0]/u.test(normalized)
-        ? normalized
-        : null;
+      return isSafeDraftProse(normalized, 200) ? normalized : null;
+    case "description":
+    case "deliveryConfig":
+    case "serviceInstructions":
+      return isSafeDraftProse(normalized, 8000) ? normalized : null;
     case "sku":
       return /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(normalized) ? normalized : null;
+    case "variant": {
+      const separator = normalized.indexOf("|");
+      if (separator <= 0) return null;
+      const name = normalized.slice(0, separator).trim();
+      const price = normalized.slice(separator + 1).trim();
+      if (!name || !price || !isSafeDraftProse(name, 200)) return null;
+      return /^\d{1,15}$/u.test(price.replace(/[.,]/g, "")) ? normalized : null;
+    }
     case "inventoryFields": {
       const fields = normalized.split(",").map((part) => part.trim().toLowerCase());
       const allowed: Record<string, true> = {
