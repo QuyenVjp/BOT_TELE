@@ -10,9 +10,11 @@ import { pathToFileURL } from "node:url";
 import { sql } from "kysely";
 
 async function main(): Promise<void> {
-  // Load local `.env` for development; production injects environment variables
-  // through the deployment secret manager.
-  await import("dotenv/config");
+  // Local `.env` only. Production is loaded by `node --env-file=` before this
+  // process starts; dotenv would fill gaps from a repo `.env` and must not mix in.
+  if (process.env.NODE_ENV !== "production") {
+    await import("dotenv/config");
+  }
 
   const { loadConfig, redactedConfig } = await import("./config/index.js");
   const config = loadConfig(process.env);
