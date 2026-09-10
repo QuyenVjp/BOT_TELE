@@ -125,7 +125,13 @@ export interface TelegramDomainDispatcherDeps {
       },
     ): Promise<PresentedMessage>;
   };
-  checkout: Pick<CheckoutCallbacks, "buyNowFromCallback" | "refresh" | "reopen" | "cancel">;
+  /**
+   * Checkout port. The two confirmation routes (goal §32) are optional so a host that only
+   * wires the original Buy Now path still type-checks; when they are absent the route answers
+   * with a recovery message instead of failing open.
+   */
+  checkout: Pick<CheckoutCallbacks, "buyNowFromCallback" | "refresh" | "reopen" | "cancel"> &
+    Partial<Pick<CheckoutCallbacks, "previewFromCallback" | "payWithWalletFromCallback">>;
   history: {
     list(customerId: string, cursor?: string | null): Promise<PresentedMessage>;
     detail(orderNumber: string, customerId: string): Promise<PresentedMessage>;
@@ -141,6 +147,10 @@ export interface TelegramDomainDispatcherDeps {
     list(customerId: string): Promise<PresentedMessage>;
   };
   walletAccount?(ctx: TelegramActionContext): Promise<PresentedMessage>;
+  /** Goal §38 `📜 Lịch sử ví`: the customer's own wallet movements. */
+  walletHistory?(ctx: TelegramActionContext): Promise<PresentedMessage>;
+  /** Goal §65 warranty home: the customer's eligible completed orders. */
+  warrantyHome?(customerId: string): Promise<PresentedMessage>;
   walletTopup?(ctx: TelegramActionContext, action?: WalletTopupAction): Promise<PresentedMessage>;
   walletPay?(ctx: TelegramActionContext, orderNumber: string): Promise<PresentedMessage>;
   walletTopupText?(ctx: TelegramActionContext, text: string): Promise<PresentedMessage | null>;
@@ -187,6 +197,18 @@ export interface TelegramDomainDispatcherDeps {
       correlationId: string;
     }): Promise<PresentedMessage>;
     audit?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    /** Goal §135 system health; root-only, secret-free. */
+    health?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    /** Goal §104-§107 notification policy view; root-only. */
+    notifications?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
@@ -794,9 +816,21 @@ export function createTelegramDomainDispatcher(
 
       let acked = false;
       let ackMs: number | null = null;
+      let serverIssueAckMs: number | null = null;
+      let telegramRttMs: number | null = null;
       const ackIfNeeded = async () => {
         if (acked || !envelope.callbackQueryId || !deps.responder.ack) return;
-        await deps.responder.ack(envelope.callbackQueryId);
+        // Split the two costs so a slow handler is never confused with a slow network:
+        // `serverIssueAckMs` is everything the code controls up to the moment the ACK is
+        // issued (the token/route decision already happened), `telegramRttMs` is the
+        // api.telegram.org round trip itself. `ackMs` stays the total for compatibility.
+        serverIssueAckMs = Date.now() - startedAt;
+        const issuedAt = Date.now();
+        try {
+          await deps.responder.ack(envelope.callbackQueryId);
+        } finally {
+          telegramRttMs = Date.now() - issuedAt;
+        }
         acked = true;
         ackMs = Date.now() - startedAt;
       };
@@ -825,6 +859,8 @@ export function createTelegramDomainDispatcher(
         }
         deps.observeCallback?.({
           ackMs,
+          serverIssueAckMs,
+          telegramRttMs,
           renderMs: Date.now() - startedAt,
           action: verified.ok ? verified.value.action : "STALE",
         });
@@ -1479,6 +1515,22 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : presentAdminMenu();
+        } else if (route === "health") {
+          message = admin.health
+            ? await admin.health({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Hệ thống không khả dụng.");
+        } else if (route === "notifications") {
+          message = admin.notifications
+            ? await admin.notifications({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Thông báo không khả dụng.");
         } else if (route === "audit") {
           message = admin.audit
             ? await admin.audit({
@@ -1872,6 +1924,10 @@ export function createTelegramDomainDispatcher(
         message = deps.walletTopup
           ? await deps.walletTopup(ctx, { kind: "PICK" })
           : safeError("Nạp ví không khả dụng.");
+      } else if (envelope.callbackData === "wallet:history") {
+        message = deps.walletHistory
+          ? await deps.walletHistory(ctx)
+          : safeError("Lịch sử ví không khả dụng.");
       } else if (envelope.callbackData?.startsWith("wallet:topup")) {
         message = deps.walletTopup
           ? await deps.walletTopup(ctx, parseWalletTopupAction(envelope.callbackData))
@@ -1995,7 +2051,11 @@ export function createTelegramDomainDispatcher(
         envelope.messageText === CUSTOMER_COPY.warranty ||
         envelope.messageText === "🛡 Bảo hành"
       ) {
-        message = presentCustomerWarranty();
+        const warrantyCustomerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          deps.warrantyHome && warrantyCustomerId
+            ? await deps.warrantyHome(warrantyCustomerId)
+            : presentCustomerWarranty();
       } else if (
         envelope.messageText === CUSTOMER_COPY.support ||
         envelope.messageText === "💬 Hỗ trợ" ||
@@ -2127,7 +2187,12 @@ export function createTelegramDomainDispatcher(
                   correlationId,
                 })
               : null) ??
-            (await shopHome(deps, envelope)));
+            // Nothing above claimed this text, so it is a customer query. `catalogHomeOrSearch`
+            // runs the catalog search for a 2-64 character term and otherwise falls back to the
+            // home screen - exactly the previous fallback. Without this, free-text search was
+            // unreachable whenever the admin/wallet text handlers were wired (they always are in
+            // production), so typing a product name returned the home screen instead of results.
+            (await catalogHomeOrSearch(deps, envelope)));
       } else if (envelope.callbackData) {
         const verified = deps.codec.verify(envelope.callbackData, {
           telegramUserId: envelope.actorUserId,
@@ -2157,6 +2222,8 @@ export function createTelegramDomainDispatcher(
       if (envelope.callbackQueryId) {
         deps.observeCallback?.({
           ackMs,
+          serverIssueAckMs,
+          telegramRttMs,
           renderMs: Date.now() - startedAt,
           action: envelope.callbackData?.split(":")[0] ?? "callback",
         });
@@ -2378,7 +2445,9 @@ async function dispatchVerified(
           )
         : shopHome(deps, envelope);
     case "CUSTOMER_WARRANTY":
-      return presentCustomerWarranty();
+      return customerId && deps.warrantyHome
+        ? deps.warrantyHome(customerId)
+        : presentCustomerWarranty();
     case "CUSTOMER_NOTIFICATIONS":
       return deps.notificationPreferences
         ? deps.notificationPreferences.get(customerId)
@@ -2389,6 +2458,22 @@ async function dispatchVerified(
         ? deps.notificationPreferences.toggle(customerId, kind)
         : safeError("Không xác minh được khách hàng.");
     }
+    case "CHECKOUT_PREVIEW":
+      return token.resourceId && deps.checkout.previewFromCallback
+        ? deps.checkout.previewFromCallback({
+            callbackData: envelope.callbackData ?? "",
+            telegramUserId: envelope.actorUserId,
+            correlationId,
+          })
+        : safeError("Không mở được xác nhận đơn hàng.");
+    case "CHECKOUT_WALLET":
+      return token.resourceId && customerId && deps.checkout.payWithWalletFromCallback
+        ? deps.checkout.payWithWalletFromCallback({
+            callbackData: envelope.callbackData ?? "",
+            telegramUserId: envelope.actorUserId,
+            correlationId,
+          })
+        : safeError("Không xác minh được khách hàng.");
     case "PREORDER_CONSENT":
       return deps.preorder && token.resourceId
         ? deps.preorder.consent(token.resourceId)

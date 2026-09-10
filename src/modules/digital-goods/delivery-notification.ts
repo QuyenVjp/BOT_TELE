@@ -26,6 +26,8 @@ export interface DeliveryNotificationClaim {
   generation: number;
   attemptCount: number;
   /** Non-secret commercial context for the delivery message (never credentials). */
+  orderNumber: string;
+  amountVnd: string;
   productName: string | null;
   usageInstructionsVi: string | null;
   warrantyVi: string | null;
@@ -59,12 +61,16 @@ async function sendDeliveryNotificationWithTimeout(
       handoffId: string;
       idempotencyKey: string;
       signal: AbortSignal;
+      orderNumber: string;
+      amountVnd: string;
     }): Promise<void>;
   },
   input: {
     chatId: string;
     handoffId: string;
     idempotencyKey: string;
+    orderNumber: string;
+    amountVnd: string;
     product?: {
       name: string | null;
       usageInstructionsVi: string | null;
@@ -754,6 +760,8 @@ export async function claimDeliveryNotifications(
     claimed_by: string;
     claim_generation: string;
     attempt_count: number;
+    order_number: string;
+    amount_vnd: string;
     product_name: string | null;
     usage_instructions_vi: string | null;
     warranty_vi: string | null;
@@ -780,6 +788,8 @@ export async function claimDeliveryNotifications(
     )
     select c.id, c.bundle_id, c.customer_id, c.telegram_chat_id,
       c.capability_ref, c.claimed_by, c.claim_generation, c.attempt_count,
+      o.order_number,
+      o.price_vnd::text as amount_vnd,
       o.product_name_vi as product_name,
       p.usage_instructions_vi, p.warranty_vi
     from claimed c
@@ -797,6 +807,8 @@ export async function claimDeliveryNotifications(
     owner: row.claimed_by,
     generation: Number(row.claim_generation),
     attemptCount: row.attempt_count,
+    orderNumber: row.order_number,
+    amountVnd: row.amount_vnd,
     productName: row.product_name,
     usageInstructionsVi: row.usage_instructions_vi,
     warrantyVi: row.warranty_vi,
@@ -1028,6 +1040,8 @@ export async function processDeliveryNotificationBatch(input: {
       handoffId: string;
       idempotencyKey: string;
       signal: AbortSignal;
+      orderNumber: string;
+      amountVnd: string;
       product?: {
         name: string | null;
         usageInstructionsVi: string | null;
@@ -1107,6 +1121,8 @@ export async function processDeliveryNotificationBatch(input: {
           chatId: claim.telegramChatId,
           handoffId: claim.id,
           idempotencyKey: claim.id,
+          orderNumber: claim.orderNumber,
+          amountVnd: claim.amountVnd,
           product: {
             name: claim.productName,
             usageInstructionsVi: claim.usageInstructionsVi,
@@ -1193,11 +1209,15 @@ export async function openTelegramDeliveryHandoff(input: {
     customer_id: string;
     telegram_chat_id: string;
     capability_ref: string;
+    order_number: string;
+    amount_vnd: string;
     product_name: string | null;
     usage_instructions_vi: string | null;
     warranty_vi: string | null;
   }>`
     select h.id, h.bundle_id, h.customer_id, h.telegram_chat_id, h.capability_ref,
+      o.order_number,
+      o.price_vnd::text as amount_vnd,
       o.product_name_vi as product_name,
       p.usage_instructions_vi, p.warranty_vi
     from delivery_notification_handoff h
@@ -1224,6 +1244,8 @@ export async function openTelegramDeliveryHandoff(input: {
       owner: "telegram-open",
       generation: 0,
       attemptCount: 0,
+      orderNumber: handoff.order_number,
+      amountVnd: handoff.amount_vnd,
       productName: handoff.product_name,
       usageInstructionsVi: handoff.usage_instructions_vi,
       warrantyVi: handoff.warranty_vi,

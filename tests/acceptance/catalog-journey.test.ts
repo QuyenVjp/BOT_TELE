@@ -84,7 +84,7 @@ describe("catalog journey (US1)", () => {
   it("opens a product detail showing all FR-003 authoritative fields", async () => {
     const variantId = await callbacks.firstSellableVariantId();
     const detail = await callbacks.variantDetail(variantId, TELEGRAM_USER_ID);
-    for (const field of ["Giá:", "Thời hạn:", "Loại giao:", "Tồn kho:"]) {
+    for (const field of ["Giá:", "Tình trạng:", "Thời hạn:", "Loại giao:"]) {
       expect(detail.text).toContain(field);
     }
     // Buy Now is reachable from detail.
@@ -103,6 +103,10 @@ describe("catalog journey (US1)", () => {
     const detail = await callbacks.productDetail(productId, TELEGRAM_USER_ID);
     const buyBtn = detail.buttons.flat().find((b) => b.callbackData.startsWith("buy:"));
     expect(buyBtn).toBeTruthy();
+    // Target product-detail copy: exact price/stock lines, never a raw enum or "Tạm hết hàng".
+    expect(detail.text).toContain("💰 Giá từ: ");
+    expect(detail.text).toMatch(/(🟢|🟡|🔴) Tình trạng: /u);
+    expect(detail.text).not.toContain("Tạm hết hàng");
   });
 
   it("deterministic search finds a seeded product and never invents one (FR-004/FR-005)", async () => {
@@ -111,8 +115,9 @@ describe("catalog journey (US1)", () => {
 
     const miss = await callbacks.search("khong-ton-tai-xyz-999");
     expect(miss.buttons.flat().some((b) => b.callbackData.startsWith("var:view:"))).toBe(false);
-    // Empty search copy, not a fabricated product card.
-    expect(miss.text.toLowerCase()).toContain("không tìm thấy");
+    // Exact empty state: no fabricated product card, retry and home only.
+    expect(miss.text).toBe("Không tìm thấy sản phẩm phù hợp.");
+    expect(miss.buttons.flat().map((b) => b.text)).toEqual(["🔎 Tìm lại", "🏠 Trang chủ"]);
   });
 
   it("never creates an Order during browsing/search (US1 independence)", async () => {

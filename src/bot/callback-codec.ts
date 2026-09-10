@@ -266,6 +266,8 @@ export const CALLBACK_ACTION_CODES = {
   CUSTOMER_WARRANTY: 25,
   PREORDER_CONSENT: 26,
   PREORDER_CREATE: 27,
+  CHECKOUT_PREVIEW: 28,
+  CHECKOUT_WALLET: 29,
 } as const;
 
 export type CallbackAction = keyof typeof CALLBACK_ACTION_CODES;
@@ -276,6 +278,8 @@ export interface IssueCallbackTokenInput {
   resourceId?: string;
   secondaryResourceId?: string;
   option?: number;
+  /** VND amount bound into the token (uint48), e.g. the confirmed checkout price. */
+  amountVnd?: number;
   now?: Date;
 }
 
@@ -284,6 +288,8 @@ export interface VerifiedCallbackToken {
   resourceId?: string;
   secondaryResourceId?: string;
   option?: number;
+  /** Price the customer was shown, for actions that must charge exactly that price. */
+  amountVnd?: number;
   expiresAt: Date;
 }
 
@@ -434,8 +440,28 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "SHOP_PAGE":
     case "PREORDER_CONSENT":
     case "PREORDER_CREATE":
+    case "CHECKOUT_PREVIEW":
       assertOnlyResource(input);
       return encodeResourceId(input.resourceId!);
+    case "CHECKOUT_WALLET": {
+      // The confirmed price rides in the token. Without it the wallet path would re-read the
+      // live price and hand THAT to buyNow as the expected price, making the stale-price guard
+      // self-fulfilling and silently charging a price the customer never saw.
+      if (
+        !input.resourceId ||
+        input.secondaryResourceId !== undefined ||
+        input.option !== undefined
+      ) {
+        throw new Error("Invalid checkout wallet callback payload");
+      }
+      const amountVnd = input.amountVnd;
+      if (!Number.isSafeInteger(amountVnd) || amountVnd! <= 0 || amountVnd! > MAX_CALLBACK_PRICE_VND) {
+        throw new Error("Invalid checkout wallet amount");
+      }
+      const amount = Buffer.alloc(6);
+      amount.writeUIntBE(amountVnd!, 0, 6);
+      return Buffer.concat([encodeResourceId(input.resourceId), amount]);
+    }
     case "CUSTOMER_NOTIFICATION_TOGGLE":
       assertOnlyResource(input);
       return encodeResourceId(input.resourceId!);
@@ -507,10 +533,16 @@ function decodeActionPayload(
       "PREORDER_CONSENT",
       "PREORDER_CREATE",
       "CUSTOMER_NOTIFICATION_TOGGLE",
+      "CHECKOUT_PREVIEW",
     ].includes(action)
   ) {
     if (payload.byteLength === 16) return { resourceId: decodeUlid(payload) };
     return payload.byteLength === 26 ? { resourceId: payload.toString("utf8") } : null;
+  }
+  if (action === "CHECKOUT_WALLET") {
+    return payload.byteLength === 22
+      ? { resourceId: decodeUlid(payload.subarray(0, 16)), amountVnd: payload.readUIntBE(16, 6) }
+      : null;
   }
   if (action === "CATALOG_PAGE") {
     if (payload.byteLength === 16) return { resourceId: decodeUlid(payload) };
@@ -580,5 +612,17 @@ export function peekCallbackAction(callbackData: string): CallbackAction | null 
   const raw = Buffer.from(encoded, "base64url");
   if (raw.byteLength < 5 + UNIFIED_SIGNATURE_BYTES || raw.toString("base64url") !== encoded)
     return null;
-  return ACTION_BY_CODE.get(raw[0]! >> 4) ?? null;
+  // Mirror `verify` exactly: actions >= 16 are packed in the EXTENDED form, where the high
+  // nibble is a 15 sentinel and the real code sits at offset 5. Reading only the nibble made
+  // every extended action (RESTOCK_*, SHOP_PRODUCT, PREORDER_*, CUSTOMER_WARRANTY and the
+  // checkout pair) peek as SUPPORT_TICKET_VIEW, so the pre-verification rate-limit bucket
+  // could not tell them apart. The 21-byte exception is SUPPORT_TICKET_VIEW itself, whose
+  // non-extended payload (5 header + 16 resource) also starts with the 15 sentinel nibble.
+  const payload = raw.subarray(0, raw.byteLength - UNIFIED_SIGNATURE_BYTES);
+  const keyVersionMatches = (payload[0]! & 0x0f) >= 0;
+  const extended = payload[0]! >> 4 === 15 && payload.byteLength !== 21;
+  if (!keyVersionMatches) return null;
+  const actionCode = extended ? payload[5]! : payload[0]! >> 4;
+  if (extended && actionCode < 16) return null;
+  return ACTION_BY_CODE.get(actionCode) ?? null;
 }

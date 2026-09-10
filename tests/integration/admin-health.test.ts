@@ -1,0 +1,119 @@
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { sql } from "kysely";
+import { newId } from "../../src/shared/ids/index.js";
+import { getAdminHealthFacts } from "../../src/modules/admin/health.js";
+import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+
+/**
+ * Admin health queues (goal §135). The screen must render even when the database it reports on
+ * is unreachable, and every count must be a read-only, secret-free number.
+ */
+
+let ctx: PgTestContext;
+
+beforeAll(async () => {
+  ctx = await startPostgresContainer();
+}, 180_000);
+
+afterAll(async () => {
+  await ctx?.teardown();
+});
+
+describe("admin health facts", () => {
+  it("reports ok with zeroed queues on a freshly migrated database", async () => {
+    const facts = await getAdminHealthFacts(ctx.db);
+    expect(facts.database).toBe("ok");
+    expect(facts.queues.outboxBacklog).toBe(0);
+    expect(facts.queues.openDiscrepancies).toBe(0);
+    expect(facts.queues.openSupportTickets).toBe(0);
+  });
+
+  it("counts a published outbox row as done and an unpublished one as backlog", async () => {
+    const pending = newId();
+    const sent = newId();
+    await sql`
+      insert into outbox_event (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted, occurred_at)
+      values (${pending}, 'Order', ${newId()}, 1, 'OrderPaid', '{}'::jsonb, now())
+    `.execute(ctx.db);
+    await sql`
+      insert into outbox_event (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted, occurred_at, published_at)
+      values (${sent}, 'Order', ${newId()}, 1, 'OrderPaid', '{}'::jsonb, now(), now())
+    `.execute(ctx.db);
+
+    const facts = await getAdminHealthFacts(ctx.db);
+    expect(facts.queues.outboxBacklog).toBe(1);
+    expect(facts.queues.outboxDeadLettered).toBe(0);
+    await sql`delete from outbox_event where id in (${pending}, ${sent})`.execute(ctx.db);
+  });
+
+  it("counts an unresolved discrepancy and a new ticket as operator work", async () => {
+    const customerId = newId();
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into discrepancy (id, type, status, reason, owner, due_at, source)
+      values (${newId()}, 'UNMATCHED', 'OPEN', 'seed', 'ops', now(), 'WEBHOOK')
+    `.execute(ctx.db);
+    await sql`
+      insert into support_ticket (id, customer_id, reason_code, status, safe_summary, due_at)
+      values (${newId()}, ${customerId}, 'OTHER', 'OPEN', 'seed', now())
+    `.execute(ctx.db);
+
+    const facts = await getAdminHealthFacts(ctx.db);
+    expect(facts.queues.openDiscrepancies).toBe(1);
+    expect(facts.queues.openSupportTickets).toBe(1);
+  });
+
+
+  it("excludes a test-order payment intent from the operator queue", async () => {
+    const customerId = newId();
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const orderId = newId();
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(ctx.db);
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', ${categoryId.slice(-8)}, true, 1)`.execute(ctx.db);
+    await sql`
+      insert into product (id, category_id, name_vi, slug, is_active, sort_order, is_test)
+      values (${productId}, ${categoryId}, '🧪 Test', ${categoryId.slice(-8) + "t"}, true, 1, true)
+    `.execute(ctx.db);
+    await sql`
+      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy)
+      values (${variantId}, ${productId}, ${"SKU-" + variantId}, '1 tháng', 2000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY')
+    `.execute(ctx.db);
+    await sql`
+      insert into "order" (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
+        price_vnd, duration_code, delivery_type, status, expires_at, fulfillment_type)
+      values (${orderId}, ${"ORD-" + orderId.slice(-10)}, ${customerId}, ${variantId}, '🧪 Test', '1 tháng',
+        2000, 'P1M', 'CREDENTIAL', 'PENDING_PAYMENT', now() + interval '15 minutes', 'STOCK_ACCOUNT')
+    `.execute(ctx.db);
+    await sql`
+      insert into payment_intent (id, order_id, status, amount_vnd, merchant_account_id, transfer_content, expires_at)
+      values (${newId()}, ${orderId}, 'PRESENTED', 2000, 'acct', ${"ORD-" + orderId.slice(-10)}, now() + interval '15 minutes')
+    `.execute(ctx.db);
+
+    const facts = await getAdminHealthFacts(ctx.db);
+    // A TEST-mode purchase creates a real intent row; the operator queue must not show it.
+    expect(facts.queues.intentsAwaitingSettlement).toBe(0);
+    expect(facts.queues.paymentsNeedingReview).toBe(0);
+  });
+
+  it("reports down with zeroed queues instead of throwing when the database is gone", async () => {
+    const broken = {
+      executeQuery: async () => {
+        throw new Error("connection refused");
+      },
+    };
+    const facts = await getAdminHealthFacts(broken as never);
+    expect(facts.database).toBe("down");
+    expect(facts.queues).toEqual({
+      outboxBacklog: 0,
+      outboxDeadLettered: 0,
+      openDiscrepancies: 0,
+      intentsAwaitingSettlement: 0,
+      paymentsNeedingReview: 0,
+      openSupportTickets: 0,
+    });
+  });
+});

@@ -66,9 +66,11 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   { id: "payments", label: ADMIN_COPY.payments, callbackData: "admin:payments", enabled: true },
   { id: "customers", label: ADMIN_COPY.customers, callbackData: "admin:customers", enabled: true },
   { id: "preorders", label: "💰 Đặt cọc", callbackData: "admin:preorders", enabled: true },
+  { id: "notifications", label: "🔔 Thông báo", callbackData: "admin:notifications", enabled: true },
   { id: "marketing", label: "📢 Broadcast", callbackData: "admin:marketing", enabled: true },
   { id: "suppliers", label: ADMIN_COPY.suppliers, callbackData: "admin:suppliers", enabled: true },
   { id: "support", label: "🛡 Hỗ trợ/BH", callbackData: "admin:support", enabled: true },
+  { id: "health", label: "🩺 Hệ thống", callbackData: "admin:health", enabled: true },
   { id: "testing", label: "🧪 Test Lab", callbackData: "admin:testlab", enabled: true },
   {
     id: "operations",
@@ -113,15 +115,39 @@ const visibleAdminButtons = (): InlineButton[][] =>
   }, []);
 
 /** Compact root: only live operational areas are shown. */
-export function presentAdminMenu(storeMode: StoreMode = "CLOSED"): PresentedMessage {
+/** Goal §71 summary block; every figure excludes test/canary trade. */
+export interface AdminHomeSummary {
+  revenueTodayVnd: bigint;
+  ordersToday: number;
+  awaitingAction: number;
+  lowStockVariants: number;
+  paymentsNeedingReview: number;
+  newTickets: number;
+}
+
+export function presentAdminMenu(
+  storeMode: StoreMode = "CLOSED",
+  summary?: AdminHomeSummary,
+): PresentedMessage {
   const storeBanner =
     storeMode === "OPEN"
       ? "🟢 ĐANG MỞ BÁN"
       : storeMode === "TEST"
         ? "🟡 CHẾ ĐỘ TEST"
         : "🔴 CỬA HÀNG ĐANG ĐÓNG";
+  const summaryLines = summary
+    ? [
+        "",
+        `💰 Doanh thu hôm nay: ${summary.revenueTodayVnd.toLocaleString("vi-VN")} ₫`,
+        `🧾 Đơn hôm nay: ${summary.ordersToday}`,
+        `⏳ Chờ xử lý: ${summary.awaitingAction}`,
+        `📦 Sắp hết: ${summary.lowStockVariants}`,
+        `⚠️ Thanh toán cần kiểm tra: ${summary.paymentsNeedingReview}`,
+        `🛡 Ticket mới: ${summary.newTickets}`,
+      ]
+    : [];
   return {
-    text: `${ADMIN_COPY.adminMenu}\n\n${storeBanner}`,
+    text: [`${ADMIN_COPY.adminMenu}`, "", storeBanner, ...summaryLines].join("\n"),
     buttons: [
       ...visibleAdminButtons(),
       [{ text: "⚙️ Cài đặt", callbackData: "admin:store:mode" }],
@@ -1576,4 +1602,84 @@ export function presentAuditList(events: AuditEvent[]): PresentedMessage {
   }
   const buttons: InlineButton[][] = [[{ text: ADMIN_COPY.mainMenu, callbackData: "menu:main" }]];
   return { text: lines.join("\n"), buttons };
+}
+
+/** Goal §135: safe system posture. Counts and configured modes only — never a secret. */
+export interface AdminSystemHealthFacts {
+  /** Build identity of the process rendering this screen (the worker). */
+  workerCommit: string;
+  builtAt: string;
+  /** Live API identity read from its /health, or why it could not be read. */
+  apiCommit: string;
+  storeMode: string;
+  database: "ok" | "down";
+  vaultDriver: string;
+  telegramWebhook: "CONFIGURED" | "MISSING";
+  sepayReconciliation: string;
+  queues: {
+    outboxBacklog: number;
+    outboxDeadLettered: number;
+    openDiscrepancies: number;
+    intentsAwaitingSettlement: number;
+    paymentsNeedingReview: number;
+    openSupportTickets: number;
+  };
+}
+
+export function presentAdminSystemHealth(input: AdminSystemHealthFacts): PresentedMessage {
+  const flag = (ok: boolean) => (ok ? "🟢" : "🔴");
+  return {
+    text: [
+      "🩺 HỆ THỐNG",
+      "",
+      `${flag(input.database === "ok")} Cơ sở dữ liệu: ${input.database === "ok" ? "hoạt động" : "KHÔNG truy cập được"}`,
+      `🔖 Bản dựng worker: ${input.workerCommit.slice(0, 12)}`,
+      `🕒 Dựng lúc: ${input.builtAt}`,
+      `🔖 Bản dựng API: ${input.apiCommit}`,
+      `🏪 Chế độ cửa hàng: ${input.storeMode}`,
+      `🔐 Kho bí mật: ${input.vaultDriver}`,
+      `${flag(input.telegramWebhook === "CONFIGURED")} Webhook Telegram: ${input.telegramWebhook === "CONFIGURED" ? "đã cấu hình" : "THIẾU"}`,
+      `🏦 Đối soát SePay: ${input.sepayReconciliation}`,
+      "",
+      `📤 Hàng đợi outbox: ${input.queues.outboxBacklog}`,
+      `☠️ Outbox dead-letter: ${input.queues.outboxDeadLettered}`,
+      `⚠️ Sai lệch cần soát: ${input.queues.openDiscrepancies}`,
+      `⏳ Intent chờ thanh toán: ${input.queues.intentsAwaitingSettlement}`,
+      `🔎 Thanh toán cần kiểm tra: ${input.queues.paymentsNeedingReview}`,
+      `🛡 Ticket đang mở: ${input.queues.openSupportTickets}`,
+    ].join("\n"),
+    buttons: [
+      [
+        { text: ADMIN_COPY.overview, callbackData: "admin:dashboard" },
+        { text: ADMIN_COPY.payments, callbackData: "admin:payments" },
+      ],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+/** Goal §104-§107: what the shop may send, and to whom. Private chats only. */
+export function presentAdminNotifications(input: {
+  transactionalKinds: string[];
+  marketingRecipients: number;
+  marketingOptOuts: number;
+  outboxBacklog: number;
+}): PresentedMessage {
+  return {
+    text: [
+      "🔔 THÔNG BÁO",
+      "",
+      "Kênh gửi: chỉ chat riêng của khách.",
+      "Giao dịch bắt buộc (không thể tắt):",
+      ...input.transactionalKinds.map((kind) => `• ${kind}`),
+      "",
+      `📣 Người nhận marketing: ${input.marketingRecipients}`,
+      `🚫 Đã tắt nhận marketing: ${input.marketingOptOuts}`,
+      `📤 Đang chờ gửi trong outbox: ${input.outboxBacklog}`,
+    ].join("\n"),
+    buttons: [
+      [{ text: "📢 Broadcast", callbackData: "admin:marketing" }],
+      adminNav("admin:menu"),
+    ],
+  };
 }

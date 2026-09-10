@@ -179,33 +179,89 @@ export function presentCustomerNotificationPreferences(prefs: {
     ],
   };
 }
+/**
+ * Customer account home (goal §69): display name, wallet balance, completed-order
+ * count and notification state. The numeric Telegram id is never rendered.
+ */
+export function presentCustomerAccount(input: {
+  displayName: string;
+  balanceVnd: bigint;
+  completedOrders: number;
+  shopUpdates: boolean;
+  purchaseActivity: boolean;
+}): PresentedMessage {
+  return {
+    text: [
+      "👤 TÀI KHOẢN KHÁCH HÀNG",
+      "",
+      `👋 ${input.displayName}`,
+      `💰 Số dư ví: ${formatVnd(makeVnd(input.balanceVnd))}`,
+      `🧾 Đơn đã hoàn tất: ${input.completedOrders}`,
+      `🔔 Thông báo: Cập nhật sản phẩm ${input.shopUpdates ? "Bật" : "Tắt"} · Hoạt động mua hàng ${input.purchaseActivity ? "Bật" : "Tắt"}`,
+    ].join("\n"),
+    buttons: [
+      [{ text: "🧾 Đơn hàng của tôi", callbackData: "ord:list" }],
+      [{ text: "💰 Nạp ví", callbackData: "wallet:topup" }],
+      [{ text: "🔔 Cài đặt thông báo", callbackData: "cust:notify" }],
+      [{ text: "🛡 Bảo hành", callbackData: "cust:warranty" }],
+      [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
+      [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+    ],
+  };
+}
+
+/**
+ * Warranty home (goal §65): the customer's completed orders, each opening a
+ * warranty request through the EXISTING support flow (`sup:open:<order>`) — no
+ * separate warranty service and no new state.
+ */
+export function presentCustomerWarrantyHome(
+  orders: ReadonlyArray<{ orderNumber: string; productNameVi: string }>,
+): PresentedMessage {
+  const lines = ["🛡 BẢO HÀNH", ""];
+  const buttons: InlineButton[][] = [];
+  if (orders.length === 0) {
+    lines.push("Bạn chưa có đơn hàng nào đã hoàn tất để bảo hành.");
+  } else {
+    lines.push("Chọn đơn hàng bạn cần bảo hành:");
+    for (const order of orders) {
+      lines.push(`• ${order.orderNumber} — ${order.productNameVi}`);
+      buttons.push([
+        {
+          text: `${order.orderNumber} · ${order.productNameVi}`,
+          callbackData: `sup:open:${order.orderNumber}`,
+        },
+      ]);
+    }
+  }
+  buttons.push([{ text: "💬 Hỗ trợ", callbackData: "supp:open" }]);
+  return { text: lines.join("\n"), buttons };
+}
+
+/**
+ * Completed-purchase thank-you (goal §53). Rendered AFTER real fulfilment, as its
+ * own message: fulfilment already sent the delivery/credential message, so this
+ * carries commercial context only — never a credential value and never a second
+ * delivery instruction.
+ */
 export function presentPurchaseThankYou(input: {
   orderNumber: string;
   productName: string;
-  variantName?: string;
-  priceVnd?: number;
-  amountVnd?: string;
 }): PresentedMessage {
-  const price =
-    input.priceVnd != null
-      ? formatVnd(makeVnd(BigInt(input.priceVnd)))
-      : input.amountVnd
-        ? `${input.amountVnd} ₫`
-        : "";
   return {
     text: [
-      "CẢM ƠN BẠN ĐÃ MUA HÀNG",
+      "🎉 CẢM ƠN BẠN ĐÃ MUA HÀNG!",
       "",
-      input.productName,
-      input.variantName,
-      `Mã đơn: ${input.orderNumber}`,
-      price,
-    ]
-      .filter(Boolean)
-      .join("\n"),
+      `Sản phẩm: ${input.productName} · Đơn: ${input.orderNumber}`,
+      "✅ Đơn đã hoàn tất.",
+    ].join("\n"),
     buttons: [
-      [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
-      [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+      [
+        { text: "🧾 Xem đơn", callbackData: `ord:view:${input.orderNumber}` },
+        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+        { text: "🛒 Mua thêm", callbackData: "shop:home" },
+        { text: "💬 Hỗ trợ", callbackData: `sup:open:${input.orderNumber}` },
+      ],
     ],
   };
 }

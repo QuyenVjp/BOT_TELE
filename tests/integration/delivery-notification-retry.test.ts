@@ -82,7 +82,7 @@ async function seedBundle() {
     correlationId: "notification-fixture",
   });
   if (!issued.ok) throw new Error("bundle issue failed");
-  return { ...issued, orderId, customerId, vault };
+  return { ...issued, orderId, customerId, vault, orderNumber: `ORD-${orderId}` };
 }
 
 describe("durable delivery notification handoff (T139/T145)", () => {
@@ -111,6 +111,43 @@ describe("durable delivery notification handoff (T139/T145)", () => {
     expect(JSON.stringify(row.rows[0])).not.toContain("RAW-CREDENTIAL");
     expect(JSON.stringify(row.rows[0])).not.toContain(f.token);
     expect(JSON.stringify(row.rows[0])).not.toContain("ds1.");
+  });
+
+  it("carries the order number and amount into the delivery notification (§36)", async () => {
+    const f = await seedBundle();
+    await createDeliveryNotificationHandoff(ctx.db, {
+      vault: f.vault,
+      bundleId: f.bundleId,
+      customerId: f.customerId,
+      deliveryUrl: `https://shop.example/d/${f.token}`,
+      sessionTtlSeconds: 300,
+      sessionConfig: SESSION_CONFIG,
+    });
+    const seen: Array<{
+      orderNumber: string;
+      amountVnd: string;
+      productName: string | null | undefined;
+    }> = [];
+    const result = await processDeliveryNotificationBatch({
+      db: ctx.db,
+      vault: f.vault,
+      sender: {
+        async send(input) {
+          seen.push({
+            orderNumber: input.orderNumber,
+            amountVnd: input.amountVnd,
+            productName: input.product?.name,
+          });
+        },
+      },
+      owner: "notify-order-context",
+      batchSize: 1,
+      maxAttempts: 3,
+      sessionConfig: SESSION_CONFIG,
+      sessionTtlSeconds: 300,
+    });
+    expect(result).toMatchObject({ sent: 1, failed: 0 });
+    expect(seen).toEqual([{ orderNumber: f.orderNumber, amountVnd: "100000", productName: "P" }]);
   });
 
   it("retries a send failure with the same capability and correct recipient", async () => {

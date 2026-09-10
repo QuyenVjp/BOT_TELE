@@ -1,7 +1,13 @@
 import { Buffer } from "node:buffer";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { createBuyNowCallbackCodec, MAX_CALLBACK_PRICE_VND } from "../../src/bot/callback-codec.js";
+import {
+  CALLBACK_ACTION_CODES,
+  createBuyNowCallbackCodec,
+  createCallbackTokenCodec,
+  MAX_CALLBACK_PRICE_VND,
+  peekCallbackAction,
+} from "../../src/bot/callback-codec.js";
 import { newId } from "../../src/shared/ids/index.js";
 
 const KEY = "test-only-buy-now-callback-key-material-v1";
@@ -85,5 +91,91 @@ describe("signed Buy Now callback codec (T160)", () => {
     expect(
       codec().verify("not-a-valid-callback", { telegramUserId: TELEGRAM_USER_ID, now }).ok,
     ).toBe(false);
+  });
+});
+
+const unified = () =>
+  createCallbackTokenCodec({ key: KEY, keyVersion: 1, ttlSeconds: 900, clockSkewSeconds: 5 });
+
+describe("checkout callback tokens", () => {
+    createCallbackTokenCodec({ key: KEY, keyVersion: 1, ttlSeconds: 900, clockSkewSeconds: 5 });
+
+
+  it("peeks EVERY action back to itself, including the extended (>=16) forms", () => {
+    const variantId = newId();
+    for (const action of Object.keys(CALLBACK_ACTION_CODES) as Array<
+      keyof typeof CALLBACK_ACTION_CODES
+    >) {
+      // Build a minimal valid payload for each action so the peek is what is under test.
+      const needsResource = ![
+        "SEARCH_PROMPT",
+        "MAIN_MENU",
+        "CATEGORY_LIST",
+        "ORDER_LIST",
+        "RESTOCK_LIST",
+        "SHOP_HOME",
+        "SHOP_OPEN",
+        "CUSTOMER_NOTIFICATIONS",
+        "CUSTOMER_WARRANTY",
+      ].includes(action);
+      const token = unified().issue({
+        action,
+        telegramUserId: TELEGRAM_USER_ID,
+        ...(needsResource ? { resourceId: variantId } : {}),
+        ...(action === "SUPPORT_REASON" || action === "ADMIN_COMMAND" ? { option: 1 } : {}),
+        ...(action === "CHECKOUT_WALLET" ? { amountVnd: 199_000 } : {}),
+      });
+      expect(peekCallbackAction(token)).toBe(action);
+    }
+  });
+
+  it("rejects a wallet token with no confirmed price", () => {
+    expect(() =>
+      unified().issue({
+        action: "CHECKOUT_WALLET",
+        telegramUserId: TELEGRAM_USER_ID,
+        resourceId: newId(),
+      }),
+    ).toThrow(/amount/i);
+  });
+
+  it.each(["CHECKOUT_PREVIEW", "CHECKOUT_WALLET"] as const)(
+    "round-trips %s as a variant-scoped token inside Telegram's 64-byte limit",
+    (action) => {
+      const variantId = newId();
+      const now = new Date("2026-07-17T00:00:00.000Z");
+      // The wallet choice binds the price the customer confirmed, so the charge can never
+      // drift from what the confirmation screen showed.
+      const amountVnd = action === "CHECKOUT_WALLET" ? 199_000 : undefined;
+      const token = unified().issue({
+        action,
+        telegramUserId: TELEGRAM_USER_ID,
+        resourceId: variantId,
+        ...(amountVnd === undefined ? {} : { amountVnd }),
+        now,
+      });
+      expect(Buffer.byteLength(token, "utf8")).toBeLessThanOrEqual(64);
+      expect(token.startsWith("cb:")).toBe(true);
+
+      const verified = unified().verify(token, {
+        telegramUserId: TELEGRAM_USER_ID,
+        now: new Date(now.getTime() + 1_000),
+      });
+      expect(verified.ok).toBe(true);
+      if (!verified.ok) return;
+      expect(verified.value.action).toBe(action);
+      expect(verified.value.resourceId).toBe(variantId);
+      if (amountVnd !== undefined) expect(verified.value.amountVnd).toBe(amountVnd);
+    },
+  );
+
+  it("binds checkout tokens to the issuing customer", () => {
+    const token = unified().issue({
+      action: "CHECKOUT_WALLET",
+      telegramUserId: TELEGRAM_USER_ID,
+      resourceId: newId(),
+      amountVnd: 199_000,
+    });
+    expect(unified().verify(token, { telegramUserId: "999" }).ok).toBe(false);
   });
 });

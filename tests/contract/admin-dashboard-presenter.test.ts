@@ -32,9 +32,11 @@ describe("admin operational presenters", () => {
       "payments",
       "customers",
       "preorders",
+      "notifications",
       "marketing",
       "suppliers",
       "support",
+      "health",
       "testing",
     ]);
 
@@ -51,9 +53,11 @@ describe("admin operational presenters", () => {
         "💳 Thanh toán",
         "👥 Khách hàng",
         "💰 Đặt cọc",
+        "🔔 Thông báo",
         "📢 Broadcast",
         ADMIN_COPY.suppliers,
         "🛡 Hỗ trợ/BH",
+        "🩺 Hệ thống",
         "🧪 Test Lab",
         "⚙️ Cài đặt",
         "🛒 Về Shop",

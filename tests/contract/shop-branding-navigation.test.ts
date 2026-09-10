@@ -88,13 +88,86 @@ describe("customer branding presenters", () => {
       pageSize: 8,
     });
     expect(page.text).toContain(SHOP_NAME);
+    expect(page.text).toContain("Chọn thương hiệu:");
     expect(page.buttons.flat().some((b) => b.url === ADMIN_CONTACT_URL)).toBe(false);
+    expect(page.buttons.flat().some((b) => b.text === "🏠 Trang chủ")).toBe(true);
     expect(presentMainMenu().text).toContain(SHOP_NAME);
     expect(
       presentMainMenu()
         .buttons.flat()
         .map((button) => button.text),
     ).not.toContain("🛍 Danh sách sản phẩm");
+  });
+
+  it("renders the family screen with offer rows, page control and recovery labels", () => {
+    const categoryId = newId();
+    const parentId = newId();
+    const product = (name: string, price: string) => ({
+      id: newId(),
+      name_vi: name,
+      slug: name.toLowerCase().replace(/\s+/gu, "-"),
+      short_description_vi: null,
+      min_price_vnd: price,
+      total_available: 5,
+      preorder_enabled: false,
+      primary_variant_id: newId(),
+      primary_variant_sku: `${name}-1M`,
+      primary_variant_name: "1 tháng",
+    });
+    const page = presentCategoryPage({
+      category: {
+        id: categoryId,
+        name_vi: "Claude",
+        slug: "claude",
+        sort_order: 1,
+        parent_id: parentId,
+        icon: null,
+        display_name_vi: null,
+        is_active: true,
+        is_featured: false,
+        featured_rank: null,
+        child_count: 0,
+        public_product_count: 2,
+      },
+      parent: {
+        id: parentId,
+        name_vi: "AI",
+        slug: "ai",
+        sort_order: 1,
+        parent_id: null,
+        icon: "🤖",
+        display_name_vi: "🤖 AI",
+        is_active: true,
+        is_featured: false,
+        featured_rank: null,
+        child_count: 1,
+        public_product_count: 2,
+      },
+      children: [],
+      products: [product("Claude Pro", "280000"), product("Claude Team", "590000")],
+      featured: [],
+      page: 1,
+      totalPages: 3,
+      pageSize: 8,
+    });
+
+    expect(page.text).toContain("Các gói đang bán:");
+    const offerRows = page.buttons.filter(
+      (row) => row.length === 1 && row[0]!.callbackData.startsWith("shop:product:"),
+    );
+    expect(offerRows.map((row) => row[0]!.text)).toEqual([
+      expect.stringMatching(/^Claude Pro · 280\.000\s₫$/u),
+      expect.stringMatching(/^Claude Team · 590\.000\s₫$/u),
+    ]);
+    expect(page.buttons).toContainEqual([
+      { text: "⬅️", callbackData: `cat:view:${categoryId}:0` },
+      { text: "2/3", callbackData: `cat:view:${categoryId}:1` },
+      { text: "➡️", callbackData: `cat:view:${categoryId}:2` },
+    ]);
+    expect(page.buttons).toContainEqual([
+      { text: "⬅️ 🤖 AI", callbackData: `cat:view:${parentId}` },
+    ]);
+    expect(page.buttons).toContainEqual([{ text: "🏠 Trang chủ", callbackData: "shop:home" }]);
   });
 });
 

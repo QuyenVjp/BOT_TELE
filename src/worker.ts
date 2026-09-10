@@ -22,10 +22,15 @@ import {
   getOrCreateUncategorizedCategory,
 } from "./modules/catalog/repository.js";
 import { createCatalogCache } from "./modules/catalog/cache.js";
+import { resolveCatalogAudience } from "./modules/catalog/visibility.js";
 
 import { pathToFileURL } from "node:url";
+import { getAdminOverview } from "./modules/admin/overview.js";
+import { getAdminHealthFacts } from "./modules/admin/health.js";
+import { loadBuildIdentity } from "./shared/build-identity.js";
 import { sql } from "kysely";
 import { isId, newId } from "./shared/ids/index.js";
+import { formatVnd as formatMoneyVnd, makeVnd } from "./shared/money/index.js";
 import { sealPresentedMessageCallbacks } from "./bot/callback-sealer.js";
 import type { CallbackTokenCodec } from "./bot/callback-codec.js";
 import type { Db } from "./infrastructure/db/transaction.js";
@@ -734,8 +739,10 @@ async function bootstrap(): Promise<void> {
   const { createCheckoutCallbacks } = await import("./bot/callbacks/checkout.js");
   const { createHistoryCallbacks } = await import("./bot/callbacks/history.js");
   const { createSupportCallbacks } = await import("./bot/callbacks/support.js");
-  const { presentPaymentScreen } = await import("./bot/presenters/payment.js");
-  const { createWalletLedgerService } = await import("./modules/wallet/ledger.js");
+  const { presentPaymentScreen, presentWalletHistory } =
+    await import("./bot/presenters/payment.js");
+  const { createWalletLedgerService, listWalletLedgerEntries } =
+    await import("./modules/wallet/ledger.js");
   const {
     WALLET_TOPUP_PRESET_AMOUNTS,
     applyWalletTopupEvidence,
@@ -748,7 +755,6 @@ async function bootstrap(): Promise<void> {
     parseWalletTopupAmount,
     presentWalletTopup,
     renderWalletTopupConfirmation,
-    renderWalletTopupPicker,
     saveWalletTopupAwaitingAmount,
     saveWalletTopupSelection,
   } = await import("./modules/wallet/topup.js");
@@ -818,6 +824,8 @@ async function bootstrap(): Promise<void> {
     presentAdminBroadcastStatus,
     presentAdminDenied,
     presentAdminDashboard,
+    presentAdminSystemHealth,
+    presentAdminNotifications,
     presentAdminInventory,
     presentAdminInventoryProduct,
     presentAdminInventoryVariant,
@@ -880,7 +888,12 @@ async function bootstrap(): Promise<void> {
   const { generateCustomerAlias } = await import("./modules/marketing/social-proof.js");
   const { formatSePayReconciliationAdminText, getSePayReconciliationStatus } =
     await import("./modules/payments/reconciliation-status.js");
-  const { presentCustomerNotificationPreferences } = await import("./bot/presenters/customer.js");
+  const {
+    presentCustomerAccount,
+    presentCustomerNotificationPreferences,
+    presentCustomerWarrantyHome,
+    presentPurchaseThankYou,
+  } = await import("./bot/presenters/customer.js");
   const { presentDeliveryReveal } = await import("./bot/presenters/delivery.js");
   const { presentAdminManualTaskDetail, presentAdminManualTasks } =
     await import("./bot/presenters/manual-fulfillment.js");
@@ -974,6 +987,7 @@ async function bootstrap(): Promise<void> {
       timeoutMs: config.SEARCH_PARSER_TIMEOUT_MS,
     }),
     callbackCodec: buyNowCodec,
+    tokenCodec: callbackCodec,
     cache: catalogCache,
     productLinkSecret: config.BUY_NOW_CALLBACK_HMAC_KEY,
   });
@@ -989,8 +1003,31 @@ async function bootstrap(): Promise<void> {
       template: config.VIETQR_TEMPLATE,
     },
     callbackCodec: buyNowCodec,
+    tokenCodec: callbackCodec,
     resolveCustomerId,
     adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+    resolveAudience: (input) =>
+      resolveCatalogAudience(dbHandle.db, {
+        telegramUserId: input.telegramUserId,
+        isRootAdmin: input.isRootAdmin,
+      }),
+    walletBalanceVnd: async (customerId) => {
+      const account = await walletLedger.ensureAccount(customerId);
+      return account ? BigInt(account.balanceVnd) : null;
+    },
+    walletTopUpBounds: {
+      minVnd: BigInt(config.WALLET_TOPUP_MIN_VND),
+      maxVnd: BigInt(config.WALLET_TOPUP_MAX_VND),
+    },
+    payOrderWithWallet: async (input) => {
+      const result = await walletPurchase.purchase({
+        customerId: input.customerId,
+        orderId: input.orderId,
+        idempotencyKey: `telegram:${input.customerId}:${input.orderId}`,
+        correlationId: input.correlationId,
+      });
+      return result.ok ? { ok: true, message: "" } : { ok: false, message: result.message };
+    },
   });
   const history = createHistoryCallbacks({ db: dbHandle.db });
   const notificationService = { getNotificationPreferences, setNotificationPreferences };
@@ -1005,22 +1042,51 @@ async function bootstrap(): Promise<void> {
     bankAlias: config.VIETQR_BANK_ALIAS,
     template: config.VIETQR_TEMPLATE,
   };
+  /** Best-effort live identity of the API process, for the admin health screen. */
+  async function readApiBuildCommit(): Promise<string> {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2_000);
+      const response = await fetch(`${config.APP_BASE_URL}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      if (!response.ok) return `không đọc được (HTTP ${response.status})`;
+      const body = (await response.json()) as { commit?: unknown };
+      return typeof body.commit === "string" ? `${body.commit.slice(0, 12)} (live)` : "không rõ";
+    } catch {
+      return "không truy cập được";
+    }
+  }
+
   const walletTopupBounds = {
     minVnd: config.WALLET_TOPUP_MIN_VND,
     maxVnd: config.WALLET_TOPUP_MAX_VND,
   };
   function walletTopupPickerMessage(account: WalletAccount): PresentedMessage {
+    const presets = WALLET_TOPUP_PRESET_AMOUNTS.filter(
+      (amount) => amount >= walletTopupBounds.minVnd && amount <= walletTopupBounds.maxVnd,
+    ).slice(0, 4);
+    const presetRows: PresentedMessage["buttons"] = [];
+    for (let i = 0; i < presets.length; i += 2) {
+      presetRows.push(
+        presets.slice(i, i + 2).map((amount) => ({
+          text: formatVnd(amount),
+          callbackData: `wallet:topup:amount:${amount}`,
+        })),
+      );
+    }
     return {
-      text: renderWalletTopupPicker(account, walletTopupBounds),
+      text: [
+        "💰 VÍ TIER20",
+        "",
+        `Số dư: ${formatVnd(account.balanceVnd)}`,
+        "Thanh toán tức thì 1 chạm, không cần quét mã mỗi lần mua.",
+        `Chọn số tiền nạp (${formatVnd(walletTopupBounds.minVnd)} – ${formatVnd(walletTopupBounds.maxVnd)}).`,
+      ].join("\n"),
       buttons: [
-        ...WALLET_TOPUP_PRESET_AMOUNTS.filter(
-          (amount) => amount >= walletTopupBounds.minVnd && amount <= walletTopupBounds.maxVnd,
-        ).map((amount) => [
-          { text: formatVnd(amount), callbackData: `wallet:topup:amount:${amount}` },
-        ]),
-        [{ text: "Nhập số khác", callbackData: "wallet:topup:custom" }],
-        [{ text: "Ví", callbackData: "wallet:account" }],
-        [{ text: "Menu chính", callbackData: "menu:main" }],
+        ...presetRows,
+        [{ text: "✏️ Số tiền khác", callbackData: "wallet:topup:custom" }],
+        [{ text: "📜 Lịch sử ví", callbackData: "wallet:history" }],
+        [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
       ],
     };
   }
@@ -1433,13 +1499,28 @@ async function bootstrap(): Promise<void> {
           text: "Không tìm thấy tài khoản khách hàng.",
           buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
         };
-      return {
-        text: `Ví của bạn\n\nSố dư: ${formatVnd(account.balanceVnd)}`,
-        buttons: [
-          [{ text: "Nạp ví", callbackData: "wallet:topup" }],
-          [{ text: "Menu chính", callbackData: "menu:main" }],
-        ],
-      };
+      const profile = await sql<{ display_name: string | null; username: string | null }>`
+        select display_name, username
+        from customer_profile_snapshot
+        where customer_id = ${customerId}
+        limit 1
+      `.execute(dbHandle.db);
+      const completed = await sql<{ count: string }>`
+        select count(*)::text as count
+        from "order"
+        where customer_id = ${customerId} and status = 'COMPLETED'
+      `.execute(dbHandle.db);
+      const preferences = await notificationService.getNotificationPreferences(
+        dbHandle.db,
+        customerId,
+      );
+      return presentCustomerAccount({
+        displayName: profile.rows[0]?.display_name ?? profile.rows[0]?.username ?? "bạn",
+        balanceVnd: account.balanceVnd,
+        completedOrders: Number(completed.rows[0]?.count ?? "0"),
+        shopUpdates: preferences.shopUpdates,
+        purchaseActivity: preferences.purchaseActivity,
+      });
     },
     async walletTopup(ctx, action = { kind: "PICK" }) {
       const customerId = await resolveCustomerId(ctx.telegramUserId);
@@ -1581,6 +1662,34 @@ async function bootstrap(): Promise<void> {
               [{ text: "Đơn hàng", callbackData: "ord:list" }],
             ],
           };
+    },
+    async walletHistory(ctx) {
+      const customerId = await resolveCustomerId(ctx.telegramUserId);
+      if (!customerId)
+        return {
+          text: "Không xác minh được khách hàng.",
+          buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
+        };
+      const account = await walletLedger.ensureAccount(customerId);
+      return presentWalletHistory({
+        balanceVnd: account ? BigInt(account.balanceVnd) : 0n,
+        entries: await listWalletLedgerEntries(dbHandle.db, customerId),
+      });
+    },
+    async warrantyHome(customerId) {
+      const rows = await sql<{ order_number: string; product_name_vi: string }>`
+        select order_number, product_name_vi
+        from "order"
+        where customer_id = ${customerId} and status = 'COMPLETED'
+        order by created_at desc, id desc
+        limit 20
+      `.execute(dbHandle.db);
+      return presentCustomerWarrantyHome(
+        rows.rows.map((row) => ({
+          orderNumber: row.order_number,
+          productNameVi: row.product_name_vi,
+        })),
+      );
     },
     admin: {
       async orders(input) {
@@ -1903,7 +2012,7 @@ async function bootstrap(): Promise<void> {
           correlationId: input.correlationId,
         });
         return result.ok
-          ? presentAdminMenu(await getStoreMode(dbHandle.db))
+          ? presentAdminMenu(await getStoreMode(dbHandle.db), await getAdminOverview(dbHandle.db))
           : presentAdminDenied(
               result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
             );
@@ -2085,6 +2194,55 @@ async function bootstrap(): Promise<void> {
           pendingPayment: row.pending_payment,
           paymentReview: row.payment_review,
           fulfillmentFailures: row.fulfillment_failures,
+        });
+      },
+      async health(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        const facts = await getAdminHealthFacts(dbHandle.db);
+        return presentAdminSystemHealth({
+          // The worker can read its own identity, but a partial/stale deploy is exactly what this
+          // screen diagnoses, so the API is asked for its own live identity too. A failure here is
+          // itself the finding, so it degrades to an explicit string instead of hiding.
+          workerCommit: loadBuildIdentity(import.meta.url)?.commit ?? "unknown",
+          builtAt: loadBuildIdentity(import.meta.url)?.builtAt ?? "unknown",
+          apiCommit: await readApiBuildCommit(),
+          storeMode: await getStoreMode(dbHandle.db),
+          database: facts.database,
+          vaultDriver: config.VAULT_DRIVER,
+          telegramWebhook: config.TELEGRAM_WEBHOOK_SECRET ? "CONFIGURED" : "MISSING",
+          sepayReconciliation: formatSePayReconciliationAdminText(
+            await getSePayReconciliationStatus(dbHandle.db),
+          ),
+          queues: facts.queues,
+        });
+      },
+      async notifications(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        const [outbox, prefs] = await Promise.all([
+          getAdminHealthFacts(dbHandle.db),
+          sql<{ recipients: number; opt_outs: number }>`
+            select count(*)::int as recipients,
+                   count(*) filter (where marketing_opt_in = false)::int as opt_outs
+            from customer_notification_preference
+          `.execute(dbHandle.db),
+        ]);
+        return presentAdminNotifications({
+          transactionalKinds: [
+            "Thanh toán thành công",
+            "Giao hàng",
+            "Đặt cọc",
+            "Hàng về (báo có hàng)",
+            "Hoàn tiền",
+            "Bảo hành",
+            "Hỗ trợ",
+          ],
+          marketingRecipients: prefs.rows[0]?.recipients ?? 0,
+          marketingOptOuts: prefs.rows[0]?.opt_outs ?? 0,
+          outboxBacklog: outbox.queues.outboxBacklog,
         });
       },
       async audit(input) {
@@ -4838,6 +4996,8 @@ async function bootstrap(): Promise<void> {
               "✅ GIAO HÀNG THÀNH CÔNG",
               "",
               input.product?.name ? `📦 ${input.product.name}` : "📦 Đơn hàng của bạn",
+              `Đơn: ${input.orderNumber}`,
+              `💰 ${formatMoneyVnd(makeVnd(BigInt(input.amountVnd)))}`,
               "",
               "Nhấn nút bên dưới để xem thông tin nhận hàng (chỉ hiện một lần, đừng chia sẻ).",
             ];
@@ -4862,6 +5022,24 @@ async function bootstrap(): Promise<void> {
                 ],
               },
             });
+            // Own message, after the fulfilled delivery: commercial context only, never
+            // the credential (that stays view-once behind "🔐 Nhận hàng ngay"). A failure
+            // here must not fail the claim, or the delivery message would be re-sent.
+            try {
+              await telegramResponder.send({
+                chatId: input.chatId,
+                messageId: null,
+                message: presentPurchaseThankYou({
+                  orderNumber: input.orderNumber,
+                  productName: input.product?.name ?? "Đơn hàng của bạn",
+                }),
+              });
+            } catch (error) {
+              logger.warn(
+                { err: error, handoffId: input.handoffId },
+                "purchase thank-you send failed",
+              );
+            }
           },
         },
         owner: ownerId,

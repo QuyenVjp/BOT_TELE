@@ -32,7 +32,7 @@ export async function sealPresentedMessageCallbacks(
         continue;
       }
       if (
-        /^wallet:(?:account|topup(?::(?:custom|confirm|status|change|cancel|amount:[1-9][0-9]{0,12}))?)$/.test(
+        /^wallet:(?:account|history|topup(?::(?:custom|confirm|status|change|cancel|amount:[1-9][0-9]{0,12}))?)$/.test(
           button.callbackData,
         )
       ) {

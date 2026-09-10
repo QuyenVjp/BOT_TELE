@@ -38,6 +38,11 @@ function setup() {
     text: "category page",
     buttons: [[{ text: "Quay lại", callbackData: "cat:list" }]],
   });
+  const catalogSearch = vi.fn();
+  const storefront = vi.fn().mockResolvedValue({
+    text: "TIER20 SHOP home",
+    buttons: [[{ text: "🤖 AI", callbackData: "cat:view:1" }]],
+  });
   const adminMainMenu = vi.fn().mockResolvedValue(presentAdminMenu());
   const adminDashboard = vi.fn().mockResolvedValue({
     text: "dashboard",
@@ -162,7 +167,8 @@ function setup() {
       categoryList,
       categoryView,
       variantDetail: vi.fn(),
-      search: vi.fn(),
+      search: catalogSearch,
+      storefront,
     },
     checkout: {
       buyNowFromCallback: vi.fn(),
@@ -236,6 +242,8 @@ function setup() {
       broadcastConfirm,
       broadcastCancel,
       broadcastStatus,
+      health: vi.fn().mockResolvedValue({ text: "health", buttons: [] }),
+      notifications: vi.fn().mockResolvedValue({ text: "notifications", buttons: [] }),
       storeOpen: vi.fn().mockResolvedValue({ text: "store open", buttons: [] }),
       storeClose: vi.fn().mockResolvedValue({ text: "store close", buttons: [] }),
       workflow: {
@@ -258,6 +266,8 @@ function setup() {
   return {
     codec,
     dispatcher,
+    catalogSearch,
+    storefront,
     mainMenu,
     categoryList,
     categoryView,
@@ -363,6 +373,43 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       amountVnd: 200_000n,
     });
     expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes an unclaimed customer query to catalog search instead of the home screen", async () => {
+    // Regression: the admin/wallet text handlers are always wired in production, so the
+    // fallthrough used to send every typed query to the home screen and the free-text search
+    // router (the final `else`) was unreachable. In production every admin text handler returns
+    // null unless the ROOT actor is inside that flow, so make the harness models do the same.
+    const {
+      dispatcher,
+      catalogSearch,
+      storefront,
+      send,
+      workflowMessageText,
+      importDocument,
+      quantityAdjustText,
+      broadcastText,
+      walletTopupText,
+    } = setup();
+    for (const mock of [workflowMessageText, importDocument, quantityAdjustText, broadcastText, walletTopupText]) {
+      mock.mockResolvedValue(null);
+    }
+    catalogSearch.mockResolvedValueOnce({ text: "kết quả tìm kiếm", buttons: [] });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "9b",
+      action: "CATALOG",
+      messageText: "claude",
+    });
+
+    expect(catalogSearch).toHaveBeenCalledTimes(1);
+    expect(catalogSearch.mock.calls[0]![0]).toBe("claude");
+    expect(storefront).not.toHaveBeenCalled();
+    const sent = send.mock.calls.at(-1)![0] as { message: { text: string } };
+    expect(sent.message.text).toContain("kết quả tìm kiếm");
   });
 
   it("routes custom wallet topup text before admin text handlers", async () => {

@@ -15,6 +15,7 @@ import type { InlineButton, PresentedMessage } from "./catalog.js";
 
 export const PAYMENT_COPY = {
   title: "💳 Thanh toán đơn hàng",
+  previewTitle: "🛒 XÁC NHẬN ĐƠN HÀNG",
   amountLabel: "Số tiền",
   accountLabel: "Số tài khoản",
   contentLabel: "Nội dung CK",
@@ -23,11 +24,12 @@ export const PAYMENT_COPY = {
   instruction: "Quét mã VietQR hoặc chuyển khoản đúng số tiền + nội dung trên.",
   refresh: "🔄 Kiểm tra trạng thái",
   cancel: "Huỷ đơn",
-  reopen: "Tạo lại QR",
+  reopen: "🛒 Tạo lại thanh toán",
   support: "💬 Hỗ trợ",
   mainMenu: "Menu chính",
-  expiredTitle: "⏰ Mã thanh toán đã hết hạn",
-  expiredBody: "Đơn hàng đã quá thời gian chờ thanh toán. Bạn có thể tạo lại QR hoặc huỷ đơn.",
+  expiredTitle: "⌛ Yêu cầu thanh toán đã hết hạn.",
+  expiredBody:
+    "Đơn hàng đã quá thời gian chờ thanh toán. Bạn có thể tạo lại thanh toán hoặc xem đơn.",
   settledTitle: "✅ Đã thanh toán",
   settledBody: "Đơn hàng đã được xác nhận thanh toán. Chúng tôi sẽ giao tài khoản ngay.",
   reviewTitle: "🔎 Đang kiểm tra giao dịch",
@@ -42,13 +44,8 @@ function navButtons(orderNumber: string): InlineButton[][] {
   ];
 }
 
-/**
- * Human-facing expiry in Asia/Ho_Chi_Minh (UTC+7), e.g. "16/07/2026 19:15 (GMT+7)".
- * Vietnamese buyers must not be shown a UTC clock (T149 finding).
- */
-export function formatExpiryVietnam(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
+/** Human-facing date-time in Asia/Ho_Chi_Minh (UTC+7), e.g. "16/07/2026 19:15". */
+function formatVietnamDateTime(value: Date): string {
   // Asia/Ho_Chi_Minh is fixed UTC+7 year-round (no DST).
   const parts = new Intl.DateTimeFormat("vi-VN", {
     timeZone: "Asia/Ho_Chi_Minh",
@@ -58,10 +55,20 @@ export function formatExpiryVietnam(iso: string): string {
     hour: "2-digit",
     minute: "2-digit",
     hour12: false,
-  }).formatToParts(d);
+  }).formatToParts(value);
   const get = (type: Intl.DateTimeFormatPartTypes): string =>
     parts.find((p) => p.type === type)?.value ?? "";
-  return `${get("day")}/${get("month")}/${get("year")} ${get("hour")}:${get("minute")} (GMT+7)`;
+  return `${get("day")}/${get("month")}/${get("year")} ${get("hour")}:${get("minute")}`;
+}
+
+/**
+ * Human-facing expiry in Asia/Ho_Chi_Minh (UTC+7), e.g. "16/07/2026 19:15 (GMT+7)".
+ * Vietnamese buyers must not be shown a UTC clock (T149 finding).
+ */
+export function formatExpiryVietnam(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return `${formatVietnamDateTime(d)} (GMT+7)`;
 }
 
 /**
@@ -100,7 +107,7 @@ export async function presentPaymentScreen(
   };
 }
 
-/** Expired intent / order: offer reopen or cancel. No screenshot instruction. */
+/** Expired intent / order (goal §37): re-mint, view the order, or get support. */
 export function presentPaymentExpired(orderNumber: string): PresentedMessage {
   return {
     text: [PAYMENT_COPY.expiredTitle, "", `Đơn: ${orderNumber}`, PAYMENT_COPY.expiredBody].join(
@@ -108,8 +115,8 @@ export function presentPaymentExpired(orderNumber: string): PresentedMessage {
     ),
     buttons: [
       [{ text: PAYMENT_COPY.reopen, callbackData: `pay:reopen:${orderNumber}` }],
-      [{ text: PAYMENT_COPY.cancel, callbackData: `pay:cancel:${orderNumber}` }],
-      ...navButtons(orderNumber),
+      [{ text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` }],
+      [{ text: PAYMENT_COPY.support, callbackData: `sup:open:${orderNumber}` }],
     ],
   };
 }
@@ -147,5 +154,121 @@ export function presentPaymentNeedsReview(
       [{ text: PAYMENT_COPY.support, callbackData: `sup:open:${orderNumber}` }],
       [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
     ],
+  };
+}
+
+/**
+ * Pre-payment confirmation (goal §32). Rendered BEFORE any order or payment intent exists:
+ * opening the preview must not create financial state. The VietQR button carries a
+ * freshly-signed Buy Now token minted here, so the confirmed price is exactly the price
+ * the customer is looking at, and the proven order+intent path stays untouched.
+ */
+export interface CheckoutPreviewInput {
+  productName: string;
+  variantName: string;
+  priceVnd: bigint;
+  deliveryLabel: string;
+  warrantyLabel: string | null;
+  qrCallbackData: string;
+  walletCallbackData: string;
+  cancelCallbackData: string;
+}
+
+export function presentCheckoutPreview(input: CheckoutPreviewInput): PresentedMessage {
+  const lines = [
+    PAYMENT_COPY.previewTitle,
+    "",
+    `📦 Sản phẩm: ${input.productName}`,
+    `🏷 Gói: ${input.variantName}`,
+    `💰 Giá: ${formatVnd(makeVnd(input.priceVnd))}`,
+    `⚡ Giao hàng: ${input.deliveryLabel}`,
+  ];
+  if (input.warrantyLabel) lines.push(`🛡 Bảo hành: ${input.warrantyLabel}`);
+  lines.push("", "Chọn cách thanh toán:");
+  return {
+    text: lines.join("\n"),
+    buttons: [
+      [{ text: "🏦 VietQR", callbackData: input.qrCallbackData }],
+      [{ text: "👛 Ví TIER20", callbackData: input.walletCallbackData }],
+      [{ text: "❌ Huỷ", callbackData: input.cancelCallbackData }],
+    ],
+  };
+}
+
+/** Wallet shortfall (goal §42): show balance, price and the exact missing amount. */
+export function presentInsufficientBalance(input: {
+  balanceVnd: bigint;
+  priceVnd: bigint;
+  shortfallVnd: bigint;
+  topUpCallbackData: string;
+  qrCallbackData: string;
+  cancelCallbackData: string;
+}): PresentedMessage {
+  return {
+    text: [
+      "⚠️ SỐ DƯ VÍ KHÔNG ĐỦ",
+      "",
+      `💰 Số dư: ${formatVnd(makeVnd(input.balanceVnd))}`,
+      `🏷 Giá: ${formatVnd(makeVnd(input.priceVnd))}`,
+      `➖ Còn thiếu: ${formatVnd(makeVnd(input.shortfallVnd))}`,
+    ].join("\n"),
+    buttons: [
+      [
+        {
+          text: `⚡ Nạp thêm ${formatVnd(makeVnd(input.shortfallVnd))}`,
+          callbackData: input.topUpCallbackData,
+        },
+      ],
+      [{ text: "🏦 Thanh toán VietQR", callbackData: input.qrCallbackData }],
+      [{ text: "❌ Huỷ", callbackData: input.cancelCallbackData }],
+    ],
+  };
+}
+
+export interface WalletHistoryEntry {
+  entryType: string;
+  amountVnd: bigint;
+  balanceAfterVnd: bigint;
+  reason: string;
+  createdAt: Date;
+}
+
+/** Friendly word per ledger entry type; an unknown internal type stays neutral. */
+function walletEntryLabel(entryType: string): string {
+  const kind = entryType.toUpperCase();
+  if (kind.includes("REFUND")) return "Hoàn tiền";
+  if (kind.includes("TOPUP") || kind === "CREDIT") return "Nạp ví";
+  if (kind.includes("PURCHASE") || kind === "DEBIT") return "Thanh toán đơn";
+  return "Giao dịch ví";
+}
+
+function isWalletCredit(entryType: string): boolean {
+  const kind = entryType.toUpperCase();
+  return kind.includes("REFUND") || kind.includes("TOPUP") || kind === "CREDIT";
+}
+
+/**
+ * Wallet ledger history (goal §38): balance, then one line per entry with a friendly
+ * label, a signed amount and the resulting balance. The raw entry enum is never shown.
+ */
+export function presentWalletHistory(input: {
+  balanceVnd: bigint;
+  entries: readonly WalletHistoryEntry[];
+}): PresentedMessage {
+  const lines = ["📜 LỊCH SỬ VÍ", "", `Số dư: ${formatVnd(makeVnd(input.balanceVnd))}`];
+  if (input.entries.length === 0) {
+    lines.push("", "Chưa có giao dịch nào.");
+  } else {
+    lines.push("");
+    for (const entry of input.entries) {
+      const sign = isWalletCredit(entry.entryType) ? "+" : "-";
+      lines.push(
+        `${formatVietnamDateTime(entry.createdAt)} · ${walletEntryLabel(entry.entryType)} · ${sign}${formatVnd(makeVnd(entry.amountVnd))} · Số dư sau: ${formatVnd(makeVnd(entry.balanceAfterVnd))}`,
+      );
+    }
+  }
+  return {
+    text: lines.join("\n"),
+    buttons: [[{ text: "🏠 Trang chủ", callbackData: "shop:home" }]],
   };
 }

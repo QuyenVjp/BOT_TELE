@@ -147,15 +147,22 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
       expect(notifyPrefs.text).toContain("CÀI ĐẶT THÔNG BÁO");
       expect(notifyPrefs.buttons[0]?.[0]?.callbackData).toContain("cust:notify:marketing");
 
+      // Goal §53 specifies title + product + order + completion line + four actions; the
+      // price is not part of that contract, so it is no longer an input.
       const thankYou = presentPurchaseThankYou({
         orderNumber: "ORD-2026-TEST-123",
         productName: "ChatGPT Plus",
-        variantName: "1 Tháng BHF",
-        priceVnd: 250000,
       });
-      expect(thankYou.text).toContain("CẢM ƠN BẠN ĐÃ MUA HÀNG");
+      expect(thankYou.text).toContain("🎉 CẢM ƠN BẠN ĐÃ MUA HÀNG!");
+      expect(thankYou.text).toContain("Sản phẩm: ChatGPT Plus");
       expect(thankYou.text).toContain("ORD-2026-TEST-123");
-      expect(thankYou.text.replace(/\u00a0/g, " ")).toContain("250.000 ₫");
+      expect(thankYou.text).toContain("✅ Đơn đã hoàn tất.");
+      expect(thankYou.buttons.flat().map((b) => b.text)).toEqual([
+        "🧾 Xem đơn",
+        "🛡 Bảo hành",
+        "🛒 Mua thêm",
+        "💬 Hỗ trợ",
+      ]);
     });
   });
 

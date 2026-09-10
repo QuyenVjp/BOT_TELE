@@ -229,3 +229,47 @@ function mapAccount(row: AccountRow): WalletAccount {
 function toIso(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
+
+/** One wallet movement, newest-first, as shown to the owner of the wallet. */
+export interface WalletLedgerEntryView {
+  entryType: string;
+  amountVnd: bigint;
+  balanceAfterVnd: bigint;
+  reason: string;
+  createdAt: Date;
+}
+
+/**
+ * Read-only wallet history for a customer's private screen (goal §38 `📜 Lịch sử ví`).
+ *
+ * Projects only the fields a customer is allowed to see. The ledger's idempotency and
+ * correlation keys stay in the database: they are internal bookkeeping, not customer content.
+ */
+export async function listWalletLedgerEntries(
+  exec: Executor,
+  customerId: string,
+  limit = 10,
+): Promise<WalletLedgerEntryView[]> {
+  const capped = Math.min(Math.max(Math.trunc(limit), 1), 50);
+  const result = await sql<{
+    entry_type: string;
+    amount_vnd: string;
+    balance_after_vnd: string;
+    reason: string | null;
+    created_at: Date;
+  }>`
+    select l.entry_type, l.amount_vnd::text, l.balance_after_vnd::text, l.reason, l.created_at
+    from wallet_ledger l
+    join wallet_account a on a.id = l.wallet_account_id
+    where a.customer_id = ${customerId}
+    order by l.created_at desc, l.id desc
+    limit ${capped}
+  `.execute(exec);
+  return result.rows.map((row) => ({
+    entryType: row.entry_type,
+    amountVnd: BigInt(row.amount_vnd),
+    balanceAfterVnd: BigInt(row.balance_after_vnd),
+    reason: row.reason ?? "",
+    createdAt: row.created_at,
+  }));
+}

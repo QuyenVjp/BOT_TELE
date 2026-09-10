@@ -15,7 +15,7 @@ import { searchCatalog } from "../../modules/catalog/search.js";
 import { resolveCatalogAudience, type CatalogIdentity } from "../../modules/catalog/visibility.js";
 import type { CatalogCache } from "../../modules/catalog/cache.js";
 import type { SearchParser } from "../../modules/catalog/search-parser-port.js";
-import type { BuyNowCallbackCodec } from "../callback-codec.js";
+import type { BuyNowCallbackCodec, CallbackTokenCodec } from "../callback-codec.js";
 import { isId } from "../../shared/ids/index.js";
 import {
   presentCategoryList,
@@ -44,6 +44,12 @@ export interface CatalogCallbackDeps {
   /** Default page size for variant lists. */
   pageSize?: number;
   callbackCodec: BuyNowCallbackCodec;
+  /**
+   * Unified token codec. When present the Buy Now button issues a CHECKOUT_PREVIEW token so
+   * the customer confirms the order before any financial intent exists (goal §32); absent, it
+   * falls back to the legacy sealed Buy Now token.
+   */
+  tokenCodec?: CallbackTokenCodec;
   productLinkSecret?: string;
 }
 
@@ -107,6 +113,13 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       return undefined;
     }
     try {
+      if (deps.tokenCodec) {
+        return deps.tokenCodec.issue({
+          action: "CHECKOUT_PREVIEW",
+          telegramUserId,
+          resourceId: variant.id,
+        });
+      }
       return deps.callbackCodec.issue({
         telegramUserId,
         variantId: variant.id,
