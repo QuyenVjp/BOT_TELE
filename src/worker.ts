@@ -429,14 +429,7 @@ export async function presentAdminCustomerSearchPrompt(db: Db, adminTelegramUser
     values (${adminTelegramUserId}, now() + interval '10 minutes')
     on conflict (chat_id) do update set expires_at = excluded.expires_at, created_at = now()
   `.execute(db);
-  // One search prompt at a time: the admission row cannot say which prompt armed it (the ingress
-  // deletes it before dispatch), so opening this one clears the product prompt's state instead.
-  // Without that, a stale CRM state would claim the next product query — the collision this session
-  // recorded when typing "claude" rendered the customer list.
-  await sql`
-    delete from admin_callback_state
-    where admin_telegram_user_id = ${adminTelegramUserId} and kind = 'CUSTOMER_SEARCH_PROMPT'
-  `.execute(db);
+
   return {
     text: "Nhập Telegram ID, username, số điện thoại đã chia sẻ, hoặc mã đơn hàng để tìm khách.",
     buttons: [[{ text: "Huỷ", callbackData: "admin:customers" }]],
@@ -5451,12 +5444,17 @@ async function bootstrap(): Promise<void> {
             await sql<{
               id: string;
             }>`select id from notification_campaign where created_by=${String(input.telegramUserId)} and status='DRAFT' and idempotency_key like ${`admin-broadcast:${input.telegramUserId}:%`}
-            -- Bounded: an abandoned draft used to persist forever and capture the next unrelated
-            -- thing the owner typed as the broadcast body, one mis-tap from messaging the audience.
-            and created_at > now() - interval '30 minutes'
           order by created_at desc limit 1`.execute(dbHandle.db)
           ).rows[0]?.id;
-        if (campaignId) await cancelBroadcast(dbHandle.db, campaignId);
+        // No age bound here on purpose: cancelling is how an abandoned draft gets cleaned up, so it
+        // must find one of any age. The composer's own lookup is the bounded one.
+        if (!campaignId) {
+          return {
+            text: "Không còn thông báo nháp nào để huỷ.",
+            buttons: [[{ text: "📣 Tiếp thị", callbackData: "admin:marketing" }]],
+          };
+        }
+        await cancelBroadcast(dbHandle.db, campaignId);
         return {
           text: "Đã huỷ thông báo.",
           buttons: [[{ text: "📣 Tiếp thị", callbackData: "admin:marketing" }]],

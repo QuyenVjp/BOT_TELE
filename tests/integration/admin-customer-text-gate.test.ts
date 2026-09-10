@@ -62,6 +62,28 @@ describe("handleAdminCustomerFreeText", () => {
     await expect(call("claude")).resolves.toBeNull();
   });
 
+  it("drives the CRM prompt end to end: admission row, live state, and the list", async () => {
+    // The prompt once wrote only the callback state, so a typed query was dropped before dispatch and
+    // this handler was never reached; a later version deleted the state it had just created, which made
+    // the search fall through to the catalog. This walks the whole path so neither can return.
+    await presentAdminCustomerSearchPrompt(ctx.db, ADMIN_ID);
+
+    const armed = await sql<{ n: string }>`
+      select count(*)::text as n from customer_search_prompt
+      where chat_id = ${ADMIN_ID} and expires_at > now()
+    `.execute(ctx.db);
+    expect(armed.rows[0]?.n).toBe("1");
+
+    await expect(call("Chính")).resolves.not.toBeNull();
+  });
+
+  it("shows the prompt itself with an instruction, never the raw state id", async () => {
+    const prompt = await presentAdminCustomerSearchPrompt(ctx.db, ADMIN_ID);
+
+    expect(prompt.text).toContain("Nhập");
+    expect(prompt.text).not.toMatch(/[0-9A-HJKMNP-TV-Z]{26}/u);
+  });
+
   it("ignores an expired prompt", async () => {
     await sql`
       insert into admin_callback_state (id, admin_telegram_user_id, kind, payload_redacted, expires_at)
