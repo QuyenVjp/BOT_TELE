@@ -1411,6 +1411,8 @@ async function bootstrap(): Promise<void> {
     presentFileArtifactImportPreview,
     presentProductDraftPreview,
     presentAdminVariantDraft,
+    presentAdminVariantFieldPrompt,
+    ADMIN_VARIANT_FIELDS,
     presentAdminVariantMutationDone,
     presentKillSwitchDone,
     presentAdminSupplierActionDone,
@@ -3383,22 +3385,88 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const stateId = await createAdminCallbackState(dbHandle.db, {
-          adminTelegramUserId: input.telegramUserId,
-          kind: "ADMIN_VARIANT_UPDATE",
-          payload: { productId: row.product_id, variantId: row.id, expectedVersion: row.version },
-        });
         return presentAdminVariantDraft({
-          stateId,
           productId: row.product_id,
           variantId: row.id,
-          expectedVersion: row.version,
           sku: row.sku,
           name: row.name,
           priceVnd: BigInt(row.price_vnd),
           durationCode: row.duration_code,
           warrantyDays: row.warranty_days,
           lowStockThreshold: row.low_stock_threshold,
+        });
+      },
+      /**
+       * Goal §78/§172: the owner picked one field off the variant editor. The prompt asks for that
+       * value alone, and the state it writes is what vouches for the reply — free text with no such
+       * state open falls through to the rest of the text chain.
+       */
+      async variantEditField(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const field = ADMIN_VARIANT_FIELDS.find((entry) => entry.key === input.fieldKey);
+        const row = (
+          await sql<{
+            id: string;
+            product_id: string;
+            name: string;
+            price_vnd: string;
+            duration_code: string;
+            warranty_days: number;
+            low_stock_threshold: number | null;
+            version: number;
+          }>`select id, product_id, name_vi as name, price_vnd::text as price_vnd, duration_code, warranty_days, low_stock_threshold, version from product_variant where id=${input.variantId} limit 1`.execute(
+            dbHandle.db,
+          )
+        ).rows[0];
+        if (!field || !row)
+          return {
+            text: "Biến thể không còn hợp lệ.",
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+          };
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: row.product_id,
+          reason: "Admin variant field edit",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "ADMIN_VARIANT_UPDATE",
+          payload: {
+            productId: row.product_id,
+            variantId: row.id,
+            field: field.key,
+            expectedVersion: row.version,
+          },
+          ttlMinutes: 10,
+        });
+        const current: Record<(typeof ADMIN_VARIANT_FIELDS)[number]["key"], string> = {
+          name: row.name,
+          priceVnd: `${BigInt(row.price_vnd).toLocaleString("vi-VN")} ₫`,
+          durationCode: row.duration_code,
+          warrantyDays: `${row.warranty_days} ngày`,
+          lowStockThreshold:
+            row.low_stock_threshold === null ? "(không đặt)" : String(row.low_stock_threshold),
+        };
+        const hints: Record<(typeof ADMIN_VARIANT_FIELDS)[number]["key"], string> = {
+          name: "Gửi tên mới trong một tin nhắn.",
+          priceVnd: "Gửi giá mới bằng số nguyên VND, ví dụ 280000.",
+          durationCode: "Gửi mã thời hạn, ví dụ P1M hoặc P12M.",
+          warrantyDays: "Gửi số ngày bảo hành, ví dụ 30. Gửi 0 nếu không bảo hành.",
+          lowStockThreshold: "Gửi ngưỡng cảnh báo sắp hết. Gửi - để xoá ngưỡng.",
+        };
+        return presentAdminVariantFieldPrompt({
+          productId: row.product_id,
+          variantId: row.id,
+          label: field.label,
+          current: current[field.key],
+          hint: hints[field.key],
         });
       },
       async suppliers(input) {
@@ -5559,12 +5627,19 @@ async function bootstrap(): Promise<void> {
           )
             return null;
           if (input.text === "/cancel") return this.cancel(input);
-          const variantState = await resolveAdminCallbackState(dbHandle.db, {
-            adminTelegramUserId: input.telegramUserId,
-            stateId: input.text.split("|")[0]?.trim() ?? "",
-          });
-          if (variantState?.kind === "ADMIN_VARIANT_UPDATE")
-            return this.variantText?.(input) ?? null;
+          // Variant field edit (goal §78/§172). The prompt no longer carries a state id in the text
+          // the owner types, so this is resolved by kind; only a state a real field prompt wrote has
+          // `field`, and the menu's own state must not vouch for anything.
+          const variantState = await sql<{ id: string }>`
+            select id from admin_callback_state
+             where admin_telegram_user_id = ${input.telegramUserId}
+               and kind = 'ADMIN_VARIANT_UPDATE'
+               and payload_redacted ? 'field'
+               and expires_at > now()
+             order by created_at desc
+             limit 1
+          `.execute(dbHandle.db);
+          if (variantState.rows[0]) return this.variantText?.(input) ?? null;
 
           // In-place product content edit (goal §81). Resolved BEFORE the wizard sub-flows because
           // it is not part of a draft: the pending state carries the product, field and version.
@@ -5928,54 +6003,63 @@ async function bootstrap(): Promise<void> {
             input.chatType !== "private"
           )
             return null;
-          const parts = input.text.split("|").map((part) => part.trim());
-          const state = await resolveAdminCallbackState(dbHandle.db, {
-            adminTelegramUserId: input.telegramUserId,
-            stateId: parts[0] ?? "",
-          });
-          if (!state || state.kind !== "ADMIN_VARIANT_UPDATE") return null;
-          const productId =
-            typeof state.payload.productId === "string" ? state.payload.productId : null;
-          const variantId =
-            typeof state.payload.variantId === "string" ? state.payload.variantId : null;
-          if (!productId || !variantId)
-            return {
-              text: "Phiên biến thể đã hết hạn.",
-              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
-            };
+          // Resolved by kind, never by an id the owner would have to type (goal §172). Only a state
+          // written by a real field prompt carries `field`, so anything else returns null and the
+          // text chain below stays in charge of it.
+          const rows = await sql<{ payload_redacted: Record<string, unknown> }>`
+            select payload_redacted from admin_callback_state
+             where admin_telegram_user_id = ${input.telegramUserId}
+               and kind = 'ADMIN_VARIANT_UPDATE'
+               and payload_redacted ? 'field'
+               and expires_at > now()
+             order by created_at desc
+             limit 1
+          `.execute(dbHandle.db);
+          const payload = rows.rows[0]?.payload_redacted;
+          const productId = typeof payload?.productId === "string" ? payload.productId : null;
+          const variantId = typeof payload?.variantId === "string" ? payload.variantId : null;
+          const field = typeof payload?.field === "string" ? payload.field : null;
           const expectedVersion =
-            typeof state.payload.expectedVersion === "number"
-              ? state.payload.expectedVersion
-              : null;
-          const [, name, price, durationCode, warranty, threshold] = parts;
-          if (!expectedVersion)
-            return {
-              text: "Phiên sửa biến thể đã hết hạn.",
-              buttons: [
-                [{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${productId}` }],
-              ],
-            };
-          if (price && !/^\d+$/.test(price))
-            return {
-              text: "Giá biến thể không hợp lệ.",
-              buttons: [
-                [{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${productId}` }],
-              ],
-            };
-          if (warranty && !/^\d+$/.test(warranty))
-            return {
-              text: "Bảo hành không hợp lệ.",
-              buttons: [
-                [{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${productId}` }],
-              ],
-            };
-          if (threshold && threshold !== "-" && !/^\d+$/.test(threshold))
-            return {
-              text: "Ngưỡng tồn không hợp lệ.",
-              buttons: [
-                [{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${productId}` }],
-              ],
-            };
+            typeof payload?.expectedVersion === "number" ? payload.expectedVersion : null;
+          if (!productId || !variantId || !field || !expectedVersion) return null;
+          const back = (text: string) => ({
+            text,
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${productId}` }]],
+          });
+          const value = input.text.trim();
+          const patch: {
+            name?: string;
+            priceVnd?: bigint;
+            durationCode?: string;
+            warrantyDays?: number;
+            lowStockThreshold?: number | null;
+          } = {};
+          switch (field) {
+            case "name":
+              if (!value) return back("Tên biến thể không được để trống.");
+              patch.name = value;
+              break;
+            case "priceVnd":
+              if (!/^\d+$/.test(value)) return back("Giá chỉ gồm chữ số, ví dụ 280000.");
+              patch.priceVnd = BigInt(value);
+              break;
+            case "durationCode":
+              if (!/^[A-Za-z0-9_-]{1,16}$/.test(value))
+                return back("Mã thời hạn chỉ gồm chữ, số, dấu - và _, ví dụ P1M.");
+              patch.durationCode = value.toUpperCase();
+              break;
+            case "warrantyDays":
+              if (!/^\d+$/.test(value)) return back("Số ngày bảo hành chỉ gồm chữ số, ví dụ 30.");
+              patch.warrantyDays = Number(value);
+              break;
+            case "lowStockThreshold":
+              if (value !== "-" && !/^\d+$/.test(value))
+                return back("Ngưỡng sắp hết chỉ gồm chữ số, hoặc gửi - để xoá ngưỡng.");
+              patch.lowStockThreshold = value === "-" ? null : Number(value);
+              break;
+            default:
+              return null;
+          }
           const ok = await updateAdminVariant({
             actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
             config: {
@@ -5986,28 +6070,19 @@ async function bootstrap(): Promise<void> {
             productId,
             variantId,
             expectedVersion,
-            ...(name ? { name } : {}),
-            ...(price ? { priceVnd: BigInt(price) } : {}),
-            ...(durationCode ? { durationCode } : {}),
-            ...(warranty ? { warrantyDays: Number(warranty) } : {}),
-            ...(threshold === undefined || threshold === ""
-              ? {}
-              : { lowStockThreshold: threshold === "-" ? null : Number(threshold) }),
+            ...patch,
             reason: "Admin variant update",
             correlationId: input.correlationId,
           });
-          return ok
-            ? presentAdminVariantMutationDone({
-                productId,
-                variantName: name || variantId,
-                action: "updated",
-              })
-            : {
-                text: "Biến thể đã thay đổi, mở lại để sửa.",
-                buttons: [
-                  [{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${productId}` }],
-                ],
-              };
+          if (!ok) return back("Biến thể đã thay đổi ở nơi khác, mở lại để sửa.");
+          const named = await sql<{ name: string }>`
+            select name_vi as name from product_variant where id = ${variantId} limit 1
+          `.execute(dbHandle.db);
+          return presentAdminVariantMutationDone({
+            productId,
+            variantName: named.rows[0]?.name ?? "biến thể",
+            action: "updated",
+          });
         },
         async category(input) {
           if (

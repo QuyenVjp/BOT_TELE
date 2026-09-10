@@ -288,6 +288,13 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    variantEditField?(input: {
+      telegramUserId: string;
+      variantId: string;
+      fieldKey: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     inventory?(input: {
       telegramUserId: string;
       chatType: string;
@@ -1728,6 +1735,18 @@ export function createTelegramDomainDispatcher(
             ? await admin.variantEditPrompt({
                 telegramUserId: envelope.actorUserId,
                 variantId: route.slice("products:variant-edit:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Sửa biến thể không khả dụng.");
+        } else if (route.startsWith("products:variant-field:")) {
+          const rest = route.slice("products:variant-field:".length);
+          const separator = rest.lastIndexOf(":");
+          message = admin.variantEditField
+            ? await admin.variantEditField({
+                telegramUserId: envelope.actorUserId,
+                variantId: rest.slice(0, separator),
+                fieldKey: rest.slice(separator + 1),
                 chatType: envelope.chatType,
                 correlationId,
               })

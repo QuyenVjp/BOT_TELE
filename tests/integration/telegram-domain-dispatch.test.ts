@@ -144,6 +144,7 @@ function setup() {
     .fn()
     .mockResolvedValue({ text: "variant create", buttons: [] });
   const adminVariantEditPrompt = vi.fn().mockResolvedValue({ text: "variant edit", buttons: [] });
+  const adminVariantEditField = vi.fn().mockResolvedValue({ text: "variant field", buttons: [] });
   const workflowVariantText = vi.fn().mockResolvedValue(null);
   const visibilityAction = vi.fn().mockResolvedValue({ text: "visibility step", buttons: [] });
   const supportReasonMenu = vi.fn().mockReturnValue({ text: "support menu", buttons: [] });
@@ -219,6 +220,7 @@ function setup() {
       productDetail: adminProductDetail,
       variantCreatePrompt: adminVariantCreatePrompt,
       variantEditPrompt: adminVariantEditPrompt,
+      variantEditField: adminVariantEditField,
       inventory: adminInventory,
       warrantyQueue,
       warrantyRefundQueue,
@@ -320,6 +322,7 @@ function setup() {
     adminCustomerState,
     adminVariantCreatePrompt,
     adminVariantEditPrompt,
+    adminVariantEditField,
     workflowVariantText,
     adminCustomerSearch,
     adminCustomerMessagePrompt,
@@ -844,7 +847,13 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
   });
 
   it("routes independent product variant create and edit callbacks", async () => {
-    const { dispatcher, adminVariantCreatePrompt, adminVariantEditPrompt, send } = setup();
+    const {
+      dispatcher,
+      adminVariantCreatePrompt,
+      adminVariantEditPrompt,
+      adminVariantEditField,
+      send,
+    } = setup();
 
     await dispatcher.handle({
       actorUserId: USER,
@@ -875,7 +884,26 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       chatType: "private",
       correlationId: "telegram:variant-edit",
     });
-    expect(send).toHaveBeenCalledTimes(2);
+
+    // Goal §78/§172: the field picker. The variant id is a hyphenated UUID and the field key carries
+    // no separator of its own, so the split has to take the LAST colon; splitting on the first would
+    // hand the id a trailing ":priceVnd" and the field key would never arrive.
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "variant-field",
+      action: "ADMIN",
+      callbackData: "admin:products:variant-field:11111111-2222-3333-4444-555555555555:priceVnd",
+    });
+    expect(adminVariantEditField).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      variantId: "11111111-2222-3333-4444-555555555555",
+      fieldKey: "priceVnd",
+      chatType: "private",
+      correlationId: "telegram:variant-field",
+    });
+    expect(send).toHaveBeenCalledTimes(3);
   });
 
   it("routes variant state text before the generic product wizard", async () => {

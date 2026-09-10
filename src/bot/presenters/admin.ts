@@ -1810,11 +1810,26 @@ export function presentAdminProductDetail(input: {
   };
 }
 
+/** Goal §78: the fields of a variant an owner may edit, with the label the menu shows. */
+export const ADMIN_VARIANT_FIELDS = [
+  { key: "name", label: "Tên" },
+  { key: "priceVnd", label: "Giá" },
+  { key: "durationCode", label: "Thời hạn" },
+  { key: "warrantyDays", label: "Bảo hành (ngày)" },
+  { key: "lowStockThreshold", label: "Ngưỡng sắp hết" },
+] as const;
+
+const formatVnd = (value: bigint): string => `${value.toLocaleString("vi-VN")} ₫`;
+
+/**
+ * The variant editor. The owner picks a field here and is asked for that one value; nothing on this
+ * screen is an identifier, so the flow never asks anyone to type a UUID or a pipe-delimited row
+ * (goal §172). The state this menu writes carries no `field`, which is what keeps free text from
+ * being vouched for until a field prompt is actually open.
+ */
 export function presentAdminVariantDraft(input: {
-  stateId: string;
   productId: string;
   variantId: string;
-  expectedVersion: number;
   sku: string;
   name: string;
   priceVnd: bigint;
@@ -1822,17 +1837,53 @@ export function presentAdminVariantDraft(input: {
   warrantyDays: number;
   lowStockThreshold: number | null;
 }): PresentedMessage {
+  const current: Record<(typeof ADMIN_VARIANT_FIELDS)[number]["key"], string> = {
+    name: input.name,
+    priceVnd: formatVnd(input.priceVnd),
+    durationCode: input.durationCode,
+    warrantyDays: `${input.warrantyDays} ngày`,
+    lowStockThreshold:
+      input.lowStockThreshold === null ? "(không đặt)" : String(input.lowStockThreshold),
+  };
   return {
     text: [
-      "✏️ Sửa biến thể",
-      `Sản phẩm: ${input.productId}`,
-      `Biến thể: ${input.variantId}`,
-      `Phiên bản: ${input.expectedVersion}`,
+      "✏️ SỬA BIẾN THỂ",
       "",
-      `Gửi: ${input.stateId}|name|priceVnd|durationCode|warrantyDays|lowStockThreshold`,
-      "Bỏ trống cột để giữ nguyên; dùng '-' để xoá ngưỡng tồn.",
+      `${input.name} · ${input.sku}`,
+      "",
+      "Chọn thông tin cần sửa:",
+      ...ADMIN_VARIANT_FIELDS.map((field) => `• ${field.label}: ${current[field.key]}`),
     ].join("\n"),
-    buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products" }]],
+    buttons: [
+      ...ADMIN_VARIANT_FIELDS.map((field) => [
+        {
+          text: `✏️ ${field.label}`,
+          callbackData: `admin:products:variant-field:${input.variantId}:${field.key}`,
+        },
+      ]),
+      [{ text: "⬅️ Sản phẩm", callbackData: `admin:products:detail:${input.productId}` }],
+    ],
+  };
+}
+
+export function presentAdminVariantFieldPrompt(input: {
+  productId: string;
+  variantId: string;
+  label: string;
+  current: string;
+  hint: string;
+}): PresentedMessage {
+  return {
+    text: [`✏️ ${input.label}`, "", `Hiện tại: ${input.current}`, "", input.hint].join("\n"),
+    buttons: [
+      [
+        {
+          text: "⬅️ Danh sách mục",
+          callbackData: `admin:products:variant-edit:${input.variantId}`,
+        },
+      ],
+      [{ text: "🛍 Sản phẩm", callbackData: `admin:products:detail:${input.productId}` }],
+    ],
   };
 }
 
