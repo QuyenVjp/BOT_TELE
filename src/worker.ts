@@ -420,6 +420,15 @@ export async function presentAdminCustomerSearchPrompt(db: Db, adminTelegramUser
     kind: "CUSTOMER_SEARCH_PROMPT",
     payload: {},
   });
+  // The ingress admits a typed query only while a `customer_search_prompt` row is live, and until now
+  // this prompt wrote only the callback state — so a query typed here was dropped before dispatch and
+  // the two halves never met. Opening the same one-shot row the customer product-search prompt uses
+  // makes admission line up with the consumer in handleAdminCustomerFreeText.
+  await sql`
+    insert into customer_search_prompt (chat_id, expires_at)
+    values (${adminTelegramUserId}, now() + interval '10 minutes')
+    on conflict (chat_id) do update set expires_at = excluded.expires_at, created_at = now()
+  `.execute(db);
   return {
     text: "Nhập Telegram ID, username, số điện thoại đã chia sẻ, hoặc mã đơn hàng để tìm khách.",
     buttons: [[{ text: "Huỷ", callbackData: "admin:customers" }]],
