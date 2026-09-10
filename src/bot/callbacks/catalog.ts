@@ -249,7 +249,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
           ...(input.isRootAdmin === true ? { isRootAdmin: true } : {}),
         });
       if (!deps.productLinkSecret || !payload.startsWith("product_")) return home();
-      const productId = verifyProductLinkToken(payload, { secret: [REDACTED:Generic Password Field] });
+      const productId = verifyProductLinkToken(payload, { secret: deps.productLinkSecret });
       if (!productId) return home();
       return callbacks.productDetail(productId, input.telegramUserId, {
         telegramUserId: input.telegramUserId,
