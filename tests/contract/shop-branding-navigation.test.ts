@@ -6,6 +6,7 @@ import { presentSupportReasonMenu } from "../../src/bot/presenters/support.js";
 import { presentCategoryPage, presentMainMenu } from "../../src/bot/presenters/catalog.js";
 import {
   ADMIN_CONTACT_URL,
+  COMMUNITY_BUTTON_LABEL,
   COMMUNITY_URL,
   SHOP_NAME,
 } from "../../src/modules/catalog/shop-profile.js";
@@ -22,7 +23,7 @@ describe("customer branding presenters", () => {
     expect(home.text).toContain(`🛒 ${SHOP_NAME}`);
     expect(home.text).not.toContain("SHOP DIGITAL");
     const buttons = home.buttons.flat();
-    expect(buttons.find((b) => b.text.includes("Cộng đồng AI Codex VN"))?.url).toBe(COMMUNITY_URL);
+    expect(buttons.find((b) => b.text.includes(COMMUNITY_BUTTON_LABEL))?.url).toBe(COMMUNITY_URL);
     expect(buttons.find((b) => b.text.includes("Liên hệ Admin"))?.url).toBe(ADMIN_CONTACT_URL);
     expect(buttons.find((b) => b.text.includes("Quản trị"))).toBeUndefined();
     expect(buttons.every((b) => b.url || b.callbackData)).toBe(true);

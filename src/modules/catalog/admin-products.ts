@@ -239,6 +239,13 @@ export function validateProductVisibilityInvariant(input: {
   if (isTest && active && visibility !== "TEST_ONLY") {
     throw new Error("INVALID_TEST_VISIBILITY: Active test product requires TEST_ONLY visibility");
   }
+  // Symmetric rule: a caller that asks for TEST_ONLY on a non-test product is asking for a
+  // narrowed audience the persistence layer cannot represent (the row would land is_test=false,
+  // is_active=true and then DERIVE to PUBLIC). Failing closed here keeps the invariant total —
+  // without it, "TEST_ONLY" would be silently upgraded to a publicly listed product.
+  if (!isTest && visibility === "TEST_ONLY") {
+    throw new Error("INVALID_TEST_VISIBILITY: Non-test product cannot have TEST_ONLY visibility");
+  }
   if (isArchived && active && visibility === "PUBLIC") {
     throw new Error("INVALID_ARCHIVED_VISIBILITY: Archived product cannot be active public");
   }

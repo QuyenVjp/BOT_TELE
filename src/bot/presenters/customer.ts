@@ -3,6 +3,7 @@ import type { InlineButton, PresentedMessage, ReplyKeyboard } from "./catalog.js
 import type { StorefrontProductSummary } from "../../modules/catalog/repository.js";
 import {
   ADMIN_CONTACT_URL,
+  COMMUNITY_BUTTON_LABEL,
   COMMUNITY_URL,
   SHOP_NAME,
   SHOP_TAGLINE,
@@ -126,7 +127,7 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   }
   buttons.push(
     [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
-    [{ text: "📢 Cộng đồng AI Codex VN", url: COMMUNITY_URL, callbackData: "" }],
+    [{ text: COMMUNITY_BUTTON_LABEL, url: COMMUNITY_URL, callbackData: "" }],
     [{ text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
   );
   if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);

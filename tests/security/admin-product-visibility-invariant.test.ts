@@ -50,6 +50,18 @@ describe("product visibility invariant (security boundary)", () => {
       ).toThrow(/INVALID_DRAFT_STATE/);
     });
 
+    it("rejects TEST_ONLY visibility on a non-test product (fail closed, not silently public)", () => {
+      // "TEST_ONLY" is not representable for a non-test row: create persists only
+      // (is_test, is_active, is_archived), so accepting it would DERIVE to PUBLIC.
+      expect(() =>
+        validateProductVisibilityInvariant({
+          isTest: false,
+          active: true,
+          visibility: "TEST_ONLY",
+        }),
+      ).toThrow(/INVALID_TEST_VISIBILITY/);
+    });
+
     it("accepts test-only active product with TEST_ONLY visibility", () => {
       expect(() =>
         validateProductVisibilityInvariant({

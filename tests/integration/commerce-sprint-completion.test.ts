@@ -5,6 +5,7 @@ import { startPostgresContainer, type PgTestContext } from "../helpers/pg-contai
 import { listStorefrontProducts } from "../../src/modules/catalog/repository.js";
 import {
   ADMIN_CONTACT_URL,
+  COMMUNITY_BUTTON_LABEL,
   COMMUNITY_URL,
   SHOP_NAME,
 } from "../../src/modules/catalog/shop-profile.js";
@@ -109,7 +110,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
 
       // Buttons check
       const buttonsFlat = customerHome.buttons.flat();
-      const communityBtn = buttonsFlat.find((b) => b.text.includes("Cộng đồng AI Codex VN"));
+      const communityBtn = buttonsFlat.find((b) => b.text.includes(COMMUNITY_BUTTON_LABEL));
       expect(communityBtn).toBeDefined();
       expect(communityBtn?.url).toBe(COMMUNITY_URL);
       const adminBtn = buttonsFlat.find((b) => b.text.includes("Liên hệ Admin"));

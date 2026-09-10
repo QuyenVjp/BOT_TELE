@@ -7,7 +7,11 @@ import {
   presentCustomerHome,
   presentStorefront,
 } from "../../src/bot/presenters/customer.js";
-import { ADMIN_CONTACT_URL, COMMUNITY_URL } from "../../src/modules/catalog/shop-profile.js";
+import {
+  ADMIN_CONTACT_URL,
+  COMMUNITY_BUTTON_LABEL,
+  COMMUNITY_URL,
+} from "../../src/modules/catalog/shop-profile.js";
 
 const BOT_TOKEN = ["1234567890", "test-token-value-for-grammy-responder"].join(":");
 
@@ -119,7 +123,7 @@ describe("createGrammyResponder admin keyboards", () => {
     };
     for (const options of [sendOptions, editOptions]) {
       const buttons = options.reply_markup?.inline_keyboard?.flat() ?? [];
-      expect(buttons.find((button) => button.text.includes("Cộng đồng AI Codex VN"))?.url).toBe(
+      expect(buttons.find((button) => button.text.includes(COMMUNITY_BUTTON_LABEL))?.url).toBe(
         COMMUNITY_URL,
       );
       expect(buttons.find((button) => button.text.includes("Liên hệ Admin"))?.url).toBe(

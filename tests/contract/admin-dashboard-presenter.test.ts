@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ADMIN_COPY,
   ADMIN_VISIBLE_ROUTE_KEYS,
   presentAdminDashboard,
   presentAdminInventory,
@@ -51,7 +52,7 @@ describe("admin operational presenters", () => {
         "👥 Khách hàng",
         "💰 Đặt cọc",
         "📢 Broadcast",
-        "🚚 NCC",
+        ADMIN_COPY.suppliers,
         "🛡 Hỗ trợ/BH",
         "🧪 Test Lab",
         "⚙️ Cài đặt",

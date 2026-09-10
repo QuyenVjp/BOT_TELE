@@ -67,7 +67,7 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   { id: "customers", label: ADMIN_COPY.customers, callbackData: "admin:customers", enabled: true },
   { id: "preorders", label: "💰 Đặt cọc", callbackData: "admin:preorders", enabled: true },
   { id: "marketing", label: "📢 Broadcast", callbackData: "admin:marketing", enabled: true },
-  { id: "suppliers", label: "🚚 NCC", callbackData: "admin:suppliers", enabled: true },
+  { id: "suppliers", label: ADMIN_COPY.suppliers, callbackData: "admin:suppliers", enabled: true },
   { id: "support", label: "🛡 Hỗ trợ/BH", callbackData: "admin:support", enabled: true },
   { id: "testing", label: "🧪 Test Lab", callbackData: "admin:testlab", enabled: true },
   {
