@@ -860,10 +860,15 @@ function warrantyCustomerNotice(
     // The hold expired and the deposit is kept. Silence here is the worst outcome: the customer
     // paid money and would only find out by opening the screen.
     case "PreorderHoldForfeited": {
+      // Same shape as shopCancelNotification: a `::bigint` payload lands as a JSON number, so
+      // checking only for a numeric string silently dropped the amount from the one message whose
+      // job is to explain money that was kept.
       const deposit =
-        typeof p.depositVnd === "string" && /^[0-9]{1,19}$/.test(p.depositVnd)
+        typeof p.depositVnd === "number" && Number.isSafeInteger(p.depositVnd)
           ? BigInt(p.depositVnd)
-          : null;
+          : typeof p.depositVnd === "string" && /^[0-9]{1,19}$/.test(p.depositVnd)
+            ? BigInt(p.depositVnd)
+            : null;
       return {
         campaignId: `preorder-forfeited:${event.aggregateId}`,
         customerId,

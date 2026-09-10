@@ -117,7 +117,8 @@ export function createFulfillmentOutboxHandler(
       // money the customer must hear about.
       event.eventType === "PreorderDepositPaid" ||
       event.eventType === "PreorderHoldForfeited" ||
-      event.eventType === "PreorderShopCancelled"
+      event.eventType === "PreorderShopCancelled" ||
+      event.eventType === "TicketOpened"
     ) {
       return handleNotificationOutboxEvent(deps.db, event);
     }

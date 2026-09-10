@@ -64,6 +64,10 @@ export const KNOWN_OUTBOX_EVENT_TYPES = [
   "PreorderDepositPaid",
   "PreorderHoldForfeited",
   "PreorderShopCancelled",
+  "PreorderStockAllocated",
+  // A support ticket is opened by the customer, so without this the row dead-letters and nobody is
+  // told. It acks through the notification service once known.
+  "TicketOpened",
 ] as const;
 
 export type KnownOutboxEventType = (typeof KNOWN_OUTBOX_EVENT_TYPES)[number];
