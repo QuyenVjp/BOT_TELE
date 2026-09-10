@@ -72,8 +72,8 @@ describe("warranty claims", () => {
       ctx.handle.db,
     );
     await sql`
-      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, warranty_days)
-      values (${variantId}, ${productId}, ${"SKU-" + variantId}, '1 tháng', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', ${warrantyDays})
+      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, warranty_days, warranty_enabled, warranty_proration_enabled, warranty_coverage_vi, warranty_exclusions_vi, warranty_policy_version, warranty_replacement_allowed, warranty_refund_allowed)
+      values (${variantId}, ${productId}, ${"SKU-" + variantId}, '1 tháng', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', ${warrantyDays}, ${options?.warrantyEnabled ?? true}, ${options?.prorationEnabled ?? true}, 'Bảo hành theo thời gian sử dụng.', 'Khách đổi thông tin đăng nhập', ${options?.policyVersion ?? 1}, ${options?.replacementAllowed ?? true}, ${options?.refundAllowed ?? true})
     `.execute(ctx.handle.db);
     await sql`
       insert into "order" (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
@@ -411,6 +411,80 @@ describe("warranty claims", () => {
       select count(*)::text as n from shop_refund_obligation
     `.execute(ctx.handle.db);
     expect(obligations.rows[0]!.n).toBe("0");
+  });
+
+  it("snapshots the policy at report time and lets it gate the resolution", async () => {
+    const fixture = await seed({
+      prorationEnabled: false,
+      replacementAllowed: false,
+      policyVersion: 7,
+    });
+    const opened = await openWarrantyClaim({
+      db: ctx.handle.db,
+      customerId: fixture.customerId,
+      orderId: fixture.orderId,
+      assetId: fixture.assetId,
+      issueType: "ACCOUNT_LOCKED",
+      correlationId: "t",
+      now: new Date(fixture.completedAt.getTime() + 18 * DAY),
+    });
+    expect(opened.ok).toBe(true);
+    if (!opened.ok) return;
+
+    const row = await sql<{
+      policy_version: number;
+      coverage_snapshot: string | null;
+      exclusions_snapshot: string | null;
+      proration_enabled: boolean;
+      replacement_allowed: boolean;
+      refund_allowed: boolean;
+      calculated_refund_vnd: string;
+    }>`
+      select policy_version, coverage_snapshot, exclusions_snapshot, proration_enabled,
+             replacement_allowed, refund_allowed, calculated_refund_vnd::text as calculated_refund_vnd
+      from warranty_claim where id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    expect(row.rows[0]).toMatchObject({
+      policy_version: 7,
+      coverage_snapshot: "Bảo hành theo thời gian sử dụng.",
+      exclusions_snapshot: "Khách đổi thông tin đăng nhập",
+      proration_enabled: false,
+      replacement_allowed: false,
+    });
+    // proration off refunds the paid amount rather than the remaining-time share
+    expect(row.rows[0]!.calculated_refund_vnd).toBe("100000");
+
+    await verifyClaimDefect(admin(opened.claimId));
+    expect(
+      await approveClaimReplacement({
+        ...admin(opened.claimId),
+        deliveryBaseUrl: "https://shop.example/d",
+        bundleTtlSeconds: 900,
+      }),
+    ).toMatchObject({ ok: false, code: "NOT_ALLOWED_BY_POLICY" });
+
+    // A later product edit must not change what this claim was judged by.
+    await sql`update product_variant set warranty_proration_enabled = true, warranty_replacement_allowed = true, warranty_policy_version = 8 where id = ${fixture.variantId}`.execute(
+      ctx.handle.db,
+    );
+    const after = await sql<{ policy_version: number; proration_enabled: boolean }>`
+      select policy_version, proration_enabled from warranty_claim where id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    expect(after.rows[0]).toMatchObject({ policy_version: 7, proration_enabled: false });
+  });
+
+  it("refuses to open a claim on a variant that has no warranty", async () => {
+    const fixture = await seed({ warrantyEnabled: false });
+    const result = await openWarrantyClaim({
+      db: ctx.handle.db,
+      customerId: fixture.customerId,
+      orderId: fixture.orderId,
+      assetId: fixture.assetId,
+      issueType: "OTHER",
+      correlationId: "t",
+      now: new Date(fixture.completedAt.getTime() + DAY),
+    });
+    expect(result).toMatchObject({ ok: false, code: "WARRANTY_NOT_ENABLED" });
   });
 
   it("denies a non-root actor every resolution action", async () => {

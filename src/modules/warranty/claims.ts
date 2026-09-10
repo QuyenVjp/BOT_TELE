@@ -57,7 +57,7 @@ export type WarrantyClaimStatus =
   | "RESOLVED"
   | "CANCELLED";
 
-/** Admin verification is due within this window; the counter only escalates once per generation. */
+/** Fallback review window when a variant does not configure its own; used for the SLA counter. */
 export const WARRANTY_REVIEW_SLA_HOURS = 12;
 
 export interface OpenClaimInput {
@@ -104,6 +104,19 @@ interface OrderRow {
   completed_at: Date | string | null;
 }
 
+/** The structured policy as it stands on the variant when a claim is opened. */
+interface WarrantyPolicy {
+  policyVersion: number;
+  coverageVi: string | null;
+  exclusionsVi: string | null;
+  prorationEnabled: boolean;
+  replacementAllowed: boolean;
+  refundAllowed: boolean;
+  replacementBehavior: "CONTINUE_ORIGINAL_END" | "RESET_FROM_REPLACEMENT";
+  slaHours: number;
+  enabled: boolean;
+}
+
 const ACTIVE_STATUSES = [
   "SUBMITTED",
   "TRIAGE",
@@ -136,11 +149,27 @@ function warrantyTermsOf(order: OrderRow): { warrantyDays: number; warrantyStart
 export async function openWarrantyClaim(input: OpenClaimInput): Promise<OpenClaimResult> {
   const reportedAt = input.now ?? new Date();
   return withTransaction(input.db, async (trx) => {
-    const orders = await sql<OrderRow>`
-      select id, order_number, customer_id, variant_id, price_vnd::text as price_vnd,
-             warranty_days, completed_at
-      from "order"
-      where id = ${input.orderId}
+    const orders = await sql<
+      OrderRow & {
+        warranty_enabled: boolean;
+        warranty_proration_enabled: boolean;
+        warranty_replacement_allowed: boolean;
+        warranty_refund_allowed: boolean;
+        warranty_replacement_behavior: string;
+        warranty_coverage_vi: string | null;
+        warranty_exclusions_vi: string | null;
+        warranty_policy_version: number;
+        warranty_sla_hours: number;
+      }
+    >`
+      select o.id, o.order_number, o.customer_id, o.variant_id, o.price_vnd::text as price_vnd,
+             o.warranty_days, o.completed_at,
+             v.warranty_enabled, v.warranty_proration_enabled, v.warranty_replacement_allowed,
+             v.warranty_refund_allowed, v.warranty_replacement_behavior, v.warranty_coverage_vi,
+             v.warranty_exclusions_vi, v.warranty_policy_version, v.warranty_sla_hours
+      from "order" o
+      join product_variant v on v.id = o.variant_id
+      where o.id = ${input.orderId}
       limit 1
     `.execute(trx);
     const order = orders.rows[0];
@@ -148,8 +177,26 @@ export async function openWarrantyClaim(input: OpenClaimInput): Promise<OpenClai
     // Ownership is checked before anything else: a claim is never opened for someone else's order.
     if (order.customer_id !== input.customerId) return { ok: false, code: "ORDER_NOT_OWNED" };
 
+    // A variant without a warranty (or with the days set to zero) has no claim to open; the owner
+    // can still handle the customer through ordinary support.
+    if (!order.warranty_enabled || order.warranty_days <= 0)
+      return { ok: false, code: "WARRANTY_NOT_ENABLED" };
     const terms = warrantyTermsOf(order);
     if (!terms) return { ok: false, code: "WARRANTY_NOT_ENABLED" };
+    const policy: WarrantyPolicy = {
+      enabled: order.warranty_enabled,
+      policyVersion: order.warranty_policy_version,
+      coverageVi: order.warranty_coverage_vi,
+      exclusionsVi: order.warranty_exclusions_vi,
+      prorationEnabled: order.warranty_proration_enabled,
+      replacementAllowed: order.warranty_replacement_allowed,
+      refundAllowed: order.warranty_refund_allowed,
+      replacementBehavior:
+        order.warranty_replacement_behavior === "RESET_FROM_REPLACEMENT"
+          ? "RESET_FROM_REPLACEMENT"
+          : "CONTINUE_ORIGINAL_END",
+      slaHours: order.warranty_sla_hours,
+    };
 
     if (input.assetId) {
       const asset = await sql<{ id: string; delivered_order_id: string | null }>`
@@ -188,20 +235,27 @@ export async function openWarrantyClaim(input: OpenClaimInput): Promise<OpenClai
     // may still open an exceptional support case outside warranty (goal §38).
     if (!isWithinWarranty(terms, reportedAt)) return { ok: false, code: "WARRANTY_EXPIRED" };
 
-    const snapshot = computeProratedRefund({
-      ...terms,
-      paidAmountVnd: BigInt(order.price_vnd),
-      reportedAt,
-    });
+    const paidAmountVnd = BigInt(order.price_vnd);
+    // Proration off means the policy refunds the whole paid amount while the warranty is live.
+    // The rule used is recorded on the claim, so a later policy edit cannot reinterpret it.
+    const snapshot = policy.prorationEnabled
+      ? computeProratedRefund({ ...terms, paidAmountVnd, reportedAt })
+      : {
+          ...computeProratedRefund({ ...terms, paidAmountVnd, reportedAt }),
+          refundVnd: paidAmountVnd,
+        };
 
     const id = newId();
-    const slaDueAt = new Date(reportedAt.getTime() + WARRANTY_REVIEW_SLA_HOURS * 60 * 60 * 1000);
+    const slaHours = policy.slaHours > 0 ? policy.slaHours : WARRANTY_REVIEW_SLA_HOURS;
+    const slaDueAt = new Date(reportedAt.getTime() + slaHours * 60 * 60 * 1000);
     await sql`
       insert into warranty_claim (
         id, claim_number, customer_id, order_id, variant_id, original_asset_id,
         issue_type, customer_note, evidence_file_ids,
         reported_at, warranty_start, warranty_end, warranty_days, used_days, remaining_days,
-        paid_amount_vnd, calculated_refund_vnd, status, review_sla_due_at
+        paid_amount_vnd, calculated_refund_vnd, status, review_sla_due_at,
+        policy_version, coverage_snapshot, exclusions_snapshot, proration_enabled,
+        replacement_allowed, refund_allowed, replacement_warranty_behavior
       ) values (
         ${id}, ${claimNumber(id)}, ${input.customerId}, ${order.id}, ${order.variant_id},
         ${input.assetId ?? null}, ${input.issueType}, ${input.customerNote?.slice(0, 1000) ?? null},
@@ -209,7 +263,10 @@ export async function openWarrantyClaim(input: OpenClaimInput): Promise<OpenClai
         ${snapshot.reportedAt}, ${snapshot.warrantyStart}, ${snapshot.warrantyEnd},
         ${terms.warrantyDays}, ${snapshot.usedDays}, ${snapshot.remainingDays},
         ${snapshot.paidAmountVnd.toString()}, ${snapshot.refundVnd.toString()},
-        'SUBMITTED', ${slaDueAt.toISOString()}
+        'SUBMITTED', ${slaDueAt.toISOString()},
+        ${policy.policyVersion}, ${policy.coverageVi}, ${policy.exclusionsVi},
+        ${policy.prorationEnabled}, ${policy.replacementAllowed}, ${policy.refundAllowed},
+        ${policy.replacementBehavior}
       )
     `.execute(trx);
 
@@ -329,7 +386,8 @@ export type AdminClaimResult =
         | "NOT_FOUND"
         | "ILLEGAL_STATE"
         | "INVALID_REASON"
-        | "OUT_OF_STOCK";
+        | "OUT_OF_STOCK"
+        | "NOT_ALLOWED_BY_POLICY";
     };
 
 async function loadClaimForUpdate(exec: Executor, claimId: string) {
@@ -343,6 +401,8 @@ async function loadClaimForUpdate(exec: Executor, claimId: string) {
     approved_refund_vnd: string | null;
     refund_obligation_id: string | null;
     replacement_case_id: string | null;
+    refund_allowed: boolean;
+    replacement_allowed: boolean;
     account_number: string | null;
     bank_name: string | null;
     account_holder: string | null;
@@ -350,7 +410,7 @@ async function loadClaimForUpdate(exec: Executor, claimId: string) {
     select id, status, customer_id, order_id, original_asset_id,
            calculated_refund_vnd::text as calculated_refund_vnd,
            approved_refund_vnd::text as approved_refund_vnd,
-           refund_obligation_id, replacement_case_id,
+           refund_obligation_id, replacement_case_id, refund_allowed, replacement_allowed,
            refund_account_number as account_number, refund_bank_name as bank_name,
            refund_account_holder as account_holder
     from warranty_claim where id = ${claimId} limit 1 for update
@@ -525,6 +585,7 @@ export async function approveClaimRefund(
       };
     if (!["VERIFIED_DEFECT", "REFUND_APPROVED", "REFUND_DUE"].includes(claim.status))
       return { ok: false, code: "ILLEGAL_STATE" };
+    if (!claim.refund_allowed) return { ok: false, code: "NOT_ALLOWED_BY_POLICY" };
 
     const recommended = BigInt(claim.calculated_refund_vnd);
     const approved = input.amountVnd ?? recommended;
@@ -673,6 +734,9 @@ export async function approveClaimReplacement(
       };
     if (!["VERIFIED_DEFECT", "REPLACEMENT_APPROVED"].includes(claim.status))
       return { ok: false, code: "ILLEGAL_STATE" };
+    // The policy snapshotted at report time decides what the admin may resolve to; a product edit
+    // afterwards must not change the options a past claim was judged by.
+    if (!claim.replacement_allowed) return { ok: false, code: "NOT_ALLOWED_BY_POLICY" };
 
     const caseId = claim.replacement_case_id ?? newId();
     if (!claim.replacement_case_id) {
