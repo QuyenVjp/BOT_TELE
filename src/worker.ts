@@ -1042,19 +1042,33 @@ async function bootstrap(): Promise<void> {
     bankAlias: config.VIETQR_BANK_ALIAS,
     template: config.VIETQR_TEMPLATE,
   };
-  /** Best-effort live identity of the API process, for the admin health screen. */
+  /**
+   * Best-effort live identity of the API process, for the admin health screen.
+   *
+   * Probes the API's own local bind first and the public base URL second: the local hop is a
+   * same-host request that does not depend on the edge (DNS, TLS or an inbound rule), so a
+   * partial or edge-broken deploy still reports the API's real commit instead of "unreachable".
+   */
   async function readApiBuildCommit(): Promise<string> {
-    try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 2_000);
-      const response = await fetch(`${config.APP_BASE_URL}/health`, { signal: controller.signal });
-      clearTimeout(timer);
-      if (!response.ok) return `không đọc được (HTTP ${response.status})`;
-      const body = (await response.json()) as { commit?: unknown };
-      return typeof body.commit === "string" ? `${body.commit.slice(0, 12)} (live)` : "không rõ";
-    } catch {
-      return "không truy cập được";
+    const targets = [
+      { url: `http://${config.HTTP_HOST}:${config.HTTP_PORT}/health`, via: "local" },
+      { url: `${config.APP_BASE_URL}/health`, via: "public" },
+    ];
+    for (const target of targets) {
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 2_000);
+        const response = await fetch(target.url, { signal: controller.signal });
+        clearTimeout(timer);
+        if (!response.ok) continue;
+        const body = (await response.json()) as { commit?: unknown };
+        if (typeof body.commit === "string")
+          return `${body.commit.slice(0, 12)} (live, ${target.via})`;
+      } catch {
+        // Try the next target; a failure here is a finding, not a crash.
+      }
     }
+    return "không truy cập được";
   }
 
   const walletTopupBounds = {
