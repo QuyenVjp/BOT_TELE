@@ -201,4 +201,21 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
       await app.close();
     }
   });
+
+  it("refuses a group chat id for the private-chat profile snapshot", async () => {
+    // A supergroup envelope used to reach this writer with the group id; the raw CHECK
+    // violation (23514) then killed the whole inbox handler before dispatch, so every group
+    // update failed. The writer now fails loudly on that programming error, and the worker
+    // only snapshots private chats.
+    const { upsertTelegramCustomerProfileSnapshot } =
+      await import("../../src/modules/identity/customer-profile.js");
+    await expect(
+      upsertTelegramCustomerProfileSnapshot(ctx.db, {
+        customerId: "01M0000000000000000000000",
+        telegramUserId: "6659186592",
+        chatId: "-1003906082671",
+        reachable: true,
+      }),
+    ).rejects.toThrow(/INVALID_PRIVATE_CHAT_ID/);
+  });
 });

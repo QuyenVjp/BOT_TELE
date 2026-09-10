@@ -14,10 +14,19 @@ export interface TelegramCustomerProfileSnapshotInput {
   seenAt?: Date;
 }
 
+/**
+ * The snapshot describes the customer's PRIVATE chat with the bot: `chat_id` is constrained
+ * to a private chat id and the row is keyed by customer. A group or channel id is a
+ * programming error, not data — rejecting it here keeps a group envelope from taking down
+ * the whole inbox handler before dispatch (which a raw constraint violation would do).
+ */
+const PRIVATE_CHAT_ID = /^[1-9][0-9]{0,19}$/;
+
 export async function upsertTelegramCustomerProfileSnapshot(
   db: Executor,
   input: TelegramCustomerProfileSnapshotInput,
 ): Promise<void> {
+  if (!PRIVATE_CHAT_ID.test(input.chatId)) throw new Error("INVALID_PRIVATE_CHAT_ID");
   const seenAt = input.seenAt ?? new Date();
   const displayName = deriveDisplayName(input.firstName, input.lastName);
   await sql`

@@ -5193,17 +5193,22 @@ async function bootstrap(): Promise<void> {
             telegramUserId: envelope.actorUserId,
             ...(observedUsername ? { observedUsername } : {}),
           });
-          await upsertTelegramCustomerProfileSnapshot(dbHandle.db, {
-            customerId: identity.customerId,
-            telegramUserId: envelope.actorUserId,
-            chatId: envelope.chatId,
-            username: envelope.actorUsername ?? observedUsername ?? null,
-            firstName: envelope.firstName ?? null,
-            lastName: envelope.lastName ?? null,
-            languageCode: envelope.languageCode ?? null,
-            phoneNumber: envelope.contactPhoneNumber ?? null,
-            reachable: true,
-          });
+          // The profile snapshot models the customer's PRIVATE chat (its chat_id column is
+          // constrained to a private chat id). Group traffic still resolves identity, but must
+          // never write the snapshot with a group chat id.
+          if (envelope.chatType === "private") {
+            await upsertTelegramCustomerProfileSnapshot(dbHandle.db, {
+              customerId: identity.customerId,
+              telegramUserId: envelope.actorUserId,
+              chatId: envelope.chatId,
+              username: envelope.actorUsername ?? observedUsername ?? null,
+              firstName: envelope.firstName ?? null,
+              lastName: envelope.lastName ?? null,
+              languageCode: envelope.languageCode ?? null,
+              phoneNumber: envelope.contactPhoneNumber ?? null,
+              reachable: true,
+            });
+          }
           await telegramDispatcher.handle(envelope);
         } catch (error) {
           logger.error(
