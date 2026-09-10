@@ -4,10 +4,10 @@ import type { InlineButton, PresentedMessage } from "./catalog.js";
  * Vietnamese processing/completed/expired/used/needs-review presenters (T075,
  * FR-017, telegram-ux.md).
  *
- * Delivery presenters never render the secret itself — they link the customer
- * to the authenticated reveal surface (or explain why it is no longer available).
- * Support paths surface a safe correlation reference, never a mark-paid or a
- * credential paste prompt.
+ * Delivery presenters never render secrets in unsolicited notifications.
+ * After the customer taps "Nhận hàng" in Telegram, `presentDeliveryReveal`
+ * shows the one-time credential in chat. Mini App / WebApp reveal is cancelled.
+ * Support paths surface a safe correlation reference, never a mark-paid prompt.
  */
 
 export const DELIVERY_COPY = {
@@ -121,7 +121,33 @@ export function presentDeliveryUsed(orderNumber: string): PresentedMessage {
   };
 }
 
-/** Fulfillment needs manual review (invalid asset / supplier unknown). */
+/** One-time Telegram-native credential reveal after the customer taps Nhận hàng. */
+export function presentDeliveryReveal(input: {
+  secret: string;
+  productName: string | null;
+  usageInstructionsVi: string | null;
+  warrantyVi: string | null;
+}): PresentedMessage {
+  const lines = [
+    "✅ GIAO HÀNG THÀNH CÔNG",
+    "",
+    input.productName ?? "Sản phẩm",
+    "",
+    "🔐 Thông tin nhận hàng (chỉ hiện một lần, đừng chia sẻ):",
+    input.secret,
+  ];
+  if (input.usageInstructionsVi) lines.push("", `📘 Hướng dẫn: ${input.usageInstructionsVi}`);
+  if (input.warrantyVi) lines.push("", `🛡 Bảo hành: ${input.warrantyVi}`);
+  return {
+    text: lines.join("\n"),
+    buttons: [
+      [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
+      [{ text: "🛡 Bảo hành", callbackData: "cust:warranty" }],
+      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+    ],
+  };
+}
+
 export function presentDeliveryNeedsReview(
   orderNumber: string,
   correlationId: string,

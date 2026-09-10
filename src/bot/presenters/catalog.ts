@@ -42,7 +42,6 @@ export interface InlineButton {
   text: string;
   callbackData: string;
   url?: string;
-  webAppUrl?: string;
 }
 export interface ReplyKeyboardButton {
   text: string;

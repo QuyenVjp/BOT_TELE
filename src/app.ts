@@ -9,7 +9,6 @@ import {
 } from "./bot/webhook.js";
 import { registerDeliveryRoute } from "./modules/digital-goods/delivery-route.js";
 import type { DeliverySessionCodecConfig } from "./modules/digital-goods/delivery-session.js";
-import { registerMiniApp } from "./modules/miniapp/index.js";
 import { healthPayload, loadBuildIdentity } from "./shared/build-identity.js";
 
 /**
@@ -57,9 +56,7 @@ export interface CreateAppDeps {
     /** Optional path override (defaults to /d/:token). */
     path?: string;
     session: DeliverySessionCodecConfig;
-    miniApp?: { botToken: string; path: string; maxAgeSeconds: number };
   };
-  miniApp?: { botToken: string; path?: string; maxAgeSeconds: number };
   bodyLimitBytes: number;
   logger?: { level: "silent" | "info" | "error" } | false;
 }
@@ -137,10 +134,8 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
       vault: deps.vault,
       session: deps.delivery.session,
       ...(deps.delivery.path !== undefined ? { path: deps.delivery.path } : {}),
-      ...(deps.delivery.miniApp !== undefined ? { miniApp: deps.delivery.miniApp } : {}),
     });
   }
-  if (deps.miniApp) await registerMiniApp(app, { db: deps.db, ...deps.miniApp });
 
   await app.ready();
   return app;

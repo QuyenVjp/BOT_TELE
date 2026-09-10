@@ -2,7 +2,8 @@ import { sql } from "kysely";
 import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
-import { newId } from "../../shared/ids/index.js";
+import { isId, newId } from "../../shared/ids/index.js";
+import { revealDeliveryBundle } from "./delivery.js";
 import {
   ageSeconds,
   validateRecoveryBatchSize,
@@ -55,14 +56,14 @@ async function sendDeliveryNotificationWithTimeout(
   sender: {
     send(input: {
       chatId: string;
-      miniAppUrl: string;
+      handoffId: string;
       idempotencyKey: string;
       signal: AbortSignal;
     }): Promise<void>;
   },
   input: {
     chatId: string;
-    miniAppUrl: string;
+    handoffId: string;
     idempotencyKey: string;
     product?: {
       name: string | null;
@@ -1024,7 +1025,7 @@ export async function processDeliveryNotificationBatch(input: {
   sender: {
     send(input: {
       chatId: string;
-      miniAppUrl: string;
+      handoffId: string;
       idempotencyKey: string;
       signal: AbortSignal;
       product?: {
@@ -1034,7 +1035,6 @@ export async function processDeliveryNotificationBatch(input: {
       };
     }): Promise<void>;
   };
-  miniAppBaseUrl: string;
   owner: string;
   batchSize: number;
   maxAttempts: number;
@@ -1058,8 +1058,6 @@ export async function processDeliveryNotificationBatch(input: {
   ) {
     throw new Error("Invalid delivery notification send timeout");
   }
-  const miniAppBaseUrl = new URL(input.miniAppBaseUrl);
-  if (miniAppBaseUrl.protocol !== "https:") throw new Error("Invalid delivery Mini App URL");
   const claims = await claimDeliveryNotifications(input.db, {
     owner: input.owner,
     batchSize: input.batchSize,
@@ -1107,11 +1105,7 @@ export async function processDeliveryNotificationBatch(input: {
         input.sender,
         {
           chatId: claim.telegramChatId,
-          miniAppUrl: (() => {
-            const url = new URL(miniAppBaseUrl);
-            url.searchParams.set("handoff", claim.id);
-            return url.toString();
-          })(),
+          handoffId: claim.id,
           idempotencyKey: claim.id,
           product: {
             name: claim.productName,
@@ -1158,4 +1152,110 @@ export async function processDeliveryNotificationBatch(input: {
     }
   }
   return { claimed: claims.length, sent, failed, stale };
+}
+
+const SAFE_TELEGRAM_DELIVERY_OPEN_ERROR =
+  "Không mở được thông tin nhận hàng. Thử lại hoặc liên hệ hỗ trợ.";
+
+function deliveryTokenFromUrl(deliveryUrl: string): string | null {
+  try {
+    const parsed = new URL(deliveryUrl);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const marker = parts.lastIndexOf("d");
+    const token = marker >= 0 ? parts[marker + 1] : parts.at(-1);
+    return token && token.length >= 16 ? token : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function openTelegramDeliveryHandoff(input: {
+  db: Db;
+  vault: Vault;
+  sessionConfig: DeliverySessionCodecConfig;
+  telegramUserId: string;
+  handoffId: string;
+  correlationId: string;
+}): Promise<
+  | {
+      ok: true;
+      secret: string;
+      productName: string | null;
+      usageInstructionsVi: string | null;
+      warrantyVi: string | null;
+    }
+  | { ok: false; message: string }
+> {
+  if (!isId(input.handoffId)) return { ok: false, message: SAFE_TELEGRAM_DELIVERY_OPEN_ERROR };
+  const row = await sql<{
+    id: string;
+    bundle_id: string;
+    customer_id: string;
+    telegram_chat_id: string;
+    capability_ref: string;
+    product_name: string | null;
+    usage_instructions_vi: string | null;
+    warranty_vi: string | null;
+  }>`
+    select h.id, h.bundle_id, h.customer_id, h.telegram_chat_id, h.capability_ref,
+      o.product_name_vi as product_name,
+      p.usage_instructions_vi, p.warranty_vi
+    from delivery_notification_handoff h
+    join delivery_bundle b on b.id = h.bundle_id
+    left join "order" o on o.id = b.order_id
+    left join product_variant v on v.id = o.variant_id
+    left join product p on p.id = v.product_id
+    where h.id = ${input.handoffId}
+      and h.telegram_chat_id = ${input.telegramUserId}
+      and h.capability_ref is not null
+    limit 1
+  `.execute(input.db);
+  const handoff = row.rows[0];
+  if (!handoff) return { ok: false, message: SAFE_TELEGRAM_DELIVERY_OPEN_ERROR };
+
+  let capability: DeliveryNotificationCapability;
+  try {
+    capability = await loadDeliveryNotificationCapability(input.vault, {
+      id: handoff.id,
+      bundleId: handoff.bundle_id,
+      customerId: handoff.customer_id,
+      telegramChatId: handoff.telegram_chat_id,
+      capabilityRef: handoff.capability_ref,
+      owner: "telegram-open",
+      generation: 0,
+      attemptCount: 0,
+      productName: handoff.product_name,
+      usageInstructionsVi: handoff.usage_instructions_vi,
+      warrantyVi: handoff.warranty_vi,
+    });
+  } catch {
+    return { ok: false, message: SAFE_TELEGRAM_DELIVERY_OPEN_ERROR };
+  }
+
+  const session = verifyDeliverySessionToken(capability.sessionToken, input.sessionConfig);
+  const token = deliveryTokenFromUrl(capability.deliveryUrl);
+  if (
+    session == null ||
+    token == null ||
+    session.bundleId !== handoff.bundle_id ||
+    session.customerId !== handoff.customer_id ||
+    session.telegramUserId !== input.telegramUserId
+  ) {
+    return { ok: false, message: SAFE_TELEGRAM_DELIVERY_OPEN_ERROR };
+  }
+
+  const revealed = await revealDeliveryBundle(input.db, {
+    token,
+    session,
+    correlationId: input.correlationId,
+    vault: input.vault,
+  });
+  if (!revealed.ok) return { ok: false, message: SAFE_TELEGRAM_DELIVERY_OPEN_ERROR };
+  return {
+    ok: true,
+    secret: revealed.secret,
+    productName: handoff.product_name,
+    usageInstructionsVi: handoff.usage_instructions_vi,
+    warrantyVi: handoff.warranty_vi,
+  };
 }

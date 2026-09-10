@@ -47,6 +47,7 @@ import {
 } from "./modules/digital-goods/recovery.js";
 import {
   cleanupDeliveryNotificationCapabilitiesBatch,
+  openTelegramDeliveryHandoff,
   processDeliveryNotificationBatch,
   recoverStoredDeliveryNotificationHandoffsBatch,
 } from "./modules/digital-goods/delivery-notification.js";
@@ -714,7 +715,7 @@ async function bootstrap(): Promise<void> {
   } = await import("./modules/wallet/topup.js");
   const { createWalletPurchaseService } = await import("./modules/wallet/purchase.js");
   const { createTelegramDomainDispatcher } = await import("./bot/callbacks/telegram-dispatch.js");
-  const { createGrammyDocumentSender, createGrammyResponder } =
+  const { createGrammyDocumentSender, createGrammyResponder, ensureTelegramCommandMenu } =
     await import("./bot/grammy-responder.js");
   const { createSearchParser } = await import("./modules/catalog/search-parser-adapter.js");
   const { findOrderById, findOrderByNumber } = await import("./modules/commerce/repository.js");
@@ -840,6 +841,7 @@ async function bootstrap(): Promise<void> {
   const { formatSePayReconciliationAdminText, getSePayReconciliationStatus } =
     await import("./modules/payments/reconciliation-status.js");
   const { presentCustomerNotificationPreferences } = await import("./bot/presenters/customer.js");
+  const { presentDeliveryReveal } = await import("./bot/presenters/delivery.js");
   const { presentAdminManualTaskDetail, presentAdminManualTasks } =
     await import("./bot/presenters/manual-fulfillment.js");
 
@@ -1135,6 +1137,17 @@ async function bootstrap(): Promise<void> {
     undefined,
     config.NODE_ENV !== "production" ? logger : undefined,
   );
+  try {
+    await ensureTelegramCommandMenu({
+      botToken: config.TELEGRAM_BOT_TOKEN,
+      adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+    });
+  } catch (err) {
+    logger.error(
+      { err: err instanceof Error ? err.message : "unknown error" },
+      "telegram command menu sync failed",
+    );
+  }
   const telegramDispatcher = createTelegramDomainDispatcher({
     codec: callbackCodec,
     resolveCustomerId,
@@ -1303,7 +1316,45 @@ async function bootstrap(): Promise<void> {
         return presentRestockList(dbHandle.db, customerId);
       },
     },
-    shopUrl: config.APP_BASE_URL,
+    async openDelivery(ctx, handoffId) {
+      if (!config.DELIVERY_SESSION_HMAC_KEY) {
+        return {
+          text: "Giao hàng không khả dụng.",
+          buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
+        };
+      }
+      const opened = await openTelegramDeliveryHandoff({
+        db: dbHandle.db,
+        vault,
+        sessionConfig: {
+          key: config.DELIVERY_SESSION_HMAC_KEY,
+          keyVersion: config.DELIVERY_SESSION_KEY_VERSION,
+          audience: "delivery-reveal",
+          ...(config.DELIVERY_SESSION_PREVIOUS_HMAC_KEY &&
+          config.DELIVERY_SESSION_PREVIOUS_KEY_VERSION !== undefined &&
+          config.DELIVERY_SESSION_PREVIOUS_KEY_GRACE_UNTIL
+            ? {
+                previousKey: config.DELIVERY_SESSION_PREVIOUS_HMAC_KEY,
+                previousKeyVersion: config.DELIVERY_SESSION_PREVIOUS_KEY_VERSION,
+                previousKeyGraceUntil: new Date(config.DELIVERY_SESSION_PREVIOUS_KEY_GRACE_UNTIL),
+              }
+            : {}),
+        },
+        telegramUserId: ctx.telegramUserId,
+        handoffId,
+        correlationId: ctx.correlationId,
+      });
+      if (!opened.ok) {
+        return {
+          text: opened.message,
+          buttons: [
+            [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
+            [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+          ],
+        };
+      }
+      return presentDeliveryReveal(opened);
+    },
     async walletAccount(ctx) {
       const customerId = await resolveCustomerId(ctx.telegramUserId);
       if (!customerId)
@@ -4673,8 +4724,7 @@ async function bootstrap(): Promise<void> {
                   [
                     {
                       text: "🔐 Nhận hàng ngay",
-                      callbackData: "delivery:open",
-                      webAppUrl: input.miniAppUrl,
+                      callbackData: `delivery:open:${input.handoffId}`,
                     },
                   ],
                   [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
@@ -4684,7 +4734,6 @@ async function bootstrap(): Promise<void> {
             });
           },
         },
-        miniAppBaseUrl: `${config.APP_BASE_URL.replace(/\/$/, "")}/delivery/redeem`,
         owner: ownerId,
         batchSize: 10,
         maxAttempts: config.OUTBOX_MAX_ATTEMPTS,

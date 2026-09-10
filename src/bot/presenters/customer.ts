@@ -26,7 +26,6 @@ export const CUSTOMER_COPY = {
   shopUpdates: "🛍 Cập nhật sản phẩm",
   notifications: "🔔 Cài đặt thông báo",
   restock: "🔔 Báo có hàng",
-  openShop: "🌐 Mở cửa hàng",
 } as const;
 export const MAIN_REPLY_KEYBOARD: ReplyKeyboard = {
   persistent: true,
@@ -37,11 +36,21 @@ export const MAIN_REPLY_KEYBOARD: ReplyKeyboard = {
     [{ text: CUSTOMER_COPY.warranty }, { text: CUSTOMER_COPY.support }],
   ],
 };
-export function presentShopLaunch(url: string): PresentedMessage {
-  if (!/^https:\/\//i.test(url)) return presentCustomerHome();
+export function presentCustomerHelp(): PresentedMessage {
   return {
-    text: [`🛒 ${SHOP_NAME}`, "", "Mở cửa hàng Mini App để xem sản phẩm."].join("\n"),
-    buttons: [[{ text: CUSTOMER_COPY.openShop, url, callbackData: "" }]],
+    text: [
+      `🛒 ${SHOP_NAME}`,
+      "",
+      "/start — Mở TIER20 SHOP",
+      "/shop — Xem sản phẩm",
+      "/orders — Đơn hàng của tôi",
+      "/wallet — Ví của tôi",
+      "/warranty — Bảo hành",
+      "/support — Hỗ trợ",
+      "/settings — Cài đặt",
+      "/help — Hướng dẫn",
+    ].join("\n"),
+    buttons: [[{ text: CUSTOMER_COPY.browse, callbackData: "shop:home" }]],
     replyKeyboard: MAIN_REPLY_KEYBOARD,
   };
 }

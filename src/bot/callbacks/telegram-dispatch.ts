@@ -10,11 +10,11 @@ import {
 } from "../presenters/admin.js";
 import {
   presentCustomerAccountPrompt,
+  presentCustomerHelp,
   presentCustomerHome,
   presentCustomerWarranty,
   CUSTOMER_COPY,
 } from "../presenters/customer.js";
-import { presentShopLaunch } from "../presenters/customer.js";
 import type { TelegramUpdate } from "../webhook.js";
 import type { PresentedMessage } from "../presenters/catalog.js";
 import type { CheckoutCallbacks } from "./checkout.js";
@@ -167,7 +167,7 @@ export interface TelegramDomainDispatcherDeps {
     get(customerId: string): Promise<PresentedMessage>;
     toggle(customerId: string, kind: "marketing" | "social"): Promise<PresentedMessage>;
   };
-  shopUrl?: string;
+  openDelivery?(ctx: TelegramActionContext, handoffId: string): Promise<PresentedMessage>;
   admin?: {
     handleToken(input: {
       targetId: string;
@@ -837,6 +837,16 @@ export function createTelegramDomainDispatcher(
           : safeError("Không tìm thấy thông tin khách hàng.");
       } else if (envelope.callbackData === "shop:home" || envelope.callbackData === "menu:main") {
         message = await shopHome(deps, envelope);
+      } else if (
+        envelope.callbackData === "delivery:open" ||
+        envelope.callbackData?.startsWith("delivery:open:")
+      ) {
+        const handoffId = envelope.callbackData.startsWith("delivery:open:")
+          ? envelope.callbackData.slice("delivery:open:".length)
+          : "";
+        message = deps.openDelivery
+          ? await deps.openDelivery(ctx, handoffId)
+          : safeError("Giao hàng không khả dụng.");
       } else if (envelope.callbackData === "cat:list") {
         message = await deps.catalog.categoryList(catalogActorIdentity(deps, envelope.actorUserId));
       } else if (envelope.callbackData?.startsWith("cat:view:")) {
@@ -1813,9 +1823,18 @@ export function createTelegramDomainDispatcher(
               })
             : presentCustomerHome();
         }
-      } else if (command === "/catalog") {
-        message = await deps.catalog.mainMenu();
-      } else if (command === "/account" || envelope.callbackData === "wallet:account") {
+      } else if (command === "/catalog" || command === "/shop") {
+        message = await shopHome(deps, envelope);
+      } else if (command === "/orders") {
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message = customerId
+          ? await deps.history.list(customerId)
+          : safeError("Không xác minh được khách hàng.");
+      } else if (
+        command === "/wallet" ||
+        command === "/account" ||
+        envelope.callbackData === "wallet:account"
+      ) {
         message = deps.walletAccount
           ? await deps.walletAccount(ctx)
           : presentCustomerAccountPrompt();
@@ -1839,6 +1858,58 @@ export function createTelegramDomainDispatcher(
               catalogActorIdentity(deps, envelope.actorUserId),
             )
           : safeError("Dùng /search kèm tên sản phẩm.");
+      } else if (command === "/warranty") {
+        message = presentCustomerWarranty();
+      } else if (command === "/settings") {
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          customerId && deps.notification
+            ? await deps.notification.settings(customerId)
+            : customerId && deps.notificationPreferences
+              ? await deps.notificationPreferences.get(customerId)
+              : safeError("Không xác minh được khách hàng.");
+      } else if (command === "/help") {
+        message = presentCustomerHelp();
+      } else if (command === "/products") {
+        message = deps.admin?.products
+          ? await deps.admin.products({
+              telegramUserId: envelope.actorUserId,
+              chatType: envelope.chatType,
+              correlationId,
+            })
+          : safeError("Lệnh quản trị không khả dụng.");
+      } else if (command === "/inventory") {
+        message = deps.admin?.inventory
+          ? await deps.admin.inventory({
+              telegramUserId: envelope.actorUserId,
+              chatType: envelope.chatType,
+              correlationId,
+            })
+          : safeError("Lệnh quản trị không khả dụng.");
+      } else if (command === "/customers") {
+        message = deps.admin?.customers
+          ? await deps.admin.customers({
+              telegramUserId: envelope.actorUserId,
+              chatType: envelope.chatType,
+              correlationId,
+            })
+          : safeError("Lệnh quản trị không khả dụng.");
+      } else if (command === "/broadcast") {
+        message = deps.admin?.broadcastCompose
+          ? await deps.admin.broadcastCompose({
+              telegramUserId: envelope.actorUserId,
+              chatType: envelope.chatType,
+              correlationId,
+            })
+          : safeError("Lệnh quản trị không khả dụng.");
+      } else if (command === "/health") {
+        message = deps.admin?.dashboard
+          ? await deps.admin.dashboard({
+              telegramUserId: envelope.actorUserId,
+              chatType: envelope.chatType,
+              correlationId,
+            })
+          : safeError("Lệnh quản trị không khả dụng.");
       } else if (command === "/support") {
         message = deps.support.reasonMenu();
       } else if (envelope.messageText === "🔔 Báo có hàng") {
@@ -1865,11 +1936,6 @@ export function createTelegramDomainDispatcher(
           customerId && deps.notification
             ? await deps.notification.toggle(customerId, "activity")
             : safeError("Không xác minh được khách hàng.");
-      } else if (
-        envelope.messageText === CUSTOMER_COPY.openShop ||
-        envelope.messageText === "🌐 Mở cửa hàng"
-      ) {
-        message = presentShopLaunch(deps.shopUrl ?? "");
       } else if (
         envelope.messageText === CUSTOMER_COPY.browse ||
         envelope.messageText === "🛒 Mua hàng"

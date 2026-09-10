@@ -159,8 +159,7 @@ function buildReplyMarkup(message: PresentedMessage): SendReplyMarkup {
   const inline = new InlineKeyboard();
   for (const row of message.buttons) {
     for (const button of row) {
-      if (button.webAppUrl) inline.webApp(button.text, button.webAppUrl);
-      else if (button.url) inline.url(button.text, button.url);
+      if (button.url) inline.url(button.text, button.url);
       else inline.text(button.text, button.callbackData ?? "");
     }
     inline.row();
@@ -195,6 +194,44 @@ function telegramFileIds(result: unknown): { fileId: string; fileUniqueId: strin
     fileId: document.file_id,
     fileUniqueId: typeof unique === "string" ? unique : null,
   };
+}
+
+export const TELEGRAM_CUSTOMER_BOT_COMMANDS = [
+  { command: "start", description: "Mở TIER20 SHOP" },
+  { command: "shop", description: "Xem sản phẩm" },
+  { command: "orders", description: "Đơn hàng của tôi" },
+  { command: "wallet", description: "Ví của tôi" },
+  { command: "warranty", description: "Bảo hành" },
+  { command: "support", description: "Hỗ trợ" },
+  { command: "settings", description: "Cài đặt" },
+  { command: "help", description: "Hướng dẫn" },
+] as const;
+
+export const TELEGRAM_OWNER_BOT_COMMANDS = [
+  { command: "admin", description: "Quản trị" },
+  { command: "products", description: "Sản phẩm" },
+  { command: "inventory", description: "Kho hàng" },
+  { command: "customers", description: "Khách hàng" },
+  { command: "broadcast", description: "Thông báo" },
+  { command: "health", description: "Hệ thống" },
+] as const;
+
+/** Command menu only — never MenuButtonWebApp. Failures are non-fatal at worker boot. */
+export async function ensureTelegramCommandMenu(input: {
+  botToken: string;
+  adminTelegramUserId?: number;
+}): Promise<void> {
+  if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(input.botToken)) {
+    throw new Error("Invalid Telegram bot token");
+  }
+  const api = new Api(input.botToken);
+  await api.setChatMenuButton({ menu_button: { type: "commands" } });
+  await api.setMyCommands([...TELEGRAM_CUSTOMER_BOT_COMMANDS]);
+  if (input.adminTelegramUserId !== undefined) {
+    await api.setMyCommands([...TELEGRAM_CUSTOMER_BOT_COMMANDS, ...TELEGRAM_OWNER_BOT_COMMANDS], {
+      scope: { type: "chat", chat_id: input.adminTelegramUserId },
+    });
+  }
 }
 
 export function createGrammyDocumentSender(

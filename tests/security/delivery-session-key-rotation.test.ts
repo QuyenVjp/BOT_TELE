@@ -96,7 +96,6 @@ describe("delivery-session key rotation (T182)", () => {
       db: {} as Db,
       vault: {} as Vault,
       sender: { async send() {} },
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       owner: "missing-session-config",
       batchSize: 1,
       maxAttempts: 3,

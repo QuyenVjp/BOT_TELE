@@ -107,16 +107,6 @@ async function main(): Promise<void> {
             }
           : {}),
       },
-      miniApp: {
-        botToken: config.TELEGRAM_BOT_TOKEN,
-        path: "/delivery/redeem",
-        maxAgeSeconds: 300,
-      },
-    },
-    miniApp: {
-      botToken: config.TELEGRAM_BOT_TOKEN,
-      path: "/shop",
-      maxAgeSeconds: 300,
     },
     bodyLimitBytes: config.HTTP_BODY_LIMIT_BYTES,
     logger: false,

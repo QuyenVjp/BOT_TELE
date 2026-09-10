@@ -123,10 +123,10 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       sessionTtlSeconds: 300,
       sessionConfig: SESSION_CONFIG,
     });
-    const seen: Array<{ chatId: string; miniAppUrl: string; idempotencyKey: string }> = [];
+    const seen: Array<{ chatId: string; handoffId: string; idempotencyKey: string }> = [];
     let fail = true;
     const sender = {
-      async send(input: { chatId: string; miniAppUrl: string; idempotencyKey: string }) {
+      async send(input: { chatId: string; handoffId: string; idempotencyKey: string }) {
         seen.push(input);
         if (fail) {
           fail = false;
@@ -141,7 +141,6 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       owner: "notify-a",
       batchSize: 1,
       maxAttempts: 5,
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
@@ -152,15 +151,14 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       owner: "notify-b",
       batchSize: 1,
       maxAttempts: 5,
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
     expect(first).toMatchObject({ failed: 1, sent: 0 });
     expect(second).toMatchObject({ failed: 0, sent: 1 });
     expect(seen.map((item) => item.chatId)).toEqual(["7788990011", "7788990011"]);
-    expect(new Set(seen.map((item) => item.miniAppUrl)).size).toBe(1);
-    expect(seen[0]?.miniAppUrl).toContain("handoff=");
+    expect(new Set(seen.map((item) => item.handoffId)).size).toBe(1);
+    expect(seen[0]?.handoffId).toBeTruthy();
     expect(new Set(seen.map((item) => item.idempotencyKey)).size).toBe(1);
   });
 
@@ -199,7 +197,6 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       owner: "recovery-worker",
       batchSize: 1,
       maxAttempts: 5,
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
@@ -250,7 +247,6 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       owner: "lease-expiry-before-send",
       batchSize: 1,
       maxAttempts: 5,
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
@@ -305,7 +301,6 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       owner: "recipient-recheck",
       batchSize: 1,
       maxAttempts: 5,
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
@@ -337,7 +332,7 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       sender: {
         async send(input: {
           chatId: string;
-          miniAppUrl: string;
+          handoffId: string;
           idempotencyKey: string;
           signal?: AbortSignal;
         }) {
@@ -358,7 +353,6 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       owner: "bounded-send-worker",
       batchSize: 1,
       maxAttempts: 5,
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
       sendTimeoutMs: 25,
@@ -405,7 +399,6 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       owner: "expired-send-ack",
       batchSize: 1,
       maxAttempts: 5,
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
@@ -455,7 +448,6 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       owner: "expired-send-fail",
       batchSize: 1,
       maxAttempts: 5,
-      miniAppBaseUrl: "https://shop.example/miniapp/delivery",
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });

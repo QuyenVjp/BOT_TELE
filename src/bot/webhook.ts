@@ -337,11 +337,30 @@ function classifyAction(
   if (callbackData?.startsWith("support:")) return "SUPPORT";
   if (callbackData?.startsWith("admin:")) return "ADMIN";
   if (callbackData?.startsWith("order:recover:")) return "PAID_ORDER_RECOVERY";
-  if (command === "/support") return "SUPPORT";
-  if (command === "/admin") return "ADMIN";
+  if (callbackData?.startsWith("delivery:open")) return "CATALOG";
+  if (command === "/support" || command === "/warranty") return "SUPPORT";
+  if (
+    command === "/admin" ||
+    command === "/products" ||
+    command === "/inventory" ||
+    command === "/customers" ||
+    command === "/broadcast" ||
+    command === "/health"
+  )
+    return "ADMIN";
   if (command === "/cancel") return "CANCEL";
-  if (command === "/start" || command === "/catalog" || command === "/search") return "CATALOG";
-  if (command === "/account" || command === "/topup" || command === "/pay") return "WALLET";
+  if (
+    command === "/start" ||
+    command === "/catalog" ||
+    command === "/shop" ||
+    command === "/search" ||
+    command === "/orders" ||
+    command === "/help" ||
+    command === "/settings"
+  )
+    return "CATALOG";
+  if (command === "/account" || command === "/wallet" || command === "/topup" || command === "/pay")
+    return "WALLET";
   return "UNKNOWN";
 }
 
