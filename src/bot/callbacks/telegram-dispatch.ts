@@ -1739,6 +1739,10 @@ export function createTelegramDomainDispatcher(
               })
             : safeError("Nhắn khách theo đơn không khả dụng.");
         } else if (route === "payments") {
+          // The one visible route NOT backed by an `admin.*` member: its screen is composed from
+          // the top-level `sepayReconciliationText` dep. Any future "every visible route has an
+          // admin handler" completeness check must account for this backing rather than invent a
+          // fake `admin.payments` entry (see work/final-commerce/ui-spec.md admin section).
           message = presentAdminPaymentsMenu(
             deps.sepayReconciliationText ? await deps.sepayReconciliationText() : undefined,
           );
