@@ -1,3 +1,4 @@
+import { PAYMENT_COPY } from "./payment.js";
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import type { InlineButton, PresentedMessage } from "./catalog.js";
 import type { OrderHistoryItem, OrderHistoryPage } from "../../modules/commerce/history.js";
@@ -160,6 +161,16 @@ export function presentOrderDetail(
   ].join("\n");
 
   const buttons: PresentedMessage["buttons"] = [
+    ...(order.status === "EXPIRED"
+      ? [
+          [
+            {
+              text: PAYMENT_COPY.reopen,
+              callbackData: `pay:reopen:${order.orderNumber}`,
+            },
+          ],
+        ]
+      : []),
     ...(warranty && !warranty.expired && warranty.warrantyDays > 0
       ? [
           [

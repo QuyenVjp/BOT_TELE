@@ -116,6 +116,14 @@ describe("customer order screens", () => {
     }
   });
 
+  it("offers a re-pay button when viewing an expired order (goal §37)", () => {
+    const message = presentOrderDetail(makeOrder({ status: "EXPIRED", paidAt: null }));
+    const flatButtons = message.buttons.flat();
+    const reopenBtn = flatButtons.find((b) => b.callbackData === "pay:reopen:ORD-2026-0001");
+    expect(reopenBtn).toBeDefined();
+    expect(reopenBtn?.text).toBe("🛒 Tạo lại thanh toán");
+  });
+
   it("shows the account screen without any numeric Telegram id", () => {
     const message = presentCustomerAccount({
       displayName: "Chính",
