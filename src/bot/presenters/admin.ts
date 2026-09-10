@@ -900,14 +900,41 @@ export function presentAdminDashboard(data: AdminDashboardSummary): PresentedMes
   };
 }
 
+export type AdminProductView = "all" | "featured" | "inactive" | "archived" | "test";
+
+const PRODUCT_VIEW_LABELS: Record<AdminProductView, string> = {
+  all: "📦 Tất cả",
+  featured: "⭐ Đã ghim",
+  inactive: "🚫 Đang tắt",
+  archived: "🗄 Lưu trữ",
+  test: "🧪 Test",
+};
+
+/**
+ * The catalog is long enough that scrolling to a product is not a way to find it, so the list is
+ * filtered and paged. "Bản nháp" from the spec is not a state this domain has; the honest split is
+ * inactive versus archived, and both are offered.
+ */
 export function presentAdminProducts(
-  rows: Array<{ id: string; name: string; active: boolean }>,
+  rows: Array<{ id: string; name: string; active: boolean; featured?: boolean; test?: boolean }>,
+  options: { view?: AdminProductView; page?: number; hasMore?: boolean; total?: number } = {},
 ): PresentedMessage {
-  const visibleRows = rows.slice(0, 20);
+  const view = options.view ?? "all";
+  const page = options.page ?? 1;
+  const views = Object.keys(PRODUCT_VIEW_LABELS) as AdminProductView[];
   return {
     text: [
       ADMIN_COPY.products,
-      ...visibleRows.map((row) => `• ${row.name} (${row.active ? "đang bán" : "tạm dừng"})`),
+      `Đang xem: ${PRODUCT_VIEW_LABELS[view]}${page > 1 ? ` · trang ${page}` : ""}`,
+      ...(rows.length === 0
+        ? ["Không có sản phẩm nào trong mục này."]
+        : rows.map(
+            (row) =>
+              `• ${row.name} (${row.active ? "đang bán" : "tạm dừng"})${
+                row.featured ? " ⭐" : ""
+              }${row.test ? " 🧪" : ""}`,
+          )),
+      ...(options.hasMore ? ["", "Còn nữa — bấm Xem thêm."] : []),
     ].join("\n"),
     buttons: [
       [
@@ -915,12 +942,30 @@ export function presentAdminProducts(
         { text: ADMIN_COPY.inventory, callbackData: "admin:inventory" },
       ],
       [{ text: "➕ Tạo sản phẩm", callbackData: "admin:products:create" }],
-      ...visibleRows.map((row) => [
+      ...views
+        .filter((candidate) => candidate !== view)
+        .map((candidate) => [
+          {
+            text: PRODUCT_VIEW_LABELS[candidate],
+            callbackData: `admin:products:view:${candidate}`,
+          },
+        ]),
+      ...rows.map((row) => [
         {
-          text: `${row.name} (${row.active ? "đang bán" : "tạm dừng"})`,
+          text: `${row.featured ? "⭐ " : ""}${row.name} (${row.active ? "đang bán" : "tạm dừng"})`,
           callbackData: `admin:products:detail:${row.id}`,
         },
       ]),
+      ...(options.hasMore
+        ? [
+            [
+              {
+                text: "➡️ Xem thêm",
+                callbackData: `admin:products:view:${view}:${page + 1}`,
+              },
+            ],
+          ]
+        : []),
       [{ text: "📝 Xem lại nháp", callbackData: "admin:products:review" }],
       adminNav("admin:menu"),
     ],

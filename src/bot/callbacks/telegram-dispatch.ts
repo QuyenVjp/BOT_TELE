@@ -260,6 +260,9 @@ export interface TelegramDomainDispatcherDeps {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
+      /** Filter for the catalog list; the worker validates it and defaults to all. */
+      view?: string;
+      page?: number;
     }): Promise<PresentedMessage>;
     productDetail?(input: {
       telegramUserId: string;
@@ -1451,6 +1454,19 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Dashboard không khả dụng.");
+        } else if (route === "products:view" || route.startsWith("products:view:")) {
+          // `products:view:<view>[:<page>]` — one route family so paging keeps the active filter.
+          const parts = route.split(":");
+          const page = Number.parseInt(parts[3] ?? "", 10);
+          message = admin.products
+            ? await admin.products({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+                view: parts[2] ?? "all",
+                page: Number.isInteger(page) && page > 0 ? page : 1,
+              })
+            : safeError("Danh sách sản phẩm không khả dụng.");
         } else if (route === "products") {
           message = admin.products
             ? await admin.products({

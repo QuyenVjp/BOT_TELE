@@ -44,6 +44,7 @@ import type {
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
 import type { AdminCallbacks } from "./bot/callbacks/admin.js";
+import type { AdminProductView } from "./bot/presenters/admin.js";
 import type { PresentedMessage } from "./bot/presenters/catalog.js";
 import {
   presentAdminRefundConfirm,
@@ -979,6 +980,18 @@ async function requireRootAdmin(
     correlationId: input.correlationId,
   });
   return gate.ok ? null : gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN";
+}
+
+const ADMIN_PRODUCT_VIEWS: readonly AdminProductView[] = [
+  "all",
+  "featured",
+  "inactive",
+  "archived",
+  "test",
+];
+
+function isAdminProductView(value: unknown): value is AdminProductView {
+  return typeof value === "string" && (ADMIN_PRODUCT_VIEWS as readonly string[]).includes(value);
 }
 
 /** A warranty screen for a case we cannot serve; never a stack trace or an internal code. */
@@ -1948,8 +1961,13 @@ async function bootstrap(): Promise<void> {
       case "category": {
         await ensureDefaultCategories(dbHandle.db);
         const rows = await sql<{ id: string; name_vi: string; parent_id: string | null }>`
-          select id, name_vi, parent_id from category where is_active
-          order by coalesce(parent_id, id), sort_order, id limit 40
+          select c.id, c.name_vi, c.parent_id
+          from category c
+          left join category p on p.id = c.parent_id
+          where c.is_active
+          order by coalesce(p.sort_order, c.sort_order), coalesce(c.parent_id, c.id),
+                   (c.parent_id is not null), c.sort_order, c.id
+          limit 40
         `.execute(dbHandle.db);
         return presentWizardCategoryStep(
           rows.rows.map((row) => ({
@@ -3081,13 +3099,36 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const result = await sql<{ id: string; name: string; active: boolean }>`
-          select id, name_vi as name, is_active as active
-          from product
-          order by sort_order asc, id asc
-          limit 20
+        const view: AdminProductView = isAdminProductView(input.view) ? input.view : "all";
+        const page = Number.isInteger(input.page) && (input.page ?? 0) > 0 ? input.page! : 1;
+        const pageSize = 12;
+        const filter =
+          view === "featured"
+            ? sql`where p.is_featured`
+            : view === "inactive"
+              ? sql`where not p.is_active and not p.is_archived`
+              : view === "archived"
+                ? sql`where p.is_archived`
+                : view === "test"
+                  ? sql`where p.is_test`
+                  : sql``;
+        // One row over the page tells us whether to offer "Xem thêm" without a count query.
+        const result = await sql<{
+          id: string;
+          name: string;
+          active: boolean;
+          featured: boolean;
+          test: boolean;
+        }>`
+          select p.id, p.name_vi as name, p.is_active as active, p.is_featured as featured,
+                 p.is_test as test
+          from product p
+          ${filter}
+          order by p.sort_order asc, p.id asc
+          limit ${pageSize + 1} offset ${(page - 1) * pageSize}
         `.execute(dbHandle.db);
-        return presentAdminProducts(result.rows);
+        const hasMore = result.rows.length > pageSize;
+        return presentAdminProducts(result.rows.slice(0, pageSize), { view, page, hasMore });
       },
       /** Goal §11 — featured is a product flag the owner toggles, on an existing product too. */
       async productFeature(input) {
