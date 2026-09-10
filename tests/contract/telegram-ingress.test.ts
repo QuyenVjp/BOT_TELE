@@ -580,3 +580,51 @@ describe("command normalization", () => {
     }
   });
 });
+
+describe("persistent reply-keyboard allowlist", () => {
+  it("preserves current Telegram-native keyboard labels and drops cancelled Mini App shop-launch label", async () => {
+    const kept: Array<string | undefined> = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          kept.push(input.envelope.messageText);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+    });
+    await ingress.ready();
+    try {
+      const labels = [
+        "🛒 Mua hàng",
+        "🛡 Bảo hành",
+        "💬 Hỗ trợ",
+        "👤 Tài khoản",
+        "🧾 Đơn hàng",
+        "💰 Nạp ví",
+        "🌐 Mở cửa hàng",
+      ];
+      for (const [i, label] of labels.entries()) {
+        await ingress.inject({
+          method: "POST",
+          url: WEBHOOK_PATH,
+          headers: { "x-telegram-bot-api-secret-token": SECRET },
+          payload: buildUpdate(8000 + i, 100, label),
+        });
+      }
+      expect(kept).toEqual([
+        "🛒 Mua hàng",
+        "🛡 Bảo hành",
+        "💬 Hỗ trợ",
+        "👤 Tài khoản",
+        "🧾 Đơn hàng",
+        "💰 Nạp ví",
+        undefined,
+      ]);
+    } finally {
+      await ingress.close();
+    }
+  });
+});

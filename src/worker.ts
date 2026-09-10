@@ -4709,7 +4709,7 @@ async function bootstrap(): Promise<void> {
               "",
               input.product?.name ? `📦 ${input.product.name}` : "📦 Đơn hàng của bạn",
               "",
-              "Nhấn nút bên dưới để xem thông tin nhận hàng (liên kết bảo mật, chỉ xem được một lần).",
+              "Nhấn nút bên dưới để xem thông tin nhận hàng (chỉ hiện một lần, đừng chia sẻ).",
             ];
             if (input.product?.usageInstructionsVi)
               lines.push("", `📘 Hướng dẫn: ${input.product.usageInstructionsVi}`);

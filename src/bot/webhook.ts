@@ -7,6 +7,7 @@ import type {
 import type { LatencyMetrics } from "../infrastructure/observability/tracing.js";
 import { verifyTelegramSecret } from "./middleware/security.js";
 import { peekCallbackAction } from "./callback-codec.js";
+import { CUSTOMER_COPY } from "./presenters/customer.js";
 
 /** Telegram webhook ingress (telegram-ux.md Ingress; SR-004, FR-010, FR-024). */
 
@@ -365,15 +366,17 @@ function classifyAction(
 }
 
 const SAFE_MESSAGE_TEXT: Record<string, true> = {
-  "🔔 Báo có hàng": true,
-  "🔔 Cài đặt thông báo": true,
-  "🛍 Cập nhật sản phẩm": true,
-  "📣 Hoạt động mua hàng": true,
-  "🌐 Mở cửa hàng": true,
-  "👤 Tài khoản": true,
-  "💰 Nạp ví": true,
-  "↩️ Quay lại": true,
-  "🧾 Đơn hàng": true,
+  [CUSTOMER_COPY.restock]: true,
+  [CUSTOMER_COPY.notifications]: true,
+  [CUSTOMER_COPY.shopUpdates]: true,
+  [CUSTOMER_COPY.purchaseActivity]: true,
+  [CUSTOMER_COPY.browse]: true,
+  [CUSTOMER_COPY.account]: true,
+  [CUSTOMER_COPY.topup]: true,
+  [CUSTOMER_COPY.back]: true,
+  [CUSTOMER_COPY.orders]: true,
+  [CUSTOMER_COPY.warranty]: true,
+  [CUSTOMER_COPY.support]: true,
   "🛟 Hỗ trợ": true,
 };
 
