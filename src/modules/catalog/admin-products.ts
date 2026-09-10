@@ -122,6 +122,10 @@ export interface AdminVariantUpdateInput extends AdminVariantMutationInput {
   warrantyDays?: number;
   active?: boolean;
   lowStockThreshold?: number | null;
+  /** Goal §78: the strikethrough price, and the preorder pair (enabling it needs a deposit). */
+  compareAtPriceVnd?: bigint | null;
+  preorderEnabled?: boolean;
+  depositAmountVnd?: number;
 }
 export interface AdminProductMutation {
   actor: RootActor;
@@ -487,6 +491,17 @@ function validateVariantUpdate(input: AdminVariantUpdateInput): void {
     throw new Error("INVALID_WARRANTY");
   if (input.lowStockThreshold !== undefined && (input.lowStockThreshold ?? 0) < 0)
     throw new Error("INVALID_THRESHOLD");
+  if (input.compareAtPriceVnd != null && input.compareAtPriceVnd <= 0n)
+    throw new Error("INVALID_COMPARE_PRICE");
+  if (
+    input.depositAmountVnd !== undefined &&
+    (!Number.isInteger(input.depositAmountVnd) || input.depositAmountVnd < 0)
+  )
+    throw new Error("INVALID_DEPOSIT");
+  // A preorder with no deposit would publish a consent screen promising to hold stock for 0 ₫, so the
+  // two fields are validated together rather than trusted to arrive in order.
+  if (input.preorderEnabled === true && input.depositAmountVnd === undefined)
+    throw new Error("PREORDER_NEEDS_DEPOSIT");
   if (!input.reason.trim() || input.reason.length > 500) throw new Error("INVALID_REASON");
 }
 
@@ -596,6 +611,10 @@ export async function updateAdminVariant(input: AdminVariantUpdateInput): Promis
           warranty_days = coalesce(${input.warrantyDays ?? null}, warranty_days),
           is_active = coalesce(${input.active ?? null}, is_active),
           low_stock_threshold = ${input.lowStockThreshold === undefined ? sql`low_stock_threshold` : input.lowStockThreshold},
+          compare_at_price_vnd = ${input.compareAtPriceVnd === undefined ? sql`compare_at_price_vnd` : input.compareAtPriceVnd === null ? sql`null` : input.compareAtPriceVnd.toString()},
+          preorder_enabled = coalesce(${input.preorderEnabled ?? null}, preorder_enabled),
+          deposit_amount_vnd = ${input.depositAmountVnd === undefined ? sql`deposit_amount_vnd` : input.depositAmountVnd},
+          min_deposit_vnd = ${input.depositAmountVnd === undefined ? sql`min_deposit_vnd` : input.depositAmountVnd},
           updated_at = now(),
           version = version + 1
       where id = ${input.variantId} and product_id = ${input.productId} and version = ${input.expectedVersion}
@@ -621,6 +640,13 @@ export async function updateAdminVariant(input: AdminVariantUpdateInput): Promis
         ...(input.lowStockThreshold === undefined
           ? {}
           : { lowStockThreshold: input.lowStockThreshold }),
+        ...(input.compareAtPriceVnd === undefined
+          ? {}
+          : { compareAtPriceVnd: input.compareAtPriceVnd?.toString() ?? null }),
+        ...(input.preorderEnabled === undefined ? {} : { preorderEnabled: input.preorderEnabled }),
+        ...(input.depositAmountVnd === undefined
+          ? {}
+          : { depositAmountVnd: input.depositAmountVnd }),
       },
     });
     return true;

@@ -145,6 +145,10 @@ function setup() {
     .mockResolvedValue({ text: "variant create", buttons: [] });
   const adminVariantEditPrompt = vi.fn().mockResolvedValue({ text: "variant edit", buttons: [] });
   const adminVariantEditField = vi.fn().mockResolvedValue({ text: "variant field", buttons: [] });
+  const adminPaymentsView = vi.fn().mockResolvedValue({ text: "payment queue", buttons: [] });
+  const adminVariantEditToggle = vi
+    .fn()
+    .mockResolvedValue({ text: "variant toggled", buttons: [] });
   const workflowVariantText = vi.fn().mockResolvedValue(null);
   const visibilityAction = vi.fn().mockResolvedValue({ text: "visibility step", buttons: [] });
   const supportReasonMenu = vi.fn().mockReturnValue({ text: "support menu", buttons: [] });
@@ -220,7 +224,9 @@ function setup() {
       productDetail: adminProductDetail,
       variantCreatePrompt: adminVariantCreatePrompt,
       variantEditPrompt: adminVariantEditPrompt,
+      paymentsView: adminPaymentsView,
       variantEditField: adminVariantEditField,
+      variantEditToggle: adminVariantEditToggle,
       inventory: adminInventory,
       warrantyQueue,
       warrantyRefundQueue,
@@ -323,6 +329,8 @@ function setup() {
     adminVariantCreatePrompt,
     adminVariantEditPrompt,
     adminVariantEditField,
+    adminVariantEditToggle,
+    adminPaymentsView,
     workflowVariantText,
     adminCustomerSearch,
     adminCustomerMessagePrompt,
@@ -852,6 +860,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       adminVariantCreatePrompt,
       adminVariantEditPrompt,
       adminVariantEditField,
+      adminVariantEditToggle,
       send,
     } = setup();
 
@@ -902,7 +911,24 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       chatType: "private",
       correlationId: "telegram:variant-field",
     });
-    expect(send).toHaveBeenCalledTimes(3);
+
+    // A boolean field is answered with a button, and the same no-id rule keeps this route short.
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "variant-toggle",
+      action: "ADMIN",
+      callbackData: "admin:products:vfset:preorderEnabled:on",
+    });
+    expect(adminVariantEditToggle).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      fieldKey: "preorderEnabled",
+      on: true,
+      chatType: "private",
+      correlationId: "telegram:variant-toggle",
+    });
+    expect(send).toHaveBeenCalledTimes(4);
   });
 
   it("routes variant state text before the generic product wizard", async () => {

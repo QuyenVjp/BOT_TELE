@@ -294,6 +294,13 @@ export interface TelegramDomainDispatcherDeps {
       view: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    variantEditToggle?(input: {
+      telegramUserId: string;
+      fieldKey: string;
+      on: boolean;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     variantEditField?(input: {
       telegramUserId: string;
       fieldKey: string;
@@ -1740,6 +1747,18 @@ export function createTelegramDomainDispatcher(
             ? await admin.variantEditPrompt({
                 telegramUserId: envelope.actorUserId,
                 variantId: route.slice("products:variant-edit:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Sửa biến thể không khả dụng.");
+        } else if (route.startsWith("products:vfset:")) {
+          const rest = route.slice("products:vfset:".length);
+          const separator = rest.lastIndexOf(":");
+          message = admin.variantEditToggle
+            ? await admin.variantEditToggle({
+                telegramUserId: envelope.actorUserId,
+                fieldKey: rest.slice(0, separator),
+                on: rest.slice(separator + 1) === "on",
                 chatType: envelope.chatType,
                 correlationId,
               })

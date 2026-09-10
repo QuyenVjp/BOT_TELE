@@ -1849,11 +1849,15 @@ export function presentAdminProductDetail(input: {
 
 /** Goal §78: the fields of a variant an owner may edit, with the label the menu shows. */
 export const ADMIN_VARIANT_FIELDS = [
-  { key: "name", label: "Tên" },
-  { key: "priceVnd", label: "Giá" },
-  { key: "durationCode", label: "Thời hạn" },
-  { key: "warrantyDays", label: "Bảo hành (ngày)" },
-  { key: "lowStockThreshold", label: "Ngưỡng sắp hết" },
+  { key: "name", label: "Tên", kind: "text" },
+  { key: "priceVnd", label: "Giá", kind: "number" },
+  { key: "compareAtPriceVnd", label: "Giá gạch ngang", kind: "number" },
+  { key: "durationCode", label: "Thời hạn", kind: "text" },
+  { key: "active", label: "Đang bán", kind: "toggle" },
+  { key: "preorderEnabled", label: "Cho đặt cọc", kind: "toggle" },
+  { key: "depositAmountVnd", label: "Tiền đặt cọc", kind: "number" },
+  { key: "lowStockThreshold", label: "Ngưỡng sắp hết", kind: "number" },
+  { key: "warrantyDays", label: "Bảo hành (ngày)", kind: "number" },
 ] as const;
 
 const formatVnd = (value: bigint): string => `${value.toLocaleString("vi-VN")} ₫`;
@@ -1867,25 +1871,14 @@ const formatVnd = (value: bigint): string => `${value.toLocaleString("vi-VN")} �
 export function presentAdminVariantDraft(input: {
   productId: string;
   sku: string;
-  name: string;
-  priceVnd: bigint;
-  durationCode: string;
-  warrantyDays: number;
-  lowStockThreshold: number | null;
+  current: Record<(typeof ADMIN_VARIANT_FIELDS)[number]["key"], string>;
 }): PresentedMessage {
-  const current: Record<(typeof ADMIN_VARIANT_FIELDS)[number]["key"], string> = {
-    name: input.name,
-    priceVnd: formatVnd(input.priceVnd),
-    durationCode: input.durationCode,
-    warrantyDays: `${input.warrantyDays} ngày`,
-    lowStockThreshold:
-      input.lowStockThreshold === null ? "(không đặt)" : String(input.lowStockThreshold),
-  };
+  const current = input.current;
   return {
     text: [
       "✏️ SỬA BIẾN THỂ",
       "",
-      `${input.name} · ${input.sku}`,
+      `${input.current.name} · ${input.sku}`,
       "",
       "Chọn thông tin cần sửa:",
       ...ADMIN_VARIANT_FIELDS.map((field) => `• ${field.label}: ${current[field.key]}`),
@@ -1905,13 +1898,30 @@ export function presentAdminVariantDraft(input: {
 export function presentAdminVariantFieldPrompt(input: {
   productId: string;
   variantId: string;
+  fieldKey: string;
   label: string;
   current: string;
   hint: string;
+  /** Present for a boolean field: the answer is a button, never something typed. */
+  toggleOn?: boolean | undefined;
 }): PresentedMessage {
   return {
     text: [`✏️ ${input.label}`, "", `Hiện tại: ${input.current}`, "", input.hint].join("\n"),
     buttons: [
+      ...(input.toggleOn === undefined
+        ? []
+        : [
+            [
+              {
+                text: "✅ Bật",
+                callbackData: `admin:products:vfset:${input.fieldKey}:on`,
+              },
+              {
+                text: "⛔ Tắt",
+                callbackData: `admin:products:vfset:${input.fieldKey}:off`,
+              },
+            ],
+          ]),
       [
         {
           text: "⬅️ Danh sách mục",

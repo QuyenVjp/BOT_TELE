@@ -3370,8 +3370,12 @@ async function bootstrap(): Promise<void> {
             duration_code: string;
             warranty_days: number;
             low_stock_threshold: number | null;
+            compare_at_price_vnd: string | null;
+            preorder_enabled: boolean;
+            deposit_amount_vnd: string;
+            is_active: boolean;
             version: number;
-          }>`select id, product_id, name_vi as name, sku, price_vnd::text as price_vnd, duration_code, warranty_days, low_stock_threshold, version from product_variant where id=${input.variantId} limit 1`.execute(
+          }>`select id, product_id, name_vi as name, sku, price_vnd::text as price_vnd, duration_code, warranty_days, low_stock_threshold, compare_at_price_vnd::text as compare_at_price_vnd, preorder_enabled, deposit_amount_vnd::text as deposit_amount_vnd, is_active, version from product_variant where id=${input.variantId} limit 1`.execute(
             dbHandle.db,
           )
         ).rows[0];
@@ -3404,11 +3408,111 @@ async function bootstrap(): Promise<void> {
         return presentAdminVariantDraft({
           productId: row.product_id,
           sku: row.sku,
-          name: row.name,
-          priceVnd: BigInt(row.price_vnd),
-          durationCode: row.duration_code,
-          warrantyDays: row.warranty_days,
-          lowStockThreshold: row.low_stock_threshold,
+          current: {
+            name: row.name,
+            priceVnd: `${BigInt(row.price_vnd).toLocaleString("vi-VN")} ₫`,
+            compareAtPriceVnd:
+              row.compare_at_price_vnd === null
+                ? "(không đặt)"
+                : `${BigInt(row.compare_at_price_vnd).toLocaleString("vi-VN")} ₫`,
+            durationCode: row.duration_code,
+            active: row.is_active ? "Đang bán" : "Đang tắt",
+            preorderEnabled: row.preorder_enabled ? "Có" : "Không",
+            depositAmountVnd: `${BigInt(row.deposit_amount_vnd).toLocaleString("vi-VN")} ₫`,
+            lowStockThreshold:
+              row.low_stock_threshold === null ? "(không đặt)" : String(row.low_stock_threshold),
+            warrantyDays: `${row.warranty_days} ngày`,
+          },
+        });
+      },
+      /**
+       * Goal §78: a boolean field is answered with a button, so it never becomes something the owner
+       * types. The pending field state decides which field and which version this applies to, so a
+       * stale button cannot flip a field the owner is no longer looking at.
+       */
+      async variantEditToggle(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const rows = await sql<{ payload_redacted: Record<string, unknown> }>`
+          select payload_redacted from admin_callback_state
+           where admin_telegram_user_id = ${input.telegramUserId}
+             and kind = 'ADMIN_VARIANT_UPDATE'
+             and payload_redacted ? 'field'
+             and expires_at > now()
+           order by created_at desc
+           limit 1
+        `.execute(dbHandle.db);
+        const payload = rows.rows[0]?.payload_redacted;
+        const productId = typeof payload?.productId === "string" ? payload.productId : null;
+        const variantId = typeof payload?.variantId === "string" ? payload.variantId : null;
+        const field = typeof payload?.field === "string" ? payload.field : null;
+        const expectedVersion =
+          typeof payload?.expectedVersion === "number" ? payload.expectedVersion : null;
+        const back = (text: string) => ({
+          text,
+          buttons: [
+            ...(productId
+              ? [
+                  [
+                    {
+                      text: "🛍 Sản phẩm",
+                      callbackData: `admin:products:detail:${productId}`,
+                    },
+                  ],
+                ]
+              : []),
+          ],
+        });
+        if (!productId || !variantId || !field || !expectedVersion)
+          return back("Phiên sửa biến thể đã hết hạn.");
+        if (field !== input.fieldKey) return back("Mục này không còn là mục đang sửa.");
+        const row = (
+          await sql<{ deposit_amount_vnd: string }>`
+            select deposit_amount_vnd::text as deposit_amount_vnd from product_variant where id = ${variantId} limit 1
+          `.execute(dbHandle.db)
+        ).rows[0];
+        if (field === "preorderEnabled" && input.on && (row?.deposit_amount_vnd ?? "0") === "0")
+          return back("Hãy đặt tiền cọc trước khi bật đặt cọc.");
+        const patch =
+          field === "active"
+            ? { active: input.on }
+            : field === "preorderEnabled"
+              ? { preorderEnabled: input.on }
+              : null;
+        if (!patch) return back("Mục này không phải lựa chọn bật/tắt.");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: productId,
+          reason: "Admin variant toggle",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const ok = await updateAdminVariant({
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          config: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          db: dbHandle.db,
+          productId,
+          variantId,
+          expectedVersion,
+          ...patch,
+          reason: "Admin variant toggle",
+          correlationId: input.correlationId,
+        });
+        if (!ok) return back("Biến thể đã thay đổi ở nơi khác, mở lại để sửa.");
+        const named = await sql<{ name: string }>`
+          select name_vi as name from product_variant where id = ${variantId} limit 1
+        `.execute(dbHandle.db);
+        return presentAdminVariantMutationDone({
+          productId,
+          variantName: named.rows[0]?.name ?? "biến thể",
+          action: "updated",
         });
       },
       /**
@@ -3466,8 +3570,12 @@ async function bootstrap(): Promise<void> {
                 duration_code: string;
                 warranty_days: number;
                 low_stock_threshold: number | null;
+                compare_at_price_vnd: string | null;
+                preorder_enabled: boolean;
+                deposit_amount_vnd: string;
+                is_active: boolean;
                 version: number;
-              }>`select id, product_id, name_vi as name, price_vnd::text as price_vnd, duration_code, warranty_days, low_stock_threshold, version from product_variant where id=${variantId} limit 1`.execute(
+              }>`select id, product_id, name_vi as name, price_vnd::text as price_vnd, duration_code, warranty_days, low_stock_threshold, compare_at_price_vnd::text as compare_at_price_vnd, preorder_enabled, deposit_amount_vnd::text as deposit_amount_vnd, is_active, version from product_variant where id=${variantId} limit 1`.execute(
                 dbHandle.db,
               )
             ).rows[0]
@@ -3502,24 +3610,41 @@ async function bootstrap(): Promise<void> {
         const current: Record<(typeof ADMIN_VARIANT_FIELDS)[number]["key"], string> = {
           name: row.name,
           priceVnd: `${BigInt(row.price_vnd).toLocaleString("vi-VN")} ₫`,
+          compareAtPriceVnd:
+            row.compare_at_price_vnd === null
+              ? "(không đặt)"
+              : `${BigInt(row.compare_at_price_vnd).toLocaleString("vi-VN")} ₫`,
           durationCode: row.duration_code,
-          warrantyDays: `${row.warranty_days} ngày`,
+          active: row.is_active ? "Đang bán" : "Đang tắt",
+          preorderEnabled: row.preorder_enabled ? "Có" : "Không",
+          depositAmountVnd: `${BigInt(row.deposit_amount_vnd).toLocaleString("vi-VN")} ₫`,
           lowStockThreshold:
             row.low_stock_threshold === null ? "(không đặt)" : String(row.low_stock_threshold),
+          warrantyDays: `${row.warranty_days} ngày`,
         };
         const hints: Record<(typeof ADMIN_VARIANT_FIELDS)[number]["key"], string> = {
           name: "Gửi tên mới trong một tin nhắn.",
           priceVnd: "Gửi giá mới bằng số nguyên VND, ví dụ 280000.",
+          compareAtPriceVnd:
+            "Gửi giá gạch ngang bằng số nguyên VND, ví dụ 350000. Gửi - để bỏ giá gạch ngang.",
           durationCode: "Gửi mã thời hạn, ví dụ P1M hoặc P12M.",
-          warrantyDays: "Gửi số ngày bảo hành, ví dụ 30. Gửi 0 nếu không bảo hành.",
+          active: "Chọn bên dưới.",
+          preorderEnabled:
+            "Chọn bên dưới. Bật đặt cọc cần có tiền cọc — đặt tiền cọc trước nếu đang là 0 ₫.",
+          depositAmountVnd: "Gửi số tiền cọc bằng số nguyên VND, ví dụ 50000.",
           lowStockThreshold: "Gửi ngưỡng cảnh báo sắp hết. Gửi - để xoá ngưỡng.",
+          warrantyDays: "Gửi số ngày bảo hành, ví dụ 30. Gửi 0 nếu không bảo hành.",
         };
         return presentAdminVariantFieldPrompt({
           productId: row.product_id,
           variantId: row.id,
+          fieldKey: field.key,
           label: field.label,
           current: current[field.key],
           hint: hints[field.key],
+          ...(field.kind === "toggle"
+            ? { toggleOn: field.key === "active" ? row.is_active : row.preorder_enabled }
+            : {}),
         });
       },
       async suppliers(input) {
@@ -6083,9 +6208,11 @@ async function bootstrap(): Promise<void> {
           const patch: {
             name?: string;
             priceVnd?: bigint;
+            compareAtPriceVnd?: bigint | null;
             durationCode?: string;
             warrantyDays?: number;
             lowStockThreshold?: number | null;
+            depositAmountVnd?: number;
           } = {};
           switch (field) {
             case "name":
@@ -6101,6 +6228,19 @@ async function bootstrap(): Promise<void> {
                 return back("Mã thời hạn chỉ gồm chữ, số, dấu - và _, ví dụ P1M.");
               patch.durationCode = value.toUpperCase();
               break;
+            case "compareAtPriceVnd":
+              if (value !== "-" && !/^\d+$/.test(value))
+                return back("Giá gạch ngang chỉ gồm chữ số, hoặc gửi - để bỏ.");
+              patch.compareAtPriceVnd = value === "-" ? null : BigInt(value);
+              break;
+            case "depositAmountVnd":
+              if (!/^\d+$/.test(value)) return back("Tiền cọc chỉ gồm chữ số, ví dụ 50000.");
+              patch.depositAmountVnd = Number(value);
+              break;
+            case "active":
+            case "preorderEnabled":
+              // These are answered with buttons; text here means the owner typed instead of tapping.
+              return back("Mục này chọn bằng nút Bật hoặc Tắt bên dưới.");
             case "warrantyDays":
               if (!/^\d+$/.test(value)) return back("Số ngày bảo hành chỉ gồm chữ số, ví dụ 30.");
               patch.warrantyDays = Number(value);
