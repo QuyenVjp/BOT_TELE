@@ -479,6 +479,21 @@ export async function handleAdminCustomerFreeText(
           buttons: [[{ text: "👥 Khách hàng", callbackData: "admin:customers" }]],
         };
   }
+  // The search prompt is the only remaining reason a root's free text means "query the CRM". It is
+  // one-shot: consuming it here is what lets every OTHER text fall through the dispatcher's chain,
+  // where the product search, the broadcast compose and the import handlers each read their own
+  // state. Before this, the unconditional return below swallowed every line the owner typed — the
+  // owner could not search products and could not compose a broadcast, while normal customers were
+  // never affected because this whole handler is root-gated by its caller.
+  const prompted = await sql<{ id: string }>`
+    delete from admin_callback_state
+    where admin_telegram_user_id = ${input.adminTelegramUserId}
+      and kind = 'CUSTOMER_SEARCH_PROMPT'
+      and expires_at > now()
+    returning id
+  `.execute(db);
+  if (prompted.rows.length === 0) return null;
+
   return presentAdminCustomers(db, {
     adminTelegramUserId: input.adminTelegramUserId,
     query: input.text,
@@ -2599,12 +2614,20 @@ async function bootstrap(): Promise<void> {
           ctx.chatType !== "private"
         )
           return presentAdminDenied("NOT_ROOT_ADMIN");
-        return handleAdminCustomerFreeText(dbHandle.db, {
+        const sent = await handleAdminCustomerFreeText(dbHandle.db, {
           adminTelegramUserId: ctx.telegramUserId,
           text: input.text,
           actorId: String(ctx.telegramUserId),
           correlationId: ctx.correlationId,
         });
+        // This command carries its own content; without a pending draft there is nothing to send, and
+        // the old fall-through showed the customer list, which is not an answer to `/message_customer`.
+        return (
+          sent ?? {
+            text: "Chưa có phiên soạn tin nào đang mở. Mở hồ sơ khách rồi chọn «Gửi tin» để soạn.",
+            buttons: [[{ text: "👥 Khách hàng", callbackData: "admin:customers" }]],
+          }
+        );
       },
       async support(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
