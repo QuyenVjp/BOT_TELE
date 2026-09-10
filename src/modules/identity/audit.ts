@@ -12,7 +12,7 @@ import { newId } from "../../shared/ids/index.js";
  * never reach the audit trail (SR-001).
  */
 
-export type AuditActorType = "ROOT_ADMIN" | "SYSTEM" | "SUPPLIER" | "PAYMENT_PROVIDER";
+export type AuditActorType = "ROOT_ADMIN" | "SYSTEM" | "SUPPLIER" | "PAYMENT_PROVIDER" | "CUSTOMER";
 
 export interface AppendAuditInput {
   actorType: AuditActorType;
