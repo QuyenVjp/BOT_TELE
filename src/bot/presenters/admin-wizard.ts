@@ -216,6 +216,47 @@ export function presentWizardVisibilityStep(draft: ProductDraft): PresentedMessa
           callbackData: "admin:products:vis:toggle_featured",
         },
       ],
+      // Warranty policy (goal §60/§61). Choices, not prose: a toggle, a duration, the refund rule and
+      // the two resolution permissions. Coverage/exclusions prose is entered in the content editor.
+      [
+        {
+          text: `${draft.warrantyEnabled ? "✅" : "❌"} Bảo hành: ${draft.warrantyEnabled ? "Bật" : "Tắt"}`,
+          callbackData: "admin:products:warranty:toggle",
+        },
+      ],
+      ...(draft.warrantyEnabled
+        ? [
+            [7, 15, 30, 90].map((days) => ({
+              text: `${draft.warrantyDays === days ? "✅" : ""}${days} ngày`,
+              callbackData: `admin:products:warranty:days:${days}`,
+            })),
+            [
+              {
+                text: `${draft.warrantyProrationEnabled === false ? "◻️" : "✅"} Hoàn theo thời gian còn lại`,
+                callbackData: "admin:products:warranty:proration",
+              },
+            ],
+            [
+              {
+                text: `${draft.warrantyReplacementAllowed === false ? "◻️" : "✅"} Cho phép đổi hàng`,
+                callbackData: "admin:products:warranty:replacement",
+              },
+              {
+                text: `${draft.warrantyRefundAllowed === false ? "◻️" : "✅"} Cho phép hoàn tiền`,
+                callbackData: "admin:products:warranty:refund",
+              },
+            ],
+            [
+              {
+                text:
+                  draft.warrantyReplacementBehavior === "RESET_FROM_REPLACEMENT"
+                    ? "♻️ Bảo hành đổi hàng: tính lại từ lần đổi"
+                    : "♻️ Bảo hành đổi hàng: giữ hạn cũ",
+                callbackData: "admin:products:warranty:behavior",
+              },
+            ],
+          ]
+        : []),
       [
         {
           text: `💰 Đặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}`,
