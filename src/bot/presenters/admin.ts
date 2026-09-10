@@ -1731,7 +1731,9 @@ export function presentAdminProductContentMenu(input: {
     buttons: [
       ...ADMIN_PRODUCT_CONTENT_FIELDS.map((field) => [
         {
-          text: `${field.label}`,
+          // Prefixed so the row cannot be confused with the persistent keyboard's own
+          // "🛡 Bảo hành" / "💬 Hỗ trợ" keys, which dispatch to customer screens.
+          text: `✏️ ${field.label}`,
           callbackData: `admin:products:cf:edit:${field.key}`,
         },
       ]),
