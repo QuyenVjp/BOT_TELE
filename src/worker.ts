@@ -3117,8 +3117,22 @@ async function bootstrap(): Promise<void> {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const parts = route.split(":");
-        const action = (parts[3] ?? "import") as "import" | "template" | "paste";
-        const productId = parts[4] ?? "";
+        const offset = parts[0] === "admin" ? 1 : 0;
+        const rawAction = parts[offset + 2];
+        if (rawAction !== "import" && rawAction !== "template" && rawAction !== "paste") {
+          return {
+            text: "Yêu cầu không hợp lệ.",
+            buttons: [[{ text: "Quay lại Kho", callbackData: "admin:inventory" }]],
+          };
+        }
+        const action = rawAction;
+        const productId = parts[offset + 3] ?? "";
+        if (!productId) {
+          return {
+            text: "Sản phẩm không tồn tại.",
+            buttons: [[{ text: "Quay lại Kho", callbackData: "admin:inventory" }]],
+          };
+        }
         const prod = await sql<{ id: string; name_vi: string }>`
           select id, name_vi from product where id = ${productId} limit 1
         `.execute(dbHandle.db);

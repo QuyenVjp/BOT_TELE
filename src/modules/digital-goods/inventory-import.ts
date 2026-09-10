@@ -343,7 +343,7 @@ export async function importDigitalInventory(
     const storedSecret = parseCredentialValues(row, config.inventoryFields);
     const ref = await input.vault.write(JSON.stringify(storedSecret), {
       namespace: "asset",
-      idempotencyKey: `inventory:${row.fingerprint}`,
+      idempotencyKey: row.fingerprint,
     });
     try {
       await withTransaction(input.db, async (trx) => {

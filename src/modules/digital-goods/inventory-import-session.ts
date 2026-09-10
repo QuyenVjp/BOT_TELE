@@ -411,7 +411,7 @@ export async function stageInventoryImportInput(
   const rawHash = sha256(normalizedInput);
   const vaultRef = await vault.write(normalizedInput, {
     namespace: "asset",
-    idempotencyKey: `inventory-import:${rawHash}`,
+    idempotencyKey: rawHash,
   });
   const existingRef = session.inputVaultRef;
   await sql`

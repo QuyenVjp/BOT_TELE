@@ -43,7 +43,7 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(keyboard).toBeDefined();
     const buttons = keyboard?.flat() ?? [];
     expect(buttons.map((button) => button.text)).toEqual(
-      expect.arrayContaining(["🛍 Sản phẩm", "📦 Kho hàng", "🧾 Đơn hàng"]),
+      expect.arrayContaining(["📦 Sản phẩm", "📥 Kho hàng", "🧾 Đơn hàng"]),
     );
     expect(buttons.every((button) => button.callback_data.length <= 64)).toBe(true);
   });
