@@ -177,4 +177,41 @@ describe("checkout callback tokens", () => {
     });
     expect(unified().verify(token, { telegramUserId: "999" }).ok).toBe(false);
   });
+
+  // The sealer maps `cat:view:<categoryId>:<page>` to CATEGORY_VIEW with an option, so the codec has
+  // to accept it: refusing the page number made every listing with more than one page throw at
+  // render time, and the customer simply never saw the family.
+  it("round-trips a paginated category view, page number included", () => {
+    const codec = createCallbackTokenCodec({
+      key: "test-only-callback-key-material-123456",
+      keyVersion: 1,
+      ttlSeconds: 900,
+      clockSkewSeconds: 5,
+    });
+    const categoryId = "01M226XN61E5SXARPBJ63M60SM";
+    const paged = codec.issue({
+      action: "CATEGORY_VIEW",
+      telegramUserId: TELEGRAM_USER_ID,
+      resourceId: categoryId,
+      option: 3,
+    });
+    expect(Buffer.byteLength(paged, "utf8")).toBeLessThanOrEqual(64);
+    const verified = codec.verify(paged, { telegramUserId: TELEGRAM_USER_ID });
+    expect(verified).toMatchObject({ ok: true });
+    if (!verified.ok) return;
+    expect(verified.value).toMatchObject({
+      action: "CATEGORY_VIEW",
+      resourceId: categoryId,
+      option: 3,
+    });
+
+    // the first page still works without the option byte
+    const plain = codec.issue({
+      action: "CATEGORY_VIEW",
+      telegramUserId: TELEGRAM_USER_ID,
+      resourceId: categoryId,
+    });
+    const plainVerified = codec.verify(plain, { telegramUserId: TELEGRAM_USER_ID });
+    expect(plainVerified.ok && plainVerified.value.option).toBe(undefined);
+  });
 });

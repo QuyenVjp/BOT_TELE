@@ -426,7 +426,15 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "CUSTOMER_WARRANTY":
       assertNoPayload(input);
       return Buffer.alloc(0);
-    case "CATEGORY_VIEW":
+    case "CATEGORY_VIEW": {
+      // A category or brand page number rides in the token: the sealer maps
+      // `cat:view:<id>:<page>` to this action, so refusing an option here made every listing with
+      // more than one page throw at render time and never reach the customer.
+      if (!input.resourceId || input.secondaryResourceId !== undefined)
+        throw new Error("Invalid category view callback payload");
+      const base = encodeResourceId(input.resourceId);
+      return input.option === undefined ? base : Buffer.concat([base, Buffer.from([input.option])]);
+    }
     case "VARIANT_VIEW":
     case "ORDER_LIST_PAGE":
     case "ORDER_VIEW":
@@ -529,7 +537,6 @@ function decodeActionPayload(
   }
   if (
     [
-      "CATEGORY_VIEW",
       "VARIANT_VIEW",
       "ORDER_LIST_PAGE",
       "ORDER_VIEW",
@@ -576,6 +583,12 @@ function decodeActionPayload(
   if (action === "SUPPORT_MENU") {
     if (payload.byteLength === 0) return {};
     return payload.byteLength === 16 ? { resourceId: decodeUlid(payload) } : null;
+  }
+  if (action === "CATEGORY_VIEW") {
+    if (payload.byteLength === 16) return { resourceId: decodeUlid(payload) };
+    return payload.byteLength === 17
+      ? { resourceId: decodeUlid(payload.subarray(0, 16)), option: payload[16]! }
+      : null;
   }
   if (action === "SUPPORT_REASON") {
     if (payload.byteLength === 1) return { option: payload[0]! };
