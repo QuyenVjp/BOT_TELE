@@ -535,4 +535,40 @@ describe("admin operational presenters", () => {
       expect(Buffer.byteLength(callback, "utf8")).toBeLessThanOrEqual(64);
     }
   });
+
+  // Two buttons sharing a label make a screen ambiguous for the owner and unaddressable for any
+  // harness: the same text would resolve to different destinations.
+  it("never renders two buttons with the same label on one screen", () => {
+    const screens = [
+      presentAdminInventoryVariant({
+        id: "01M25ZS118M24RG8V3JJAD0J1W",
+        productId: "01M25ZS117DD2H4RH751FEWDYR",
+        name: "1 thang",
+        sku: "TEST-FINAL-E2E-ACCT-03",
+        fulfillmentType: "STOCK_ACCOUNT",
+        available: 3,
+        lowStockThreshold: 3,
+        stockVersion: 1,
+        inventoryFields: [],
+        importSupported: true,
+      }),
+      presentAdminProductDetail({
+        id: "01M25ZS117DD2H4RH751FEWDYR",
+        name: "San pham",
+        slug: "san-pham",
+        categoryName: "Gemini",
+        description: null,
+        active: true,
+        variantCount: 0,
+        minPriceVnd: 2000n,
+        variants: [],
+      }),
+      presentAdminInventoryMenu(),
+      presentAdminProductsMenu(),
+    ];
+    for (const screen of screens) {
+      const labels = screen.buttons.flat().map((button) => button.text);
+      expect(new Set(labels).size).toBe(labels.length);
+    }
+  });
 });

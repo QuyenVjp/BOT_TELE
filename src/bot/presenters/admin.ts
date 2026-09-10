@@ -103,6 +103,13 @@ export const ADMIN_VISIBLE_ROUTE_KEYS = ADMIN_NAV_ITEMS.filter((item) => item.en
   | "testing"
 >;
 
+/**
+ * Home-only nav, for a screen that already carries its own contextual back row. Emitting a second
+ * `↩️ Quay lại` there produced two buttons with the same label pointing at different destinations —
+ * ambiguous for the owner and impossible to address unambiguously from a harness.
+ */
+const adminHomeOnly: InlineButton[] = [{ text: ADMIN_COPY.home, callbackData: "admin:menu" }];
+
 const adminNav = (back: string): InlineButton[] => [
   { text: ADMIN_COPY.back, callbackData: back },
   { text: ADMIN_COPY.home, callbackData: "admin:menu" },
@@ -1144,7 +1151,7 @@ export function presentAdminInventoryProduct(input: {
       ]),
       [{ text: "➕ Thêm biến thể", callbackData: `admin:products:variant-add:${input.id}` }],
       [{ text: ADMIN_COPY.back, callbackData: "admin:inventory" }],
-      adminNav("admin:menu"),
+      adminHomeOnly,
     ],
   };
 }
@@ -1224,7 +1231,7 @@ export function presentAdminInventoryVariant(input: {
       [{ text: "📋 Danh sách an toàn", callbackData: `admin:inventory:history:${input.id}` }],
       [{ text: "🧰 Quản lý dữ liệu", callbackData: `admin:inventory:items:${input.id}` }],
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:product:${input.productId}` }],
-      adminNav("admin:menu"),
+      adminHomeOnly,
     ],
   };
 }
@@ -1245,7 +1252,7 @@ export function presentAdminInventoryItems(input: {
       buttons: [
         [{ text: "📥 Nhập kho", callbackData: `admin:inventory:import:${input.variantId}` }],
         [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
-        adminNav("admin:menu"),
+        adminHomeOnly,
       ],
     };
   }
@@ -1265,7 +1272,7 @@ export function presentAdminInventoryItems(input: {
         },
       ]),
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
-      adminNav("admin:menu"),
+      adminHomeOnly,
     ],
   };
 }
@@ -1296,7 +1303,7 @@ export function presentAdminInventoryItemActions(input: {
         },
       ]),
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:items:${input.variantId}` }],
-      adminNav("admin:menu"),
+      adminHomeOnly,
     ],
   };
 }
@@ -1361,7 +1368,7 @@ export function presentAdminInventoryItemDone(input: {
     buttons: [
       [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
-      adminNav("admin:menu"),
+      adminHomeOnly,
     ],
   };
 }
@@ -1579,6 +1586,7 @@ export function presentAdminProductDetail(input: {
   active: boolean;
   variantCount: number;
   minPriceVnd: bigint;
+  isFeatured?: boolean;
   variants?: Array<{
     id: string;
     name: string;
@@ -1597,6 +1605,7 @@ export function presentAdminProductDetail(input: {
       `Slug: ${input.slug}`,
       `Danh mục: ${input.categoryName}`,
       `Trạng thái: ${input.active ? "đang bán" : "tạm dừng"}`,
+      `Ghim nổi bật: ${input.isFeatured ? "⭐ Có" : "Không"}`,
       `Biến thể: ${input.variantCount}`,
       `Giá thấp nhất: ${input.minPriceVnd.toLocaleString("vi-VN")} ₫`,
       ...(input.variants?.length
@@ -1612,6 +1621,12 @@ export function presentAdminProductDetail(input: {
     ].join("\n"),
     buttons: [
       [{ text: "✏️ Sửa nội dung", callbackData: `admin:products:content:${input.id}` }],
+      [
+        {
+          text: input.isFeatured ? "☆ Bỏ ghim nổi bật" : "⭐ Ghim nổi bật",
+          callbackData: `admin:products:feature:${input.id}`,
+        },
+      ],
       [{ text: "➕ Thêm biến thể", callbackData: `admin:products:variant-add:${input.id}` }],
       ...(input.variants ?? []).flatMap((variant) => {
         const stockBacked =
@@ -1636,7 +1651,7 @@ export function presentAdminProductDetail(input: {
         ];
       }),
       [{ text: ADMIN_COPY.back, callbackData: "admin:products" }],
-      adminNav("admin:menu"),
+      adminHomeOnly,
     ],
   };
 }
@@ -1878,7 +1893,7 @@ export function presentAdminProductContentMenu(input: {
         },
       ]),
       [{ text: "⬅️ Quay lại", callbackData: `admin:products:detail:${input.productId}` }],
-      adminNav("admin:menu"),
+      adminHomeOnly,
     ],
   };
 }

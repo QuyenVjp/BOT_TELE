@@ -2343,6 +2343,60 @@ async function bootstrap(): Promise<void> {
         `.execute(dbHandle.db);
         return presentAdminProducts(result.rows);
       },
+      /** Goal §11 — featured is a product flag the owner toggles, on an existing product too. */
+      async productFeature(input) {
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: input.productId,
+          reason: "Admin product featured toggle",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const current = await sql<{ is_featured: boolean }>`
+          select is_featured from product where id = ${input.productId} limit 1
+        `.execute(dbHandle.db);
+        if (!current.rows[0])
+          return {
+            text: "Sản phẩm không còn hợp lệ.",
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+          };
+        const { setProductFeatured } = await import("./modules/catalog/repository.js");
+        const next = !current.rows[0].is_featured;
+        await setProductFeatured(dbHandle.db, input.productId, next);
+        await appendAuditEvent(dbHandle.db, {
+          actorType: "ROOT_ADMIN",
+          actorId: String(input.telegramUserId),
+          action: next ? "product.featured" : "product.unfeatured",
+          targetType: "Product",
+          targetId: input.productId,
+          reason: "Owner toggled featured",
+          correlationId: input.correlationId,
+          metadataRedacted: { isFeatured: next },
+        });
+        return {
+          text: next
+            ? "⭐ Đã ghim sản phẩm vào mục nổi bật."
+            : "☆ Đã bỏ ghim sản phẩm khỏi mục nổi bật.",
+          buttons: [
+            [
+              {
+                text: "↩️ Chi tiết sản phẩm",
+                callbackData: `admin:products:detail:${input.productId}`,
+              },
+            ],
+            [
+              { text: "🛍 Sản phẩm", callbackData: "admin:products" },
+              { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
+            ],
+          ],
+        };
+      },
       async productDetail(input) {
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const gate = await adminCallbacks.handle({
@@ -2365,6 +2419,7 @@ async function bootstrap(): Promise<void> {
           active: boolean;
           variant_count: number;
           min_price_vnd: string | null;
+          is_featured: boolean;
         }>`
           select
             p.id,
@@ -2373,6 +2428,7 @@ async function bootstrap(): Promise<void> {
             c.name_vi as category_name,
             p.short_description_vi as description,
             p.is_active as active,
+            p.is_featured,
             count(v.id)::int as variant_count,
             min(v.price_vnd)::bigint as min_price_vnd
           from product p
@@ -2412,6 +2468,7 @@ async function bootstrap(): Promise<void> {
           active: row.active,
           variantCount: row.variant_count,
           minPriceVnd: BigInt(row.min_price_vnd ?? 0),
+          isFeatured: row.is_featured,
           variants: variants.rows.map((variant) => ({
             id: variant.id,
             name: variant.name,

@@ -224,6 +224,12 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    productFeature?(input: {
+      telegramUserId: string;
+      productId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     variantCreatePrompt?(input: {
       telegramUserId: string;
       productId: string;
@@ -1477,6 +1483,15 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Sửa biến thể không khả dụng.");
+        } else if (route.startsWith("products:feature:")) {
+          message = admin.productFeature
+            ? await admin.productFeature({
+                telegramUserId: envelope.actorUserId,
+                productId: route.slice("products:feature:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Sản phẩm không khả dụng.");
         } else if (route.startsWith("products:content:")) {
           const productId = route.slice("products:content:".length);
           message = admin.workflow?.productContentMenu
