@@ -17,7 +17,6 @@ import type { SearchParser } from "../../modules/catalog/search-parser-port.js";
 import type { BuyNowCallbackCodec } from "../callback-codec.js";
 import { isId } from "../../shared/ids/index.js";
 import {
-  presentMainMenu,
   presentCategoryList,
   presentVariantDetail,
   presentSearchResults,
@@ -119,7 +118,12 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
 
   const callbacks: CatalogCallbacks = {
     async mainMenu() {
-      return presentMainMenu();
+      return callbacks.storefront({
+        actorName: "bạn",
+        telegramUserId: "0",
+        offset: 0,
+        isRootAdmin: false,
+      });
     },
 
     async categoryList(identity?: CatalogIdentity | undefined) {
@@ -245,7 +249,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
           ...(input.isRootAdmin === true ? { isRootAdmin: true } : {}),
         });
       if (!deps.productLinkSecret || !payload.startsWith("product_")) return home();
-      const productId = verifyProductLinkToken(payload, { secret: deps.productLinkSecret });
+      const productId = verifyProductLinkToken(payload, { secret: [REDACTED:Generic Password Field] });
       if (!productId) return home();
       return callbacks.productDetail(productId, input.telegramUserId, {
         telegramUserId: input.telegramUserId,

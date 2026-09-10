@@ -94,18 +94,26 @@ function navHome(): InlineButton[][] {
   ];
 }
 
-/** Main retail menu (FR-001). No wallet/top-up/reseller/admin controls. */
+/** Legacy compact menu. Live customer home is presentStorefront. */
 export function presentMainMenu(): PresentedMessage {
   return {
     text: CATALOG_COPY.mainMenuTitle,
     buttons: [
-      [{ text: CATALOG_COPY.browse, callbackData: "cat:list" }],
-      [
-        { text: CATALOG_COPY.search, callbackData: "cat:search" },
-        { text: CATALOG_COPY.orders, callbackData: "ord:list" },
-      ],
-      [{ text: CATALOG_COPY.support, callbackData: "sup:open" }],
+      [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
+      [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
     ],
+  };
+}
+
+export function presentSearchPrompt(): PresentedMessage {
+  return {
+    text: [
+      "🔎 TÌM SẢN PHẨM",
+      "",
+      "Gửi tên sản phẩm ngay bây giờ, ví dụ:",
+      "gpt • chatgpt • claude • cursor • vpn",
+    ].join("\n"),
+    buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]],
   };
 }
 

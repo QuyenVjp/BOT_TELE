@@ -16,7 +16,7 @@ import {
   CUSTOMER_COPY,
 } from "../presenters/customer.js";
 import type { TelegramUpdate } from "../webhook.js";
-import type { PresentedMessage } from "../presenters/catalog.js";
+import { presentSearchPrompt, type PresentedMessage } from "../presenters/catalog.js";
 import type { CheckoutCallbacks } from "./checkout.js";
 import type { TelegramCommandEnvelope } from "../../infrastructure/inbox/telegram.js";
 import type { CallbackTokenCodec, VerifiedCallbackToken } from "../callback-codec.js";
@@ -776,12 +776,7 @@ export function createTelegramDomainDispatcher(
         });
         await ackIfNeeded();
         if (!verified.ok) {
-          const home = await shopHome(deps, envelope);
-          message = {
-            text: `Phiên này đã cũ. Đã tải lại danh mục mới nhất.\n\n${home.text}`,
-            buttons: home.buttons,
-            ...(home.replyKeyboard ? { replyKeyboard: home.replyKeyboard } : {}),
-          };
+          message = await staleNavigation(deps, envelope);
         } else {
           message = await dispatchVerified(deps, envelope, verified.value, correlationId);
         }
@@ -837,6 +832,8 @@ export function createTelegramDomainDispatcher(
           : safeError("Không tìm thấy thông tin khách hàng.");
       } else if (envelope.callbackData === "shop:home" || envelope.callbackData === "menu:main") {
         message = await shopHome(deps, envelope);
+      } else if (envelope.callbackData === "cat:search") {
+        message = presentSearchPrompt();
       } else if (
         envelope.callbackData === "delivery:open" ||
         envelope.callbackData?.startsWith("delivery:open:")
@@ -883,7 +880,7 @@ export function createTelegramDomainDispatcher(
               envelope.actorUserId,
               catalogActorIdentity(deps, envelope.actorUserId),
             )
-          : await deps.catalog.mainMenu();
+          : await shopHome(deps, envelope);
       } else if (envelope.callbackData === "cust:warranty") {
         message = presentCustomerWarranty();
       } else if (envelope.callbackData === "cust:notify") {
@@ -1857,7 +1854,7 @@ export function createTelegramDomainDispatcher(
               envelope.searchQuery,
               catalogActorIdentity(deps, envelope.actorUserId),
             )
-          : safeError("Dùng /search kèm tên sản phẩm.");
+          : presentSearchPrompt();
       } else if (command === "/warranty") {
         message = presentCustomerWarranty();
       } else if (command === "/settings") {
@@ -1952,7 +1949,7 @@ export function createTelegramDomainDispatcher(
         envelope.messageText === CUSTOMER_COPY.back ||
         envelope.messageText === "↩️ Quay lại"
       ) {
-        message = presentCustomerHome();
+        message = await shopHome(deps, envelope);
       } else if (
         envelope.messageText === CUSTOMER_COPY.orders ||
         envelope.messageText === "🧾 Đơn hàng"
@@ -1981,7 +1978,7 @@ export function createTelegramDomainDispatcher(
             document: envelope.document,
             chatType: envelope.chatType,
             correlationId,
-          })) ?? (await deps.catalog.mainMenu());
+          })) ?? (await shopHome(deps, envelope));
       } else if (
         envelope.messageText &&
         (deps.walletTopupText ||
@@ -2012,7 +2009,7 @@ export function createTelegramDomainDispatcher(
                   correlationId,
                 })
               : null) ??
-            (await deps.catalog.mainMenu()))
+            (await shopHome(deps, envelope)))
           : ((deps.walletTopupText
               ? await deps.walletTopupText(ctx, envelope.messageText)
               : null) ??
@@ -2088,22 +2085,16 @@ export function createTelegramDomainDispatcher(
                   correlationId,
                 })
               : null) ??
-            (await deps.catalog.mainMenu()));
+            (await shopHome(deps, envelope)));
       } else if (envelope.callbackData) {
         const verified = deps.codec.verify(envelope.callbackData, {
           telegramUserId: envelope.actorUserId,
         });
         message = verified.ok
           ? await dispatchVerified(deps, envelope, verified.value, correlationId)
-          : {
-              text: "Yêu cầu không hợp lệ hoặc phiên nút đã cũ. Vui lòng mở lại menu để tiếp tục.",
-              buttons: [
-                [{ text: "🧾 Đơn hàng của tôi", callbackData: "ord:list" }],
-                [{ text: "Menu chính", callbackData: "menu:main" }],
-              ],
-            };
+          : await staleNavigation(deps, envelope);
       } else {
-        message = await deps.catalog.mainMenu();
+        message = await catalogHomeOrSearch(deps, envelope);
       }
 
       const sealed = await sealPresentedMessageCallbacks(message, {
@@ -2200,7 +2191,7 @@ async function dispatchVerified(
 
   switch (token.action) {
     case "SEARCH_PROMPT":
-      return deps.catalog.mainMenu();
+      return presentSearchPrompt();
     case "MAIN_MENU":
       return shopHome(deps, envelope);
     case "CATEGORY_LIST":
@@ -2319,7 +2310,7 @@ async function dispatchVerified(
             envelope.actorUserId,
             catalogActorIdentity(deps, envelope.actorUserId),
           )
-        : deps.catalog.mainMenu();
+        : shopHome(deps, envelope);
     case "CUSTOMER_WARRANTY":
       return presentCustomerWarranty();
     case "CUSTOMER_NOTIFICATIONS":
@@ -2382,6 +2373,30 @@ function safeError(text: string): PresentedMessage {
 
 function isCatalogId(value: string): boolean {
   return /^[0-9A-Z]{26}$/.test(value);
+}
+
+
+async function staleNavigation(
+  deps: TelegramDomainDispatcherDeps,
+  envelope: TelegramCommandEnvelope,
+): Promise<PresentedMessage> {
+  const home = await shopHome(deps, envelope);
+  return {
+    text: `Phiên này đã cũ. Đã tải lại thông tin mới nhất.\n\n${home.text}`,
+    buttons: home.buttons,
+    ...(home.replyKeyboard ? { replyKeyboard: home.replyKeyboard } : {}),
+  };
+}
+
+async function catalogHomeOrSearch(
+  deps: TelegramDomainDispatcherDeps,
+  envelope: TelegramCommandEnvelope,
+): Promise<PresentedMessage> {
+  const raw = envelope.messageText?.trim() ?? "";
+  if (raw.length >= 2 && raw.length <= 64 && !raw.startsWith("/")) {
+    return deps.catalog.search(raw, catalogActorIdentity(deps, envelope.actorUserId));
+  }
+  return shopHome(deps, envelope);
 }
 
 async function shopHome(

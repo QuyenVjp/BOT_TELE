@@ -23,37 +23,46 @@ import {
 describe("admin operational presenters", () => {
   it("only exposes live admin route keys in the root menu", () => {
     expect(ADMIN_VISIBLE_ROUTE_KEYS).toEqual([
+      "dashboard",
       "products",
+      "categories",
       "inventory",
-      "customers",
       "orders",
       "payments",
+      "customers",
+      "preorders",
+      "marketing",
       "suppliers",
       "support",
-      "marketing",
+      "testing",
     ]);
 
-    const labels = presentAdminMenu()
-      .buttons.flat()
-      .map((button) => button.text);
+    const menu = presentAdminMenu();
+    expect(menu.text).toContain("⚙️ TIER20 SHOP — QUẢN TRỊ");
+    const labels = menu.buttons.flat().map((button) => button.text);
     expect(labels).toEqual(
       expect.arrayContaining([
-        "🛍 Sản phẩm",
-        "📦 Kho hàng",
+        "📊 Tổng quan",
+        "📦 Sản phẩm",
+        "🏷 Danh mục",
+        "📥 Kho hàng",
         "🧾 Đơn hàng",
         "💳 Thanh toán",
-        "🚚 Nhà cung cấp",
-        "💬 Hỗ trợ",
+        "👥 Khách hàng",
+        "💰 Đặt cọc",
+        "📢 Broadcast",
+        "🚚 NCC",
+        "🛡 Hỗ trợ/BH",
+        "🧪 Test Lab",
+        "⚙️ Cài đặt",
+        "🛒 Về Shop",
       ]),
     );
+    expect(menu.buttons.flat().find((button) => button.text === "🛒 Về Shop")?.callbackData).toBe(
+      "shop:home",
+    );
     expect(labels).not.toEqual(
-      expect.arrayContaining([
-        "📊 Tổng quan",
-        "📣 Tiếp thị",
-        "🛠 Vận hành",
-        "🧪 Kiểm thử",
-        "📜 Nhật ký",
-      ]),
+      expect.arrayContaining(["🛠 Vận hành", "🧪 Kiểm thử", "📜 Nhật ký"]),
     );
   });
 
@@ -63,7 +72,7 @@ describe("admin operational presenters", () => {
       .map((button) => button.text)
       .join(" ");
     expect(labels).not.toMatch(
-      /Dashboard|Products|Inventory|Orders|Payments|Suppliers|Broadcast|Restock|Test Lab|Health|Settings|Audit/,
+      /Dashboard|Products|Inventory|Orders|Payments|Suppliers|Restock|Health|Settings|Audit/,
     );
   });
 

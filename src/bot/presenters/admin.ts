@@ -33,7 +33,7 @@ export const ADMIN_COPY = {
   auditEmpty: "Chưa có sự kiện kiểm toán cho mục này.",
   unknownCommand: "Lệnh không được hỗ trợ.",
   mainMenu: "Menu chính",
-  adminMenu: "⚙️ BẢNG ĐIỀU HÀNH QUẢN TRỊ",
+  adminMenu: "⚙️ TIER20 SHOP — QUẢN TRỊ",
   back: "↩️ Quay lại",
   home: "⌂ Trang quản trị",
   overview: "📊 Tổng quan",
@@ -58,37 +58,43 @@ export interface AdminNavItem {
 }
 
 export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
-  { id: "products", label: ADMIN_COPY.products, callbackData: "admin:products", enabled: true },
-  { id: "inventory", label: ADMIN_COPY.inventory, callbackData: "admin:inventory", enabled: true },
-  { id: "customers", label: ADMIN_COPY.customers, callbackData: "admin:customers", enabled: true },
+  { id: "dashboard", label: ADMIN_COPY.overview, callbackData: "admin:dashboard", enabled: true },
+  { id: "products", label: "📦 Sản phẩm", callbackData: "admin:products", enabled: true },
+  { id: "categories", label: "🏷 Danh mục", callbackData: "admin:categories", enabled: true },
+  { id: "inventory", label: "📥 Kho hàng", callbackData: "admin:inventory", enabled: true },
   { id: "orders", label: ADMIN_COPY.orders, callbackData: "admin:orders", enabled: true },
   { id: "payments", label: ADMIN_COPY.payments, callbackData: "admin:payments", enabled: true },
-  { id: "suppliers", label: ADMIN_COPY.suppliers, callbackData: "admin:suppliers", enabled: true },
-  { id: "support", label: ADMIN_COPY.support, callbackData: "admin:support", enabled: true },
-  { id: "dashboard", label: ADMIN_COPY.overview, callbackData: "admin:dashboard", enabled: false },
-  { id: "marketing", label: ADMIN_COPY.marketing, callbackData: "admin:marketing", enabled: true },
+  { id: "customers", label: ADMIN_COPY.customers, callbackData: "admin:customers", enabled: true },
+  { id: "preorders", label: "💰 Đặt cọc", callbackData: "admin:preorders", enabled: true },
+  { id: "marketing", label: "📢 Broadcast", callbackData: "admin:marketing", enabled: true },
+  { id: "suppliers", label: "🚚 NCC", callbackData: "admin:suppliers", enabled: true },
+  { id: "support", label: "🛡 Hỗ trợ/BH", callbackData: "admin:support", enabled: true },
+  { id: "testing", label: "🧪 Test Lab", callbackData: "admin:testlab", enabled: true },
   {
     id: "operations",
     label: ADMIN_COPY.operations,
     callbackData: "admin:operations",
     enabled: false,
   },
-  { id: "testing", label: ADMIN_COPY.testing, callbackData: "admin:testing", enabled: false },
   { id: "audit", label: ADMIN_COPY.audit, callbackData: "admin:audit", enabled: false },
 ] as const;
 
 export const ADMIN_VISIBLE_ROUTE_KEYS = ADMIN_NAV_ITEMS.filter((item) => item.enabled).map(
   (item) => item.id,
 ) as Array<
+  | "dashboard"
   | "products"
+  | "categories"
   | "inventory"
   | "orders"
   | "payments"
+  | "customers"
+  | "preorders"
+  | "marketing"
   | "suppliers"
   | "support"
-  | "marketing"
-  | "customers"
->;
+  | "testing"
+>
 
 const adminNav = (back: string): InlineButton[] => [
   { text: ADMIN_COPY.back, callbackData: back },
@@ -114,13 +120,13 @@ export function presentAdminMenu(storeMode: StoreMode = "CLOSED"): PresentedMess
       : storeMode === "TEST"
         ? "🟡 CHẾ ĐỘ TEST"
         : "🔴 CỬA HÀNG ĐANG ĐÓNG";
-  const storeButton: InlineButton[] =
-    storeMode === "CLOSED"
-      ? [{ text: "🏪 Trạng thái cửa hàng", callbackData: "admin:store:mode" }]
-      : [{ text: "🏪 Trạng thái cửa hàng", callbackData: "admin:store:mode" }];
   return {
     text: `${ADMIN_COPY.adminMenu}\n\n${storeBanner}`,
-    buttons: [storeButton, ...visibleAdminButtons()],
+    buttons: [
+      ...visibleAdminButtons(),
+      [{ text: "⚙️ Cài đặt", callbackData: "admin:store:mode" }],
+      [{ text: "🛒 Về Shop", callbackData: "shop:home" }],
+    ],
   };
 }
 

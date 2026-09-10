@@ -89,6 +89,9 @@ describe("customer branding presenters", () => {
     expect(page.text).toContain(SHOP_NAME);
     expect(page.buttons.flat().some((b) => b.url === ADMIN_CONTACT_URL)).toBe(false);
     expect(presentMainMenu().text).toContain(SHOP_NAME);
+    expect(presentMainMenu().buttons.flat().map((button) => button.text)).not.toContain(
+      "🛍 Danh sách sản phẩm",
+    );
   });
 });
 
@@ -155,5 +158,118 @@ describe("catalog callback ACK", () => {
     expect(order.events[1]).toBe("send");
     expect(send.mock.calls[0]?.[0]).not.toHaveProperty("callbackQueryId");
     expect(storefront).toHaveBeenCalled();
+  });
+});
+
+describe("bot-only catalog navigation", () => {
+  function dispatcherForNav() {
+    const storefront = vi.fn(async () => ({
+      text: `👋 Chào Quyen!\n🛒 ${SHOP_NAME}`,
+      buttons: [[{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }]],
+    }));
+    const search = vi.fn(async () => ({ text: "Kết quả tìm kiếm", buttons: [] }));
+    const send = vi.fn();
+    const codec = createCallbackTokenCodec({
+      key: "test-only-telegram-dispatch-key-material-123456",
+      keyVersion: 1,
+      ttlSeconds: 900,
+      clockSkewSeconds: 5,
+    });
+    const dispatcher = createTelegramDomainDispatcher({
+      codec,
+      resolveCustomerId: vi.fn().mockResolvedValue("cust"),
+      resolveOrderById: vi.fn().mockResolvedValue(null),
+      resolveOrderIdByNumber: vi.fn().mockResolvedValue(null),
+      resolveCatalogPage: vi.fn().mockResolvedValue(null),
+      catalog: {
+        mainMenu: vi.fn(async () => presentMainMenu()),
+        categoryList: vi.fn(async () => ({ text: "cats", buttons: [] })),
+        categoryView: vi.fn(async () => ({ text: "cat", buttons: [] })),
+        variantDetail: vi.fn(),
+        search,
+        storefront,
+      },
+      checkout: {
+        buyNowFromCallback: vi.fn(),
+        refresh: vi.fn(),
+        reopen: vi.fn(),
+        cancel: vi.fn(),
+      },
+      history: { list: vi.fn(), detail: vi.fn() },
+      support: {
+        reasonMenu: vi.fn(() => presentSupportReasonMenu()),
+        open: vi.fn(),
+        list: vi.fn(),
+      },
+      responder: { ack: vi.fn(), send },
+    });
+    return { storefront, codec, send, dispatcher };
+  }
+
+  it("opens catalog home from Mua hàng without Danh sách sản phẩm", async () => {
+    const { dispatcher, storefront, send } = dispatcherForNav();
+    await dispatcher.handle({
+      actorUserId: "123456789",
+      chatId: "123456789",
+      chatType: "private",
+      messageId: "7",
+      action: "CATALOG",
+      messageText: "🛒 Mua hàng",
+      firstName: "Quyen",
+    });
+    expect(storefront).toHaveBeenCalled();
+    const message = send.mock.calls[0]?.[0]?.message as { text: string; buttons: { text: string }[][] };
+    expect(message.text).toContain(SHOP_NAME);
+    expect(JSON.stringify(message.buttons)).not.toContain("Danh sách sản phẩm");
+  });
+
+  it("routes search prompt instead of the old product-list hop", async () => {
+    const { dispatcher, codec, send } = dispatcherForNav();
+    const token = codec.issue({ action: "SEARCH_PROMPT", telegramUserId: "123456789" });
+    await dispatcher.handle({
+      actorUserId: "123456789",
+      chatId: "123456789",
+      chatType: "private",
+      messageId: "8",
+      action: "CATALOG",
+      callbackData: token,
+      callbackQueryId: "cq-search",
+    });
+    const message = send.mock.calls[0]?.[0]?.message as { text: string };
+    expect(message.text).toContain("TÌM SẢN PHẨM");
+    expect(message.text).not.toContain("Danh sách sản phẩm");
+  });
+
+  it("recovers stale unsealed callbacks without calling them invalid", async () => {
+    const { dispatcher, storefront, send } = dispatcherForNav();
+    await dispatcher.handle({
+      actorUserId: "123456789",
+      chatId: "123456789",
+      chatType: "private",
+      messageId: "9",
+      action: "CATALOG",
+      callbackData: "not-a-valid-token",
+      callbackQueryId: "cq-stale",
+    });
+    const message = send.mock.calls[0]?.[0]?.message as { text: string };
+    expect(message.text).toContain("Phiên này đã cũ. Đã tải lại thông tin mới nhất.");
+    expect(message.text).not.toContain("Yêu cầu không hợp lệ");
+    expect(storefront).toHaveBeenCalled();
+  });
+
+  it("returns catalog home from Quay lại", async () => {
+    const { dispatcher, storefront, send } = dispatcherForNav();
+    await dispatcher.handle({
+      actorUserId: "123456789",
+      chatId: "123456789",
+      chatType: "private",
+      messageId: "10",
+      action: "CATALOG",
+      messageText: "↩️ Quay lại",
+      firstName: "Quyen",
+    });
+    expect(storefront).toHaveBeenCalled();
+    const message = send.mock.calls[0]?.[0]?.message as { text: string };
+    expect(message.text).toContain(SHOP_NAME);
   });
 });
