@@ -163,7 +163,9 @@ describe("admin product creation and selected-variant inventory import", () => {
       actor: rootActor,
       config: rootConfig,
       correlationId: "admin-product-inventory:stage-import",
-      rawInput: "user1:pass1\nuser2:pass2",
+      // The variant's schema is [email, username, password]: a row that fills only two of them
+      // leaves a required field empty and the import refuses it, so the fixture fills all three.
+      rawInput: "user1@example.invalid:user1:pass1\nuser2@example.invalid:user2:pass2",
     });
     expect(staged).toMatchObject({ ok: true, preview: { ready: 2, invalid: 0, duplicates: 0 } });
     if (!staged.ok) return;
