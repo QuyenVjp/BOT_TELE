@@ -41,6 +41,7 @@ describe("admin operational presenters", () => {
       "suppliers",
       "support",
       "health",
+      "warranty",
       "testing",
     ]);
 
