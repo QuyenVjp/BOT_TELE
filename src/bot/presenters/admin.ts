@@ -713,6 +713,10 @@ export function presentProductDraftPreview(draft: {
   lowStockThreshold?: number | undefined;
   descriptionVi?: string | undefined;
   warrantyVi?: string | undefined;
+  /** Warranty policy (goal §79): the preview states the structured term. */
+  warrantyEnabled?: boolean | undefined;
+  warrantyDays?: number | undefined;
+  warrantyProrationEnabled?: boolean | undefined;
   deliveryEtaVi?: string | undefined;
   serviceInstructions?: string | undefined;
   initialQuantity?: number | undefined;
