@@ -107,8 +107,80 @@ export async function presentPaymentScreen(
   };
 }
 
-/** Expired intent / order (goal §37): re-mint, view the order, or get support. */
-export function presentPaymentExpired(orderNumber: string): PresentedMessage {
+/**
+ * Preorder deposit / balance payment screen. Shows the SAME truth as the order
+ * screen (exact amount, transfer content, deadline) but for a deposit hold, and
+ * it never says "thành công" — the deposit counts only once SePay confirms it.
+ */
+export interface PreorderPaymentScreenInput {
+  productName: string;
+  variantName: string;
+  /** Deposit (queue hold) or the remaining balance owed once stock is allocated. */
+  leg: "DEPOSIT" | "BALANCE";
+  depositVnd: bigint;
+  balanceVnd: bigint;
+  presentation: PaymentPresentation;
+  /** Reservation id the refresh/back callbacks resolve against. */
+  reservationId: string;
+}
+
+export async function presentPreorderPaymentScreen(
+  input: PreorderPaymentScreenInput,
+): Promise<PresentedMessage> {
+  const amount = formatVnd(makeVnd(input.presentation.amountVnd));
+  const bankLine = input.presentation.bankName
+    ? `${PAYMENT_COPY.accountLabel}: ${input.presentation.accountNumber} — ${input.presentation.bankName} (${input.presentation.accountName})`
+    : `${PAYMENT_COPY.accountLabel}: ${input.presentation.accountNumber} (${input.presentation.accountName})`;
+  const lines =
+    input.leg === "DEPOSIT"
+      ? [
+          "💰 THANH TOÁN TIỀN ĐẶT CỌC",
+          "",
+          `📦 Sản phẩm: ${input.productName} · ${input.variantName}`,
+          `Tiền đặt cọc: ${amount}`,
+          `Còn lại khi có hàng: ${formatVnd(makeVnd(input.balanceVnd))}`,
+          "",
+          bankLine,
+          `${PAYMENT_COPY.contentLabel}: ${input.presentation.transferContent}`,
+          `${PAYMENT_COPY.expiresLabel}: ${formatExpiryVietnam(input.presentation.expiresAt)}`,
+          "",
+          "Suất của bạn được xác nhận ngay khi hệ thống nhận được tiền cọc.",
+          PAYMENT_COPY.noScreenshot,
+        ]
+      : [
+          "💰 THANH TOÁN PHẦN CÒN LẠI",
+          "",
+          `📦 Sản phẩm: ${input.productName} · ${input.variantName}`,
+          `Còn phải trả: ${amount}`,
+          `Tiền cọc đã trả: ${formatVnd(makeVnd(input.depositVnd))}`,
+          "",
+          bankLine,
+          `${PAYMENT_COPY.contentLabel}: ${input.presentation.transferContent}`,
+          `${PAYMENT_COPY.expiresLabel}: ${formatExpiryVietnam(input.presentation.expiresAt)}`,
+          "",
+          "Hàng đang được giữ riêng cho bạn. Vui lòng thanh toán trước hạn trên.",
+          PAYMENT_COPY.noScreenshot,
+        ];
+  return {
+    text: lines.join("\n"),
+    photo: await toBuffer(input.presentation.payload, { type: "png", errorCorrectionLevel: "M" }),
+    buttons: [
+      [
+        {
+          text: PAYMENT_COPY.refresh,
+          callbackData: `preorder:pay:${input.reservationId}`,
+        },
+      ],
+      [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
+      [{ text: PAYMENT_COPY.support, callbackData: "supp:open" }],
+      [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+    ],
+  };
+}
+
+/** Expired intent / order (goal §37): re-mint, view the order, or get support. */ export function presentPaymentExpired(
+  orderNumber: string,
+): PresentedMessage {
   return {
     text: [PAYMENT_COPY.expiredTitle, "", `Đơn: ${orderNumber}`, PAYMENT_COPY.expiredBody].join(
       "\n",

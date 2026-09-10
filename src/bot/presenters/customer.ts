@@ -1,6 +1,12 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import type { InlineButton, PresentedMessage, ReplyKeyboard } from "./catalog.js";
+import { formatExpiryVietnam } from "./payment.js";
 import type { StorefrontProductSummary } from "../../modules/catalog/repository.js";
+import {
+  preorderPayableLeg,
+  type CustomerPreorderSummary,
+  type PreorderStatus,
+} from "../../modules/commerce/preorder.js";
 import {
   ADMIN_CONTACT_URL,
   COMMUNITY_BUTTON_LABEL,
@@ -180,6 +186,81 @@ export function presentCustomerNotificationPreferences(prefs: {
   };
 }
 /**
+ * The customer's deposit holds (goal: preorder visibility). One screen answers
+ * the three questions a depositor actually has: has my deposit been received,
+ * where am I in the queue, and by when must I pay the rest. State comes from the
+ * reservation row only — nothing here claims a payment that SePay has not
+ * confirmed.
+ */
+const PREORDER_STATUS_LINE: Record<PreorderStatus, string> = {
+  CREATED: "⏳ Chưa hoàn tất đặt cọc",
+  WAITING_DEPOSIT: "⏳ Chưa nhận được tiền cọc",
+  DEPOSIT_PAID: "✅ Đã nhận tiền cọc — đang chờ hàng về",
+  ALLOCATED: "📦 Hàng đã về và đang giữ riêng cho bạn",
+  BALANCE_DUE: "📦 Hàng đã về, cần thanh toán nốt",
+  FULLY_PAID: "🎉 Đã thanh toán đủ — shop đang giao hàng",
+  FULFILLED: "✅ Đã giao hàng",
+  DEPOSIT_EXPIRED: "❌ Suất đặt cọc đã hết hạn",
+  CANCELLED: "🚫 Suất đặt cọc đã huỷ",
+  SHOP_CANCELLED: "🚫 Shop đã huỷ suất đặt cọc",
+  HOLD_EXPIRED: "❌ Đã hết hạn giữ hàng",
+  DEPOSIT_FORFEITED:
+    "❌ Quá hạn thanh toán phần còn lại — tiền cọc không được hoàn lại theo điều kiện đã đồng ý",
+  REFUND_DUE: "💸 Shop đang xử lý hoàn tiền cọc",
+};
+
+export function presentCustomerPreorders(
+  preorders: readonly CustomerPreorderSummary[],
+): PresentedMessage {
+  const lines = ["💰 ĐẶT CỌC CỦA TÔI", ""];
+  const buttons: InlineButton[][] = [];
+  if (preorders.length === 0) {
+    lines.push("Bạn chưa có suất đặt cọc nào.");
+  }
+  for (const preorder of preorders) {
+    lines.push(`• ${preorder.productName} · ${preorder.variantName}`);
+    lines.push(`   ${PREORDER_STATUS_LINE[preorder.status]}`);
+    if (preorder.status === "DEPOSIT_PAID") {
+      lines.push(`   Đã cọc: ${formatVnd(makeVnd(BigInt(preorder.depositVnd)))}`);
+      const position = preorder.queuePosition;
+      lines.push(
+        position !== null && position > 0
+          ? `   Vị trí hàng chờ: #${position}`
+          : "   Đang xếp vào hàng chờ",
+      );
+    }
+    const balanceDueLabel =
+      preorder.balanceDueUntil !== null
+        ? formatExpiryVietnam(preorder.balanceDueUntil.toISOString())
+        : null;
+    if (preorder.status === "ALLOCATED" || preorder.status === "BALANCE_DUE") {
+      lines.push(`   Còn phải trả: ${formatVnd(makeVnd(BigInt(preorder.balanceVnd)))}`);
+      if (balanceDueLabel) lines.push(`   Hạn thanh toán: ${balanceDueLabel}`);
+    }
+    if (preorder.status === "WAITING_DEPOSIT") {
+      lines.push(`   Tiền cọc: ${formatVnd(makeVnd(BigInt(preorder.depositVnd)))}`);
+    }
+    const leg = preorderPayableLeg(preorder.status);
+    if (leg) {
+      const amount = leg === "DEPOSIT" ? preorder.depositVnd : preorder.balanceVnd;
+      buttons.push([
+        {
+          text:
+            leg === "DEPOSIT"
+              ? `🏦 Thanh toán cọc ${formatVnd(makeVnd(BigInt(amount)))}`
+              : `🏦 Thanh toán nốt ${formatVnd(makeVnd(BigInt(amount)))}`,
+          callbackData: `preorder:pay:${preorder.id}`,
+        },
+      ]);
+    }
+    lines.push("");
+  }
+  buttons.push([{ text: CUSTOMER_COPY.browse, callbackData: "shop:home" }]);
+  buttons.push([{ text: CUSTOMER_COPY.support, callbackData: "supp:open" }]);
+  return { text: lines.join("\n").trimEnd(), buttons };
+}
+
+/**
  * Customer account home (goal §69): display name, wallet balance, completed-order
  * count and notification state. The numeric Telegram id is never rendered.
  */
@@ -201,6 +282,7 @@ export function presentCustomerAccount(input: {
     ].join("\n"),
     buttons: [
       [{ text: "🧾 Đơn hàng của tôi", callbackData: "ord:list" }],
+      [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
       [{ text: "💰 Nạp ví", callbackData: "wallet:topup" }],
       [{ text: "🔔 Cài đặt thông báo", callbackData: "cust:notify" }],
       [{ text: "🛡 Bảo hành", callbackData: "cust:warranty" }],

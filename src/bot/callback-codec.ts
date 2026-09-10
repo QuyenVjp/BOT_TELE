@@ -268,6 +268,8 @@ export const CALLBACK_ACTION_CODES = {
   PREORDER_CREATE: 27,
   CHECKOUT_PREVIEW: 28,
   CHECKOUT_WALLET: 29,
+  PREORDER_LIST: 30,
+  PREORDER_PAY: 31,
 } as const;
 
 export type CallbackAction = keyof typeof CALLBACK_ACTION_CODES;
@@ -424,6 +426,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "SHOP_OPEN":
     case "CUSTOMER_NOTIFICATIONS":
     case "CUSTOMER_WARRANTY":
+    case "PREORDER_LIST":
       assertNoPayload(input);
       return Buffer.alloc(0);
     case "CATEGORY_VIEW": {
@@ -448,6 +451,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "SHOP_PAGE":
     case "PREORDER_CONSENT":
     case "PREORDER_CREATE":
+    case "PREORDER_PAY":
     case "CHECKOUT_PREVIEW":
       assertOnlyResource(input);
       return encodeResourceId(input.resourceId!);
@@ -531,6 +535,7 @@ function decodeActionPayload(
       "SHOP_OPEN",
       "CUSTOMER_NOTIFICATIONS",
       "CUSTOMER_WARRANTY",
+      "PREORDER_LIST",
     ].includes(action)
   ) {
     return payload.byteLength === 0 ? {} : null;

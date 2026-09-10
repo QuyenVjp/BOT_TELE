@@ -76,7 +76,9 @@ export async function insertBankTransactionIfNew(
 
 interface IntentRow {
   id: string;
-  order_id: string;
+  order_id: string | null;
+  preorder_id: string | null;
+  kind: "ORDER" | "TOPUP" | "DEPOSIT" | "BALANCE";
   amount_vnd: string;
   merchant_account_id: string;
   transfer_content: string;
@@ -85,11 +87,18 @@ interface IntentRow {
   version: number;
 }
 
+const INTENT_COLUMNS = sql`
+  id, order_id, preorder_id, kind, amount_vnd, merchant_account_id, transfer_content,
+  status, expires_at, version
+`;
+
 function toMatchableIntent(row: IntentRow): MatchableIntent & { version: number } {
   const expires = row.expires_at instanceof Date ? row.expires_at : new Date(row.expires_at);
   return {
     id: row.id,
     orderId: row.order_id,
+    preorderId: row.preorder_id,
+    kind: row.kind,
     amountVnd: Number(row.amount_vnd),
     merchantAccountId: row.merchant_account_id,
     transferContent: row.transfer_content,
@@ -109,7 +118,7 @@ export async function findIntentByContent(
   content: string,
 ): Promise<(MatchableIntent & { version: number }) | null> {
   const result = await sql<IntentRow>`
-    select id, order_id, amount_vnd, merchant_account_id, transfer_content, status, expires_at, version
+    select ${INTENT_COLUMNS}
     from payment_intent
     where transfer_content = ${content}
     order by created_at desc
@@ -125,7 +134,7 @@ export async function findIntentByIdForUpdate(
   intentId: string,
 ): Promise<(MatchableIntent & { version: number }) | null> {
   const result = await sql<IntentRow>`
-    select id, order_id, amount_vnd, merchant_account_id, transfer_content, status, expires_at, version
+    select ${INTENT_COLUMNS}
     from payment_intent
     where id = ${intentId}
     for update
@@ -144,7 +153,7 @@ export async function findLiveIntentByOrder(
   orderId: string,
 ): Promise<(MatchableIntent & { version: number }) | null> {
   const result = await sql<IntentRow>`
-    select id, order_id, amount_vnd, merchant_account_id, transfer_content, status, expires_at, version
+    select ${INTENT_COLUMNS}
     from payment_intent
     where order_id = ${orderId} and status in ('CREATED','PRESENTED')
     limit 1
@@ -153,9 +162,34 @@ export async function findLiveIntentByOrder(
   return row ? toMatchableIntent(row) : null;
 }
 
+/**
+ * Return the live (CREATED/PRESENTED) intent for one preorder leg. Deposit and
+ * balance are distinct legs, so a reservation may hold at most one live intent
+ * per leg (partial unique index `payment_intent_active_preorder_leg_uq`).
+ */
+export async function findLiveIntentByPreorderLeg(
+  exec: Executor,
+  preorderId: string,
+  kind: "DEPOSIT" | "BALANCE",
+): Promise<(MatchableIntent & { version: number }) | null> {
+  const result = await sql<IntentRow>`
+    select ${INTENT_COLUMNS}
+    from payment_intent
+    where preorder_id = ${preorderId} and kind = ${kind}
+      and status in ('CREATED','PRESENTED')
+    limit 1
+  `.execute(exec);
+  const row = result.rows[0];
+  return row ? toMatchableIntent(row) : null;
+}
+
 export interface InsertIntentInput {
   id: string;
-  orderId: string;
+  /** Owning Order, or null for a preorder deposit/balance intent. */
+  orderId: string | null;
+  /** Owning reservation for a preorder intent. */
+  preorderId?: string | null;
+  kind?: "ORDER" | "DEPOSIT" | "BALANCE";
   amountVnd: number;
   merchantAccountId: string;
   transferContent: string;
@@ -174,9 +208,11 @@ export async function insertPresentedIntent(
 ): Promise<boolean> {
   const result = await sql<{ id: string }>`
     insert into payment_intent
-      (id, order_id, status, amount_vnd, merchant_account_id, transfer_content, expires_at, presented_at)
+      (id, order_id, preorder_id, kind, status, amount_vnd, merchant_account_id,
+       transfer_content, expires_at, presented_at)
     values
-      (${input.id}, ${input.orderId}, 'PRESENTED', ${input.amountVnd}, ${input.merchantAccountId},
+      (${input.id}, ${input.orderId}, ${input.preorderId ?? null}, ${input.kind ?? "ORDER"},
+       'PRESENTED', ${input.amountVnd}, ${input.merchantAccountId},
        ${input.transferContent}, ${input.expiresAt.toISOString()}, now())
     on conflict do nothing
     returning id
@@ -260,6 +296,49 @@ export async function voidLiveIntentsForOrder(exec: Executor, orderId: string): 
     where order_id = ${orderId} and status in ('CREATED', 'PRESENTED')
   `.execute(exec);
   return Number(result.numAffectedRows ?? 0);
+}
+
+/**
+ * Close a live preorder intent. Used when a reservation stops being payable
+ * (`FAILED` on shop cancel) or when a hold lapses (`EXPIRED` on forfeiture) so a
+ * later bank transfer hits a dead intent and becomes an ops discrepancy instead
+ * of settling a reservation that no longer exists.
+ */
+export async function voidLiveIntentsForPreorder(
+  exec: Executor,
+  preorderId: string,
+  target: "EXPIRED" | "FAILED",
+): Promise<number> {
+  const result = await sql`
+    update payment_intent
+    set status = ${target}, version = version + 1
+    where preorder_id = ${preorderId} and status in ('CREATED', 'PRESENTED')
+  `.execute(exec);
+  return Number(result.numAffectedRows ?? 0);
+}
+
+/**
+ * Version-guarded close of one still-live intent (stale QR replaced by a fresh
+ * one for the same leg). Returns the new version.
+ */
+export async function expireIntent(
+  exec: Executor,
+  intentId: string,
+  version: number,
+): Promise<number> {
+  const newVer = nextVersion(version);
+  const result = await sql`
+    update payment_intent
+    set status = 'EXPIRED', version = ${newVer}
+    where id = ${intentId} and version = ${version} and status in ('CREATED', 'PRESENTED')
+  `.execute(exec);
+  assertVersionUpdated(
+    { numUpdatedRows: BigInt(result.numAffectedRows ?? 0) },
+    "payment_intent",
+    intentId,
+    version,
+  );
+  return newVer;
 }
 
 /** Record a typed discrepancy for manual/automated review. */

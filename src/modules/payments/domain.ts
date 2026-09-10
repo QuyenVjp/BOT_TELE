@@ -48,7 +48,12 @@ export interface PaymentEvidence {
 /** The live intent a matcher compares evidence against. */
 export interface MatchableIntent {
   id: string;
-  orderId: string;
+  /** Owning Order; null for a preorder deposit/balance intent. */
+  orderId: string | null;
+  /** Owning reservation; null for an order intent. */
+  preorderId?: string | null;
+  /** Which preorder leg the intent pays; absent for order intents. */
+  kind?: "ORDER" | "TOPUP" | "DEPOSIT" | "BALANCE";
   amountVnd: number;
   merchantAccountId: string;
   transferContent: string;
@@ -57,7 +62,7 @@ export interface MatchableIntent {
 }
 
 export type MatchDecision =
-  | { kind: "SETTLE"; intentId: string; orderId: string }
+  | { kind: "SETTLE"; intentId: string; orderId: string | null; preorderId: string | null }
   | { kind: "DISCREPANCY"; type: DiscrepancyType; reason: string };
 
 /**
@@ -115,5 +120,10 @@ export function decideMatch(
   if (transferredLate) {
     return { kind: "DISCREPANCY", type: "LATE_PAYMENT", reason: "transfer after expiry" };
   }
-  return { kind: "SETTLE", intentId: intent.id, orderId: intent.orderId };
+  return {
+    kind: "SETTLE",
+    intentId: intent.id,
+    orderId: intent.orderId,
+    preorderId: intent.preorderId ?? null,
+  };
 }

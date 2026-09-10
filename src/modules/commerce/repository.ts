@@ -24,6 +24,8 @@ export interface InsertOrderInput {
   correlationId: string;
   actorType: string;
   actorId: string | null;
+  /** Reason recorded on the creation transition (defaults to BUY_NOW). */
+  creationReasonCode?: string;
 }
 
 function mapRow(row: {
@@ -180,7 +182,7 @@ export async function insertOrder(
     insert into order_transition
       (id, order_id, from_status, to_status, reason_code, actor_type, actor_id, correlation_id)
     values
-      (${newId()}, ${id}, 'DRAFT', ${input.status}, 'BUY_NOW',
+      (${newId()}, ${id}, 'DRAFT', ${input.status}, ${input.creationReasonCode ?? "BUY_NOW"},
        ${input.actorType}, ${input.actorId}, ${input.correlationId})
   `.execute(exec);
 

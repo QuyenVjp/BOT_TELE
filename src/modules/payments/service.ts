@@ -1,17 +1,27 @@
-import type { Db } from "../../infrastructure/db/transaction.js";
+import type { Db, Trx } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { newId } from "../../shared/ids/index.js";
 import { findOrderById, findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
+import {
+  confirmPreorderDepositInTransaction,
+  finalizePreorderInTransaction,
+  lockPreorderForSettlement,
+  preorderPayableLeg,
+  recordPreorderPaymentIntent,
+  type PreorderSettlementTarget,
+} from "../commerce/preorder.js";
 import { isSupportedCatalogRoute } from "../catalog/domain.js";
 import { orderHasActiveReservation } from "../digital-goods/repository.js";
 import { isVerifiedSePayEvidence, type VerifiedSePayEvidence } from "./sepay-ingress.js";
-import { decideMatch, LATE_PAYMENT_SKEW_MS } from "./domain.js";
+import { decideMatch, LATE_PAYMENT_SKEW_MS, type MatchableIntent } from "./domain.js";
 import { projectDiscrepancyOrderStatus, projectSettlement } from "./projection.js";
 import {
+  expireIntent,
   findIntentByContent,
   findIntentByIdForUpdate,
   findLiveIntentByOrder,
+  findLiveIntentByPreorderLeg,
   flagIntentNeedsReview,
   insertBankTransactionIfNew,
   insertDiscrepancy,
@@ -20,7 +30,7 @@ import {
   settleIntent,
 } from "./repository.js";
 import { presentPayment, type PaymentPresentation } from "./vietqr.js";
-import { generateOrderPaymentCode } from "./payment-code.js";
+import { generateOrderPaymentCode, generatePreorderPaymentCode } from "./payment-code.js";
 
 /**
  * Payment settlement service (T053, T128).
@@ -45,7 +55,14 @@ import { generateOrderPaymentCode } from "./payment-code.js";
  */
 
 export type ApplyEvidenceResult =
-  | { ok: true; kind: "SETTLED"; intentId: string; orderId: string; bankTransactionId: string }
+  | {
+      ok: true;
+      kind: "SETTLED";
+      intentId: string;
+      /** Owning Order; null for a preorder deposit (no Order exists yet). */
+      orderId: string | null;
+      bankTransactionId: string;
+    }
   | { ok: true; kind: "ALREADY_APPLIED" }
   | { ok: true; kind: "DISCREPANCY"; type: string; discrepancyId: string }
   | { ok: false; error: string };
@@ -210,8 +227,280 @@ export async function presentPaymentForOrder(
   });
 }
 
+export interface PresentPreorderPaymentInput {
+  reservationId: string;
+  /** Deposit (queue hold) or the remaining balance owed once stock is allocated. */
+  leg: "DEPOSIT" | "BALANCE";
+  merchantAccountId: string;
+  /** VietQR beneficiary account number; intentionally distinct from SePay identity. */
+  beneficiaryAccountNumber: string;
+  bankBin: string;
+  accountName: string;
+  bankName?: string;
+  bankAlias?: string;
+  template?: string;
+  correlationId: string;
+  /** Intent TTL for the deposit leg in seconds (default 3600). */
+  ttlSeconds?: number;
+}
+
+export type PresentPreorderPaymentResult =
+  | {
+      ok: true;
+      intentId: string;
+      presentation: PaymentPresentation;
+      productName: string;
+      variantName: string;
+    }
+  | { ok: false; error: "NOT_FOUND" | "NOT_PAYABLE" | "AMOUNT_INVALID" | "NOT_OWNED" };
+
+/** Bounded deposit-QR window: long enough to open a bank app, short enough to free the queue. */
+const MIN_PREORDER_TTL_SECONDS = 300;
+const MAX_PREORDER_TTL_SECONDS = 6 * 3600;
+const DEFAULT_PREORDER_TTL_SECONDS = 3600;
+
+/**
+ * Mint (or reuse) the live PaymentIntent for one preorder leg and return the
+ * VietQR presentation. Re-opening the same leg returns the same live intent and
+ * payment code, so the customer never sees two competing QRs for one payment —
+ * and a stale QR from a previous window is closed before a fresh one is minted
+ * (a transfer against a closed intent becomes an ops discrepancy, never a
+ * silent settlement).
+ */
+export async function presentPreorderPayment(
+  db: Db,
+  input: PresentPreorderPaymentInput,
+): Promise<PresentPreorderPaymentResult> {
+  return withTransaction(db, async (trx) => {
+    const reservation = await lockPreorderForSettlement(trx, input.reservationId);
+    if (!reservation) return { ok: false, error: "NOT_FOUND" };
+    if (preorderPayableLeg(reservation.status) !== input.leg) {
+      return { ok: false, error: "NOT_PAYABLE" };
+    }
+
+    const amountVnd = input.leg === "DEPOSIT" ? reservation.depositVnd : reservation.balanceVnd;
+    if (!Number.isInteger(amountVnd) || amountVnd <= 0) {
+      return { ok: false, error: "AMOUNT_INVALID" };
+    }
+
+    const presentation = (fields: {
+      amountVnd: number;
+      transferContent: string;
+      expiresAt: Date;
+    }): PaymentPresentation =>
+      presentPayment({
+        bankBin: input.bankBin,
+        accountNumber: input.beneficiaryAccountNumber,
+        accountName: input.accountName,
+        amountVnd: fields.amountVnd,
+        transferContent: fields.transferContent,
+        // A preorder has no public order number; the payment code IS the reference
+        // the customer types and support can match.
+        orderNumber: fields.transferContent,
+        expiresAt: fields.expiresAt,
+        ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
+        ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
+        ...(input.template !== undefined ? { template: input.template } : {}),
+      });
+
+    const now = new Date();
+    const existing = await findLiveIntentByPreorderLeg(trx, reservation.id, input.leg);
+    if (existing && existing.expiresAt.getTime() > now.getTime()) {
+      return {
+        ok: true,
+        intentId: existing.id,
+        presentation: presentation({
+          amountVnd: existing.amountVnd,
+          transferContent: existing.transferContent,
+          expiresAt: existing.expiresAt,
+        }),
+        productName: reservation.productName,
+        variantName: reservation.variantName,
+      };
+    }
+    if (existing) await expireIntent(trx, existing.id, existing.version);
+
+    const ttlSeconds = Math.min(
+      MAX_PREORDER_TTL_SECONDS,
+      Math.max(
+        MIN_PREORDER_TTL_SECONDS,
+        Math.trunc(input.ttlSeconds ?? DEFAULT_PREORDER_TTL_SECONDS),
+      ),
+    );
+    // The balance leg is bound to the deadline the customer was told: paying
+    // after `balance_due_until` must not settle, so the QR must not outlive it.
+    const expiresAt =
+      input.leg === "BALANCE" &&
+      reservation.balanceDueUntil !== null &&
+      reservation.balanceDueUntil.getTime() > now.getTime()
+        ? reservation.balanceDueUntil
+        : new Date(now.getTime() + ttlSeconds * 1000);
+    const transferContent = generatePreorderPaymentCode(reservation.id, input.leg);
+    const intentId = newId();
+
+    const inserted = await insertPresentedIntent(trx, {
+      id: intentId,
+      orderId: null,
+      preorderId: reservation.id,
+      kind: input.leg,
+      amountVnd,
+      merchantAccountId: input.merchantAccountId,
+      transferContent,
+      expiresAt,
+    });
+    let liveIntentId: string = intentId;
+    if (!inserted) {
+      // A concurrent presentation won. Only a live intent for THIS reservation
+      // and THIS leg is acceptable; anything else is a real uniqueness break.
+      const raced = await findLiveIntentByPreorderLeg(trx, reservation.id, input.leg);
+      if (!raced) {
+        throw new Error("preorder payment-intent conflict did not belong to this reservation");
+      }
+      liveIntentId = raced.id;
+    }
+
+    await recordPreorderPaymentIntent(trx, {
+      reservationId: reservation.id,
+      leg: input.leg,
+      paymentIntentId: liveIntentId,
+    });
+
+    if (inserted) {
+      await enqueueOutboxEvent(trx, {
+        id: newId(),
+        aggregateType: "PaymentIntent",
+        aggregateId: intentId,
+        aggregateVersion: 1,
+        eventType: "PaymentIntentPresented",
+        payloadRedacted: {
+          intentId,
+          preorderId: reservation.id,
+          leg: input.leg,
+          amountVnd,
+          correlationId: input.correlationId,
+        },
+      });
+    }
+
+    return {
+      ok: true,
+      intentId: liveIntentId,
+      presentation: presentation({ amountVnd, transferContent, expiresAt }),
+      productName: reservation.productName,
+      variantName: reservation.variantName,
+    };
+  });
+}
+
 const SCHEMA_VERSION = "sepay.v1";
 const SIGNATURE_STATUS = "VERIFIED";
+
+/**
+ * Settle one preorder leg against its reservation.
+ *
+ * Runs with the reservation row already locked, so the payable check here is
+ * authoritative. All money-safety outcomes are explicit:
+ *  - reservation still payable → allocation + intent SUCCEEDED + PaymentSettled,
+ *    then the domain transition (deposit confirmed / purchase finalised + OrderPaid);
+ *  - reservation no longer payable (forfeited, cancelled, already settled) →
+ *    ops discrepancy, never a silent settle and never a silent drop.
+ * A replay of the same evidence never reaches here (bank_transaction dedupe), and
+ * a second distinct transfer against a settled intent is a `decideMatch`
+ * discrepancy, so no leg can be paid twice.
+ */
+async function settlePreorderLeg(
+  trx: Trx,
+  input: {
+    intent: MatchableIntent & { version: number };
+    reservation: PreorderSettlementTarget | null;
+    evidence: VerifiedSePayEvidence;
+    bankTransactionId: string;
+  },
+): Promise<ApplyEvidenceResult> {
+  const { intent, reservation, evidence } = input;
+  const leg = intent.kind === "DEPOSIT" || intent.kind === "BALANCE" ? intent.kind : null;
+  const payable =
+    leg !== null &&
+    reservation !== null &&
+    (leg === "DEPOSIT"
+      ? reservation.status === "WAITING_DEPOSIT"
+      : preorderPayableLeg(reservation.status) === "BALANCE");
+
+  if (!payable) {
+    const discrepancyId = await insertDiscrepancy(trx, {
+      type: "UNMATCHED",
+      bankTransactionId: input.bankTransactionId,
+      paymentIntentId: intent.id,
+      orderId: null,
+      reason: `money arrived for non-payable preorder leg=${leg ?? "UNKNOWN"} status=${reservation?.status ?? "MISSING"}`,
+      owner: "payments",
+    });
+    // A live intent is flagged so it cannot settle later; an already non-live
+    // intent (voided at cancel/forfeit) needs no flag.
+    if (intent.status === "CREATED" || intent.status === "PRESENTED") {
+      await flagIntentNeedsReview(trx, intent.id, intent.version);
+    }
+    return { ok: true, kind: "DISCREPANCY", type: "UNMATCHED", discrepancyId };
+  }
+
+  await insertSettledAllocation(trx, {
+    bankTransactionId: input.bankTransactionId,
+    paymentIntentId: intent.id,
+    allocatedAmountVnd: evidence.amountVnd,
+    decisionCode: "EXACT_MATCH",
+    correlationId: evidence.correlationId,
+  });
+
+  const intentVersion = await settleIntent(trx, intent.id, intent.version);
+
+  await enqueueOutboxEvent(trx, {
+    id: newId(),
+    aggregateType: "PaymentIntent",
+    aggregateId: intent.id,
+    aggregateVersion: intentVersion,
+    eventType: "PaymentSettled",
+    payloadRedacted: {
+      intentId: intent.id,
+      preorderId: reservation!.id,
+      leg,
+      bankTransactionId: input.bankTransactionId,
+      amountVnd: evidence.amountVnd,
+      correlationId: evidence.correlationId,
+    },
+  });
+
+  let orderId: string | null = null;
+  if (leg === "DEPOSIT") {
+    const confirmed = await confirmPreorderDepositInTransaction(trx, {
+      reservationId: reservation!.id,
+      paymentIntentId: intent.id,
+    });
+    if (!confirmed.ok) {
+      // Unreachable: payability was checked under the reservation lock. Throw so
+      // the whole transaction rolls back instead of recording money that changed
+      // nothing.
+      throw new Error(`preorder deposit did not confirm: ${confirmed.code}`);
+    }
+  } else {
+    const settled = await finalizePreorderInTransaction(trx, {
+      reservationId: reservation!.id,
+      paymentIntentId: intent.id,
+      correlationId: evidence.correlationId,
+    });
+    if (!settled.ok) {
+      throw new Error(`preorder balance did not settle: ${settled.code}`);
+    }
+    orderId = settled.orderId;
+  }
+
+  return {
+    ok: true,
+    kind: "SETTLED",
+    intentId: intent.id,
+    orderId,
+    bankTransactionId: input.bankTransactionId,
+  };
+}
 
 export async function applyPaymentEvidence(
   db: Db,
@@ -259,15 +548,24 @@ export async function applyPaymentEvidence(
     }
     const bankTxnId = bankTxn.id;
 
-    // 2. Resolve the intent, then lock Order -> Intent in the same order used
-    // by cancel/expiry. This makes settlement and cancellation converge without
-    // stale-version exceptions or deadlocks.
+    // 2. Resolve the intent, then lock its owner before the intent itself
+    // (Order -> Intent, reservation -> Intent) in the same order used by
+    // cancel/expiry/hold-release. Settlement and cancellation therefore converge
+    // without stale-version exceptions or deadlocks.
     const matchKey =
       (evidence.structuredCode ?? evidence.content ?? evidence.reference)?.trim() ?? "";
     const candidate = matchKey.length > 0 ? await findIntentByContent(trx, matchKey) : null;
-    const lockedOrder = candidate ? await findOrderByIdForUpdate(trx, candidate.orderId) : null;
+    const lockedPreorder =
+      candidate?.preorderId !== null && candidate?.preorderId !== undefined
+        ? await lockPreorderForSettlement(trx, candidate.preorderId)
+        : null;
+    const lockedOrder = candidate?.orderId
+      ? await findOrderByIdForUpdate(trx, candidate.orderId)
+      : null;
     const intent =
-      candidate && lockedOrder ? await findIntentByIdForUpdate(trx, candidate.id) : candidate;
+      candidate && (lockedPreorder || lockedOrder)
+        ? await findIntentByIdForUpdate(trx, candidate.id)
+        : candidate;
     const decision = decideMatch(evidence, intent, now);
 
     if (decision.kind === "SETTLE") {
@@ -277,7 +575,18 @@ export async function applyPaymentEvidence(
         return { ok: false, error: "settle without intent" };
       }
 
-      const order = lockedOrder ?? (await findOrderByIdForUpdate(trx, decision.orderId));
+      // Preorder deposit / balance legs settle against a reservation, never an
+      // Order: until the reservation is paid in full there is nothing to deliver.
+      if (decision.preorderId) {
+        return settlePreorderLeg(trx, {
+          intent,
+          reservation: lockedPreorder,
+          evidence,
+          bankTransactionId: bankTxnId,
+        });
+      }
+
+      const order = lockedOrder ?? (await findOrderByIdForUpdate(trx, decision.orderId!));
       if (!order) {
         return { ok: false, error: "order missing for settled intent" };
       }
@@ -353,11 +662,11 @@ export async function applyPaymentEvidence(
         await enqueueOutboxEvent(trx, {
           id: newId(),
           aggregateType: "Order",
-          aggregateId: decision.orderId,
+          aggregateId: order.id,
           aggregateVersion: paid.version,
           eventType: "OrderPaid",
           payloadRedacted: {
-            orderId: decision.orderId,
+            orderId: order.id,
             intentId: decision.intentId,
             correlationId: evidence.correlationId,
           },
@@ -368,7 +677,7 @@ export async function applyPaymentEvidence(
         ok: true,
         kind: "SETTLED",
         intentId: decision.intentId,
-        orderId: decision.orderId,
+        orderId: order.id,
         bankTransactionId: bankTxnId,
       };
     }
@@ -405,7 +714,9 @@ export async function applyPaymentEvidence(
 
     // Freeze the Order under review so a refresh cannot mint a second QR
     // (T124 — independent review finding: discrepancy left Order PENDING_PAYMENT).
-    if (intent) {
+    // A preorder intent has no Order: hold expiry / shop cancel already closed the
+    // reservation's live intents, so there is no Order state to freeze.
+    if (intent?.orderId) {
       const order = lockedOrder ?? (await findOrderByIdForUpdate(trx, intent.orderId));
       if (order) {
         const target = projectDiscrepancyOrderStatus(order.status);
