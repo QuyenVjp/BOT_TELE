@@ -177,12 +177,23 @@ export interface AdminInventoryImportTextIngress {
   isActive(telegramUserId: string): Promise<boolean>;
 }
 
+/**
+ * In-place product content editing (goal §81). Like the inventory-import context, a non-draft
+ * admin input is not a "safe message" by itself, so the ingress has to vouch for it: without this
+ * the text is dropped before the dispatcher ever sees it and the flow is unreachable.
+ */
+export interface AdminProductContentEditIngress {
+  adminTelegramUserId: number;
+  isActive(telegramUserId: string): Promise<boolean>;
+}
+
 export interface TelegramWebhookOptions {
   path: string;
   secretToken: string;
   inbox: UpdateInbox;
   rootProductDraftText?: RootProductDraftTextIngress;
   inventoryImportText?: AdminInventoryImportTextIngress;
+  productContentEditText?: AdminProductContentEditIngress;
   metrics?: LatencyMetrics;
 }
 
@@ -206,6 +217,7 @@ export async function registerTelegramWebhook(
           update,
           options.rootProductDraftText,
           options.inventoryImportText,
+          options.productContentEditText,
         )
       : null;
     if (!update || !normalized) {
@@ -270,6 +282,7 @@ async function normalizeTelegramUpdate(
   update: TelegramUpdate,
   rootProductDraftText?: RootProductDraftTextIngress,
   inventoryImportText?: AdminInventoryImportTextIngress,
+  productContentEditText?: AdminProductContentEditIngress,
 ): Promise<TelegramCommandEnvelope | null> {
   if (
     !Number.isSafeInteger(update.update_id) ||
@@ -365,6 +378,7 @@ async function normalizeTelegramUpdate(
     text: string;
     rootProductDraftText?: true;
     inventoryImportText?: true;
+    productContentEditText?: true;
   } | null = null;
   const isGroup = chatType === "group" || chatType === "supergroup";
   const isMentioned = Boolean(
@@ -409,6 +423,7 @@ async function normalizeTelegramUpdate(
       chatType,
       ...(rootProductDraftText ? { rootProductDraftText } : {}),
       ...(inventoryImportText ? { inventoryImportText } : {}),
+      ...(productContentEditText ? { productContentEditText } : {}),
     });
   }
   const action =
@@ -416,8 +431,10 @@ async function normalizeTelegramUpdate(
       ? ("CATALOG" as const)
       : normalizedMessageText?.inventoryImportText
         ? ("ADMIN" as const)
-        : normalizedMessageText?.rootProductDraftText
+        : normalizedMessageText?.productContentEditText
           ? ("ADMIN" as const)
+          : normalizedMessageText?.rootProductDraftText
+            ? ("ADMIN" as const)
           : classifyAction(callbackData, command);
   const actorUsername = normalizeUsernameMetadata(actor.username);
   const contact = update.message?.contact;
@@ -599,8 +616,14 @@ async function normalizeSafeMessageText(
     chatType: string;
     rootProductDraftText?: RootProductDraftTextIngress;
     inventoryImportText?: AdminInventoryImportTextIngress;
+    productContentEditText?: AdminProductContentEditIngress;
   },
-): Promise<{ text: string; rootProductDraftText?: true; inventoryImportText?: true } | null> {
+): Promise<{
+  text: string;
+  rootProductDraftText?: true;
+  inventoryImportText?: true;
+  productContentEditText?: true;
+} | null> {
   if (!text || command) return null;
   const normalized = text.normalize("NFC").trim();
   if (SAFE_MESSAGE_TEXT[normalized]) return { text: normalized };
@@ -618,6 +641,17 @@ async function normalizeSafeMessageText(
     }
   }
   if (
+    context.productContentEditText &&
+    context.chatType === "private" &&
+    context.actorId === context.productContentEditText.adminTelegramUserId
+  ) {
+    const active = await context.productContentEditText.isActive(String(context.actorId));
+    if (active) {
+      const sanitized = sanitizeProductContentText(normalized);
+      if (sanitized) return { text: sanitized, productContentEditText: true };
+    }
+  }
+  if (
     context.rootProductDraftText &&
     context.chatType === "private" &&
     context.actorId === context.rootProductDraftText.adminTelegramUserId
@@ -632,6 +666,18 @@ async function normalizeSafeMessageText(
 }
 
 const MAX_DRAFT_PROSE_CHARS = 2000;
+
+/** Trim, strip control/format characters, and cap — mirrors the service's 2000-character limit. */
+function sanitizeProductContentText(normalized: string): string | null {
+  let out = "";
+  for (const ch of normalized) {
+    if (/[\p{Cc}\p{Cf}\0]/u.test(ch)) continue;
+    out += ch;
+  }
+  const trimmed = out.trim();
+  if (!trimmed) return null;
+  return trimmed.length <= MAX_DRAFT_PROSE_CHARS ? trimmed : trimmed.slice(0, MAX_DRAFT_PROSE_CHARS);
+}
 
 function isSafeDraftProse(normalized: string, maxBytes: number): boolean {
   return (

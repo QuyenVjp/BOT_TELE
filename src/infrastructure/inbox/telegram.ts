@@ -22,6 +22,7 @@ export interface TelegramCommandEnvelope {
   messageText?: string;
   rootProductDraftText?: true;
   inventoryImportText?: true;
+  productContentEditText?: true;
   searchQuery?: string;
   firstName?: string;
   lastName?: string;
@@ -174,6 +175,7 @@ export const RETAINED_ENVELOPE_KEYS = [
   "command",
   "rootProductDraftText",
   "inventoryImportText",
+  "productContentEditText",
   "firstName",
   "lastName",
   "languageCode",
