@@ -5558,6 +5558,22 @@ async function bootstrap(): Promise<void> {
             draft.warrantyReplacementAllowed = draft.warrantyReplacementAllowed === false;
           } else if (input.action === "refund") {
             draft.warrantyRefundAllowed = draft.warrantyRefundAllowed === false;
+          } else if (input.action.startsWith("text:")) {
+            // Coverage and exclusions are prose, so they ride the existing field-editor state rather
+            // than inventing a second prompt mechanism (goal §60).
+            const which = input.action.slice("text:".length);
+            const fieldKey = which === "coverage" ? "warrantyCoverageVi" : "warrantyExclusionsVi";
+            const field = wizardDescriptionField(fieldKey);
+            if (!field) return renderWizardStep(draft);
+            await createAdminCallbackState(dbHandle.db, {
+              adminTelegramUserId: input.telegramUserId,
+              kind: "WIZARD_DESC_CUSTOM",
+              payload: { field: fieldKey },
+            });
+            return presentWizardDescriptionFieldPrompt(
+              fieldKey,
+              which === "coverage" ? draft.warrantyCoverageVi : draft.warrantyExclusionsVi,
+            );
           } else if (input.action === "behavior") {
             draft.warrantyReplacementBehavior =
               draft.warrantyReplacementBehavior === "RESET_FROM_REPLACEMENT"

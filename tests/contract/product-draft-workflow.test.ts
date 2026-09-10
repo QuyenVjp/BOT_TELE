@@ -84,4 +84,48 @@ describe("product draft step 8 & preview presenter", () => {
       preview.buttons.flat().find((b) => b.callbackData === "admin:products:confirm"),
     ).toBeDefined();
   });
+
+  // The step-8 screen is the only place the owner can configure the warranty, and a grep of the
+  // built file cannot tell a rendered button from a string in dead code — so assert the buttons the
+  // presenter actually returns.
+  it("renders the warranty controls on the settings step", () => {
+    const draft = {
+      adminTelegramUserId: "1",
+      step: "visibilityFlags" as const,
+      sku: "SKU-1",
+      variantName: "1 tháng",
+      priceVnd: 2000n,
+      fulfillmentType: "STOCK_ACCOUNT" as const,
+      inventoryFields: [],
+      visibility: "TEST_ONLY" as const,
+      expiresAt: Date.now() + 60_000,
+    };
+    const off = presentWizardVisibilityStep(draft);
+    const offCallbacks = off.buttons.flat().map((button) => button.callbackData);
+    expect(offCallbacks).toContain("admin:products:warranty:toggle");
+    // the controls that only make sense once it is on stay hidden until then
+    expect(offCallbacks.some((value) => value.startsWith("admin:products:warranty:days:"))).toBe(
+      false,
+    );
+
+    const on = presentWizardVisibilityStep({
+      ...draft,
+      warrantyEnabled: true,
+      warrantyDays: 30,
+    });
+    const onCallbacks = on.buttons.flat().map((button) => button.callbackData);
+    for (const expected of [
+      "admin:products:warranty:toggle",
+      "admin:products:warranty:days:15",
+      "admin:products:warranty:proration",
+      "admin:products:warranty:replacement",
+      "admin:products:warranty:refund",
+      "admin:products:warranty:behavior",
+      "admin:products:warranty:text:coverage",
+      "admin:products:warranty:text:exclusions",
+    ]) {
+      expect(onCallbacks).toContain(expected);
+    }
+    expect(on.text).toContain("Bảo hành: 30 ngày");
+  });
 });

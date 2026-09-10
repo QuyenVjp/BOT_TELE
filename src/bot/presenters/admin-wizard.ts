@@ -255,6 +255,16 @@ export function presentWizardVisibilityStep(draft: ProductDraft): PresentedMessa
                 callbackData: "admin:products:warranty:behavior",
               },
             ],
+            [
+              {
+                text: `${draft.warrantyCoverageVi ? "✅" : "◻️"} Phạm vi bảo hành`,
+                callbackData: "admin:products:warranty:text:coverage",
+              },
+              {
+                text: `${draft.warrantyExclusionsVi ? "✅" : "◻️"} Không thuộc bảo hành`,
+                callbackData: "admin:products:warranty:text:exclusions",
+              },
+            ],
           ]
         : []),
       [
@@ -327,6 +337,16 @@ export const WIZARD_DESCRIPTION_FIELDS = [
   { key: "warrantyVi", label: "🛡 Bảo hành", prompt: "Chính sách bảo hành." },
   { key: "deliveryEtaVi", label: "⏱ Thời gian giao", prompt: "Dự kiến giao hàng." },
   { key: "termsVi", label: "📄 Điều khoản", prompt: "Điều khoản / lưu ý." },
+  {
+    key: "warrantyCoverageVi",
+    label: "🛡 Phạm vi bảo hành",
+    prompt: "Mô tả phạm vi bảo hành (lỗi nào thuộc trách nhiệm shop).",
+  },
+  {
+    key: "warrantyExclusionsVi",
+    label: "🚫 Không thuộc bảo hành",
+    prompt: "Mô tả các trường hợp không thuộc bảo hành.",
+  },
 ] as const;
 
 export type WizardDescriptionFieldKey = (typeof WIZARD_DESCRIPTION_FIELDS)[number]["key"];
