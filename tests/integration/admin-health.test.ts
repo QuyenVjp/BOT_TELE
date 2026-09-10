@@ -99,6 +99,27 @@ describe("admin health facts", () => {
     expect(facts.queues.paymentsNeedingReview).toBe(0);
   });
 
+
+  it("reports the durable ingress dead letters, not just the outbound outbox ones", async () => {
+    for (const [source, status, id] of [
+      ["telegram", "DEAD", newId()],
+      ["telegram", "RETRY", newId()],
+      ["sepay", "DEAD", newId()],
+    ] as const) {
+      await sql`
+        insert into webhook_inbox (id, source, source_event_id, raw_hash, signature_status, received_at, processing_status)
+        values (${id}, ${source}, ${"evt-" + id}, ${"hash-" + id}, 'VALID', now(), ${status})
+      `.execute(ctx.db);
+    }
+
+    const facts = await getAdminHealthFacts(ctx.db);
+    // The outbox queue is empty here on purpose: the ingress DLQ is the one that answers
+    // "did we lose an update", and reporting only the outbox figure understates the backlog.
+    expect(facts.queues.inboxDeadLetteredTelegram).toBe(1);
+    expect(facts.queues.inboxDeadLetteredSePay).toBe(1);
+    expect(facts.queues.inboxPendingTelegram).toBe(1);
+  });
+
   it("reports down with zeroed queues instead of throwing when the database is gone", async () => {
     const broken = {
       executeQuery: async () => {
@@ -110,6 +131,10 @@ describe("admin health facts", () => {
     expect(facts.queues).toEqual({
       outboxBacklog: 0,
       outboxDeadLettered: 0,
+      inboxDeadLetteredTelegram: 0,
+      inboxDeadLetteredSePay: 0,
+      inboxPendingTelegram: 0,
+      inboxPendingSePay: 0,
       openDiscrepancies: 0,
       intentsAwaitingSettlement: 0,
       paymentsNeedingReview: 0,

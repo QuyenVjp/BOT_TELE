@@ -1619,6 +1619,10 @@ export interface AdminSystemHealthFacts {
   queues: {
     outboxBacklog: number;
     outboxDeadLettered: number;
+    inboxDeadLetteredTelegram: number;
+    inboxDeadLetteredSePay: number;
+    inboxPendingTelegram: number;
+    inboxPendingSePay: number;
     openDiscrepancies: number;
     intentsAwaitingSettlement: number;
     paymentsNeedingReview: number;
@@ -1643,6 +1647,8 @@ export function presentAdminSystemHealth(input: AdminSystemHealthFacts): Present
       "",
       `📤 Hàng đợi outbox: ${input.queues.outboxBacklog}`,
       `☠️ Outbox dead-letter: ${input.queues.outboxDeadLettered}`,
+      `📥 Inbox Telegram: chờ ${input.queues.inboxPendingTelegram} · dead ${input.queues.inboxDeadLetteredTelegram}`,
+      `📥 Inbox SePay: chờ ${input.queues.inboxPendingSePay} · dead ${input.queues.inboxDeadLetteredSePay}`,
       `⚠️ Sai lệch cần soát: ${input.queues.openDiscrepancies}`,
       `⏳ Intent chờ thanh toán: ${input.queues.intentsAwaitingSettlement}`,
       `🔎 Thanh toán cần kiểm tra: ${input.queues.paymentsNeedingReview}`,

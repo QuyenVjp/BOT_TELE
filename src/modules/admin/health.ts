@@ -21,6 +21,17 @@ import type { Executor } from "../../infrastructure/db/transaction.js";
 export interface AdminHealthQueues {
   outboxBacklog: number;
   outboxDeadLettered: number;
+  /**
+   * Durable ingress dead letters, split by source. This is the queue that answers "did we lose an
+   * update?": it holds a Telegram callback or a SePay event that exhausted its attempts, while the
+   * outbox queue only holds outbound effects. Reporting one without the other understates the
+   * backlog, which is the single thing the health screen exists to prevent.
+   */
+  inboxDeadLetteredTelegram: number;
+  inboxDeadLetteredSePay: number;
+  /** Ingress envelopes still awaiting a retry or being processed (the domain has no PENDING). */
+  inboxPendingTelegram: number;
+  inboxPendingSePay: number;
   openDiscrepancies: number;
   intentsAwaitingSettlement: number;
   paymentsNeedingReview: number;
@@ -36,6 +47,10 @@ export interface AdminHealthFacts {
 const EMPTY_QUEUES: AdminHealthQueues = {
   outboxBacklog: 0,
   outboxDeadLettered: 0,
+  inboxDeadLetteredTelegram: 0,
+  inboxDeadLetteredSePay: 0,
+  inboxPendingTelegram: 0,
+  inboxPendingSePay: 0,
   openDiscrepancies: 0,
   intentsAwaitingSettlement: 0,
   paymentsNeedingReview: 0,
@@ -58,6 +73,10 @@ export async function getAdminHealthFacts(exec: Executor): Promise<AdminHealthFa
   const result = await sql<{
     outbox_backlog: number;
     outbox_dead_lettered: number;
+    inbox_dead_telegram: number;
+    inbox_dead_sepay: number;
+    inbox_pending_telegram: number;
+    inbox_pending_sepay: number;
     open_discrepancies: number;
     intents_awaiting_settlement: number;
     payments_needing_review: number;
@@ -81,6 +100,16 @@ export async function getAdminHealthFacts(exec: Executor): Promise<AdminHealthFa
          join product p on p.id = v.product_id
          where i.status = 'NEEDS_REVIEW' and not p.is_test and not p.is_archived
       ) as payments_needing_review,
+      (select count(*)::int from webhook_inbox
+         where source = 'telegram' and processing_status = 'DEAD') as inbox_dead_telegram,
+      (select count(*)::int from webhook_inbox
+         where source = 'sepay' and processing_status = 'DEAD') as inbox_dead_sepay,
+      (select count(*)::int from webhook_inbox
+         where source = 'telegram' and processing_status in ('RETRY', 'PROCESSING')
+      ) as inbox_pending_telegram,
+      (select count(*)::int from webhook_inbox
+         where source = 'sepay' and processing_status in ('RETRY', 'PROCESSING')
+      ) as inbox_pending_sepay,
       (select count(*)::int from support_ticket t
          where t.status in ('OPEN', 'MANUAL_REVIEW')
            and not exists (
@@ -99,6 +128,10 @@ export async function getAdminHealthFacts(exec: Executor): Promise<AdminHealthFa
     queues: {
       outboxBacklog: row?.outbox_backlog ?? 0,
       outboxDeadLettered: row?.outbox_dead_lettered ?? 0,
+      inboxDeadLetteredTelegram: row?.inbox_dead_telegram ?? 0,
+      inboxDeadLetteredSePay: row?.inbox_dead_sepay ?? 0,
+      inboxPendingTelegram: row?.inbox_pending_telegram ?? 0,
+      inboxPendingSePay: row?.inbox_pending_sepay ?? 0,
       openDiscrepancies: row?.open_discrepancies ?? 0,
       intentsAwaitingSettlement: row?.intents_awaiting_settlement ?? 0,
       paymentsNeedingReview: row?.payments_needing_review ?? 0,
