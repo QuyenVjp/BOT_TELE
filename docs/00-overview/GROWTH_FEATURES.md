@@ -1,12 +1,14 @@
 # Differentiation and Growth Features — Post-MVP
 
+> **MINI APP: NOT IN PRODUCT SCOPE — OWNER DECISION.** TIER20 SHOP is Telegram-bot-only. Do not treat Mini App, WebApp, `initData`, `startapp`, or `shop.tier20.click` as required, blocked, or future work. See `docs/architecture/telegram-only-commerce.md`.
+
 > Tất cả nội dung trong file này bị hoãn cho tới khi customer flow `tìm hàng → mua → VietQR → SePay → nhận hàng` hoạt động ổn định. Không mục nào ở đây được phép làm tăng scope retail MVP.
 
 ## Positioning
 
 Khác biệt nên được xây quanh ba trụ cột:
 
-1. **Conversational commerce:** mua nhanh ngay trong chat, nhưng chuyển sang Mini App khi catalog/cart/form trở nên dày.
+1. **Conversational commerce:** mua hoàn toàn trong chat Telegram (reply keyboard + inline + commands + deep link). Mini App is cancelled permanently.
 2. **Trust:** khách luôn biết tiền đang ở trạng thái nào, order nào, ai đang xử lý và khi nào được hoàn.
 3. **Convenience:** ít bước, ít tin nhắn rác, deep link đúng ngữ cảnh, mua lại và hỗ trợ không phải kể lại từ đầu.
 
@@ -16,7 +18,7 @@ Không cạnh tranh bằng spam, countdown giả, AI tự ý mua hàng hoặc bi
 
 | Phase | Feature | Business impact | Risk/guardrail |
 |---|---|---|---|
-| P0 | Telegram Mini App/Web App catalog + cart + variant + address | Tăng conversion, giảm số lượt chat | Validate Telegram `initData` server-side; client không quyết định price/stock |
+| CANCELLED | Telegram Mini App/Web App catalog + cart | CANCELLED BY OWNER — DO NOT IMPLEMENT | Telegram-bot-only architecture |
 | P0 | Payment timeline + trust center | Giảm support và tranh chấp | Chỉ provider evidence mới chuyển settled; hiển thị `Pending/NeedsReview` rõ |
 | P0 | One-tap reorder + order deep link | Tăng repeat purchase | Requote/recheck stock; không clone payment cũ mù quáng |
 | P0 | Persistent menu, quick replies, edit-in-place, inline actions | UX mượt, ít rác | Opaque expiring action tokens; callback idempotent |

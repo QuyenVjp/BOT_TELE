@@ -1,5 +1,7 @@
 # VietQR Sales Bot
 
+TIER20 SHOP is **Telegram-bot-only**. Mini App / WebApp / `shop.tier20.click` are cancelled permanently (`docs/architecture/telegram-only-commerce.md`). Canonical interface: `@tier20ai_bot`.
+
 Telegram digital-goods shop implemented as a TypeScript modular monolith. The HTTP process durably accepts Telegram and SePay webhooks into PostgreSQL; the worker processes independent Telegram, payment, delivery/outbox, and recovery lanes.
 
 ## Runtime status

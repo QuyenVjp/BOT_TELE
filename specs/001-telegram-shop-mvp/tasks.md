@@ -1,5 +1,7 @@
 # Tasks: Telegram Shop Digital MVP
 
+> HISTORICAL SPEC. Mini App / WebApp / initData / shop.tier20.click: CANCELLED BY OWNER — DO NOT IMPLEMENT. Canonical architecture is Telegram-bot-only: `docs/architecture/telegram-only-commerce.md`.
+
 **Input**: Design documents from `specs/001-telegram-shop-mvp/`
 
 **Prerequisites**: constitution, spec.md, plan.md, research.md, data-model.md, contracts/, checklists/, quickstart.md

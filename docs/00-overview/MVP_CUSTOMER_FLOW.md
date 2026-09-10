@@ -1,5 +1,7 @@
 # MVP Customer Flow — Shop digital trong Telegram
 
+> **MINI APP: NOT IN PRODUCT SCOPE — OWNER DECISION.** TIER20 SHOP is Telegram-bot-only. Do not treat Mini App, WebApp, `initData`, `startapp`, or `shop.tier20.click` as required, blocked, or future work. See `docs/architecture/telegram-only-commerce.md`.
+
 > Trạng thái: đề xuất chốt trước khi code  
 > Phiên bản: v0.2 — 2026-07-16
 

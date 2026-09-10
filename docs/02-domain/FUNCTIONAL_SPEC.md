@@ -1,5 +1,7 @@
 # Functional Specification: Telegram shop bán digital account
 
+> **MINI APP: NOT IN PRODUCT SCOPE — OWNER DECISION.** TIER20 SHOP is Telegram-bot-only. Do not treat Mini App, WebApp, `initData`, `startapp`, or `shop.tier20.click` as required, blocked, or future work. See `docs/architecture/telegram-only-commerce.md`.
+
 > Phiên bản: v0.2 — customer-first MVP  
 > Ngày: 2026-07-16  
 > UX chuẩn: [MVP Customer Flow](../00-overview/MVP_CUSTOMER_FLOW.md)  

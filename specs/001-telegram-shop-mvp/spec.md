@@ -1,5 +1,7 @@
 # Feature Specification: Telegram Shop Digital MVP
 
+> HISTORICAL SPEC. Mini App / WebApp / initData / shop.tier20.click: CANCELLED BY OWNER — DO NOT IMPLEMENT. Canonical architecture is Telegram-bot-only: `docs/architecture/telegram-only-commerce.md`.
+
 **Feature Branch**: `001-telegram-shop-mvp`
 
 **Created**: 2026-07-16

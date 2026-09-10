@@ -1,5 +1,7 @@
 # Product Overview
 
+> **MINI APP: NOT IN PRODUCT SCOPE — OWNER DECISION.** TIER20 SHOP is Telegram-bot-only. Do not treat Mini App, WebApp, `initData`, `startapp`, or `shop.tier20.click` as required, blocked, or future work. See `docs/architecture/telegram-only-commerce.md`.
+
 ## Product surface ưu tiên
 
 ### Retail bot
@@ -17,7 +19,7 @@ Flow chuẩn và copy màn hình nằm tại [MVP Customer Flow](./MVP_CUSTOMER_
 ### Backend/post-MVP lanes
 
 - Supplier API là backend-only để lấy/provision hàng sau khi payment được xác minh.
-- Reseller API, prepaid credit, wallet/top-up, Mini App và growth engine là các lane sau MVP.
+- Reseller API, prepaid credit, wallet/top-up, and growth engine are post-MVP lanes. Mini App is cancelled permanently (not a future lane).
 - Các lane này không xuất hiện trên menu khách lẻ và không được làm phức tạp happy path.
 
 ## Main bot menu

@@ -1,8 +1,10 @@
-# Architecture Contract — Wallet, Customer Identity, Persistent Keyboard, Mini App
+# Architecture Contract — Wallet, Customer Identity, Persistent Keyboard
+
+> **MINI APP: NOT IN PRODUCT SCOPE — OWNER DECISION.** TIER20 SHOP is Telegram-bot-only. Do not treat Mini App, WebApp, `initData`, `startapp`, or `shop.tier20.click` as required, blocked, or future work. See `docs/architecture/telegram-only-commerce.md`.
 
 ## 1. Scope
 
-This sprint adds customer store credit, Telegram customer profile snapshots, a persistent Telegram reply keyboard, restock notifications, and a Mini App foundation. It does not replace the existing retail order/payment/delivery core. VietQR + SePay remains the payment rail for both direct checkout and wallet top-up settlement.
+This sprint adds customer store credit, Telegram customer profile snapshots, a persistent Telegram reply keyboard, and restock notifications. Mini App was cancelled by owner decision; commerce is Telegram-bot-only. It does not replace the existing retail order/payment/delivery core. VietQR + SePay remains the payment rail for both direct checkout and wallet top-up settlement.
 
 Wallet is closed-loop store credit only. No withdrawal, cash-out, or P2P transfer.
 
@@ -51,7 +53,7 @@ The active scope is the complete admin product → variant → inventory → cus
 - `bot/presenters/admin.ts`, `bot/callbacks/admin.ts`
   - Own admin screens and root-admin guarded actions.
 - `modules/digital-goods/delivery-route.ts`
-  - Owns the current server-side Mini App validation for delivery redemption.
+  - Owns operational GET `/d/:token` Bearer reveal. Mini App initData redeem is cancelled; customers receive credentials in Telegram chat.
 
 ### New modules to add
 
@@ -59,8 +61,7 @@ The active scope is the complete admin product → variant → inventory → cus
   - Own wallet account projection, immutable ledger, top-up intents, and purchase/refund commands.
 - `modules/notification/*` or equivalent existing outbox-backed notification lane
   - Owns opt-in settings, stock-change notifications, restock subscriptions, and durable broadcast dispatch.
-- `modules/miniapp/*` or equivalent API module
-  - Owns Mini App auth validation, shared storefront APIs, and session/user identity binding.
+- Mini App module is cancelled. Do not add `modules/miniapp/*`.
 
 ## 3. Data model
 
@@ -103,7 +104,7 @@ Add persistent settings for customer notification opt-in and per-product restock
 
 ### Mini App
 
-Reuse the existing delivery Mini App verification pattern: server validates raw `Telegram.WebApp.initData` and `auth_date` freshness before identifying the user. Do not trust `initDataUnsafe`.
+CANCELLED BY OWNER — DO NOT IMPLEMENT. No `initData`, WebApp session, or Mini App identity binding.
 
 ## 4. Request flow
 
@@ -146,8 +147,7 @@ Canonical labels:
 - `🧾 Đơn hàng`
 - `🛡 Bảo hành`
 - `🔔 Báo có hàng`
-- `🛟 Hỗ trợ`
-- `🌐 Mở cửa hàng`
+- `💬 Hỗ trợ`
 
 Rules:
 - `/start` installs or refreshes it.
@@ -163,18 +163,9 @@ Rules:
 - Contact sharing is opt-in and user-approved.
 - Store phone only after explicit share.
 
-## 6. Mini App contract
+## 6. Mini App contract — CANCELLED BY OWNER — DO NOT IMPLEMENT
 
-The Mini App is optional storefront UI only.
-
-Must-haves:
-- HTTPS WebApp URL
-- server-side validation of raw `initData`
-- auth_date freshness check
-- user identity bound to Telegram numeric ID
-- reuse backend commerce/wallet services; no duplicate purchase logic
-
-Bottom navigation can be added later, but it must call shared backend services only.
+TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API only (`docs/architecture/telegram-only-commerce.md`). Do not implement WebApp URL, `initData`, or `/shop` HTTP storefront.
 
 ## 7. Delivery and notification semantics
 
@@ -194,7 +185,7 @@ Bottom navigation can be added later, but it must call shared backend services o
 - One SePay transaction can credit at most one top-up intent.
 - One purchase can debit wallet at most once.
 - No wallet debit when stock reservation fails.
-- Mini App auth must validate raw initData server-side.
+- Mini App/WebApp auth is out of scope; do not add initData verification.
 - Notifications respect opt-in.
 - Admin messages and wallet adjustments are audited.
 
@@ -220,7 +211,7 @@ Bottom navigation can be added later, but it must call shared backend services o
 2. Wallet schema + ledger + top-up intent + SePay crediting.
 3. Wallet purchase confirmation/debit flow.
 4. Notification settings, restock subscriptions, stock event capture, broadcasts.
-5. Mini App auth + shared storefront API shell.
+5. ~~Mini App auth + shared storefront API shell~~ CANCELLED BY OWNER — DO NOT IMPLEMENT.
 6. Admin customer wallet/detail + message customer.
 
 ## 10. Open decisions
@@ -228,11 +219,10 @@ Bottom navigation can be added later, but it must call shared backend services o
 - Customer snapshots use `customer_profile_snapshot`; channel identity remains authoritative.
 - Notifications extend the existing durable outbox/restock lane, with persisted opt-in and bounded retry/pacing. Admin direct messages require private-chat numeric root-admin authorization and audited enqueue.
 - Wallet purchase, ledger debit, payment-intent voiding, and OrderPaid enqueue share one transaction; transaction executors never open nested transactions. Refund credits require the existing authorized refund flow and cannot exceed eligible paid value.
-- Mini App ships a small working `/shop` storefront and authenticated API using the same catalog, order, and wallet services. No separate purchase engine or frontend dependency. Raw initData is checked server-side on authenticated requests; credentials never enter URLs or logs.
-- Existing HTTPS public URL supplies the inline WebApp launch URL. Production registration, deployment, real money movement, and owner Telegram acceptance require explicit owner action; local disposable runtime verification does not substitute for owner acceptance.
+- Mini App / `/shop` storefront / WebApp launch URL: CANCELLED BY OWNER — DO NOT IMPLEMENT.
 
 ### Continuation invariant ledger
 
 - `invariants_preserved`: numeric identity; closed-loop integer VND; nonnegative balance; once-only business effects; stock/expiry validation before debit; transactional outbox; opt-in notifications; no secret disclosure.
 - `intentional_breaks`: none to existing direct checkout or delivery capabilities.
-- `risked_invariants`: concurrent bank settlement versus wallet purchase; reused idempotency keys; refund eligibility; stock-delta dispatch; expired/forged Mini App authentication; admin authorization. Integration/security tests must exercise these boundaries, including rollback and replay.
+- `risked_invariants`: concurrent bank settlement versus wallet purchase; reused idempotency keys; refund eligibility; stock-delta dispatch; admin authorization. Integration/security tests must exercise these boundaries, including rollback and replay.

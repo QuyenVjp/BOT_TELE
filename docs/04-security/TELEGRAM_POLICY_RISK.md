@@ -1,3 +1,5 @@
+> **MINI APP: NOT IN PRODUCT SCOPE — OWNER DECISION.** Do not implement Mini App validation, WebApp, or `shop.tier20.click`. Canonical UX is Telegram-bot-only: `docs/architecture/telegram-only-commerce.md`.
+
 # Telegram Platform Policy Risk
 
 This is a deployment/compliance warning, not the payment implementation. The requested payment core is **VietQR + SePay**. Before production, the owner must confirm that the chosen Telegram flow and product are allowed by Telegram and by the upstream account provider.

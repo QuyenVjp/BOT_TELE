@@ -1,5 +1,7 @@
 # Business Idempotency Matrix
 
+> **MINI APP: NOT IN PRODUCT SCOPE — OWNER DECISION.** TIER20 SHOP is Telegram-bot-only. Do not treat Mini App, WebApp, `initData`, `startapp`, or `shop.tier20.click` as required, blocked, or future work. See `docs/architecture/telegram-only-commerce.md`.
+
 This document is canonical for business idempotency. It names the business effect, the key that makes a retry safe, the exact database uniqueness/fencing rule, and the source path that applies it. These are implementation facts, not production-readiness claims.
 
 | Business effect | Retry / duplicate source | Idempotency key | Exact DB uniqueness / fencing | Source applying it | Current readiness |
