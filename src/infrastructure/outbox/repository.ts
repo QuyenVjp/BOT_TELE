@@ -199,6 +199,10 @@ export async function markOutboxPublished(
  * backoff `next_attempt_at`, releases the lease so another worker can pick it
  * up after the backoff, and — once the bounded attempt budget is exhausted —
  * dead-letters the row so the poller stops re-delivering a poison event.
+ *
+ * `RATE_LIMITED` is backpressure rather than a poison event: it neither consumes the attempt
+ * budget nor dead-letters, so a burst of publication work defers and later drains instead of
+ * being silently dropped. The row still backs off, so the poller never busy-loops.
  */
 export async function recordOutboxFailure(
   exec: Executor,
@@ -212,17 +216,21 @@ export async function recordOutboxFailure(
   if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 10_000) {
     throw new RangeError("outbox maxAttempts must be an integer between 1 and 10000");
   }
+  const countsTowardBudget = errorCode !== "RATE_LIMITED";
 
   // Backoff: 2^attempt seconds, capped at 1 hour. Dead-letter when the next
   // attempt would exceed the budget. Release the lease so the event is free
   // for reclaim after next_attempt_at.
   const result = await sql<{ id: string }>`
     update outbox_event
-    set attempt_count = attempt_count + 1,
+    set attempt_count = case
+          when ${countsTowardBudget} then attempt_count + 1
+          else attempt_count
+        end,
         last_error_code = ${errorCode},
         next_attempt_at = now() + (least(power(2, attempt_count + 1), 3600) || ' seconds')::interval,
         dead_lettered_at = case
-          when attempt_count + 1 >= ${maxAttempts} then now()
+          when ${countsTowardBudget} and attempt_count + 1 >= ${maxAttempts} then now()
           else dead_lettered_at
         end,
         claimed_by = null,

@@ -71,6 +71,8 @@ export type TelegramRateLimitAction =
   | "ADMIN"
   | "PAID_ORDER_RECOVERY"
   | "WALLET"
+  /** Outbound group broadcasts (restock / social proof). Distinct bucket per chat. */
+  | "GROUP_PUBLICATION"
   | "UNKNOWN";
 
 export interface DistributedRateLimitResult {
@@ -89,6 +91,9 @@ export type TelegramRateLimitPolicies = Partial<
   Record<TelegramRateLimitAction, { capacity: number; refillPerSecond: number }>
 >;
 
+/** Conservative per-chat ceiling for bot-published group messages. */
+export const GROUP_PUBLICATION_MAX_PER_MINUTE = 12;
+
 export const DEFAULT_TELEGRAM_RATE_LIMIT_POLICIES = {
   CATALOG: { capacity: 60, refillPerSecond: 1 },
   BUY_NOW: { capacity: 5, refillPerSecond: 0.1 },
@@ -99,9 +104,18 @@ export const DEFAULT_TELEGRAM_RATE_LIMIT_POLICIES = {
   PAID_ORDER_RECOVERY: { capacity: 30, refillPerSecond: 0.5 },
   WALLET: { capacity: 5, refillPerSecond: 0.1 },
   UNKNOWN: { capacity: 5, refillPerSecond: 0.1 },
+  /**
+   * Outbound community publication. Telegram's documented ceiling for a group is
+   * ~20 messages/minute; 12/min leaves headroom for operational replies without
+   * ever approaching the platform limit.
+   */
+  GROUP_PUBLICATION: {
+    capacity: GROUP_PUBLICATION_MAX_PER_MINUTE,
+    refillPerSecond: GROUP_PUBLICATION_MAX_PER_MINUTE / 60,
+  },
 } as const satisfies Record<TelegramRateLimitAction, { capacity: number; refillPerSecond: number }>;
 
-const PRINCIPAL_PATTERN = /^(?:user:[1-9][0-9]{0,19}|anonymous)$/;
+const PRINCIPAL_PATTERN = /^(?:user:[1-9][0-9]{0,19}|group:-?[1-9][0-9]{0,19}|anonymous)$/;
 
 /** PostgreSQL fallback: row locking makes budgets atomic across app/worker instances. */
 export function createPostgresRateLimiter(

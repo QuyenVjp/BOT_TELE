@@ -773,6 +773,14 @@ async function bootstrap(): Promise<void> {
   const { createWalletPurchaseService } = await import("./modules/wallet/purchase.js");
   const { createTelegramDomainDispatcher } = await import("./bot/callbacks/telegram-dispatch.js");
   const { createPostgresUiSurfaceRegistry } = await import("./bot/ui-surface.js");
+  const {
+    isGroupPublicationEvent,
+    handleGroupPublicationOutboxEvent,
+    advanceRestockGenerations,
+    enqueueRestockPublication,
+    listSocialProofCandidates,
+    evaluateSocialProofCandidate,
+  } = await import("./modules/group/publication.js");
   const { createGrammyDocumentSender, createGrammyResponder, ensureTelegramCommandMenu } =
     await import("./bot/grammy-responder.js");
   const { createSearchParser } = await import("./modules/catalog/search-parser-adapter.js");
@@ -1213,6 +1221,9 @@ async function bootstrap(): Promise<void> {
     undefined,
     config.NODE_ENV !== "production" ? logger : undefined,
   );
+  // The community chat the group-publication lane addresses. Settings are seeded by
+  // migration 051, so this is always present.
+  const groupChatId = (await getGroupCommerceSettings(dbHandle.db)).group_chat_id;
   try {
     await ensureTelegramCommandMenu({
       botToken: config.TELEGRAM_BOT_TOKEN,
@@ -5131,11 +5142,33 @@ async function bootstrap(): Promise<void> {
       batchSize: 20,
       maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
       handler: (event) =>
-        event.eventType === "StockDelta"
-          ? handleNotificationOutboxEvent(dbHandle.db, event, {
-              rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+        isGroupPublicationEvent(event.eventType)
+          ? handleGroupPublicationOutboxEvent(dbHandle.db, event, {
+              send: async ({ chatId, message }) => {
+                await telegramResponder.send({ chatId, messageId: null, message });
+              },
+              botMembership: async () => {
+                if (!telegramResponder.getChatMember) return null;
+                try {
+                  const member = (await telegramResponder.getChatMember(
+                    groupChatId,
+                    BOT_USER_ID,
+                  )) as { status?: string } | null;
+                  const status = member?.status;
+                  return status === "member" || status === "administrator" || status === "creator"
+                    ? status
+                    : null;
+                } catch {
+                  return null;
+                }
+              },
+              limiter: telegramLimiter,
             })
-          : handler(event),
+          : event.eventType === "StockDelta"
+            ? handleNotificationOutboxEvent(dbHandle.db, event, {
+                rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+              })
+            : handler(event),
       ownerId,
     });
     if (result.claimed > 0) {
@@ -5232,6 +5265,30 @@ async function bootstrap(): Promise<void> {
       "bounded recovery cycle",
     );
   };
+  /**
+   * Group publication detection. Runs on the recovery cadence and only ever enqueues
+   * durable work: the actual Telegram send happens in the outbox lane under the limiter.
+   */
+  const groupPublicationLane = async (): Promise<void> => {
+    const ticks = await advanceRestockGenerations(dbHandle.db, { batchSize: 200 });
+    for (const tick of ticks) await enqueueRestockPublication(dbHandle.db, tick);
+    const candidates = await listSocialProofCandidates(dbHandle.db, { batchSize: 50 });
+    let queued = 0;
+    for (const orderId of candidates) {
+      const outcome = await evaluateSocialProofCandidate(dbHandle.db, { orderId });
+      if (outcome.queued) queued += 1;
+    }
+    if (ticks.length > 0 || candidates.length > 0) {
+      logger.info(
+        {
+          restockGenerations: ticks.length,
+          socialProofEvaluated: candidates.length,
+          socialProofQueued: queued,
+        },
+        "group publication detection cycle",
+      );
+    }
+  };
   const { createDbWakeListener, DB_WAKE_CHANNELS } = await import("./infrastructure/db/client.js");
   const wakeListener = createDbWakeListener(dbHandle.pool, {
     callbacks: {
@@ -5247,6 +5304,7 @@ async function bootstrap(): Promise<void> {
       sepay: sepayLane,
       notifications: notificationLane,
       recovery: recoveryLane,
+      groupPublication: groupPublicationLane,
     },
     pollIntervalMs: config.OUTBOX_POLL_INTERVAL_MS,
     recoveryIntervalMs: 60_000,

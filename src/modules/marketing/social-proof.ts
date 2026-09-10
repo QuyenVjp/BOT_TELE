@@ -152,12 +152,13 @@ export async function evaluateAndPublishSocialProof(
     ) values (
       ${eventId}, 'SocialProof', ${row.order_id}, 1, 'SocialProofEventCreated',
       jsonb_build_object(
-        'orderId', ${row.order_id},
-        'orderNumber', ${row.order_number},
-        'customerAlias', ${customerAlias},
-        'message', ${message}
+        'orderId', ${row.order_id}::text,
+        'orderNumber', ${row.order_number}::text,
+        'customerAlias', ${customerAlias}::text,
+        'message', ${message}::text
       )
     )
+    on conflict (aggregate_type, aggregate_id, aggregate_version, event_type) do nothing
   `.execute(db);
 
   return { ok: true, published: true, message };

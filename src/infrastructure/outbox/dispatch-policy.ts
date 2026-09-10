@@ -45,6 +45,8 @@ export const KNOWN_OUTBOX_EVENT_TYPES = [
   "WalletTopupPresented",
   "WalletTopupCredited",
   "WalletRefunded",
+  "GroupRestockPublished",
+  "SocialProofEventCreated",
 ] as const;
 
 export type KnownOutboxEventType = (typeof KNOWN_OUTBOX_EVENT_TYPES)[number];
