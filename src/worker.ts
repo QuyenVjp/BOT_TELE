@@ -43,6 +43,8 @@ import type {
   presentAdminOrderDetail,
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
+import { presentAdminDenied } from "./bot/presenters/admin.js";
+import type { AdminCallbacks } from "./bot/callbacks/admin.js";
 import type { PresentedMessage } from "./bot/presenters/catalog.js";
 import {
   presentAdminRefundConfirm,
@@ -952,6 +954,31 @@ function parseRefundAdjustment(text: string): { amountVnd: bigint; reason: strin
   const amountVnd = BigInt(rawAmount);
   if (amountVnd <= 0n || amountVnd > 1_000_000_000n) return null;
   return { amountVnd, reason };
+}
+
+/**
+ * Root-only. The warranty surface reads customer, claim and payout data, and `adminCallbacks` being
+ * present only proves the feature is configured — it is built once from config, so it is non-null
+ * for every caller. Every entry point therefore asks the admin callback layer to authorise this
+ * specific actor, exactly as the sibling admin handlers do.
+ */
+async function requireRootAdmin(
+  adminCallbacks: AdminCallbacks | null,
+  input: { telegramUserId: string; chatType: string; correlationId: string },
+  targetId: string,
+  reason: string,
+): Promise<PresentedMessage | null> {
+  if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+  const gate = await adminCallbacks.handle({
+    command: "order.inspect",
+    actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+    targetId,
+    reason,
+    correlationId: input.correlationId,
+  });
+  return gate.ok
+    ? null
+    : presentAdminDenied(gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN");
 }
 
 /** A warranty screen for a case we cannot serve; never a stack trace or an internal code. */
@@ -3720,7 +3747,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyVerify(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const result = await verifyClaimDefect({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3741,7 +3774,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyInfo(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const result = await requestClaimInfo({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3763,7 +3802,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyRejectReason(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminWarrantyRejectReason({
@@ -3773,7 +3818,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyReject(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const reason = decodeURIComponent(input.reason);
         const result = await rejectClaim({
           db: dbHandle.db,
@@ -3796,7 +3847,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyReplace(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const result = await approveClaimReplacement({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3820,7 +3877,13 @@ async function bootstrap(): Promise<void> {
       /** Goal §25: the refund confirmation, with the calculation spelled out before approving. */
       async warrantyRefund(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminRefundConfirm({
@@ -3836,7 +3899,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyRefundConfirm(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const result = await approveClaimRefund({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3858,7 +3927,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyRefundAdjust(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         // One pending prompt at a time: an older unexpired row would otherwise claim the next
@@ -3880,7 +3955,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyPayout(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminRefundPayout({
@@ -3897,7 +3978,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyPaid(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminRefundPaidConfirm({
@@ -3908,7 +3995,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyPaidConfirm(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.claimId,
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const result = await markRefundPaid({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3929,7 +4022,13 @@ async function bootstrap(): Promise<void> {
       },
       async warrantyRefundQueue(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          "admin-warranty",
+          "Admin warranty",
+        );
+        if (denied) return denied;
         const rows = await warrantyQueueRows(dbHandle.db, "refund_due");
         return presentAdminRefundQueue(rows);
       },
@@ -5297,14 +5396,19 @@ async function bootstrap(): Promise<void> {
           if (pendingAdjust) {
             const payload = (pendingAdjust.payload ?? {}) as { claimId?: unknown };
             const claimId = typeof payload.claimId === "string" ? payload.claimId : null;
-            await sql`
-              delete from admin_callback_state
-              where admin_telegram_user_id = ${input.telegramUserId}
-                and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
-            `.execute(dbHandle.db);
-            if (!claimId) return null;
+            if (!claimId) {
+              // Unusable state: drop it and let the message fall through rather than swallow it.
+              await sql`
+                delete from admin_callback_state
+                where admin_telegram_user_id = ${input.telegramUserId}
+                  and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
+              `.execute(dbHandle.db);
+              return null;
+            }
             const adjusted = parseRefundAdjustment(input.text);
             if (!adjusted) {
+              // The state stays pending: telling the owner to resend is only honest if the prompt
+              // is still live to vouch for the retry.
               return {
                 text: [
                   "Chưa đọc được số tiền.",
@@ -5314,6 +5418,12 @@ async function bootstrap(): Promise<void> {
                 buttons: [[{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }]],
               };
             }
+            // Only now is the prompt spent.
+            await sql`
+              delete from admin_callback_state
+              where admin_telegram_user_id = ${input.telegramUserId}
+                and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
+            `.execute(dbHandle.db);
             const result = await approveClaimRefund({
               db: dbHandle.db,
               actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
