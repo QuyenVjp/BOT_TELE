@@ -42,6 +42,7 @@ export interface InlineButton {
   text: string;
   callbackData: string;
   url?: string;
+  switchInlineQueryCurrentChat?: string;
 }
 export interface ReplyKeyboardButton {
   text: string;

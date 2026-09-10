@@ -16,6 +16,21 @@ import type {
 import type { PresentedMessage } from "./presenters/catalog.js";
 import type { TelegramDocumentSender } from "../modules/digital-goods/file-delivery.js";
 
+export interface InlineQueryResultArticle {
+  type: "article";
+  id: string;
+  title: string;
+  input_message_content: {
+    message_text: string;
+    parse_mode?: "Markdown" | "HTML";
+  };
+  reply_markup?: {
+    inline_keyboard: Array<Array<{ text: string; url?: string; callback_data?: string }>>;
+  };
+  description?: string;
+  thumb_url?: string;
+}
+
 export interface TelegramResponder {
   ack?(callbackQueryId: string): Promise<void>;
   send(input: {
@@ -23,7 +38,22 @@ export interface TelegramResponder {
     messageId: string | null;
     callbackQueryId?: string;
     message: PresentedMessage;
+    messageThreadId?: number | null;
   }): Promise<void>;
+  answerInlineQuery?(
+    inlineQueryId: string,
+    results: InlineQueryResultArticle[],
+    options?: {
+      cacheTime?: number;
+      isPersonal?: boolean;
+      switchPmText?: string;
+      switchPmParameter?: string;
+    },
+  ): Promise<void>;
+  getChat?(chatId: string | number): Promise<unknown>;
+  getChatMember?(chatId: string | number, userId: number): Promise<unknown>;
+  pinChatMessage?(chatId: string | number, messageId: number): Promise<void>;
+  deleteMessage?(chatId: string | number, messageId: number): Promise<void>;
 }
 
 export class TelegramRetryableError extends Error {
@@ -43,11 +73,16 @@ export class TelegramAmbiguousSendError extends Error {
 type TelegramApi = Pick<
   Api,
   | "answerCallbackQuery"
+  | "answerInlineQuery"
   | "editMessageMedia"
   | "editMessageText"
   | "sendDocument"
   | "sendPhoto"
   | "sendMessage"
+  | "getChat"
+  | "getChatMember"
+  | "pinChatMessage"
+  | "deleteMessage"
 >;
 
 type TelegramResponderTrace = {
@@ -159,8 +194,13 @@ function buildReplyMarkup(message: PresentedMessage): SendReplyMarkup {
   const inline = new InlineKeyboard();
   for (const row of message.buttons) {
     for (const button of row) {
-      if (button.url) inline.url(button.text, button.url);
-      else inline.text(button.text, button.callbackData ?? "");
+      if (button.switchInlineQueryCurrentChat !== undefined) {
+        inline.switchInlineCurrent(button.text, button.switchInlineQueryCurrentChat);
+      } else if (button.url) {
+        inline.url(button.text, button.url);
+      } else {
+        inline.text(button.text, button.callbackData ?? "");
+      }
     }
     inline.row();
   }
@@ -216,6 +256,15 @@ export const TELEGRAM_OWNER_BOT_COMMANDS = [
   { command: "health", description: "Hệ thống" },
 ] as const;
 
+export const TELEGRAM_GROUP_BOT_COMMANDS = [
+  { command: "shop", description: "Xem sản phẩm" },
+  { command: "tim", description: "Tìm sản phẩm" },
+  { command: "hot", description: "Sản phẩm nổi bật" },
+  { command: "new", description: "Hàng mới" },
+  { command: "stock", description: "Kiểm tra còn hàng" },
+  { command: "support", description: "Hỗ trợ" },
+] as const;
+
 /** Command menu only — never MenuButtonWebApp. Failures are non-fatal at worker boot. */
 export async function ensureTelegramCommandMenu(input: {
   botToken: string;
@@ -226,7 +275,12 @@ export async function ensureTelegramCommandMenu(input: {
   }
   const api = new Api(input.botToken);
   await api.setChatMenuButton({ menu_button: { type: "commands" } });
-  await api.setMyCommands([...TELEGRAM_CUSTOMER_BOT_COMMANDS]);
+  await api.setMyCommands([...TELEGRAM_CUSTOMER_BOT_COMMANDS], {
+    scope: { type: "all_private_chats" },
+  });
+  await api.setMyCommands([...TELEGRAM_GROUP_BOT_COMMANDS], {
+    scope: { type: "all_group_chats" },
+  });
   if (input.adminTelegramUserId !== undefined) {
     await api.setMyCommands([...TELEGRAM_CUSTOMER_BOT_COMMANDS, ...TELEGRAM_OWNER_BOT_COMMANDS], {
       scope: { type: "chat", chat_id: input.adminTelegramUserId },
@@ -283,11 +337,45 @@ export function createGrammyResponder(
       const oldest = answered.values().next().value;
       if (oldest) answered.delete(oldest);
     }
+    const t0 = Date.now();
     await telegramApi.answerCallbackQuery(callbackQueryId).catch(() => undefined);
+    return { rttMs: Date.now() - t0 };
   };
   return {
     async ack(callbackQueryId) {
       await ack(callbackQueryId);
+    },
+    async answerInlineQuery(inlineQueryId, results, options) {
+      await callTelegram("answerInlineQuery", () =>
+        telegramApi.answerInlineQuery(
+          inlineQueryId,
+          results as unknown as Parameters<Api["answerInlineQuery"]>[1],
+          {
+            cache_time: options?.cacheTime ?? 10,
+            is_personal: options?.isPersonal ?? false,
+            ...(options?.switchPmText
+              ? {
+                  button: {
+                    text: options.switchPmText,
+                    start_parameter: options.switchPmParameter ?? "start",
+                  },
+                }
+              : {}),
+          },
+        ),
+      );
+    },
+    async getChat(chatId) {
+      return callTelegram("getChat", () => telegramApi.getChat(chatId));
+    },
+    async getChatMember(chatId, userId) {
+      return callTelegram("getChatMember", () => telegramApi.getChatMember(chatId, userId));
+    },
+    async pinChatMessage(chatId, messageId) {
+      await callTelegram("pinChatMessage", () => telegramApi.pinChatMessage(chatId, messageId));
+    },
+    async deleteMessage(chatId, messageId) {
+      await callTelegram("deleteMessage", () => telegramApi.deleteMessage(chatId, messageId));
     },
     async send(input) {
       if (input.callbackQueryId) {
@@ -363,7 +451,10 @@ export function createGrammyResponder(
         }
       }
       const result = await callTelegram("sendMessage", () =>
-        telegramApi.sendMessage(input.chatId, input.message.text, { reply_markup: replyMarkup }),
+        telegramApi.sendMessage(input.chatId, input.message.text, {
+          reply_markup: replyMarkup,
+          ...(input.messageThreadId ? { message_thread_id: input.messageThreadId } : {}),
+        }),
       );
       traceTelegram(trace, { method: "sendMessage", ...summarizeTelegramResult(result) });
     },

@@ -20,8 +20,27 @@ import {
   reorderCategory,
   ensureDefaultCategories,
   getOrCreateUncategorizedCategory,
+  listFeaturedProducts,
+  getProductDetail,
 } from "./modules/catalog/repository.js";
 import { createCatalogCache } from "./modules/catalog/cache.js";
+import {
+  getGroupCommerceSettings,
+  updateGroupCommerceSettings,
+  buildInlineQueryResults,
+  parseNaturalSalesQA,
+} from "./modules/catalog/group-commerce.js";
+
+const BOT_USERNAME = "tier20ai_bot";
+const BOT_USER_ID = 8394662759;
+import {
+  presentGroupShopPanel,
+  presentGroupProductCard,
+  presentGroupWelcome,
+  presentGroupPrivacyNotice,
+  presentGroupAdminPanel,
+} from "./bot/presenters/group.js";
+import { issueProductLinkToken } from "./modules/catalog/product-link-token.js";
 import { pathToFileURL } from "node:url";
 import { sql } from "kysely";
 import { isId, newId } from "./shared/ids/index.js";
@@ -1195,7 +1214,13 @@ async function bootstrap(): Promise<void> {
     adminRootUserId: config.ADMIN_TELEGRAM_USER_ID,
     observeCallback: (event) => {
       logger.info(
-        { ack_ms: event.ackMs, render_ms: event.renderMs, action: event.action },
+        {
+          ack_ms: event.ackMs,
+          server_issue_ack_ms: event.serverIssueAckMs,
+          telegram_rtt_ms: event.telegramRttMs,
+          render_ms: event.renderMs,
+          action: event.action,
+        },
         "catalog.callback.timing",
       );
     },
@@ -3459,37 +3484,55 @@ async function bootstrap(): Promise<void> {
         const session = await getInventoryImportSession(dbHandle.db, String(input.telegramUserId));
         if (!session || session.status === "COMMITTED" || session.status === "CANCELLED")
           return null;
-        const result = await stageInventoryImportInput(dbHandle.db, vault, {
-          actor: {
-            numericUserId: Number(input.telegramUserId),
-            chatType: input.chatType as "private",
-          },
-          config: {
-            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
-          },
-          correlationId: input.correlationId,
-          rawInput: input.text,
-        });
-        if (!result.ok) {
-          if (result.code === "NOT_FOUND" || result.code === "EXPIRED") return null;
+        try {
+          const result = await stageInventoryImportInput(dbHandle.db, vault, {
+            actor: {
+              numericUserId: Number(input.telegramUserId),
+              chatType: input.chatType as "private",
+            },
+            config: {
+              adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+              expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+            },
+            correlationId: input.correlationId,
+            rawInput: input.text,
+          });
+          if (!result.ok) {
+            if (result.code === "NOT_FOUND" || result.code === "EXPIRED") return null;
+            return {
+              text: "Dữ liệu nhập kho không hợp lệ. Dán lại nội dung CSV đúng định dạng.",
+              buttons: [
+                [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
+                [{ text: "📦 Nhập kho", callbackData: "admin:inventory:import" }],
+              ],
+            };
+          }
+          const preview = result.preview;
+          return presentInventoryImportPreview({
+            ready: preview.ready,
+            invalid: preview.invalid,
+            duplicates: preview.duplicates,
+            variants: preview.lines
+              .filter((line) => line.classification === "READY" && line.variantId)
+              .map((line) => line.variantId!),
+          });
+        } catch (error) {
+          logger.error(
+            {
+              err: error instanceof Error ? error.message : "unknown",
+              name: error instanceof Error ? error.name : undefined,
+              code: error instanceof Error && "code" in error ? error.code : undefined,
+            },
+            "inventory import text failed",
+          );
           return {
-            text: "Dữ liệu nhập kho không hợp lệ. Dán lại nội dung CSV đúng định dạng.",
+            text: "Không lưu được dữ liệu nhập kho. Thử dán lại hoặc gửi file CSV.",
             buttons: [
               [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
               [{ text: "📦 Nhập kho", callbackData: "admin:inventory:import" }],
             ],
           };
         }
-        const preview = result.preview;
-        return presentInventoryImportPreview({
-          ready: preview.ready,
-          invalid: preview.invalid,
-          duplicates: preview.duplicates,
-          variants: preview.lines
-            .filter((line) => line.classification === "READY" && line.variantId)
-            .map((line) => line.variantId!),
-        });
       },
       async importDocument(input) {
         if (!adminCallbacks) return null;
@@ -4725,6 +4768,223 @@ async function bootstrap(): Promise<void> {
           };
         },
       },
+      async communityMenu(_input) {
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const settings = await getGroupCommerceSettings(dbHandle.db);
+        let membershipStatus: "NOT_MEMBER" | "MEMBER" | "ADMIN" = "MEMBER";
+        let canPin = false;
+        let canManageTopics = false;
+        if (telegramResponder.getChatMember) {
+          try {
+            const member = (await telegramResponder.getChatMember(
+              settings.group_chat_id,
+              BOT_USER_ID,
+            )) as {
+              status?: string;
+              can_pin_messages?: boolean;
+              can_manage_topics?: boolean;
+            } | null;
+            if (member?.status === "administrator" || member?.status === "creator") {
+              membershipStatus = "ADMIN";
+              canPin = Boolean(member.can_pin_messages);
+              canManageTopics = Boolean(member.can_manage_topics);
+            } else if (member?.status === "member") {
+              membershipStatus = "MEMBER";
+            } else {
+              membershipStatus = "NOT_MEMBER";
+            }
+          } catch {
+            membershipStatus = "NOT_MEMBER";
+          }
+        }
+        return presentGroupAdminPanel({
+          chatTitle: "AI Codex Việt Nam",
+          membershipStatus,
+          canPin,
+          canManageTopics,
+          shopPanelEnabled: settings.shop_panel_enabled,
+          welcomeEnabled: settings.welcome_enabled,
+          replyMode: settings.group_reply_mode,
+          restockEnabled: settings.restock_publishing_enabled,
+          socialProofMode: settings.social_proof_mode,
+        });
+      },
+      async communityAction(input) {
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const settings = await getGroupCommerceSettings(dbHandle.db);
+        if (input.action === "refresh_pin") {
+          const panel = presentGroupShopPanel({
+            botUsername: BOT_USERNAME,
+          });
+          if (settings.shop_panel_message_id && telegramResponder.send) {
+            try {
+              await telegramResponder.send({
+                chatId: settings.group_chat_id,
+                messageId: settings.shop_panel_message_id,
+                message: panel,
+              });
+            } catch {
+              // fall through to send new
+            }
+          } else if (telegramResponder.send) {
+            await telegramResponder.send({
+              chatId: settings.group_chat_id,
+              messageId: null,
+              message: panel,
+            });
+          }
+          return {
+            text: "✅ Đã làm mới bảng ghim shop trong nhóm cộng đồng.",
+            buttons: [[{ text: "↩️ Quay lại Cộng đồng", callbackData: "admin:community" }]],
+          };
+        }
+        if (input.action === "test_msg") {
+          if (telegramResponder.send) {
+            await telegramResponder.send({
+              chatId: settings.group_chat_id,
+              messageId: null,
+              message: {
+                text: "🧪 *TIER20 GROUP TEST*\n\nĐây là thông báo kiểm thử kết nối bot với nhóm cộng đồng AI Codex Việt Nam.",
+                buttons: [
+                  [
+                    {
+                      text: "🛒 Mở Shop",
+                      url: `https://t.me/${BOT_USERNAME}?start=shop`,
+                      callbackData: "",
+                    },
+                  ],
+                ],
+              },
+            });
+          }
+          return {
+            text: "✅ Đã gửi bài test vào nhóm cộng đồng.",
+            buttons: [[{ text: "↩️ Quay lại Cộng đồng", callbackData: "admin:community" }]],
+          };
+        }
+        if (input.action === "toggle_reply_mode") {
+          const next =
+            settings.group_reply_mode === "MENTION_ONLY" ? "PASSIVE_COMMERCE" : "MENTION_ONLY";
+          await updateGroupCommerceSettings(dbHandle.db, { group_reply_mode: next });
+          return this.communityMenu ? await this.communityMenu(input) : presentAdminMenu();
+        }
+        if (input.action === "stats") {
+          const stats = await sql<{ count: number; action: string }>`
+            select action, count(*)::int as count
+            from group_acquisition_log
+            group by action
+          `.execute(dbHandle.db);
+          const statMap = Object.fromEntries(stats.rows.map((r) => [r.action, r.count]));
+          return {
+            text: [
+              "📊 *THỐNG KÊ CỘNG ĐỒNG*",
+              "",
+              `• Lượt mở thẻ sản phẩm: ${statMap["CARD_OPEN"] ?? 0}`,
+              `• Lượt bấm Mua riêng: ${statMap["BUY_START"] ?? 0}`,
+              `• Đơn hàng hoàn tất từ nhóm: ${statMap["CHECKOUT_COMPLETE"] ?? 0}`,
+            ].join("\n"),
+            buttons: [[{ text: "↩️ Quay lại", callbackData: "admin:community" }]],
+          };
+        }
+        return {
+          text: "Thao tác không hỗ trợ.",
+          buttons: [[{ text: "Quay lại", callbackData: "admin:community" }]],
+        };
+      },
+    },
+    group: {
+      async buildInlineResults(query, actorUserId) {
+        const isRootOrTester = Number(actorUserId) === config.ADMIN_TELEGRAM_USER_ID;
+        return buildInlineQueryResults(dbHandle.db, {
+          query,
+          botUsername: BOT_USERNAME,
+          linkSecret: config.BUY_NOW_CALLBACK_HMAC_KEY,
+          isRootOrTester,
+        });
+      },
+      async handleWelcome(envelope) {
+        const settings = await getGroupCommerceSettings(dbHandle.db);
+        if (!settings.welcome_enabled) return null;
+        const now = Date.now();
+        if (
+          settings.last_welcome_at &&
+          now - new Date(settings.last_welcome_at).getTime() <
+            settings.welcome_cooldown_seconds * 1000
+        ) {
+          return null;
+        }
+        await updateGroupCommerceSettings(dbHandle.db, {
+          last_welcome_at: new Date(now),
+        });
+        const names = (envelope.newChatMembers ?? []).map((m) => m.firstName);
+        return presentGroupWelcome({
+          memberNames: names.length > 0 ? names : ["bạn"],
+          botUsername: BOT_USERNAME,
+        });
+      },
+      async handleShopPanel(_envelope) {
+        return presentGroupShopPanel({
+          botUsername: BOT_USERNAME,
+        });
+      },
+      async handleHotProducts(_envelope) {
+        const prods = await listFeaturedProducts(dbHandle.db, "public", 3);
+        if (prods.length === 0) {
+          return presentGroupShopPanel({
+            botUsername: BOT_USERNAME,
+          });
+        }
+        const prod = prods[0]!;
+        const detail = await getProductDetail(dbHandle.db, prod.id, "public");
+        const token = issueProductLinkToken(prod.id, { secret: config.BUY_NOW_CALLBACK_HMAC_KEY });
+        return presentGroupProductCard({
+          name: prod.name_vi,
+          shortDescription: prod.short_description_vi,
+          priceVnd: Number(prod.min_price_vnd),
+          isOutOfStock: prod.total_available <= 0,
+          stockLabel: prod.total_available > 0 ? `Còn hàng (${prod.total_available})` : "Hết hàng",
+          deliveryTypeLabel: "Tự động 24/7",
+          warrantyText: detail?.warranty_vi ?? null,
+          productToken: token,
+          botUsername: BOT_USERNAME,
+        });
+      },
+      async handleSearchPrompt(_envelope) {
+        return presentGroupShopPanel({
+          botUsername: BOT_USERNAME,
+        });
+      },
+      async handleNewProducts(_envelope) {
+        return presentGroupShopPanel({
+          botUsername: BOT_USERNAME,
+        });
+      },
+      async handleStockSummary(_envelope) {
+        return presentGroupShopPanel({
+          botUsername: BOT_USERNAME,
+        });
+      },
+      async handleSupport(_envelope) {
+        return presentGroupPrivacyNotice("general", BOT_USERNAME);
+      },
+      async handlePrivacyNotice(topic) {
+        return presentGroupPrivacyNotice(topic, BOT_USERNAME);
+      },
+      async handleNaturalQA(envelope) {
+        const settings = await getGroupCommerceSettings(dbHandle.db);
+        if (
+          settings.group_reply_mode !== "MENTION_ONLY" &&
+          settings.group_reply_mode !== "PASSIVE_COMMERCE"
+        ) {
+          return null;
+        }
+        return parseNaturalSalesQA(dbHandle.db, {
+          question: envelope.messageText ?? "",
+          botUsername: BOT_USERNAME,
+          linkSecret: config.BUY_NOW_CALLBACK_HMAC_KEY,
+          ...(envelope.replyToText ? { replyToText: envelope.replyToText } : {}),
+        });
+      },
     },
     responder: telegramResponder,
   });
@@ -4827,26 +5087,41 @@ async function bootstrap(): Promise<void> {
       inbox: telegramInbox,
       limiter: telegramLimiter,
       handler: async (envelope) => {
-        const observedUsername = await consumeTelegramUsernameObservation(
-          dbHandle.db,
-          envelope.actorUserId,
-        );
-        const identity = await ensureTelegramIdentity(dbHandle.db, {
-          telegramUserId: envelope.actorUserId,
-          ...(observedUsername ? { observedUsername } : {}),
-        });
-        await upsertTelegramCustomerProfileSnapshot(dbHandle.db, {
-          customerId: identity.customerId,
-          telegramUserId: envelope.actorUserId,
-          chatId: envelope.chatId,
-          username: envelope.actorUsername ?? observedUsername ?? null,
-          firstName: envelope.firstName ?? null,
-          lastName: envelope.lastName ?? null,
-          languageCode: envelope.languageCode ?? null,
-          phoneNumber: envelope.contactPhoneNumber ?? null,
-          reachable: true,
-        });
-        await telegramDispatcher.handle(envelope);
+        try {
+          const observedUsername = await consumeTelegramUsernameObservation(
+            dbHandle.db,
+            envelope.actorUserId,
+          );
+          const identity = await ensureTelegramIdentity(dbHandle.db, {
+            telegramUserId: envelope.actorUserId,
+            ...(observedUsername ? { observedUsername } : {}),
+          });
+          await upsertTelegramCustomerProfileSnapshot(dbHandle.db, {
+            customerId: identity.customerId,
+            telegramUserId: envelope.actorUserId,
+            chatId: envelope.chatId,
+            username: envelope.actorUsername ?? observedUsername ?? null,
+            firstName: envelope.firstName ?? null,
+            lastName: envelope.lastName ?? null,
+            languageCode: envelope.languageCode ?? null,
+            phoneNumber: envelope.contactPhoneNumber ?? null,
+            reachable: true,
+          });
+          await telegramDispatcher.handle(envelope);
+        } catch (error) {
+          logger.error(
+            {
+              err: error instanceof Error ? error.message : "unknown",
+              name: error instanceof Error ? error.name : undefined,
+              code: error instanceof Error && "code" in error ? error.code : undefined,
+              action: envelope.action,
+              hasInventoryImportText: envelope.inventoryImportText === true,
+              hasMessageText: Boolean(envelope.messageText),
+            },
+            "telegram inbox handler failed",
+          );
+          throw error;
+        }
       },
       owner: telegramOwnerId,
       batchSize: 20,

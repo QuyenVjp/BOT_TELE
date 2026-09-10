@@ -559,6 +559,251 @@ describe("admin inventory import text ingress", () => {
   });
 });
 
+describe("group commerce and inline query ingress", () => {
+  it("accepts inline_query and normalizes to CATALOG action with query and offset", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: {
+          update_id: 9101,
+          inline_query: {
+            id: "iq-101",
+            from: { id: 12345, username: "tester", first_name: "Test" },
+            query: "claude",
+            offset: "0",
+            chat_type: "supergroup",
+          },
+        },
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.action).toBe("CATALOG");
+      expect(accepted[0]?.inlineQuery).toEqual({
+        id: "iq-101",
+        query: "claude",
+        offset: "0",
+        chatType: "supergroup",
+      });
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("accepts chosen_inline_result and captures resultId and query", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: {
+          update_id: 9102,
+          chosen_inline_result: {
+            result_id: "prod-claude-pro",
+            from: { id: 12345, username: "tester", first_name: "Test" },
+            query: "claude",
+            inline_message_id: "imi-999",
+          },
+        },
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.action).toBe("CATALOG");
+      expect(accepted[0]?.chosenInlineResult).toEqual({
+        resultId: "prod-claude-pro",
+        query: "claude",
+        inlineMessageId: "imi-999",
+      });
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("accepts group command with supergroup chatType and negative chatId", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: {
+          update_id: 9103,
+          message: {
+            message_id: 100,
+            from: { id: 12345, is_bot: false },
+            chat: { id: -1003906082671, type: "supergroup", title: "AI Codex" },
+            text: "/shop@tier20ai_bot",
+          },
+        },
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.command).toBe("/shop");
+      expect(accepted[0]?.chatType).toBe("supergroup");
+      expect(accepted[0]?.chatId).toBe("-1003906082671");
+      expect(accepted[0]?.action).toBe("CATALOG");
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("drops unmentioned group conversation when MENTION_ONLY is active", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: {
+          update_id: 9104,
+          message: {
+            message_id: 101,
+            from: { id: 12345, is_bot: false },
+            chat: { id: -1003906082671, type: "supergroup", title: "AI Codex" },
+            text: "Claude ngon không mọi người?",
+          },
+        },
+      });
+
+      expect(accepted).toHaveLength(0);
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("accepts group question when bot is mentioned and passes clean prose", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: {
+          update_id: 9105,
+          message: {
+            message_id: 102,
+            from: { id: 12345, is_bot: false },
+            chat: { id: -1003906082671, type: "supergroup", title: "AI Codex" },
+            text: "@tier20ai_bot Claude Pro còn hàng không?",
+          },
+        },
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.messageText).toBe("Claude Pro còn hàng không?");
+      expect(accepted[0]?.chatType).toBe("supergroup");
+      expect(accepted[0]?.action).toBe("CATALOG");
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("accepts new_chat_members event in group and captures members", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: {
+          update_id: 9106,
+          message: {
+            message_id: 103,
+            from: { id: 12345, is_bot: false },
+            chat: { id: -1003906082671, type: "supergroup", title: "AI Codex" },
+            new_chat_members: [
+              { id: 99991, is_bot: false, first_name: "Nguyen" },
+              { id: 99992, is_bot: true, first_name: "SpamBot" },
+            ],
+          },
+        },
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.chatType).toBe("supergroup");
+      expect(accepted[0]?.newChatMembers).toHaveLength(1);
+      expect(accepted[0]?.newChatMembers?.[0]?.firstName).toBe("Nguyen");
+    } finally {
+      await ingress.close();
+    }
+  });
+});
+
 describe("durable callback ACK", () => {
   function callbackUpdate(updateId: number, callbackId = "cb-1") {
     return {

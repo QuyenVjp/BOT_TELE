@@ -6,7 +6,7 @@ import type {
 } from "../../modules/risk/service.js";
 import type { Db } from "../db/transaction.js";
 
-export type TelegramChatType = "private";
+export type TelegramChatType = "private" | "group" | "supergroup";
 export type TelegramInboxAction = TelegramRateLimitAction;
 
 export interface TelegramCommandEnvelope {
@@ -34,6 +34,22 @@ export interface TelegramCommandEnvelope {
     filename: string;
     mimeType: string;
     fileSize?: number;
+  };
+  messageThreadId?: number | null;
+  replyToMessageId?: string | null;
+  replyToText?: string | null;
+  replyToBot?: boolean;
+  newChatMembers?: Array<{ id: number; firstName: string; isBot: boolean }>;
+  inlineQuery?: {
+    id: string;
+    query: string;
+    offset?: string;
+    chatType?: string;
+  };
+  chosenInlineResult?: {
+    resultId: string;
+    query: string;
+    inlineMessageId?: string;
   };
 }
 

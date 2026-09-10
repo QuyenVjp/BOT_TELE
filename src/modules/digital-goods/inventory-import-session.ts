@@ -183,13 +183,16 @@ async function inventoryFieldsForSecretImportVariant(
   const parsed = INVENTORY_FIELDS_SCHEMA.safeParse(row.inventory_fields);
   return parsed.success ? parsed.data : [];
 }
-function bindSecretsToVariant(
+export function bindSecretsToVariant(
   rawInput: string,
   variantId: string,
   fields: readonly InventoryField[],
 ): string {
   const records = parseCsvRecords(rawInput);
-  if (!records || records.length === 0) return "";
+  if (!records || records.length === 0) {
+    const trimmed = rawInput.trim();
+    return trimmed ? [variantId, trimmed].map(csvCell).join(",") : "";
+  }
   const [firstRecord, ...dataRecords] = records;
   const firstCell = firstRecord?.[0] ?? "";
   if (firstCell === "variantId") {
@@ -400,6 +403,7 @@ export async function stageInventoryImportInput(
   const normalizedInput = selectedVariantId
     ? bindSecretsToVariant(input.rawInput, selectedVariantId, selectedVariantFields ?? [])
     : input.rawInput;
+  if (!normalizedInput.trim()) return { ok: false, code: "INVALID_INPUT" };
   const preview = await previewDigitalInventory({
     db,
     actor: input.actor,

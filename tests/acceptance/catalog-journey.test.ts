@@ -60,7 +60,7 @@ describe("catalog journey (US1)", () => {
     expect(menu.text).toContain("TIER20 SHOP");
     const labels = menu.buttons.flat().map((b) => b.text.toLowerCase());
     // Retail-only: no wallet/top-up/reseller/api/supplier/admin controls.
-    for (const forbidden of ["ví", "nạp", "đại lý", "api", "admin", "supplier"]) {
+    for (const forbidden of ["ví", "nạp", "đại lý", "api", "quản trị", "supplier"]) {
       expect(labels.join(" ")).not.toContain(forbidden);
     }
   });

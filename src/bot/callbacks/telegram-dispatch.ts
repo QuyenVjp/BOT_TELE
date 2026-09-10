@@ -22,6 +22,7 @@ import type { TelegramCommandEnvelope } from "../../infrastructure/inbox/telegra
 import type { CallbackTokenCodec, VerifiedCallbackToken } from "../callback-codec.js";
 import { sealPresentedMessageCallbacks } from "../callback-sealer.js";
 import { SUPPORT_REASON_CODES } from "../../modules/support/domain.js";
+import type { InlineQueryResultArticle } from "../grammy-responder.js";
 
 export type TelegramBuyNowDispatchResult =
   { handled: false } | { handled: true; callbackQueryId: string; message: PresentedMessage };
@@ -725,6 +726,17 @@ export interface TelegramDomainDispatcherDeps {
       },
       route: string,
     ): Promise<PresentedMessage>;
+    communityMenu?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    communityAction?(input: {
+      telegramUserId: string;
+      chatType: string;
+      action: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
   };
   responder: {
     ack?(callbackQueryId: string): Promise<void>;
@@ -733,9 +745,45 @@ export interface TelegramDomainDispatcherDeps {
       messageId: string | null;
       callbackQueryId?: string;
       message: PresentedMessage;
+      messageThreadId?: number | null;
     }): Promise<void>;
+    answerInlineQuery?(
+      inlineQueryId: string,
+      results: InlineQueryResultArticle[],
+      options?: {
+        cacheTime?: number;
+        isPersonal?: boolean;
+        switchPmText?: string;
+        switchPmParameter?: string;
+      },
+    ): Promise<void>;
   };
-  observeCallback?: (event: { ackMs: number | null; renderMs: number; action: string }) => void;
+  observeCallback?: (event: {
+    ackMs: number | null;
+    serverIssueAckMs?: number | null;
+    telegramRttMs?: number | null;
+    renderMs: number;
+    action: string;
+  }) => void;
+  group?: {
+    buildInlineResults?(query: string, actorUserId: string): Promise<InlineQueryResultArticle[]>;
+    recordChosenInlineResult?(input: {
+      resultId: string;
+      query: string;
+      inlineMessageId?: string;
+    }): Promise<void>;
+    handleWelcome?(envelope: TelegramCommandEnvelope): Promise<PresentedMessage | null>;
+    handleShopPanel?(envelope: TelegramCommandEnvelope): Promise<PresentedMessage | null>;
+    handleHotProducts?(envelope: TelegramCommandEnvelope): Promise<PresentedMessage | null>;
+    handleSearchPrompt?(envelope: TelegramCommandEnvelope): Promise<PresentedMessage | null>;
+    handleNewProducts?(envelope: TelegramCommandEnvelope): Promise<PresentedMessage | null>;
+    handleStockSummary?(envelope: TelegramCommandEnvelope): Promise<PresentedMessage | null>;
+    handleSupport?(envelope: TelegramCommandEnvelope): Promise<PresentedMessage | null>;
+    handlePrivacyNotice?(
+      topic: "orders" | "wallet" | "warranty" | "general",
+    ): Promise<PresentedMessage | null>;
+    handleNaturalQA?(envelope: TelegramCommandEnvelope): Promise<PresentedMessage | null>;
+  };
 }
 
 export interface TelegramActionContext {
@@ -755,12 +803,115 @@ export function createTelegramDomainDispatcher(
 ): TelegramDomainDispatcher {
   return {
     async handle(envelope) {
-      if (envelope.chatType !== "private") return;
+      if (
+        envelope.chatType !== "private" &&
+        envelope.chatType !== "group" &&
+        envelope.chatType !== "supergroup"
+      ) {
+        return;
+      }
       const startedAt = Date.now();
       const correlationId = `telegram:${envelope.messageId ?? envelope.actorUserId}`;
       const command = normalizeTelegramCommand(envelope.command);
       let message: PresentedMessage;
       const ctx = actionContext(envelope, correlationId);
+
+      if (envelope.inlineQuery) {
+        if (deps.group?.buildInlineResults && deps.responder.answerInlineQuery) {
+          const articles = await deps.group.buildInlineResults(
+            envelope.inlineQuery.query,
+            envelope.actorUserId,
+          );
+          await deps.responder.answerInlineQuery(envelope.inlineQuery.id, articles, {
+            cacheTime: 10,
+            isPersonal: false,
+            switchPmText: "🛒 Mở TIER20 SHOP",
+            switchPmParameter: "shop",
+          });
+        }
+        return;
+      }
+
+      if (envelope.chosenInlineResult) {
+        if (deps.group?.recordChosenInlineResult) {
+          await deps.group.recordChosenInlineResult(envelope.chosenInlineResult);
+        }
+        return;
+      }
+
+      if (envelope.chatType === "group" || envelope.chatType === "supergroup") {
+        if (envelope.newChatMembers && envelope.newChatMembers.length > 0) {
+          const welcome = deps.group?.handleWelcome
+            ? await deps.group.handleWelcome(envelope)
+            : null;
+          if (welcome) {
+            await deps.responder.send({
+              chatId: envelope.chatId,
+              messageId: null,
+              message: welcome,
+              ...(envelope.messageThreadId !== undefined && envelope.messageThreadId !== null
+                ? { messageThreadId: envelope.messageThreadId }
+                : {}),
+            });
+          }
+          return;
+        }
+
+        let groupResponse: PresentedMessage | null = null;
+        if (command === "/shop") {
+          groupResponse = deps.group?.handleShopPanel
+            ? await deps.group.handleShopPanel(envelope)
+            : null;
+        } else if (command === "/hot") {
+          groupResponse = deps.group?.handleHotProducts
+            ? await deps.group.handleHotProducts(envelope)
+            : null;
+        } else if (command === "/tim") {
+          groupResponse = deps.group?.handleSearchPrompt
+            ? await deps.group.handleSearchPrompt(envelope)
+            : null;
+        } else if (command === "/new") {
+          groupResponse = deps.group?.handleNewProducts
+            ? await deps.group.handleNewProducts(envelope)
+            : null;
+        } else if (command === "/stock") {
+          groupResponse = deps.group?.handleStockSummary
+            ? await deps.group.handleStockSummary(envelope)
+            : null;
+        } else if (command === "/support") {
+          groupResponse = deps.group?.handleSupport
+            ? await deps.group.handleSupport(envelope)
+            : null;
+        } else if (command === "/orders") {
+          groupResponse = deps.group?.handlePrivacyNotice
+            ? await deps.group.handlePrivacyNotice("orders")
+            : null;
+        } else if (command === "/wallet") {
+          groupResponse = deps.group?.handlePrivacyNotice
+            ? await deps.group.handlePrivacyNotice("wallet")
+            : null;
+        } else if (command === "/warranty") {
+          groupResponse = deps.group?.handlePrivacyNotice
+            ? await deps.group.handlePrivacyNotice("warranty")
+            : null;
+        } else if (envelope.messageText) {
+          groupResponse = deps.group?.handleNaturalQA
+            ? await deps.group.handleNaturalQA(envelope)
+            : null;
+        }
+
+        if (groupResponse) {
+          await deps.responder.send({
+            chatId: envelope.chatId,
+            messageId: null,
+            message: groupResponse,
+            ...(envelope.messageThreadId !== undefined && envelope.messageThreadId !== null
+              ? { messageThreadId: envelope.messageThreadId }
+              : {}),
+          });
+        }
+        return;
+      }
       let acked = false;
       let ackMs: number | null = null;
       const ackIfNeeded = async () => {
@@ -1462,6 +1613,24 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : presentAdminMarketingMenu();
+        } else if (route === "community") {
+          message = admin.communityMenu
+            ? await admin.communityMenu({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Quản trị cộng đồng không khả dụng.");
+        } else if (route.startsWith("grp:")) {
+          const action = route.slice("grp:".length);
+          message = admin.communityAction
+            ? await admin.communityAction({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                action,
+                correlationId,
+              })
+            : safeError("Thao tác cộng đồng không khả dụng.");
         } else if (route === "marketing:compose") {
           message = admin.broadcastCompose
             ? await admin.broadcastCompose({

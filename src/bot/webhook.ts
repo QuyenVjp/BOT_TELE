@@ -2,6 +2,7 @@ import type { FastifyInstance } from "fastify";
 import { createHash } from "node:crypto";
 import type {
   AcceptTelegramResult,
+  TelegramChatType,
   TelegramCommandEnvelope,
 } from "../infrastructure/inbox/telegram.js";
 import type { LatencyMetrics } from "../infrastructure/observability/tracing.js";
@@ -31,6 +32,7 @@ export interface TelegramUpdate {
       username?: string;
       first_name?: string;
       last_name?: string;
+      title?: string;
     };
     contact?: {
       phone_number?: string;
@@ -48,11 +50,29 @@ export interface TelegramUpdate {
       mime_type?: string;
       file_size?: number;
     };
+    message_thread_id?: number;
+    reply_to_message?: {
+      message_id: number;
+      from?: {
+        id: number;
+        is_bot?: boolean;
+        username?: string;
+      };
+      text?: string;
+    };
+    new_chat_members?: Array<{
+      id: number;
+      is_bot?: boolean;
+      first_name: string;
+      last_name?: string;
+      username?: string;
+    }>;
   };
   callback_query?: {
     id: string;
     from?: {
       id: number;
+      is_bot?: boolean;
       username?: string;
       first_name?: string;
       last_name?: string;
@@ -69,6 +89,33 @@ export interface TelegramUpdate {
       };
       message_id?: number;
     };
+  };
+  inline_query?: {
+    id: string;
+    from: {
+      id: number;
+      is_bot?: boolean;
+      username?: string;
+      first_name?: string;
+      last_name?: string;
+      language_code?: string;
+    };
+    query: string;
+    offset: string;
+    chat_type?: string;
+  };
+  chosen_inline_result?: {
+    result_id: string;
+    from: {
+      id: number;
+      is_bot?: boolean;
+      username?: string;
+      first_name?: string;
+      last_name?: string;
+      language_code?: string;
+    };
+    query: string;
+    inline_message_id?: string;
   };
 }
 
@@ -230,14 +277,81 @@ async function normalizeTelegramUpdate(
     update.update_id > 0x7fffffff
   )
     return null;
-  const actor = update.message?.from ?? update.callback_query?.from;
+  const actor =
+    update.message?.from ??
+    update.callback_query?.from ??
+    update.inline_query?.from ??
+    update.chosen_inline_result?.from;
   const actorId = actor?.id;
-  if (!actorId || !Number.isSafeInteger(actorId) || actorId <= 0 || update.message?.from?.is_bot)
-    return null;
+  if (!actorId || !Number.isSafeInteger(actorId) || actorId <= 0 || actor?.is_bot) return null;
+  if (update.inline_query) {
+    const actorUsername = normalizeUsernameMetadata(actor.username);
+    return {
+      actorUserId: String(actorId),
+      ...(actorUsername ? { actorUsername } : {}),
+      chatId: String(actorId),
+      chatType: "private",
+      messageId: null,
+      action: "CATALOG",
+      inlineQuery: {
+        id: update.inline_query.id,
+        query: update.inline_query.query.normalize("NFC").trim(),
+        offset: update.inline_query.offset,
+        ...(update.inline_query.chat_type ? { chatType: update.inline_query.chat_type } : {}),
+      },
+      ...(actor.first_name ? { firstName: actor.first_name } : {}),
+      ...(actor.last_name ? { lastName: actor.last_name } : {}),
+      ...(actor.language_code ? { languageCode: actor.language_code } : {}),
+    };
+  }
+  if (update.chosen_inline_result) {
+    const actorUsername = normalizeUsernameMetadata(actor.username);
+    return {
+      actorUserId: String(actorId),
+      ...(actorUsername ? { actorUsername } : {}),
+      chatId: String(actorId),
+      chatType: "private",
+      messageId: null,
+      action: "CATALOG",
+      chosenInlineResult: {
+        resultId: update.chosen_inline_result.result_id,
+        query: update.chosen_inline_result.query.normalize("NFC").trim(),
+        ...(update.chosen_inline_result.inline_message_id
+          ? { inlineMessageId: update.chosen_inline_result.inline_message_id }
+          : {}),
+      },
+      ...(actor.first_name ? { firstName: actor.first_name } : {}),
+      ...(actor.last_name ? { lastName: actor.last_name } : {}),
+    };
+  }
   const chat = update.message?.chat ?? update.callback_query?.message?.chat;
+  const rawChatType = chat?.type ?? "private";
+  const chatType: TelegramChatType =
+    rawChatType === "group" || rawChatType === "supergroup" ? rawChatType : "private";
   const chatId = chat?.id ?? actorId;
-  if (!Number.isSafeInteger(chatId) || chatId === 0 || (chat?.type ?? "private") !== "private")
-    return null;
+  if (!Number.isSafeInteger(chatId) || chatId === 0) return null;
+  if (update.message?.new_chat_members) {
+    const newMembers = update.message.new_chat_members.filter((m) => !m.is_bot);
+    if (newMembers.length > 0) {
+      const actorUsername = normalizeUsernameMetadata(actor.username);
+      return {
+        actorUserId: String(actorId),
+        ...(actorUsername ? { actorUsername } : {}),
+        chatId: String(chatId),
+        chatType,
+        messageId: String(update.message.message_id),
+        ...(update.message.message_thread_id
+          ? { messageThreadId: update.message.message_thread_id }
+          : {}),
+        action: "CATALOG",
+        newChatMembers: newMembers.map((m) => ({
+          id: m.id,
+          firstName: m.first_name,
+          isBot: false,
+        })),
+      };
+    }
+  }
   const callbackData = update.callback_query?.data;
   if (callbackData && Buffer.byteLength(callbackData, "utf8") > 64) return null;
 
@@ -247,17 +361,64 @@ async function normalizeTelegramUpdate(
   const searchQuery = commandInfo
     ? normalizeCommandArgument(command, text.slice(commandInfo.rawLength))
     : null;
-  const normalizedMessageText = await normalizeSafeMessageText(text, command, {
-    actorId,
-    chatType: chat?.type ?? "private",
-    ...(rootProductDraftText ? { rootProductDraftText } : {}),
-    ...(inventoryImportText ? { inventoryImportText } : {}),
-  });
-  const action = normalizedMessageText?.inventoryImportText
-    ? ("ADMIN" as const)
-    : normalizedMessageText?.rootProductDraftText
-      ? ("ADMIN" as const)
-      : classifyAction(callbackData, command);
+  let normalizedMessageText: {
+    text: string;
+    rootProductDraftText?: true;
+    inventoryImportText?: true;
+  } | null = null;
+  const isGroup = chatType === "group" || chatType === "supergroup";
+  const isMentioned = Boolean(
+    text.toLowerCase().includes("@tier20ai_bot") ||
+    update.message?.entities?.some(
+      (e) =>
+        e.type === "mention" &&
+        e.offset !== undefined &&
+        e.length !== undefined &&
+        text.slice(e.offset, e.offset + e.length).toLowerCase() === "@tier20ai_bot",
+    ),
+  );
+  const isReplyToBot = Boolean(update.message?.reply_to_message?.from?.is_bot);
+  const GROUP_COMMANDS: Record<string, true> = {
+    "/shop": true,
+    "/tim": true,
+    "/hot": true,
+    "/new": true,
+    "/stock": true,
+    "/support": true,
+    "/orders": true,
+    "/wallet": true,
+    "/warranty": true,
+  };
+  if (isGroup && command && !GROUP_COMMANDS[command]) {
+    return null;
+  }
+  if (isGroup && !command && !isMentioned && !isReplyToBot) {
+    return null;
+  }
+  if (isGroup && !command && (isMentioned || isReplyToBot)) {
+    const cleanText = text
+      .replace(/@tier20ai_bot/gi, "")
+      .normalize("NFC")
+      .trim();
+    if (cleanText.length > 0 && isSafeDraftProse(cleanText, 1000)) {
+      normalizedMessageText = { text: cleanText };
+    }
+  } else {
+    normalizedMessageText = await normalizeSafeMessageText(text, command, {
+      actorId,
+      chatType,
+      ...(rootProductDraftText ? { rootProductDraftText } : {}),
+      ...(inventoryImportText ? { inventoryImportText } : {}),
+    });
+  }
+  const action =
+    isGroup && (isMentioned || isReplyToBot) && !command
+      ? ("CATALOG" as const)
+      : normalizedMessageText?.inventoryImportText
+        ? ("ADMIN" as const)
+        : normalizedMessageText?.rootProductDraftText
+          ? ("ADMIN" as const)
+          : classifyAction(callbackData, command);
   const actorUsername = normalizeUsernameMetadata(actor.username);
   const contact = update.message?.contact;
   const contactPhoneNumber =
@@ -285,7 +446,17 @@ async function normalizeTelegramUpdate(
     actorUserId: String(actorId),
     ...(actorUsername ? { actorUsername } : {}),
     chatId: String(chatId),
-    chatType: "private",
+    chatType,
+    ...(update.message?.message_thread_id
+      ? { messageThreadId: update.message.message_thread_id }
+      : {}),
+    ...(update.message?.reply_to_message
+      ? {
+          replyToMessageId: String(update.message.reply_to_message.message_id),
+          replyToText: update.message.reply_to_message.text ?? null,
+          replyToBot: Boolean(update.message.reply_to_message.from?.is_bot),
+        }
+      : {}),
     messageId:
       update.message?.message_id || update.callback_query?.message?.message_id
         ? String(update.message?.message_id ?? update.callback_query?.message?.message_id)
@@ -372,6 +543,10 @@ function classifyAction(
     command === "/catalog" ||
     command === "/shop" ||
     command === "/search" ||
+    command === "/tim" ||
+    command === "/hot" ||
+    command === "/new" ||
+    command === "/stock" ||
     command === "/orders" ||
     command === "/help" ||
     command === "/settings"
