@@ -53,4 +53,38 @@ describe("presentAdminOrders", () => {
     expect(message.text).toContain("⚠️ Cần hỗ trợ");
     expect(message.text).not.toContain("SOME_FUTURE_STATE");
   });
+
+  it("maps every known status and never leaks an internal enum", () => {
+    // Mirrors the customer list's own table case: this leak class has now appeared on two surfaces
+    // (warranty, then orders), so both are pinned status by status rather than by sample.
+    const known: Array<[string, string]> = [
+      ["PENDING_PAYMENT", "⏳ Chờ thanh toán"],
+      ["PAID", "✅ Đã thanh toán"],
+      ["PROCESSING", "📦 Đang giao"],
+      ["COMPLETED", "🎉 Hoàn tất"],
+      ["EXPIRED", "⌛ Hết hạn"],
+      ["CANCELLED", "❌ Đã huỷ"],
+    ];
+
+    for (const [status, label] of known) {
+      const message = presentAdminOrders(page(status));
+      expect(message.text).toContain(label);
+      expect(message.text).not.toContain(status);
+      expect(message.buttons.flat().some((button) => button.text.includes(status))).toBe(false);
+    }
+
+    for (const status of [
+      "DRAFT",
+      "REJECTED",
+      "PAYMENT_NEEDS_REVIEW",
+      "FULFILLMENT_NEEDS_REVIEW",
+      "REFUND_PENDING",
+      "REFUNDED",
+      "SOMETHING_NEW",
+    ]) {
+      const message = presentAdminOrders(page(status));
+      expect(message.text).toContain("⚠️ Cần hỗ trợ");
+      expect(message.text).not.toContain(status);
+    }
+  });
 });
