@@ -2161,6 +2161,16 @@ export function createTelegramDomainDispatcher(
             chatType: envelope.chatType,
             correlationId,
           })) ?? (await shopHome(deps, envelope));
+      } else if (envelope.productContentEditText && deps.admin?.workflow?.messageText) {
+        // The ingress vouched for this text as an in-place product content edit, so it goes
+        // straight to the workflow handler. It must not fall through the admin/customer text
+        // chain below, where the customer-search handler would claim it first.
+        message = (await deps.admin.workflow.messageText({
+          telegramUserId: envelope.actorUserId,
+          text: envelope.messageText ?? "",
+          chatType: envelope.chatType,
+          correlationId,
+        })) ?? safeError("Không lưu được nội dung.");
       } else if (
         envelope.messageText &&
         (deps.walletTopupText ||
