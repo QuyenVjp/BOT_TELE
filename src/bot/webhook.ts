@@ -194,6 +194,8 @@ export interface TelegramWebhookOptions {
   rootProductDraftText?: RootProductDraftTextIngress;
   inventoryImportText?: AdminInventoryImportTextIngress;
   productContentEditText?: AdminProductContentEditIngress;
+  /** Goal §28: the search prompt's one-shot permission for a typed query. */
+  customerSearchQuery?: CustomerSearchQueryIngress;
   metrics?: LatencyMetrics;
 }
 
@@ -218,6 +220,7 @@ export async function registerTelegramWebhook(
           options.rootProductDraftText,
           options.inventoryImportText,
           options.productContentEditText,
+          options.customerSearchQuery,
         )
       : null;
     if (!update || !normalized) {
@@ -283,6 +286,7 @@ async function normalizeTelegramUpdate(
   rootProductDraftText?: RootProductDraftTextIngress,
   inventoryImportText?: AdminInventoryImportTextIngress,
   productContentEditText?: AdminProductContentEditIngress,
+  customerSearchQuery?: CustomerSearchQueryIngress,
 ): Promise<TelegramCommandEnvelope | null> {
   if (
     !Number.isSafeInteger(update.update_id) ||
@@ -420,7 +424,11 @@ async function normalizeTelegramUpdate(
   } else {
     normalizedMessageText = await normalizeSafeMessageText(text, command, {
       actorId,
+      chatId: String(
+        update.message?.chat?.id ?? update.callback_query?.message?.chat?.id ?? actorId,
+      ),
       chatType,
+      ...(customerSearchQuery ? { customerSearchQuery } : {}),
       ...(rootProductDraftText ? { rootProductDraftText } : {}),
       ...(inventoryImportText ? { inventoryImportText } : {}),
       ...(productContentEditText ? { productContentEditText } : {}),
@@ -618,7 +626,9 @@ async function normalizeSafeMessageText(
   command: string | undefined,
   context: {
     actorId: number;
+    chatId: string;
     chatType: string;
+    customerSearchQuery?: CustomerSearchQueryIngress;
     rootProductDraftText?: RootProductDraftTextIngress;
     inventoryImportText?: AdminInventoryImportTextIngress;
     productContentEditText?: AdminProductContentEditIngress;
@@ -632,13 +642,14 @@ async function normalizeSafeMessageText(
   if (!text || command) return null;
   const normalized = text.normalize("NFC").trim();
   if (SAFE_MESSAGE_TEXT[normalized]) return { text: normalized };
-  const searchQuery = normalizeCustomerSearchQuery(
-    normalized,
-    context.rootProductDraftText !== undefined
-      ? String(context.actorId) === String(context.rootProductDraftText.adminTelegramUserId)
-      : false,
-  );
-  if (searchQuery) return { text: searchQuery };
+  // Only while the customer is actually looking at the search prompt, and only once: any other
+  // raw text stays dropped, exactly as the ingress contract has always required.
+  if (context.customerSearchQuery && context.chatType === "private") {
+    const candidate = normalizeCustomerSearchQuery(normalized);
+    if (candidate && (await context.customerSearchQuery.consume(context.chatId))) {
+      return { text: candidate };
+    }
+  }
   if (
     context.inventoryImportText &&
     context.chatType === "private" &&
@@ -744,10 +755,18 @@ function isSafeInventoryImportText(normalized: string): boolean {
  * `/search <term>` worked. This admits a conservative query and nothing else — no commands, no
  * URLs, no handles, no multi-line text, no phone-number-shaped input.
  */
-function normalizeCustomerSearchQuery(value: string, isRootAdmin: boolean): string | null {
-  if (isRootAdmin) return null;
+/** One-shot permission created by the search prompt and consumed by the query it invites. */
+export interface CustomerSearchQueryIngress {
+  consume(chatId: string): Promise<boolean>;
+}
+
+function normalizeCustomerSearchQuery(value: string): string | null {
   if (value.length < 2 || value.length > 64) return null;
   if (value.startsWith("/")) return null;
+  // Every reply-keyboard label the bot installs carries a leading emoji, so an emoji-bearing
+  // message is a button the customer tapped — not a product name. Without this the labels that
+  // are not in SAFE_MESSAGE_TEXT (e.g. the closed-store key) would be swallowed as a search.
+  if (/\p{Extended_Pictographic}/u.test(value)) return null;
   if (/[\n\r\t]/.test(value)) return null;
   if (/https?:\/\/|www\./iu.test(value)) return null;
   if (/[@#]/u.test(value)) return null;

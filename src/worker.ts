@@ -1016,6 +1016,17 @@ async function bootstrap(): Promise<void> {
   catalogCache.invalidate();
   const catalog = createCatalogCallbacks({
     db: dbHandle.db,
+    // Goal §28: one-shot permission so the search prompt can accept the product name it asks for.
+    // Raw customer text stays dropped outside this window.
+    searchPrompt: {
+      async open(input) {
+        await sql`
+          insert into customer_search_prompt (chat_id, expires_at)
+          values (${input.chatId}, now() + interval '10 minutes')
+          on conflict (chat_id) do update set expires_at = excluded.expires_at, created_at = now()
+        `.execute(dbHandle.db);
+      },
+    },
     parser: createSearchParser({
       driver: config.SEARCH_PARSER_DRIVER,
       timeoutMs: config.SEARCH_PARSER_TIMEOUT_MS,

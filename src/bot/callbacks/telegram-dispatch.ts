@@ -110,6 +110,10 @@ export interface TelegramDomainDispatcherDeps {
       offset?: number;
       isRootAdmin?: boolean;
     }): Promise<PresentedMessage>;
+    /** Goal §28: the one-shot permission the search prompt needs before it accepts a typed query. */
+    searchPrompt?: {
+      open(input: { chatId: string; correlationId: string }): Promise<void>;
+    };
     productDetail?(
       productId: string,
       telegramUserId: string | bigint | number,
@@ -965,6 +969,7 @@ export function createTelegramDomainDispatcher(
       } else if (envelope.callbackData === "shop:home" || envelope.callbackData === "menu:main") {
         message = await shopHome(deps, envelope);
       } else if (envelope.callbackData === "cat:search") {
+        await deps.catalog.searchPrompt?.open({ chatId: envelope.chatId, correlationId });
         message = presentSearchPrompt();
       } else if (
         envelope.callbackData === "delivery:open" ||
@@ -2102,12 +2107,15 @@ export function createTelegramDomainDispatcher(
             ? await deps.walletPay(ctx, envelope.searchQuery)
             : safeError("Dùng /pay kèm mã đơn hàng.");
       } else if (command === "/search") {
-        message = envelope.searchQuery
-          ? await deps.catalog.search(
-              envelope.searchQuery,
-              catalogActorIdentity(deps, envelope.actorUserId),
-            )
-          : presentSearchPrompt();
+        if (envelope.searchQuery) {
+          message = await deps.catalog.search(
+            envelope.searchQuery,
+            catalogActorIdentity(deps, envelope.actorUserId),
+          );
+        } else {
+          await deps.catalog.searchPrompt?.open({ chatId: envelope.chatId, correlationId });
+          message = presentSearchPrompt();
+        }
       } else if (command === "/warranty") {
         message = presentCustomerWarranty();
       } else if (command === "/settings") {
@@ -2499,6 +2507,7 @@ async function dispatchVerified(
 
   switch (token.action) {
     case "SEARCH_PROMPT":
+      await deps.catalog.searchPrompt?.open({ chatId: envelope.chatId, correlationId });
       return presentSearchPrompt();
     case "MAIN_MENU":
       return shopHome(deps, envelope);

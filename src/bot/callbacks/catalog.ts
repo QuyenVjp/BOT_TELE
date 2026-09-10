@@ -51,6 +51,10 @@ export interface CatalogCallbackDeps {
    */
   tokenCodec?: CallbackTokenCodec;
   productLinkSecret?: string;
+  /** Goal §28: opens the one-shot permission the search prompt needs before it accepts text. */
+  searchPrompt?: {
+    open(input: { chatId: string; correlationId: string }): Promise<void>;
+  };
 }
 
 export interface CatalogCallbacks {
@@ -68,6 +72,10 @@ export interface CatalogCallbacks {
     identity?: CatalogIdentity | undefined,
   ): Promise<PresentedMessage>;
   firstSellableVariantId(): Promise<string>;
+  /** Goal §28: the search prompt's permission, passed through to the dispatcher. */
+  searchPrompt?: {
+    open(input: { chatId: string; correlationId: string }): Promise<void>;
+  };
   search(rawQuery: string, identity?: CatalogIdentity | undefined): Promise<PresentedMessage>;
   storefront(input: {
     actorName: string;
@@ -131,6 +139,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
   };
 
   const callbacks: CatalogCallbacks = {
+    ...(deps.searchPrompt ? { searchPrompt: deps.searchPrompt } : {}),
     async mainMenu() {
       return callbacks.storefront({
         actorName: "bạn",

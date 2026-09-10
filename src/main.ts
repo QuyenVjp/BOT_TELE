@@ -87,6 +87,18 @@ async function main(): Promise<void> {
           return row && isRootProductDraftTextStep(row.step) ? row.step : null;
         },
       },
+      customerSearchQuery: {
+        // One-shot: the prompt writes the row, the next acceptable text consumes and deletes it, so
+        // a typed query is admitted exactly once and raw text stays dropped the rest of the time.
+        async consume(chatId: string) {
+          const row = await sql<{ chat_id: string }>`
+            delete from customer_search_prompt
+            where chat_id = ${chatId} and expires_at > now()
+            returning chat_id
+          `.execute(dbHandle.db);
+          return row.rows.length === 1;
+        },
+      },
       productContentEditText: {
         adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
         // Only a REAL field prompt vouches for free text. The menu itself also writes a state
