@@ -94,6 +94,7 @@ import {
 import type { SePayReconciliationPort } from "./modules/payments/reconciliation.js";
 import type { SupplierPort } from "./modules/supplier/port.js";
 import type { RecoveryTelemetry } from "./modules/recovery-result.js";
+import type { PreorderStatus } from "./modules/commerce/preorder.js";
 import { recoverExpiredOrdersBatch } from "./modules/commerce/recovery.js";
 import {
   recoverExpiredDeliveryBundlesBatch,
@@ -1226,7 +1227,8 @@ async function bootstrap(): Promise<void> {
   } = await import("./infrastructure/inbox/telegram.js");
   const { createPostgresSePayInbox, processSePayInboxBatch } =
     await import("./infrastructure/inbox/sepay.js");
-  const { applyPaymentEvidence } = await import("./modules/payments/service.js");
+  const { applyPaymentEvidence, presentPreorderPayment } =
+    await import("./modules/payments/service.js");
   const { classifyPaymentCode } = await import("./modules/payments/payment-code.js");
   const { createPostgresRateLimiter, DEFAULT_TELEGRAM_RATE_LIMIT_POLICIES } =
     await import("./modules/risk/service.js");
@@ -1236,7 +1238,7 @@ async function bootstrap(): Promise<void> {
   const { createCheckoutCallbacks } = await import("./bot/callbacks/checkout.js");
   const { createHistoryCallbacks } = await import("./bot/callbacks/history.js");
   const { createSupportCallbacks } = await import("./bot/callbacks/support.js");
-  const { presentPaymentScreen, presentWalletHistory } =
+  const { presentPaymentScreen, presentPreorderPaymentScreen, presentWalletHistory } =
     await import("./bot/presenters/payment.js");
   const { createWalletLedgerService, listWalletLedgerEntries } =
     await import("./modules/wallet/ledger.js");
@@ -1396,8 +1398,14 @@ async function bootstrap(): Promise<void> {
     presentWizardAdvancedPrompt,
     presentWizardVisibilityStep,
   } = await import("./bot/presenters/admin-wizard.js");
-  const { loadPreorderVariantConfig, presentPreorderConsent, createPreorderReservation } =
-    await import("./modules/commerce/preorder.js");
+  const {
+    loadPreorderVariantConfig,
+    presentPreorderConsent,
+    createPreorderReservation,
+    preorderPayableLeg,
+    listCustomerPreorders,
+    releaseExpiredPreorderHolds,
+  } = await import("./modules/commerce/preorder.js");
   const { shopCancelPreorder } = await import("./modules/commerce/shop-cancel.js");
   const { generateCustomerAlias } = await import("./modules/marketing/social-proof.js");
   const { formatSePayReconciliationAdminText, getSePayReconciliationStatus } =
@@ -1405,6 +1413,7 @@ async function bootstrap(): Promise<void> {
   const {
     presentCustomerAccount,
     presentCustomerNotificationPreferences,
+    presentCustomerPreorders,
     presentCustomerWarrantyHome,
     presentPurchaseThankYou,
   } = await import("./bot/presenters/customer.js");
@@ -1689,6 +1698,67 @@ async function bootstrap(): Promise<void> {
     bankAlias: config.VIETQR_BANK_ALIAS,
     template: config.VIETQR_TEMPLATE,
   };
+  const preorderHomeButtons: PresentedMessage["buttons"] = [
+    [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
+    [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+  ];
+  /**
+   * The QR for the leg a reservation currently owes: the deposit while the hold is
+   * unpaid, the remaining balance once stock is allocated. Ownership is enforced by
+   * the `customer_id` predicate — a reservation id alone never yields a payment code.
+   *
+   * Nothing here is a purchase confirmation: only SePay evidence moves the reservation
+   * out of WAITING_DEPOSIT.
+   */
+  async function presentOwnedPreorderLeg(input: {
+    customerId: string;
+    reservationId: string;
+    correlationId: string;
+  }): Promise<PresentedMessage> {
+    const rowRes = await sql<{
+      status: PreorderStatus;
+      deposit_amount_vnd: string;
+      balance_amount_vnd: string;
+    }>`
+      select status, deposit_amount_vnd::text, balance_amount_vnd::text
+      from preorder_reservation
+      where id = ${input.reservationId} and customer_id = ${input.customerId}
+      limit 1
+    `.execute(dbHandle.db);
+    const row = rowRes.rows[0];
+    if (!row) return { text: "Không tìm thấy suất đặt cọc.", buttons: preorderHomeButtons };
+
+    const leg = preorderPayableLeg(row.status);
+    if (!leg) {
+      return {
+        text: "Suất đặt cọc này không còn khoản nào cần thanh toán.",
+        buttons: preorderHomeButtons,
+      };
+    }
+
+    const presented = await presentPreorderPayment(dbHandle.db, {
+      reservationId: input.reservationId,
+      leg,
+      ...merchant,
+      correlationId: input.correlationId,
+    });
+    if (!presented.ok) {
+      return {
+        text: "Chưa tạo được mã thanh toán cho suất đặt cọc này. Vui lòng mở “Đặt cọc của tôi” để thử lại.",
+        buttons: preorderHomeButtons,
+      };
+    }
+
+    return await presentPreorderPaymentScreen({
+      productName: presented.productName,
+      variantName: presented.variantName,
+      leg,
+      depositVnd: BigInt(row.deposit_amount_vnd),
+      balanceVnd: BigInt(row.balance_amount_vnd),
+      presentation: presented.presentation,
+      reservationId: input.reservationId,
+    });
+  }
   /**
    * Best-effort live identity of the API process, for the admin health screen.
    *
@@ -2032,24 +2102,22 @@ async function bootstrap(): Promise<void> {
                   : res.code === "ALREADY_PREORDERED"
                     ? "Bạn đã có một suất đặt cọc đang chờ xử lý cho sản phẩm này."
                     : "Không thể thực hiện đặt cọc lúc này.";
-          return { text: msg, buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]] };
+          return { text: msg, buttons: preorderHomeButtons };
         }
-        return {
-          text: [
-            "✅ ĐẶT CỌC THÀNH CÔNG",
-            "",
-            `Sản phẩm: ${res.config.productName} · ${res.config.variantName}`,
-            `Tiền cọc: ${res.depositVnd.toLocaleString("vi-VN")} ₫`,
-            `Khi hàng về còn thanh toán: ${res.balanceVnd.toLocaleString("vi-VN")} ₫`,
-            "",
-            "Trạng thái: ⏳ Đang chờ đợt hàng mới về",
-            "Hệ thống sẽ gửi thông báo giữ hàng ngay khi đợt hàng tiếp theo được nhập kho!",
-          ].join("\n"),
-          buttons: [
-            [{ text: "📦 Xem các sản phẩm khác", callbackData: "shop:home" }],
-            [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
-          ],
-        };
+        // Consent is not a purchase: the hold stays WAITING_DEPOSIT until SePay evidence
+        // confirms the deposit, so the customer must be handed the deposit QR here — never
+        // a "thành công" that money has not earned.
+        return await presentOwnedPreorderLeg({
+          customerId: input.customerId,
+          reservationId: res.reservationId,
+          correlationId: input.correlationId,
+        });
+      },
+      async pay(input) {
+        return await presentOwnedPreorderLeg(input);
+      },
+      async list(customerId) {
+        return presentCustomerPreorders(await listCustomerPreorders(dbHandle.db, customerId));
       },
     },
     notificationPreferences: {
@@ -6888,9 +6956,14 @@ async function bootstrap(): Promise<void> {
         batchSize: config.TELEGRAM_INBOX_PRUNE_BATCH_SIZE,
       },
     });
+    // Deposit holds are a bounded promise: a reservation whose balance deadline passed
+    // forfeits the deposit (per the terms the customer accepted) and its held unit goes
+    // back to the next waiter in the queue. Same lane, same cadence as the other recovery.
+    const preorderHolds = await releaseExpiredPreorderHolds(dbHandle.db);
     logger.info(
       {
         recovery,
+        preorderHolds,
         sePayRecoveryConfigured: sePayRecoveryPort !== null,
         supplierRecoveryConfigured: supplier !== null,
       },

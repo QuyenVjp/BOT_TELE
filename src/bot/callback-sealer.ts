@@ -84,6 +84,7 @@ async function parseLegacyCallback(
     "shop:open": "SHOP_OPEN",
     "cust:notify": "CUSTOMER_NOTIFICATIONS",
     "cust:warranty": "CUSTOMER_WARRANTY",
+    "cust:preorders": "PREORDER_LIST",
   };
   if (noResource[value]) return { action: noResource[value] };
 
@@ -106,6 +107,7 @@ async function parseLegacyCallback(
     ["shop:product:", "SHOP_PRODUCT"],
     ["preorder:consent:", "PREORDER_CONSENT"],
     ["preorder:create:", "PREORDER_CREATE"],
+    ["preorder:pay:", "PREORDER_PAY"],
   ] as const) {
     if (value.startsWith(prefix)) {
       const resourceId = value.slice(prefix.length);

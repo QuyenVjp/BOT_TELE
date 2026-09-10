@@ -162,6 +162,9 @@ function setup() {
   const restockUnsubscribe = vi.fn().mockResolvedValue({ text: "unsubscribed", buttons: [] });
   const restockList = vi.fn().mockResolvedValue({ text: "restock list", buttons: [] });
   const preorderConsent = vi.fn().mockResolvedValue({ text: "preorder consent", buttons: [] });
+  const preorderCreate = vi.fn().mockResolvedValue({ text: "preorder deposit qr", buttons: [] });
+  const preorderPay = vi.fn().mockResolvedValue({ text: "preorder deposit qr", buttons: [] });
+  const preorderList = vi.fn().mockResolvedValue({ text: "preorder list", buttons: [] });
 
   const dispatcher = createTelegramDomainDispatcher({
     codec,
@@ -274,7 +277,9 @@ function setup() {
     },
     preorder: {
       consent: preorderConsent,
-      create: vi.fn(),
+      create: preorderCreate,
+      pay: preorderPay,
+      list: preorderList,
     },
     responder: { send },
   });
@@ -347,6 +352,9 @@ function setup() {
     order,
     visibilityAction,
     preorderConsent,
+    preorderCreate,
+    preorderPay,
+    preorderList,
   };
 }
 
@@ -2116,5 +2124,76 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ message: { text: "preorder consent", buttons: [] } }),
     );
+  });
+
+  it("routes the deposit QR route and the customer's own deposit list", async () => {
+    const { dispatcher, preorderPay, preorderList, send } = setup();
+    const reservationId = newId();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "preorder-pay-raw",
+      action: "UNKNOWN",
+      callbackData: `preorder:pay:${reservationId}`,
+    });
+
+    // The handler re-derives the payable leg and re-authorises against the actor's
+    // own customer id — the raw route never carries an amount.
+    expect(preorderPay).toHaveBeenCalledWith({
+      customerId: CUSTOMER,
+      reservationId,
+      correlationId: "telegram:preorder-pay-raw",
+    });
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ message: { text: "preorder deposit qr", buttons: [] } }),
+    );
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "preorder-list-raw",
+      action: "UNKNOWN",
+      callbackData: "cust:preorders",
+    });
+
+    expect(preorderList).toHaveBeenCalledWith(CUSTOMER);
+  });
+
+  it("routes the sealed deposit callbacks (preorder:pay / cust:preorders) after sealing", async () => {
+    const { codec, dispatcher, preorderPay, preorderList } = setup();
+    const reservationId = newId();
+
+    const payToken = codec.issue({
+      action: "PREORDER_PAY",
+      resourceId: reservationId,
+      telegramUserId: USER,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "preorder-pay-sealed",
+      action: "UNKNOWN",
+      callbackData: payToken,
+    });
+    expect(preorderPay).toHaveBeenCalledWith({
+      customerId: CUSTOMER,
+      reservationId,
+      correlationId: "telegram:preorder-pay-sealed",
+    });
+
+    const listToken = codec.issue({ action: "PREORDER_LIST", telegramUserId: USER });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "preorder-list-sealed",
+      action: "UNKNOWN",
+      callbackData: listToken,
+    });
+    expect(preorderList).toHaveBeenCalledWith(CUSTOMER);
   });
 });

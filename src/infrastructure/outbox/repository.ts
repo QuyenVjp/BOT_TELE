@@ -184,7 +184,8 @@ export async function markOutboxPublished(
         next_attempt_at = null,
         claimed_by = null,
         claimed_at = null,
-        claim_expires_at = null
+        claim_expires_at = null,
+        last_error_code = null
     where id = ${claim.id}
       and published_at is null
       and claimed_by = ${claim.claimedBy}

@@ -112,6 +112,7 @@ describe("checkout callback tokens", () => {
         "CATEGORY_LIST",
         "ORDER_LIST",
         "RESTOCK_LIST",
+        "PREORDER_LIST",
         "SHOP_HOME",
         "SHOP_OPEN",
         "CUSTOMER_NOTIFICATIONS",

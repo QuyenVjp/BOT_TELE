@@ -132,6 +132,7 @@ describe("customer order screens", () => {
     expect(text).toContain("🔔 Thông báo: Cập nhật sản phẩm Bật · Hoạt động mua hàng Tắt");
     expect(message.buttons.flat().map((b) => b.callbackData)).toEqual([
       "ord:list",
+      "cust:preorders",
       "wallet:topup",
       "cust:notify",
       "cust:warranty",

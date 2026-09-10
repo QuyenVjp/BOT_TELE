@@ -159,4 +159,32 @@ describe("callback sealing", () => {
 
     expect(sealed.buttons).toEqual([]);
   });
+
+  it("seals the deposit QR and the customer's deposit list into actor-bound tokens", async () => {
+    const c = codec();
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "deposit",
+        buttons: [
+          [{ text: "pay", callbackData: `preorder:pay:${COMMAND_ID}` }],
+          [{ text: "mine", callbackData: "cust:preorders" }],
+        ],
+      },
+      { codec: c, telegramUserId: "123456789", resolveOrderId: async () => null },
+    );
+
+    const [pay, list] = sealed.buttons.map((row) => row[0]!.callbackData!);
+    expect(c.verify(pay!, { telegramUserId: "123456789" })).toMatchObject({
+      ok: true,
+      value: { action: "PREORDER_PAY", resourceId: COMMAND_ID },
+    });
+    expect(c.verify(pay!, { telegramUserId: "999999999" })).toMatchObject({
+      ok: false,
+      code: "INVALID_SIGNATURE",
+    });
+    expect(c.verify(list!, { telegramUserId: "123456789" })).toMatchObject({
+      ok: true,
+      value: { action: "PREORDER_LIST" },
+    });
+  });
 });

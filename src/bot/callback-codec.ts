@@ -555,6 +555,7 @@ function decodeActionPayload(
       "SHOP_PAGE",
       "PREORDER_CONSENT",
       "PREORDER_CREATE",
+      "PREORDER_PAY",
       "CUSTOMER_NOTIFICATION_TOGGLE",
       "CHECKOUT_PREVIEW",
     ].includes(action)

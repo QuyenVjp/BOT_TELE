@@ -206,7 +206,16 @@ export interface TelegramDomainDispatcherDeps {
       customerId: string;
       variantId: string;
       telegramUserId: string;
+      correlationId: string;
     }): Promise<PresentedMessage>;
+    /** Deposit / remaining-balance QR for one reservation the actor owns. */
+    pay(input: {
+      customerId: string;
+      reservationId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    /** The actor's own deposit holds, hard-scoped by customer id. */
+    list(customerId: string): Promise<PresentedMessage>;
   };
   notificationPreferences?: {
     get(customerId: string): Promise<PresentedMessage>;
@@ -1244,7 +1253,21 @@ export function createTelegramDomainDispatcher(
                 customerId,
                 variantId,
                 telegramUserId: envelope.actorUserId,
+                correlationId,
               })
+            : safeError("Không xác minh được khách hàng.");
+      } else if (envelope.callbackData?.startsWith("preorder:pay:")) {
+        const reservationId = envelope.callbackData.slice("preorder:pay:".length);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          customerId && deps.preorder
+            ? await deps.preorder.pay({ customerId, reservationId, correlationId })
+            : safeError("Không xác minh được khách hàng.");
+      } else if (envelope.callbackData === "cust:preorders") {
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          customerId && deps.preorder
+            ? await deps.preorder.list(customerId)
             : safeError("Không xác minh được khách hàng.");
       } else if (envelope.callbackData?.startsWith("restock:sub:")) {
         const variantId = envelope.callbackData.slice("restock:sub:".length);
@@ -2911,7 +2934,16 @@ async function dispatchVerified(
             customerId,
             variantId: token.resourceId,
             telegramUserId: envelope.actorUserId,
+            correlationId,
           })
+        : safeError("Không xác minh được khách hàng.");
+    case "PREORDER_PAY":
+      return customerId && deps.preorder && token.resourceId
+        ? deps.preorder.pay({ customerId, reservationId: token.resourceId, correlationId })
+        : safeError("Không xác minh được khách hàng.");
+    case "PREORDER_LIST":
+      return customerId && deps.preorder
+        ? deps.preorder.list(customerId)
         : safeError("Không xác minh được khách hàng.");
     case "ADMIN_COMMAND":
       return deps.admin

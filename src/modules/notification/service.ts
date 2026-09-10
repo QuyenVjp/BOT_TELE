@@ -831,6 +831,19 @@ function warrantyCustomerNotice(
       ? BigInt(p.amountVnd)
       : null;
   switch (event.eventType) {
+    // Verifying is a resolution step the customer is waiting on: without this the claim goes quiet
+    // between "we received it" and "here is your refund", which reads as being ignored.
+    case "WarrantyClaimVerified":
+      return {
+        campaignId: `warranty-verified:${event.aggregateId}`,
+        customerId,
+        content: [
+          "✅ ĐÃ XÁC NHẬN BẢO HÀNH",
+          "",
+          "Shop đã kiểm tra và xác nhận sản phẩm của bạn thuộc phạm vi bảo hành.",
+          "Shop sẽ liên hệ để đổi tài khoản hoặc hoàn tiền.",
+        ].join("\n"),
+      };
     case "WarrantyRefundDue":
       return {
         campaignId: `warranty-refund-due:${event.aggregateId}`,
