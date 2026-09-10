@@ -8,6 +8,7 @@ import {
   getProductDetail,
 } from "../../modules/catalog/repository.js";
 import { getShopProfile } from "../../modules/catalog/shop-profile.js";
+import { getRealStoreStats } from "../../modules/marketing/social-proof.js";
 import { verifyProductLinkToken } from "../../modules/catalog/product-link-token.js";
 import { presentStorefront } from "../presenters/customer.js";
 import { searchCatalog } from "../../modules/catalog/search.js";
@@ -201,10 +202,11 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
         telegramUserId: input.telegramUserId,
         isRootAdmin: input.isRootAdmin === true,
       });
-      const [profile, categories, featured] = await Promise.all([
+      const [profile, categories, featured, stats] = await Promise.all([
         getShopProfile(deps.db),
         listPublicRootCategories(deps.db, audience),
         listFeaturedProducts(deps.db, audience, 3),
+        getRealStoreStats(deps.db),
       ]);
       return presentStorefront({
         actorName: input.actorName,
@@ -218,6 +220,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
           icon: category.icon,
         })),
         featuredProducts: featured,
+        stats: { completedOrders: stats.completedOrders },
       });
     },
 

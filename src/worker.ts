@@ -20,27 +20,9 @@ import {
   reorderCategory,
   ensureDefaultCategories,
   getOrCreateUncategorizedCategory,
-  listFeaturedProducts,
-  getProductDetail,
 } from "./modules/catalog/repository.js";
 import { createCatalogCache } from "./modules/catalog/cache.js";
-import {
-  getGroupCommerceSettings,
-  updateGroupCommerceSettings,
-  buildInlineQueryResults,
-  parseNaturalSalesQA,
-} from "./modules/catalog/group-commerce.js";
 
-const BOT_USERNAME = "tier20ai_bot";
-const BOT_USER_ID = 8394662759;
-import {
-  presentGroupShopPanel,
-  presentGroupProductCard,
-  presentGroupWelcome,
-  presentGroupPrivacyNotice,
-  presentGroupAdminPanel,
-} from "./bot/presenters/group.js";
-import { issueProductLinkToken } from "./modules/catalog/product-link-token.js";
 import { pathToFileURL } from "node:url";
 import { sql } from "kysely";
 import { isId, newId } from "./shared/ids/index.js";
@@ -773,15 +755,6 @@ async function bootstrap(): Promise<void> {
   const { createWalletPurchaseService } = await import("./modules/wallet/purchase.js");
   const { createTelegramDomainDispatcher } = await import("./bot/callbacks/telegram-dispatch.js");
   const { createPostgresUiSurfaceRegistry } = await import("./bot/ui-surface.js");
-  const {
-    isGroupPublicationEvent,
-    handleGroupPublicationOutboxEvent,
-    advanceRestockGenerations,
-    enqueueRestockPublication,
-    listSocialProofCandidates,
-    evaluateSocialProofCandidate,
-  } = await import("./modules/group/publication.js");
-  const { publishShopPanel } = await import("./modules/group/shop-panel.js");
   const { createGrammyDocumentSender, createGrammyResponder, ensureTelegramCommandMenu } =
     await import("./bot/grammy-responder.js");
   const { createSearchParser } = await import("./modules/catalog/search-parser-adapter.js");
@@ -1222,9 +1195,6 @@ async function bootstrap(): Promise<void> {
     undefined,
     config.NODE_ENV !== "production" ? logger : undefined,
   );
-  // The community chat the group-publication lane addresses. Settings are seeded by
-  // migration 051, so this is always present.
-  const groupChatId = (await getGroupCommerceSettings(dbHandle.db)).group_chat_id;
   try {
     await ensureTelegramCommandMenu({
       botToken: config.TELEGRAM_BOT_TOKEN,
@@ -4840,226 +4810,6 @@ async function bootstrap(): Promise<void> {
           };
         },
       },
-      async communityMenu(_input) {
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
-        const settings = await getGroupCommerceSettings(dbHandle.db);
-        let membershipStatus: "NOT_MEMBER" | "MEMBER" | "ADMIN" = "MEMBER";
-        let canPin = false;
-        let canManageTopics = false;
-        if (telegramResponder.getChatMember) {
-          try {
-            const member = (await telegramResponder.getChatMember(
-              settings.group_chat_id,
-              BOT_USER_ID,
-            )) as {
-              status?: string;
-              can_pin_messages?: boolean;
-              can_manage_topics?: boolean;
-            } | null;
-            if (member?.status === "administrator" || member?.status === "creator") {
-              membershipStatus = "ADMIN";
-              canPin = Boolean(member.can_pin_messages);
-              canManageTopics = Boolean(member.can_manage_topics);
-            } else if (member?.status === "member") {
-              membershipStatus = "MEMBER";
-            } else {
-              membershipStatus = "NOT_MEMBER";
-            }
-          } catch {
-            membershipStatus = "NOT_MEMBER";
-          }
-        }
-        return presentGroupAdminPanel({
-          chatTitle: "AI Codex Việt Nam",
-          membershipStatus,
-          canPin,
-          canManageTopics,
-          shopPanelEnabled: settings.shop_panel_enabled,
-          welcomeEnabled: settings.welcome_enabled,
-          replyMode: settings.group_reply_mode,
-          restockEnabled: settings.restock_publishing_enabled,
-          socialProofMode: settings.social_proof_mode,
-        });
-      },
-      async communityAction(input) {
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
-        const settings = await getGroupCommerceSettings(dbHandle.db);
-        if (input.action === "refresh_pin") {
-          if (!telegramResponder.send) {
-            return {
-              text: "❌ Bot chưa kết nối được Telegram. Thử lại sau.",
-              buttons: [[{ text: "↩️ Quay lại Cộng đồng", callbackData: "admin:community" }]],
-            };
-          }
-          // Create-once, edit-forever: the identity comes from the Bot API response and is
-          // persisted, so later refreshes edit the same message instead of reposting it.
-          const panel = await publishShopPanel(dbHandle.db, {
-            send: ({ chatId, messageId, message }) =>
-              telegramResponder.send!({ chatId, messageId, message }),
-            botUsername: BOT_USERNAME,
-            updatedBy: input.telegramUserId,
-          });
-          return {
-            text: [
-              panel.created ? "✅ Đã tạo bảng shop trong nhóm cộng đồng." : null,
-              panel.replaced ? "♻️ Bảng cũ không còn nên đã tạo bảng thay thế." : null,
-              !panel.created && !panel.replaced ? "✅ Đã cập nhật bảng shop hiện có." : null,
-              "",
-              `Message ID: ${panel.messageId}`,
-              "Ghim thủ công trong Telegram nếu muốn (bot không có quyền ghim).",
-            ]
-              .filter((line) => line !== null)
-              .join("\n"),
-            buttons: [[{ text: "↩️ Quay lại Cộng đồng", callbackData: "admin:community" }]],
-          };
-        }
-        if (input.action === "test_msg") {
-          if (telegramResponder.send) {
-            await telegramResponder.send({
-              chatId: settings.group_chat_id,
-              messageId: null,
-              message: {
-                text: "🧪 *TIER20 GROUP TEST*\n\nĐây là thông báo kiểm thử kết nối bot với nhóm cộng đồng AI Codex Việt Nam.",
-                buttons: [
-                  [
-                    {
-                      text: "🛒 Mở Shop",
-                      url: `https://t.me/${BOT_USERNAME}?start=shop`,
-                      callbackData: "",
-                    },
-                  ],
-                ],
-              },
-            });
-          }
-          return {
-            text: "✅ Đã gửi bài test vào nhóm cộng đồng.",
-            buttons: [[{ text: "↩️ Quay lại Cộng đồng", callbackData: "admin:community" }]],
-          };
-        }
-        if (input.action === "toggle_reply_mode") {
-          const next =
-            settings.group_reply_mode === "MENTION_ONLY" ? "PASSIVE_COMMERCE" : "MENTION_ONLY";
-          await updateGroupCommerceSettings(dbHandle.db, { group_reply_mode: next });
-          return this.communityMenu ? await this.communityMenu(input) : presentAdminMenu();
-        }
-        if (input.action === "stats") {
-          const stats = await sql<{ count: number; action: string }>`
-            select action, count(*)::int as count
-            from group_acquisition_log
-            group by action
-          `.execute(dbHandle.db);
-          const statMap = Object.fromEntries(stats.rows.map((r) => [r.action, r.count]));
-          return {
-            text: [
-              "📊 *THỐNG KÊ CỘNG ĐỒNG*",
-              "",
-              `• Lượt mở thẻ sản phẩm: ${statMap["CARD_OPEN"] ?? 0}`,
-              `• Lượt bấm Mua riêng: ${statMap["BUY_START"] ?? 0}`,
-              `• Đơn hàng hoàn tất từ nhóm: ${statMap["CHECKOUT_COMPLETE"] ?? 0}`,
-            ].join("\n"),
-            buttons: [[{ text: "↩️ Quay lại", callbackData: "admin:community" }]],
-          };
-        }
-        return {
-          text: "Thao tác không hỗ trợ.",
-          buttons: [[{ text: "Quay lại", callbackData: "admin:community" }]],
-        };
-      },
-    },
-    group: {
-      async buildInlineResults(query, actorUserId) {
-        const isRootOrTester = Number(actorUserId) === config.ADMIN_TELEGRAM_USER_ID;
-        return buildInlineQueryResults(dbHandle.db, {
-          query,
-          botUsername: BOT_USERNAME,
-          linkSecret: config.BUY_NOW_CALLBACK_HMAC_KEY,
-          isRootOrTester,
-        });
-      },
-      async handleWelcome(envelope) {
-        const settings = await getGroupCommerceSettings(dbHandle.db);
-        if (!settings.welcome_enabled) return null;
-        const now = Date.now();
-        if (
-          settings.last_welcome_at &&
-          now - new Date(settings.last_welcome_at).getTime() <
-            settings.welcome_cooldown_seconds * 1000
-        ) {
-          return null;
-        }
-        await updateGroupCommerceSettings(dbHandle.db, {
-          last_welcome_at: new Date(now),
-        });
-        const names = (envelope.newChatMembers ?? []).map((m) => m.firstName);
-        return presentGroupWelcome({
-          memberNames: names.length > 0 ? names : ["bạn"],
-          botUsername: BOT_USERNAME,
-        });
-      },
-      async handleShopPanel(_envelope) {
-        return presentGroupShopPanel({
-          botUsername: BOT_USERNAME,
-        });
-      },
-      async handleHotProducts(_envelope) {
-        const prods = await listFeaturedProducts(dbHandle.db, "public", 3);
-        if (prods.length === 0) {
-          return presentGroupShopPanel({
-            botUsername: BOT_USERNAME,
-          });
-        }
-        const prod = prods[0]!;
-        const detail = await getProductDetail(dbHandle.db, prod.id, "public");
-        const token = issueProductLinkToken(prod.id, { secret: config.BUY_NOW_CALLBACK_HMAC_KEY });
-        return presentGroupProductCard({
-          name: prod.name_vi,
-          shortDescription: prod.short_description_vi,
-          priceVnd: Number(prod.min_price_vnd),
-          isOutOfStock: prod.total_available <= 0,
-          stockLabel: prod.total_available > 0 ? `Còn hàng (${prod.total_available})` : "Hết hàng",
-          deliveryTypeLabel: "Tự động 24/7",
-          warrantyText: detail?.warranty_vi ?? null,
-          productToken: token,
-          botUsername: BOT_USERNAME,
-        });
-      },
-      async handleSearchPrompt(_envelope) {
-        return presentGroupShopPanel({
-          botUsername: BOT_USERNAME,
-        });
-      },
-      async handleNewProducts(_envelope) {
-        return presentGroupShopPanel({
-          botUsername: BOT_USERNAME,
-        });
-      },
-      async handleStockSummary(_envelope) {
-        return presentGroupShopPanel({
-          botUsername: BOT_USERNAME,
-        });
-      },
-      async handleSupport(_envelope) {
-        return presentGroupPrivacyNotice("general", BOT_USERNAME);
-      },
-      async handlePrivacyNotice(topic) {
-        return presentGroupPrivacyNotice(topic, BOT_USERNAME);
-      },
-      async handleNaturalQA(envelope) {
-        const settings = await getGroupCommerceSettings(dbHandle.db);
-        if (
-          settings.group_reply_mode !== "MENTION_ONLY" &&
-          settings.group_reply_mode !== "PASSIVE_COMMERCE"
-        ) {
-          return null;
-        }
-        return parseNaturalSalesQA(dbHandle.db, {
-          question: envelope.messageText ?? "",
-          botUsername: BOT_USERNAME,
-          linkSecret: config.BUY_NOW_CALLBACK_HMAC_KEY,
-          ...(envelope.replyToText ? { replyToText: envelope.replyToText } : {}),
-        });
-      },
     },
     responder: telegramResponder,
   });
@@ -5146,33 +4896,11 @@ async function bootstrap(): Promise<void> {
       batchSize: 20,
       maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
       handler: (event) =>
-        isGroupPublicationEvent(event.eventType)
-          ? handleGroupPublicationOutboxEvent(dbHandle.db, event, {
-              send: async ({ chatId, message }) => {
-                await telegramResponder.send({ chatId, messageId: null, message });
-              },
-              botMembership: async () => {
-                if (!telegramResponder.getChatMember) return null;
-                try {
-                  const member = (await telegramResponder.getChatMember(
-                    groupChatId,
-                    BOT_USER_ID,
-                  )) as { status?: string } | null;
-                  const status = member?.status;
-                  return status === "member" || status === "administrator" || status === "creator"
-                    ? status
-                    : null;
-                } catch {
-                  return null;
-                }
-              },
-              limiter: telegramLimiter,
+        event.eventType === "StockDelta"
+          ? handleNotificationOutboxEvent(dbHandle.db, event, {
+              rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
             })
-          : event.eventType === "StockDelta"
-            ? handleNotificationOutboxEvent(dbHandle.db, event, {
-                rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-              })
-            : handler(event),
+          : handler(event),
       ownerId,
     });
     if (result.claimed > 0) {
@@ -5184,6 +4912,11 @@ async function bootstrap(): Promise<void> {
       inbox: telegramInbox,
       limiter: telegramLimiter,
       handler: async (envelope) => {
+        // Private-chat commerce only. A group/supergroup/channel update (or an inline query) is
+        // acknowledged and dropped here so it produces no identity, profile or commerce side
+        // effect at all.
+        if (envelope.chatType !== "private") return;
+        if (envelope.inlineQuery || envelope.chosenInlineResult) return;
         try {
           const observedUsername = await consumeTelegramUsernameObservation(
             dbHandle.db,
@@ -5278,26 +5011,6 @@ async function bootstrap(): Promise<void> {
    * Group publication detection. Runs on the recovery cadence and only ever enqueues
    * durable work: the actual Telegram send happens in the outbox lane under the limiter.
    */
-  const groupPublicationLane = async (): Promise<void> => {
-    const ticks = await advanceRestockGenerations(dbHandle.db, { batchSize: 200 });
-    for (const tick of ticks) await enqueueRestockPublication(dbHandle.db, tick);
-    const candidates = await listSocialProofCandidates(dbHandle.db, { batchSize: 50 });
-    let queued = 0;
-    for (const orderId of candidates) {
-      const outcome = await evaluateSocialProofCandidate(dbHandle.db, { orderId });
-      if (outcome.queued) queued += 1;
-    }
-    if (ticks.length > 0 || candidates.length > 0) {
-      logger.info(
-        {
-          restockGenerations: ticks.length,
-          socialProofEvaluated: candidates.length,
-          socialProofQueued: queued,
-        },
-        "group publication detection cycle",
-      );
-    }
-  };
   const { createDbWakeListener, DB_WAKE_CHANNELS } = await import("./infrastructure/db/client.js");
   const wakeListener = createDbWakeListener(dbHandle.pool, {
     callbacks: {
@@ -5313,7 +5026,6 @@ async function bootstrap(): Promise<void> {
       sepay: sepayLane,
       notifications: notificationLane,
       recovery: recoveryLane,
-      groupPublication: groupPublicationLane,
     },
     pollIntervalMs: config.OUTBOX_POLL_INTERVAL_MS,
     recoveryIntervalMs: 60_000,

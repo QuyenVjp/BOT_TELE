@@ -43,7 +43,8 @@ export interface RealStoreStats {
 }
 
 /**
- * Computes truthful stats from real DB records only, strictly excluding test/canary orders (FR 37).
+ * Computes truthful stats from real DB records only, strictly excluding test, archived and
+ * canary products — the same orders a customer would recognise as real sales.
  */
 export async function getRealStoreStats(exec: Executor): Promise<RealStoreStats> {
   const result = await sql<{
@@ -54,23 +55,21 @@ export async function getRealStoreStats(exec: Executor): Promise<RealStoreStats>
     with real_completed_orders as (
       select o.id, o.customer_id
       from "order" o
-      join product_variant v on v.id = (
-        select v2.id from product_variant v2 where v2.product_id in (
-          select p.id from product p where p.is_test = false and p.is_archived = false
-        ) limit 1
-      )
+      join product_variant v on v.id = o.variant_id
+      join product p on p.id = v.product_id
       where o.status = 'COMPLETED'
-        and not exists (
-          select 1 from digital_asset a
-          join product_variant pv on pv.id = a.variant_id
-          join product p on p.id = pv.product_id
-          where a.delivered_order_id = o.id and (p.is_test = true or p.is_archived = true)
-        )
+        and p.is_test = false
+        and p.is_archived = false
+        and p.name_vi not ilike '%canary%'
     )
     select
       count(*)::int as completed_orders,
       count(distinct customer_id)::int as total_customers,
-      coalesce((select count(*)::int from delivery_bundle where status = 'CONSUMED'), 0)::int as automated_deliveries
+      coalesce((
+        select count(*)::int from delivery_bundle b
+        where b.status = 'CONSUMED'
+          and exists (select 1 from real_completed_orders r where r.id = b.order_id)
+      ), 0)::int as automated_deliveries
     from real_completed_orders
   `.execute(exec);
 

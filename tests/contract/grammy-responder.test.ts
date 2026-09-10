@@ -119,7 +119,7 @@ describe("createGrammyResponder admin keyboards", () => {
     };
     for (const options of [sendOptions, editOptions]) {
       const buttons = options.reply_markup?.inline_keyboard?.flat() ?? [];
-      expect(buttons.find((button) => button.text.includes("AI Codex Việt Nam"))?.url).toBe(
+      expect(buttons.find((button) => button.text.includes("Cộng đồng AI Codex VN"))?.url).toBe(
         COMMUNITY_URL,
       );
       expect(buttons.find((button) => button.text.includes("Liên hệ Admin"))?.url).toBe(

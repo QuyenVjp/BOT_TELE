@@ -230,7 +230,6 @@ function setup() {
       quantityAdjustConfirm,
       quantityAdjustText,
       marketing: vi.fn().mockResolvedValue({ text: "marketing", buttons: [] }),
-      communityMenu: vi.fn().mockResolvedValue({ text: "community", buttons: [] }),
       broadcastCompose,
       broadcastAudience,
       broadcastText,
@@ -1274,76 +1273,9 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(base.send.mock.calls[0]![0].message.text).toBe("import preview from marker");
   });
 
-  it("routes /shop in a group chat to group.handleShopPanel with group thread id", async () => {
-    const base = setup();
-    const handleShopPanel = vi.fn().mockResolvedValue({
-      text: "group shop panel",
-      buttons: [
-        [{ text: "Xem Shop", url: "https://t.me/tier20ai_bot?start=shop", callbackData: "" }],
-      ],
-    });
-    const dispatcher = createTelegramDomainDispatcher({
-      codec: base.codec,
-      resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-      resolveOrderById: vi.fn(),
-      resolveOrderIdByNumber: vi.fn(),
-      resolveCatalogPage: vi.fn().mockResolvedValue(null),
-      catalog: {
-        mainMenu: base.mainMenu,
-        categoryList: vi.fn(),
-        categoryView: vi.fn(),
-        variantDetail: vi.fn(),
-        search: vi.fn(),
-      },
-      checkout: {
-        buyNowFromCallback: vi.fn(),
-        refresh: vi.fn(),
-        reopen: vi.fn(),
-        cancel: vi.fn(),
-      },
-      history: { list: vi.fn(), detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
-      admin: {
-        handleToken: vi.fn(),
-      },
-      responder: { send: base.send },
-      group: {
-        handleShopPanel,
-      },
-    });
-
-    await dispatcher.handle({
-      actorUserId: USER,
-      chatId: "-1003906082671",
-      chatType: "supergroup",
-      messageId: "grp-msg-1",
-      messageThreadId: 42,
-      action: "CATALOG",
-      command: "/shop",
-    });
-
-    expect(handleShopPanel).toHaveBeenCalledTimes(1);
-    expect(base.send).toHaveBeenCalledTimes(1);
-    expect(base.send.mock.calls[0]![0].chatId).toBe("-1003906082671");
-    expect(base.send.mock.calls[0]![0].messageThreadId).toBe(42);
-    expect(base.send.mock.calls[0]![0].message.text).toBe("group shop panel");
-  });
-
-  it("routes /orders in a group chat to privacy notice instead of private order history", async () => {
+  it("treats every group update as inert: no commerce handler and no reply", async () => {
     const base = setup();
     const historyList = vi.fn();
-    const handlePrivacyNotice = vi.fn().mockResolvedValue({
-      text: "Thông tin đơn hàng được bảo vệ",
-      buttons: [
-        [
-          {
-            text: "Xem đơn riêng",
-            url: "https://t.me/tier20ai_bot?start=orders",
-            callbackData: "",
-          },
-        ],
-      ],
-    });
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
@@ -1365,41 +1297,40 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       },
       history: { list: historyList, detail: vi.fn() },
       support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
-      admin: {
-        handleToken: vi.fn(),
-      },
+      admin: { handleToken: vi.fn() },
       responder: { send: base.send },
-      group: {
-        handlePrivacyNotice,
-      },
     });
 
-    await dispatcher.handle({
-      actorUserId: USER,
-      chatId: "-1003906082671",
-      chatType: "supergroup",
-      messageId: "grp-msg-2",
-      action: "CATALOG",
-      command: "/orders",
-    });
+    // Commerce commands, a mention-shaped question, a plain message and a new-member event.
+    for (const update of [
+      { command: "/shop" },
+      { command: "/orders" },
+      { command: "/hot" },
+      { command: "/stock" },
+      { command: "/support" },
+      { messageText: "@tier20ai_bot shop có gì?" },
+      { messageText: "hàng về chưa shop" },
+      { newChatMembers: [{ id: 42, firstName: "New", isBot: false }] },
+    ]) {
+      await dispatcher.handle({
+        actorUserId: USER,
+        chatId: "-1003906082671",
+        chatType: "supergroup",
+        messageId: "grp-msg-1",
+        messageThreadId: 42,
+        action: "CATALOG",
+        ...update,
+      });
+    }
 
-    expect(handlePrivacyNotice).toHaveBeenCalledWith("orders");
+    expect(base.send).not.toHaveBeenCalled();
     expect(historyList).not.toHaveBeenCalled();
-    expect(base.send).toHaveBeenCalledTimes(1);
-    expect(base.send.mock.calls[0]![0].message.text).toContain("bảo vệ");
+    expect(base.mainMenu).not.toHaveBeenCalled();
   });
 
-  it("routes inline queries to group.buildInlineResults and answers via responder", async () => {
+  it("never answers an inline query, so no commerce card can be posted into a chat", async () => {
     const base = setup();
     const answerInlineQuery = vi.fn().mockResolvedValue(undefined);
-    const buildInlineResults = vi.fn().mockResolvedValue([
-      {
-        type: "article",
-        id: "prod-1",
-        title: "Claude Pro",
-        input_message_content: { message_text: "Claude Pro 280k" },
-      },
-    ]);
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
@@ -1423,7 +1354,6 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
       admin: { handleToken: vi.fn() },
       responder: { send: base.send, answerInlineQuery },
-      group: { buildInlineResults },
     });
 
     await dispatcher.handle({
@@ -1432,19 +1362,11 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       chatType: "private",
       messageId: null,
       action: "CATALOG",
-      inlineQuery: {
-        id: "iq-test-1",
-        query: "claude",
-        offset: "0",
-      },
+      inlineQuery: { id: "iq-test-1", query: "claude", offset: "0" },
     });
 
-    expect(buildInlineResults).toHaveBeenCalledWith("claude", USER);
-    expect(answerInlineQuery).toHaveBeenCalledWith(
-      "iq-test-1",
-      expect.arrayContaining([expect.objectContaining({ title: "Claude Pro" })]),
-      expect.any(Object),
-    );
+    expect(answerInlineQuery).not.toHaveBeenCalled();
+    expect(base.send).not.toHaveBeenCalled();
   });
 
   it("routes Telegram document envelopes to file import before storefront fallback", async () => {

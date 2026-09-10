@@ -22,7 +22,7 @@ describe("customer branding presenters", () => {
     expect(home.text).toContain(`🛒 ${SHOP_NAME}`);
     expect(home.text).not.toContain("SHOP DIGITAL");
     const buttons = home.buttons.flat();
-    expect(buttons.find((b) => b.text.includes("AI Codex Việt Nam"))?.url).toBe(COMMUNITY_URL);
+    expect(buttons.find((b) => b.text.includes("Cộng đồng AI Codex VN"))?.url).toBe(COMMUNITY_URL);
     expect(buttons.find((b) => b.text.includes("Liên hệ Admin"))?.url).toBe(ADMIN_CONTACT_URL);
     expect(buttons.find((b) => b.text.includes("Quản trị"))).toBeUndefined();
     expect(buttons.every((b) => b.url || b.callbackData)).toBe(true);

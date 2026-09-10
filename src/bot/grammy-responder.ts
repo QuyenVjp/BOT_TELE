@@ -317,14 +317,13 @@ export const TELEGRAM_OWNER_BOT_COMMANDS = [
   { command: "health", description: "Hệ thống" },
 ] as const;
 
-export const TELEGRAM_GROUP_BOT_COMMANDS = [
-  { command: "shop", description: "Xem sản phẩm" },
-  { command: "tim", description: "Tìm sản phẩm" },
-  { command: "hot", description: "Sản phẩm nổi bật" },
-  { command: "new", description: "Hàng mới" },
-  { command: "stock", description: "Kiểm tra còn hàng" },
-  { command: "support", description: "Hỗ trợ" },
-] as const;
+/**
+ * Group chats register NO commerce commands. TIER20 SHOP is a private-chat bot: a group is
+ * only a human community we link to, so the group command scope is cleared explicitly rather
+ * than left with stale commands from an earlier release.
+ */
+export const TELEGRAM_GROUP_BOT_COMMANDS: ReadonlyArray<{ command: string; description: string }> =
+  [];
 
 /** Command menu only — never MenuButtonWebApp. Failures are non-fatal at worker boot. */
 export async function ensureTelegramCommandMenu(input: {

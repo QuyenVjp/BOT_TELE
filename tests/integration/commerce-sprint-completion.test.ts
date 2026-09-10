@@ -109,7 +109,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
 
       // Buttons check
       const buttonsFlat = customerHome.buttons.flat();
-      const communityBtn = buttonsFlat.find((b) => b.text.includes("AI Codex Việt Nam"));
+      const communityBtn = buttonsFlat.find((b) => b.text.includes("Cộng đồng AI Codex VN"));
       expect(communityBtn).toBeDefined();
       expect(communityBtn?.url).toBe(COMMUNITY_URL);
       const adminBtn = buttonsFlat.find((b) => b.text.includes("Liên hệ Admin"));

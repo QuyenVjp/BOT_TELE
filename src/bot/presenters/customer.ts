@@ -87,7 +87,8 @@ export interface StorefrontDisplayOptions {
   totalProducts?: number;
   offset?: number;
   limit?: number;
-  stats?: unknown;
+  /** Private social proof: real completed-order count, test/canary excluded. */
+  stats?: { completedOrders?: number } | undefined;
   testProducts?: StorefrontProductSummary[];
 }
 export function presentStorefront(options: StorefrontDisplayOptions): PresentedMessage {
@@ -102,6 +103,10 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
     "📦 Giao hàng nhanh",
     "🛡 Hỗ trợ & bảo hành",
   ];
+  // Private social proof only: a real completed-order count, never a fabricated one and
+  // never published anywhere but this customer's own chat.
+  const completedOrders = options.stats?.completedOrders ?? 0;
+  if (completedOrders > 0) lines.push("", `⭐ ${completedOrders} đơn đã hoàn tất`);
   const buttons: InlineButton[][] = [];
   const featured = options.featuredProducts ?? [];
   if (featured.length) {
@@ -121,11 +126,7 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   }
   buttons.push(
     [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
-    [
-      { text: "🧾 Đơn hàng", callbackData: "ord:list" },
-      { text: "👤 Tài khoản", callbackData: "wallet:account" },
-    ],
-    [{ text: "📢 AI Codex Việt Nam", url: COMMUNITY_URL, callbackData: "" }],
+    [{ text: "📢 Cộng đồng AI Codex VN", url: COMMUNITY_URL, callbackData: "" }],
     [{ text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
   );
   if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);

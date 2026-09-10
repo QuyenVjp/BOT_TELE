@@ -67,7 +67,6 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   { id: "customers", label: ADMIN_COPY.customers, callbackData: "admin:customers", enabled: true },
   { id: "preorders", label: "💰 Đặt cọc", callbackData: "admin:preorders", enabled: true },
   { id: "marketing", label: "📢 Broadcast", callbackData: "admin:marketing", enabled: true },
-  { id: "community", label: "👥 Cộng đồng", callbackData: "admin:community", enabled: true },
   { id: "suppliers", label: "🚚 NCC", callbackData: "admin:suppliers", enabled: true },
   { id: "support", label: "🛡 Hỗ trợ/BH", callbackData: "admin:support", enabled: true },
   { id: "testing", label: "🧪 Test Lab", callbackData: "admin:testlab", enabled: true },
@@ -95,7 +94,6 @@ export const ADMIN_VISIBLE_ROUTE_KEYS = ADMIN_NAV_ITEMS.filter((item) => item.en
   | "suppliers"
   | "support"
   | "testing"
-  | "community"
 >;
 
 const adminNav = (back: string): InlineButton[] => [
