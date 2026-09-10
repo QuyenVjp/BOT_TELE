@@ -188,6 +188,20 @@ export function bindSecretsToVariant(
   variantId: string,
   fields: readonly InventoryField[],
 ): string {
+  // The paste prompt tells the owner to send one record per line with the configured fields
+  // separated by "|". Honour that documented format: a line carrying pipes is split on them, and
+  // everything else still goes through the CSV parser (the template and header paths above are
+  // comma-based). Without this, a pipe line collapses into a single value and the customer
+  // receives one unlabelled blob instead of the configured fields.
+  if (fields.length > 1 && rawInput.includes("|") && !rawInput.includes(",")) {
+    const rows = rawInput
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .map((line) => [variantId, ...line.split("|").map((part) => part.trim())]);
+    if (rows.length > 0) return rows.map((row) => row.map(csvCell).join(",")).join("\n");
+  }
+
   const records = parseCsvRecords(rawInput);
   if (!records || records.length === 0) {
     const trimmed = rawInput.trim();

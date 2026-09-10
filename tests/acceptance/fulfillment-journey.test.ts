@@ -415,4 +415,69 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
     if (!revealed.ok) return;
     expect(revealed.secret).toBe("CODE-1234-ABCD");
   });
+
+  // A multi-field variant whose record fills only one field must still label it: a bare value
+  // tells the customer nothing about which credential it is.
+  it("keeps the field label when a multi-field record fills only one value", async () => {
+    const customerId = newId();
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const orderId = newId();
+    const vault = createInMemoryVault();
+    const accountFields = [
+      { name: "email", label: "Email", required: true, secret: false, customerVisible: true },
+      { name: "password", label: "Mật khẩu", required: false, secret: true, customerVisible: true },
+    ];
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Partial', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Partial Pack', ${"partial-" + categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields)
+      values (${variantId}, ${productId}, ${"SKU-" + variantId}, 'Partial', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', ${JSON.stringify(accountFields)}::jsonb)
+    `.execute(ctx.db);
+    await sql`
+      insert into "order"
+        (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type, supplier_policy_snapshot, fulfillment_type, status)
+      values (${orderId}, ${"ORD-" + orderId}, ${customerId}, ${variantId}, 'Partial Pack', 'Partial', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', 'PAID')
+    `.execute(ctx.db);
+    // Only the email is filled, so the customer-visible values collapse to exactly one entry.
+    const imported = await importDigitalInventory({
+      actor: rootActor,
+      config: rootConfig,
+      vault,
+      db: ctx.db,
+      input: `${variantId},only@example.invalid,`,
+      reason: "partial visibility test",
+      correlationId: "partial-import",
+    });
+    expect(imported).toMatchObject({ ok: true, summary: { imported: 1 } });
+    const fulfilled = await fulfillPaidOrder(ctx.db, {
+      orderId,
+      correlationId: "partial-fulfill",
+      deps: {
+        vault,
+        supplier: null,
+        deliveryBaseUrl: "https://shop.example/d",
+        bundleTtlSeconds: 900,
+      },
+    });
+    expect(fulfilled).toMatchObject({ ok: true, kind: "DELIVERY_BUNDLE" });
+    const revealed = await revealDeliveryBundle(ctx.db, {
+      token: fulfilled.token,
+      customerId,
+      correlationId: "partial-reveal",
+      vault,
+    });
+    expect(revealed).toMatchObject({ ok: true });
+    if (!revealed.ok) return;
+    expect(revealed.secret).toBe("Email: only@example.invalid");
+  });
 });

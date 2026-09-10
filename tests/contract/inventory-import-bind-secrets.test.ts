@@ -21,4 +21,24 @@ describe("bindSecretsToVariant", () => {
   it("returns empty for blank input", () => {
     expect(bindSecretsToVariant("   ", "var-1", FIELDS)).toBe("");
   });
+
+  // The paste prompt tells the owner the fields are pipe-separated. A pipe line that is not split
+  // lands entirely in the first field, and the customer then receives one unlabelled blob instead
+  // of the configured fields.
+  it("splits the pipe format the paste prompt documents into per-field values", () => {
+    expect(
+      bindSecretsToVariant("a@example.invalid|PASS-1\na2@example.invalid|PASS-2", "var-1", FIELDS),
+    ).toBe("var-1,a@example.invalid,PASS-1\nvar-1,a2@example.invalid,PASS-2");
+  });
+
+  it("keeps a single-field variant on the whole-line path", () => {
+    const code: InventoryField = {
+      name: "code",
+      label: "Mã",
+      required: true,
+      secret: true,
+      customerVisible: true,
+    };
+    expect(bindSecretsToVariant("CODE-1|CODE-2", "var-1", [code])).toBe("var-1,CODE-1|CODE-2");
+  });
 });

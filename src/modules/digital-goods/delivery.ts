@@ -86,7 +86,10 @@ function renderVisibleSecret(raw: string, fields: InventoryField[]): string | nu
     .map((field) => ({ label: field.label, value: values.get(field.name) ?? "" }))
     .filter((field) => field.value.length > 0);
   if (visible.length === 0) return null;
-  if (visible.length === 1) return visible[0]!.value;
+  // A single-field schema (a stock code) stays as bare copy-friendly text. Anything with a
+  // multi-field schema keeps its labels even when only one value is present, so a partially
+  // filled record can never surface as an unlabelled blob the customer cannot interpret.
+  if (visible.length === 1 && fields.length <= 1) return visible[0]!.value;
   return visible.map((field) => `${field.label}: ${field.value}`).join("\n");
 }
 
