@@ -2375,7 +2375,6 @@ function isCatalogId(value: string): boolean {
   return /^[0-9A-Z]{26}$/.test(value);
 }
 
-
 async function staleNavigation(
   deps: TelegramDomainDispatcherDeps,
   envelope: TelegramCommandEnvelope,

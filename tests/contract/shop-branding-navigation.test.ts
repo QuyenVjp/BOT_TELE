@@ -89,9 +89,11 @@ describe("customer branding presenters", () => {
     expect(page.text).toContain(SHOP_NAME);
     expect(page.buttons.flat().some((b) => b.url === ADMIN_CONTACT_URL)).toBe(false);
     expect(presentMainMenu().text).toContain(SHOP_NAME);
-    expect(presentMainMenu().buttons.flat().map((button) => button.text)).not.toContain(
-      "🛍 Danh sách sản phẩm",
-    );
+    expect(
+      presentMainMenu()
+        .buttons.flat()
+        .map((button) => button.text),
+    ).not.toContain("🛍 Danh sách sản phẩm");
   });
 });
 
@@ -218,7 +220,10 @@ describe("bot-only catalog navigation", () => {
       firstName: "Quyen",
     });
     expect(storefront).toHaveBeenCalled();
-    const message = send.mock.calls[0]?.[0]?.message as { text: string; buttons: { text: string }[][] };
+    const message = send.mock.calls[0]?.[0]?.message as {
+      text: string;
+      buttons: { text: string }[][];
+    };
     expect(message.text).toContain(SHOP_NAME);
     expect(JSON.stringify(message.buttons)).not.toContain("Danh sách sản phẩm");
   });

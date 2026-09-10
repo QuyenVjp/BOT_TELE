@@ -94,7 +94,7 @@ export const ADMIN_VISIBLE_ROUTE_KEYS = ADMIN_NAV_ITEMS.filter((item) => item.en
   | "suppliers"
   | "support"
   | "testing"
->
+>;
 
 const adminNav = (back: string): InlineButton[] => [
   { text: ADMIN_COPY.back, callbackData: back },

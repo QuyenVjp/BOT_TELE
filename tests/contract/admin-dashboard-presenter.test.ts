@@ -61,9 +61,7 @@ describe("admin operational presenters", () => {
     expect(menu.buttons.flat().find((button) => button.text === "🛒 Về Shop")?.callbackData).toBe(
       "shop:home",
     );
-    expect(labels).not.toEqual(
-      expect.arrayContaining(["🛠 Vận hành", "🧪 Kiểm thử", "📜 Nhật ký"]),
-    );
+    expect(labels).not.toEqual(expect.arrayContaining(["🛠 Vận hành", "🧪 Kiểm thử", "📜 Nhật ký"]));
   });
 
   it("does not retain labels from the former English root menu", () => {
