@@ -5205,11 +5205,31 @@ async function bootstrap(): Promise<void> {
               ],
             };
           } catch (error) {
-            if (error instanceof Error && /23505|CONFLICT|conflict/i.test(error.message))
+            // Postgres reports a unique violation through the error's `code`/`constraint` fields,
+            // not through `message`, so a message-text match misses it and the failure escapes to
+            // the inbox retry loop — the owner taps Create and simply sees nothing happen.
+            const pg = (error ?? {}) as { code?: unknown; constraint?: unknown };
+            if (pg.code === "23505") {
+              // Both collisions are fixable without leaving Telegram, and the draft is kept on
+              // purpose so the wizard reopens at the step that owns the clashing value (§130/§131).
+              const clash = String(pg.constraint ?? "");
+              const lines = clash.includes("slug")
+                ? [
+                    "Tên sản phẩm này đã được dùng cho một sản phẩm khác đang bán.",
+                    "👉 Quay lại bước 📝 Tên sản phẩm và đổi tên, hoặc mở sản phẩm cũ để chỉnh sửa.",
+                  ]
+                : [
+                    "SKU này đã tồn tại cho một sản phẩm khác.",
+                    "👉 Quay lại bước 🏷 SKU và chọn SKU khác.",
+                  ];
               return {
-                text: "SKU này vừa được tạo bởi thao tác khác. Vui lòng chọn SKU khác.",
-                buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+                text: `⚠️ ${lines.join("\n")}`,
+                buttons: [
+                  [{ text: "⬅️ Quay lại bước trước", callbackData: "admin:products:back" }],
+                  [{ text: "🛍 Sản phẩm", callbackData: "admin:products" }],
+                ],
               };
+            }
             throw error;
           }
         },
