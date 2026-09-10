@@ -4675,6 +4675,13 @@ async function bootstrap(): Promise<void> {
               text: "Không tìm thấy sản phẩm.",
               buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
             };
+          // The field route carries only the field key, so the menu records which product (and
+          // which version) is being edited. Without this the field prompt had nothing to resolve.
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "ADMIN_PRODUCT_CONTENT_EDIT",
+            payload: { productId: row.id, expectedVersion: row.version },
+          });
           return presentAdminProductContentMenu({
             productId: row.id,
             name: row.name_vi,
