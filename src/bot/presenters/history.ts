@@ -117,7 +117,20 @@ export function presentOrderHistory(page: OrderHistoryPage): PresentedMessage {
 }
 
 /** Detail view for one owned order: snapshot, payment state, status, policy. */
-export function presentOrderDetail(order: Order): PresentedMessage {
+/** Goal §7: the warranty state of a fulfilled order, as the customer should read it. */
+export interface OrderWarrantyState {
+  warrantyDays: number;
+  endsAt: string;
+  usedDays: number;
+  remainingDays: number;
+  expired: boolean;
+  variantId: string;
+}
+
+export function presentOrderDetail(
+  order: Order,
+  warranty?: OrderWarrantyState | undefined,
+): PresentedMessage {
   const price = formatVnd(makeVnd(BigInt(order.priceVnd)));
   const text = [
     HISTORY_COPY.detailTitle,
@@ -129,15 +142,39 @@ export function presentOrderDetail(order: Order): PresentedMessage {
     `${HISTORY_COPY.statusLabel}: ${statusLabel(order.status)}`,
     `${HISTORY_COPY.createdLabel}: ${formatDate(order.createdAt)}`,
     `${HISTORY_COPY.deliveryLabel}: ${deliveryWarrantyLine(order)}`,
+    // Goal §7: a live warranty states its end date and how much of it is left, so the customer can
+    // see their own position without asking. An expired one says so instead of counting backwards.
+    ...(warranty && warranty.warrantyDays > 0
+      ? warranty.expired
+        ? ["", "🛡 Bảo hành: đã hết hạn"]
+        : [
+            "",
+            "🛡 Bảo hành đến: " +
+              new Date(warranty.endsAt).toLocaleDateString("vi-VN", {
+                timeZone: "Asia/Ho_Chi_Minh",
+              }),
+            `Đã sử dụng: ${warranty.usedDays} ngày`,
+            `Còn bảo hành: ${warranty.remainingDays} ngày`,
+          ]
+      : []),
   ].join("\n");
 
-  return {
-    text,
-    buttons: [
-      [{ text: HISTORY_COPY.support, callbackData: `sup:open:${order.orderNumber}` }],
-      [{ text: HISTORY_COPY.back, callbackData: "ord:list" }],
-    ],
-  };
+  const buttons: PresentedMessage["buttons"] = [
+    ...(warranty && !warranty.expired && warranty.warrantyDays > 0
+      ? [
+          [
+            {
+              text: "🛡 Báo lỗi / Bảo hành",
+              callbackData: `warranty:report:${warranty.variantId}`,
+            },
+          ],
+        ]
+      : []),
+    [{ text: HISTORY_COPY.support, callbackData: `sup:open:${order.orderNumber}` }],
+    [{ text: HISTORY_COPY.back, callbackData: "ord:list" }],
+  ];
+
+  return { text, buttons };
 }
 
 /** Convenience: the summary row shape used in tests. */
