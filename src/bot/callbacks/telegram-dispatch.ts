@@ -259,6 +259,36 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    inventoryItems?(input: {
+      telegramUserId: string;
+      variantId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    inventoryItemActions?(input: {
+      telegramUserId: string;
+      variantId: string;
+      ref: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    inventoryItemAction?(input: {
+      telegramUserId: string;
+      variantId: string;
+      ref: string;
+      action: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    inventoryItemConfirm?(input: {
+      telegramUserId: string;
+      variantId: string;
+      ref: string;
+      action: string;
+      reason: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     inventoryHistory?(input: {
       telegramUserId: string;
       variantId: string;
@@ -1514,6 +1544,51 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Thông báo kho không khả dụng.");
+        } else if (route.startsWith("inventory:items:")) {
+          message = admin.inventoryItems
+            ? await admin.inventoryItems({
+                telegramUserId: envelope.actorUserId,
+                variantId: route.slice("inventory:items:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Dữ liệu kho không khả dụng.");
+        } else if (route.startsWith("inventory:item-act:")) {
+          const [, , variantId, ref, action] = route.split(":");
+          message = admin.inventoryItemAction
+            ? await admin.inventoryItemAction({
+                telegramUserId: envelope.actorUserId,
+                variantId: variantId ?? "",
+                ref: ref ?? "",
+                action: action ?? "",
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Dữ liệu kho không khả dụng.");
+        } else if (route.startsWith("inventory:item-confirm:")) {
+          const [, , variantId, ref, action] = route.split(":");
+          message = admin.inventoryItemConfirm
+            ? await admin.inventoryItemConfirm({
+                telegramUserId: envelope.actorUserId,
+                variantId: variantId ?? "",
+                ref: ref ?? "",
+                action: action ?? "",
+                reason: "Owner inventory hygiene",
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Dữ liệu kho không khả dụng.");
+        } else if (route.startsWith("inventory:item:")) {
+          const [, , variantId, ref] = route.split(":");
+          message = admin.inventoryItemActions
+            ? await admin.inventoryItemActions({
+                telegramUserId: envelope.actorUserId,
+                variantId: variantId ?? "",
+                ref: ref ?? "",
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Dữ liệu kho không khả dụng.");
         } else if (route.startsWith("inventory:history:")) {
           message = admin.inventoryHistory
             ? await admin.inventoryHistory({

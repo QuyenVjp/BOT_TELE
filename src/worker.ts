@@ -837,6 +837,10 @@ async function bootstrap(): Promise<void> {
     presentAdminInventoryProduct,
     presentAdminInventoryVariant,
     presentAdminInventoryHistory,
+    presentAdminInventoryItems,
+    presentAdminInventoryItemActions,
+    presentAdminInventoryItemConfirm,
+    presentAdminInventoryItemDone,
     presentQuantityStockAdjustPreview,
     presentQuantityStockAdjustReasonPrompt,
     presentQuantityStockAdjustDone,
@@ -3040,6 +3044,184 @@ async function bootstrap(): Promise<void> {
           variantId: history.variantId,
           variantName: history.variantName,
           rows: history.rows,
+        });
+      },
+      async inventoryItems(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: input.variantId,
+          reason: "Admin inventory item access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const variant = await sql<{ name_vi: string }>`
+          select name_vi from product_variant where id = ${input.variantId} limit 1
+        `.execute(dbHandle.db);
+        if (!variant.rows[0]) {
+          return {
+            text: "Biến thể không còn hợp lệ.",
+            buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
+          };
+        }
+        const { listInventoryItems } =
+          await import("./modules/digital-goods/inventory-item-ops.js");
+        const items = await listInventoryItems(dbHandle.db, { variantId: input.variantId });
+        return presentAdminInventoryItems({
+          variantId: input.variantId,
+          variantName: variant.rows[0].name_vi,
+          items,
+        });
+      },
+      async inventoryItemActions(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: input.variantId,
+          reason: "Admin inventory item access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const variant = await sql<{ name_vi: string }>`
+          select name_vi from product_variant where id = ${input.variantId} limit 1
+        `.execute(dbHandle.db);
+        const { listInventoryItems, ITEM_ACTION_LABELS } =
+          await import("./modules/digital-goods/inventory-item-ops.js");
+        const items = await listInventoryItems(dbHandle.db, { variantId: input.variantId });
+        const item = items.find((row) => row.ref === input.ref);
+        if (!variant.rows[0] || !item) {
+          return {
+            text: "Mục kho không còn hợp lệ.",
+            buttons: [
+              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
+            ],
+          };
+        }
+        return presentAdminInventoryItemActions({
+          variantId: input.variantId,
+          variantName: variant.rows[0].name_vi,
+          ref: item.ref,
+          statusLabel: item.statusLabel,
+          actions: item.actions.map((action) => ({
+            action,
+            label: ITEM_ACTION_LABELS[action],
+          })),
+        });
+      },
+      async inventoryItemAction(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: input.variantId,
+          reason: "Admin inventory item action",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const { listInventoryItems, ITEM_ACTION_LABELS } =
+          await import("./modules/digital-goods/inventory-item-ops.js");
+        if (!(input.action in ITEM_ACTION_LABELS)) {
+          return {
+            text: "Thao tác kho không hợp lệ.",
+            buttons: [
+              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
+            ],
+          };
+        }
+        const action = input.action as keyof typeof ITEM_ACTION_LABELS;
+        const items = await listInventoryItems(dbHandle.db, { variantId: input.variantId });
+        const item = items.find((row) => row.ref === input.ref);
+        const variant = await sql<{ name_vi: string }>`
+          select name_vi from product_variant where id = ${input.variantId} limit 1
+        `.execute(dbHandle.db);
+        if (!variant.rows[0] || !item || !item.actions.includes(action)) {
+          return {
+            text: "Thao tác này không áp dụng cho mục đang chọn.",
+            buttons: [
+              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
+            ],
+          };
+        }
+        return presentAdminInventoryItemConfirm({
+          variantId: input.variantId,
+          variantName: variant.rows[0].name_vi,
+          ref: item.ref,
+          statusLabel: item.statusLabel,
+          action,
+          actionLabel: ITEM_ACTION_LABELS[action],
+        });
+      },
+      async inventoryItemConfirm(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: input.variantId,
+          reason: "Admin inventory item action",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const { applyInventoryItemAction, ITEM_ACTION_LABELS, ITEM_STATUS_LABELS } =
+          await import("./modules/digital-goods/inventory-item-ops.js");
+        if (!(input.action in ITEM_ACTION_LABELS)) {
+          return {
+            text: "Thao tác kho không hợp lệ.",
+            buttons: [
+              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
+            ],
+          };
+        }
+        const action = input.action as keyof typeof ITEM_ACTION_LABELS;
+        const applied = await applyInventoryItemAction({
+          db: dbHandle.db,
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          config: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          variantId: input.variantId,
+          ref: input.ref,
+          action,
+          reason: input.reason,
+          correlationId: input.correlationId,
+        });
+        if (!applied.ok) {
+          const message =
+            applied.code === "ILLEGAL_TRANSITION"
+              ? "Mục này không còn ở trạng thái cho phép thao tác đó. Mở lại để xem trạng thái mới nhất."
+              : applied.code === "NOT_FOUND"
+                ? "Không tìm thấy mục kho."
+                : "Không thể cập nhật mục kho.";
+          return {
+            text: message,
+            buttons: [
+              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
+            ],
+          };
+        }
+        return presentAdminInventoryItemDone({
+          variantId: input.variantId,
+          ref: applied.ref,
+          actionLabel: ITEM_ACTION_LABELS[action],
+          statusLabel: ITEM_STATUS_LABELS[applied.status] ?? applied.status.toLowerCase(),
         });
       },
       async testLab(input) {

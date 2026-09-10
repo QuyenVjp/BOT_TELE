@@ -470,6 +470,7 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
       },
     });
     expect(fulfilled).toMatchObject({ ok: true, kind: "DELIVERY_BUNDLE" });
+    if (!fulfilled.ok || fulfilled.kind !== "DELIVERY_BUNDLE") return;
     const revealed = await revealDeliveryBundle(ctx.db, {
       token: fulfilled.token,
       customerId,

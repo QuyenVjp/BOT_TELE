@@ -1222,7 +1222,145 @@ export function presentAdminInventoryVariant(input: {
           ]
         : []),
       [{ text: "📋 Danh sách an toàn", callbackData: `admin:inventory:history:${input.id}` }],
+      [{ text: "🧰 Quản lý dữ liệu", callbackData: `admin:inventory:items:${input.id}` }],
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:product:${input.productId}` }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+/** Goal §89 — items of one variant, addressed by a derived ref, never by key or secret. */
+export function presentAdminInventoryItems(input: {
+  variantId: string;
+  variantName: string;
+  items: Array<{ ref: string; statusLabel: string; actions: string[] }>;
+}): PresentedMessage {
+  if (input.items.length === 0) {
+    return {
+      text: [
+        ADMIN_COPY.inventory,
+        `Biến thể: ${input.variantName}`,
+        "Chưa có dữ liệu kho. Nhập kho để bắt đầu bán.",
+      ].join("\n"),
+      buttons: [
+        [{ text: "📥 Nhập kho", callbackData: `admin:inventory:import:${input.variantId}` }],
+        [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
+        adminNav("admin:menu"),
+      ],
+    };
+  }
+  const manageable = input.items.filter((item) => item.actions.length > 0).length;
+  return {
+    text: [
+      ADMIN_COPY.inventory,
+      `Biến thể: ${input.variantName}`,
+      `Dữ liệu: ${input.items.length} mục — ${manageable} mục có thể xử lý.`,
+      "Chọn một mục để cách ly, phục hồi hoặc thu hồi. Nội dung đăng nhập không hiển thị ở đây.",
+    ].join("\n"),
+    buttons: [
+      ...input.items.map((item) => [
+        {
+          text: `${item.ref} · ${item.statusLabel}`,
+          callbackData: `admin:inventory:item:${input.variantId}:${item.ref}`,
+        },
+      ]),
+      [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+/** Actions for one item. Only the transitions legal from its current status are offered. */
+export function presentAdminInventoryItemActions(input: {
+  variantId: string;
+  variantName: string;
+  ref: string;
+  statusLabel: string;
+  actions: Array<{ action: string; label: string }>;
+}): PresentedMessage {
+  return {
+    text: [
+      ADMIN_COPY.inventory,
+      `Mục: ${input.ref}`,
+      `Biến thể: ${input.variantName}`,
+      `Trạng thái: ${input.statusLabel}`,
+      input.actions.length === 0
+        ? "Mục này đã giao cho khách hoặc đang trong đơn — chỉ xử lý được từ luồng đơn hàng."
+        : "Chọn thao tác. Mỗi thao tác đều hỏi xác nhận và được ghi nhật ký.",
+    ].join("\n"),
+    buttons: [
+      ...input.actions.map((entry) => [
+        {
+          text: entry.label,
+          callbackData: `admin:inventory:item-act:${input.variantId}:${input.ref}:${entry.action}`,
+        },
+      ]),
+      [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:items:${input.variantId}` }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+const ITEM_ACTION_EFFECT: Record<string, string> = {
+  QUARANTINE: "Mục sẽ không còn được bán cho khách cho tới khi phục hồi.",
+  RESTORE: "Mục sẽ trở lại trạng thái bán được.",
+  REVOKE: "Mục sẽ bị thu hồi vĩnh viễn và không thể phục hồi.",
+};
+
+export function presentAdminInventoryItemConfirm(input: {
+  variantId: string;
+  variantName: string;
+  ref: string;
+  statusLabel: string;
+  action: string;
+  actionLabel: string;
+}): PresentedMessage {
+  return {
+    text: [
+      "⚠️ XÁC NHẬN THAO TÁC KHO",
+      "",
+      `Mục: ${input.ref} — ${input.statusLabel}`,
+      `Biến thể: ${input.variantName}`,
+      `Thao tác: ${input.actionLabel}`,
+      ITEM_ACTION_EFFECT[input.action] ?? "",
+    ]
+      .filter((line) => line.length > 0)
+      .join("\n"),
+    buttons: [
+      [
+        {
+          text: "✅ Thực hiện",
+          callbackData: `admin:inventory:item-confirm:${input.variantId}:${input.ref}:${input.action}`,
+        },
+      ],
+      [
+        {
+          text: ADMIN_COPY.back,
+          callbackData: `admin:inventory:item:${input.variantId}:${input.ref}`,
+        },
+      ],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentAdminInventoryItemDone(input: {
+  variantId: string;
+  ref: string;
+  actionLabel: string;
+  statusLabel: string;
+}): PresentedMessage {
+  return {
+    text: [
+      "✅ Đã cập nhật kho",
+      "",
+      `Mục: ${input.ref}`,
+      `Thao tác: ${input.actionLabel}`,
+      `Trạng thái mới: ${input.statusLabel}`,
+    ].join("\n"),
+    buttons: [
+      [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
+      [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
       adminNav("admin:menu"),
     ],
   };
