@@ -3399,6 +3399,14 @@ async function bootstrap(): Promise<void> {
         // and `admin:products:variant-field:<id>:<key>` overflowed for three of the five fields, which
         // the ingress drops silently. The id rides in this state instead, exactly as the product
         // content edit does it.
+        // One editor at a time: clear older menu states for this admin so a click on an older message's
+        // field cannot accidentally modify another variant.
+        await sql`
+          delete from admin_callback_state
+           where admin_telegram_user_id = ${input.telegramUserId}
+             and kind = 'ADMIN_VARIANT_UPDATE'
+             and not (payload_redacted ? 'field')
+        `.execute(dbHandle.db);
         await createAdminCallbackState(dbHandle.db, {
           adminTelegramUserId: input.telegramUserId,
           kind: "ADMIN_VARIANT_UPDATE",
@@ -3506,6 +3514,12 @@ async function bootstrap(): Promise<void> {
           correlationId: input.correlationId,
         });
         if (!ok) return back("Biến thể đã thay đổi ở nơi khác, mở lại để sửa.");
+        await sql`
+          delete from admin_callback_state
+           where admin_telegram_user_id = ${input.telegramUserId}
+             and kind = 'ADMIN_VARIANT_UPDATE'
+             and payload_redacted ? 'field'
+        `.execute(dbHandle.db);
         const named = await sql<{ name: string }>`
           select name_vi as name from product_variant where id = ${variantId} limit 1
         `.execute(dbHandle.db);
@@ -6221,6 +6235,7 @@ async function bootstrap(): Promise<void> {
               break;
             case "priceVnd":
               if (!/^\d+$/.test(value)) return back("Giá chỉ gồm chữ số, ví dụ 280000.");
+              if (BigInt(value) <= 0n) return back("Giá biến thể phải lớn hơn 0 ₫.");
               patch.priceVnd = BigInt(value);
               break;
             case "durationCode":
@@ -6233,10 +6248,18 @@ async function bootstrap(): Promise<void> {
                 return back("Giá gạch ngang chỉ gồm chữ số, hoặc gửi - để bỏ.");
               patch.compareAtPriceVnd = value === "-" ? null : BigInt(value);
               break;
-            case "depositAmountVnd":
+            case "depositAmountVnd": {
               if (!/^\d+$/.test(value)) return back("Tiền cọc chỉ gồm chữ số, ví dụ 50000.");
+              const variantRow = (
+                await sql<{ preorder_enabled: boolean }>`
+                  select preorder_enabled from product_variant where id = ${variantId} limit 1
+                `.execute(dbHandle.db)
+              ).rows[0];
+              if (variantRow?.preorder_enabled && Number(value) <= 0)
+                return back("Tiền cọc phải lớn hơn 0 ₫ khi biến thể đang bật đặt cọc.");
               patch.depositAmountVnd = Number(value);
               break;
+            }
             case "active":
             case "preorderEnabled":
               // These are answered with buttons; text here means the owner typed instead of tapping.
@@ -6268,6 +6291,13 @@ async function bootstrap(): Promise<void> {
             correlationId: input.correlationId,
           });
           if (!ok) return back("Biến thể đã thay đổi ở nơi khác, mở lại để sửa.");
+          // One-shot consume: remove the field state so subsequent typed texts are not swallowed.
+          await sql`
+            delete from admin_callback_state
+             where admin_telegram_user_id = ${input.telegramUserId}
+               and kind = 'ADMIN_VARIANT_UPDATE'
+               and payload_redacted ? 'field'
+          `.execute(dbHandle.db);
           const named = await sql<{ name: string }>`
             select name_vi as name from product_variant where id = ${variantId} limit 1
           `.execute(dbHandle.db);

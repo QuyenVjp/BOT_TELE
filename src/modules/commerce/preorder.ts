@@ -175,8 +175,14 @@ export function presentPreorderConsent(config: PreorderVariantConfig): Presented
     "📋 Quy định & quyền lợi đặt cọc:",
     "• Đơn cọc được xếp vào hàng chờ ưu tiên theo thứ tự thời gian thanh toán cọc.",
     `• Khi hàng về, hệ thống giữ hàng riêng cho bạn trong ${config.holdDurationHours} giờ.`,
-    `• Bạn có ${config.balanceDueHours} giờ để thanh toán nốt phần còn lại (${balanceVnd.toLocaleString("vi-VN")} ₫).`,
-    "• Nếu bạn không thanh toán phần còn lại đúng hạn, suất giữ hàng sẽ tự động chuyển cho khách hàng kế tiếp và tiền cọc không được hoàn lại.",
+    ...(balanceVnd > 0
+      ? [
+          `• Bạn có ${config.balanceDueHours} giờ để thanh toán nốt phần còn lại (${balanceVnd.toLocaleString("vi-VN")} ₫).`,
+          "• Nếu bạn không thanh toán phần còn lại đúng hạn, suất giữ hàng sẽ tự động chuyển cho khách hàng kế tiếp và tiền cọc không được hoàn lại.",
+        ]
+      : [
+          "• Tiền đặt cọc đã bao gồm 100% giá trị sản phẩm, bạn không cần thanh toán thêm khi hàng về.",
+        ]),
     "• Trường hợp Shop không thể nhập hàng hoặc huỷ đợt hàng, 100% tiền cọc sẽ được hoàn trả lại ví của bạn.",
     "",
     "Bạn có đồng ý với các điều kiện trên để tiếp tục đặt cọc?",
