@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   WIZARD_DESCRIPTION_FIELDS,
+  wizardValidationMessage,
   presentWizardDescriptionFieldPrompt,
   presentWizardDescriptionFields,
   wizardDescriptionField,
@@ -74,5 +75,47 @@ describe("wizard description field editor", () => {
     const unknown = presentWizardDescriptionFieldPrompt("not_a_field");
     expect(unknown.text).toContain("NỘI DUNG");
     expect(wizardDescriptionField("not_a_field")).toBeUndefined();
+  });
+});
+
+describe("wizard validation messages name the field (goal §131)", () => {
+  it("never returns a bare invalid-data sentence", () => {
+    // Every code the draft machine can return, against a representative step.
+    for (const code of [
+      "DRAFT_EXPIRED",
+      "DRAFT_READY",
+      "INVALID_STEP",
+      "UNSUPPORTED_FULFILLMENT_TYPE",
+      "NO_DRAFT",
+      "INVALID_QUANTITY",
+      "INVALID_VARIANT",
+      "INVALID_SKU",
+      "INVALID_SUPPLIER_CONFIG",
+      "INVALID_INVENTORY_FIELDS",
+      "INVALID_VALUE",
+      "SOMETHING_UNMAPPED",
+    ]) {
+      const message = wizardValidationMessage(code, "variant");
+      expect(message).not.toBe("Dữ liệu không hợp lệ, vui lòng thử lại.");
+      expect(message).toContain("💰 Giá / biến thể");
+      expect(message).toContain("👉");
+    }
+  });
+
+  it("names the step and the expected input per field", () => {
+    expect(wizardValidationMessage("INVALID_VALUE", "name")).toContain("📝 Tên sản phẩm");
+    expect(wizardValidationMessage("INVALID_VALUE", "name")).toContain("tối đa 200 ký tự");
+    expect(wizardValidationMessage("INVALID_SKU", "sku")).toContain("dấu - hoặc _");
+    expect(wizardValidationMessage("INVALID_VARIANT", "variant")).toContain("Tên biến thể | Giá");
+    expect(wizardValidationMessage("INVALID_VALUE", "threshold")).toContain("nguyên không âm");
+    expect(wizardValidationMessage("INVALID_SUPPLIER_CONFIG", "supplierConfig")).toContain(
+      "supplierId | externalSku",
+    );
+  });
+
+  it("still says something actionable for an unknown step or code", () => {
+    const message = wizardValidationMessage("UNKNOWN_CODE", "unknown");
+    expect(message).toContain("Nội dung chưa hợp lệ cho bước này.");
+    expect(message).not.toContain("👉");
   });
 });

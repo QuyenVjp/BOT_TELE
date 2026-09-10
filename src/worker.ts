@@ -876,6 +876,7 @@ async function bootstrap(): Promise<void> {
     presentWizardDescriptionFields,
     presentWizardDescriptionFieldPrompt,
     wizardDescriptionField,
+    wizardValidationMessage,
     presentWizardDescriptionCustomPrompt,
     presentWizardVariantStep,
     presentWizardDeliveryStep,
@@ -4275,24 +4276,9 @@ async function bootstrap(): Promise<void> {
 
           const result = await productDraftWorkflow.advance(input.telegramUserId, input.text);
           if (!result.ok) {
-            let errorMsg = "Dữ liệu không hợp lệ, vui lòng thử lại.";
-            if (result.error === "INVALID_VARIANT") {
-              errorMsg = "Định dạng chưa đúng. Nhập: Tên biến thể | Giá\nVí dụ: 1 tháng | 250000";
-            } else if (result.error === "INVALID_SKU") {
-              errorMsg =
-                "SKU không hợp lệ. SKU chỉ gồm chữ, số, dấu - hoặc _ (không chứa khoảng trắng).";
-            } else if (result.error === "INVALID_QUANTITY") {
-              errorMsg = "Số lượng không hợp lệ. Vui lòng nhập số nguyên dương.";
-            } else if (result.error === "INVALID_SUPPLIER_CONFIG") {
-              errorMsg =
-                "Cấu hình nhà cung cấp chưa đúng. Định dạng: supplierId | externalSku | costVnd | region";
-            } else if (result.error === "INVALID_INVENTORY_FIELDS") {
-              errorMsg = "Cấu trúc kho chưa hợp lệ. Hãy kiểm tra lại các trường đã chọn.";
-            } else if (result.error === "DRAFT_EXPIRED") {
-              errorMsg = "Phiên tạo sản phẩm đã hết hạn. Hãy bắt đầu lại.";
-            } else if (result.error === "INVALID_VALUE") {
-              errorMsg = "Dữ liệu không được để trống hoặc vượt quá độ dài cho phép.";
-            }
+            // Goal §131: name the field. The step IS the field the owner is editing, so the
+            // message is derived from it and every error code gets its own sentence.
+            const errorMsg = wizardValidationMessage(result.error, current?.step ?? "unknown");
             return {
               text: `⚠️ ${errorMsg}`,
               buttons: [

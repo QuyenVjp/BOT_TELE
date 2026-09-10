@@ -346,3 +346,69 @@ export function presentWizardDescriptionFieldPrompt(
     ],
   };
 }
+
+/**
+ * Goal §131 — a wizard validation error must say WHICH field is wrong, never a bare
+ * "Dữ liệu không hợp lệ". The step is the field being edited, so the hint is derived from it, and
+ * every error code the draft machine can return gets its own sentence.
+ */
+const WIZARD_STEP_HINTS: Record<string, string> = {
+  name: "Nhập tên sản phẩm (tối đa 200 ký tự).",
+  sku: "SKU chỉ gồm chữ, số, dấu - hoặc _ (không dấu cách).",
+  category: "Chọn danh mục bằng nút bên dưới.",
+  productType: "Chọn loại sản phẩm bằng nút bên dưới.",
+  description: "Nhập nội dung mô tả.",
+  variant: "Nhập: Tên biến thể | Giá (ví dụ: 1 tháng | 250000).",
+  deliveryConfig: "Chọn cấu trúc kho bằng nút bên dưới.",
+  visibilityFlags: "Chọn hiển thị bằng nút bên dưới.",
+  confirm: "Xác nhận bằng nút bên dưới.",
+  inventoryFields: "Chọn cấu trúc kho bằng nút bên dưới.",
+  variantName: "Nhập tên biến thể (tối đa 200 ký tự).",
+  price: "Nhập giá là một số nguyên dương (VND).",
+  threshold: "Nhập ngưỡng cảnh báo là một số nguyên không âm.",
+  initialQuantity: "Nhập số lượng ban đầu là một số nguyên không âm.",
+  serviceInstructions: "Nhập hướng dẫn xử lý cho đơn hàng.",
+  supplierConfig: "Nhập: supplierId | externalSku | costVnd | region.",
+};
+
+const WIZARD_STEP_LABELS: Record<string, string> = {
+  name: "📝 Tên sản phẩm",
+  sku: "🏷 SKU",
+  description: "📝 Mô tả & hướng dẫn",
+  variant: "💰 Giá / biến thể",
+  deliveryConfig: "📦 Cách giao hàng",
+  visibilityFlags: "⚙️ Hiển thị & bán hàng",
+  inventoryFields: "📦 Cấu trúc kho",
+  variantName: "🏷 Tên biến thể",
+  price: "💰 Giá",
+  threshold: "📦 Ngưỡng cảnh báo",
+  initialQuantity: "📦 Số lượng ban đầu",
+  serviceInstructions: "🧑‍💻 Hướng dẫn xử lý",
+  supplierConfig: "🔌 Nhà cung cấp",
+};
+
+const WIZARD_ERROR_SENTENCES: Record<string, string> = {
+  DRAFT_EXPIRED: "Phiên tạo sản phẩm đã hết hạn.",
+  DRAFT_READY: "Sản phẩm đã sẵn sàng để tạo — hãy bấm nút xác nhận.",
+  INVALID_STEP: "Bước này không nhận nội dung gõ tay.",
+  UNSUPPORTED_FULFILLMENT_TYPE: "Loại sản phẩm chưa được hỗ trợ cho trường này.",
+  NO_DRAFT: "Chưa có sản phẩm đang tạo.",
+  INVALID_QUANTITY: "Số lượng không hợp lệ.",
+  INVALID_VARIANT: "Định dạng biến thể chưa đúng.",
+  INVALID_SKU: "SKU không hợp lệ.",
+  INVALID_SUPPLIER_CONFIG: "Cấu hình nhà cung cấp chưa đúng.",
+  INVALID_INVENTORY_FIELDS: "Cấu trúc kho chưa hợp lệ.",
+  INVALID_VALUE: "Nội dung không được để trống hoặc quá dài.",
+};
+
+export function wizardValidationMessage(errorCode: string, step: string): string {
+  const label = WIZARD_STEP_LABELS[step];
+  const sentence = WIZARD_ERROR_SENTENCES[errorCode] ?? "Nội dung chưa hợp lệ cho bước này.";
+  const hint = WIZARD_STEP_HINTS[step];
+  return [
+    label ? `Ở bước ${label}: ${sentence}` : sentence,
+    hint ? `👉 ${hint}` : null,
+  ]
+    .filter((line): line is string => line !== null)
+    .join("\n");
+}
