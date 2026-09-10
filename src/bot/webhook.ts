@@ -485,6 +485,11 @@ async function normalizeTelegramUpdate(
     ...(normalizedMessageText?.text ? { messageText: normalizedMessageText.text } : {}),
     ...(normalizedMessageText?.rootProductDraftText ? { rootProductDraftText: true as const } : {}),
     ...(normalizedMessageText?.inventoryImportText ? { inventoryImportText: true as const } : {}),
+    // Without this spread the ingress decision is computed and then thrown away, so the routing
+    // marker never reaches the dispatcher and the vouched text is claimed by a generic handler.
+    ...(normalizedMessageText?.productContentEditText
+      ? { productContentEditText: true as const }
+      : {}),
     ...(actor.first_name ? { firstName: actor.first_name } : {}),
     ...(actor.last_name ? { lastName: actor.last_name } : {}),
     ...(actor.language_code ? { languageCode: actor.language_code } : {}),
