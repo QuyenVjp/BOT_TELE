@@ -813,10 +813,10 @@ async function warrantyQueueRows(db: Db, view: WarrantyQueueView): Promise<Warra
   // Overdue is a filter over the waiting views, and an empty status list is not a valid `= any`.
   const filter =
     view === "overdue"
-      ? sql`status in ('SUBMITTED','TRIAGE') and review_sla_due_at is not null and review_sla_due_at < now()`
+      ? sql`c.status in ('SUBMITTED','TRIAGE') and c.review_sla_due_at is not null and c.review_sla_due_at < now()`
       : statuses.length === 0
         ? sql`false`
-        : sql`status = any(${sql.val(statuses)}::text[])`;
+        : sql`c.status = any(${sql.val(statuses)}::text[])`;
   const rows = await sql<{
     id: string;
     claim_number: string;

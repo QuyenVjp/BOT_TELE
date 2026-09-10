@@ -2919,9 +2919,10 @@ async function routeAdminWarranty(
   const actor = { telegramUserId: envelope.actorUserId, chatType: envelope.chatType };
   const missing = safeError("Bảo hành không khả dụng.");
   switch (head) {
+    case "":
     case "view":
       return surface.warrantyQueue
-        ? surface.warrantyQueue({ ...actor, correlationId, view: claimId })
+        ? surface.warrantyQueue({ ...actor, correlationId, view: claimId || "new" })
         : missing;
     case "refunds":
       return surface.warrantyRefundQueue

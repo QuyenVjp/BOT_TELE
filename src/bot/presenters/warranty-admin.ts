@@ -96,6 +96,13 @@ export function presentAdminWarrantyQueue(input: {
           )),
     ].join("\n"),
     buttons: [
+      // One row per claim: the list above names them, and this is how the owner opens one.
+      ...input.rows.map((row) => [
+        {
+          text: `🧾 ${row.claimNumber}`,
+          callbackData: `admin:warranty:claim:${row.claimId}`,
+        },
+      ]),
       ...views.map((view) => [
         {
           text: `${VIEW_LABELS[view]} (${input.counts[view] ?? 0})`,
@@ -103,7 +110,7 @@ export function presentAdminWarrantyQueue(input: {
         },
       ]),
       [
-        { text: "💸 Chờ hoàn tiền", callbackData: "admin:warranty:refunds" },
+        { text: "💰 Hàng chờ chi", callbackData: "admin:warranty:refunds" },
         { text: "🏠 Quản trị", callbackData: "admin:menu" },
       ],
     ],
