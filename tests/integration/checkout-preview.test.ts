@@ -85,7 +85,12 @@ const tokenCodec = () =>
 
 function build(catalog: Catalog, balanceVnd: bigint | null) {
   const payOrderWithWallet = vi.fn(
-    async (_input: { customerId: string; orderId: string; idempotencyKey: string; correlationId: string }) => ({
+    async (_input: {
+      customerId: string;
+      orderId: string;
+      idempotencyKey: string;
+      correlationId: string;
+    }) => ({
       ok: true,
       message: "",
     }),

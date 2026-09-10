@@ -17,7 +17,7 @@ import {
   PAYMENT_COPY,
 } from "../presenters/payment.js";
 import { presentStockOutcome, type PresentedMessage } from "../presenters/catalog.js";
-import { getProductDetail, getVariantById } from "../../modules/catalog/repository.js";
+import { getVariantById } from "../../modules/catalog/repository.js";
 import type { FulfillmentType } from "../../modules/catalog/fulfillment-type.js";
 import type { CatalogAudience } from "../../modules/catalog/visibility.js";
 
@@ -350,9 +350,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       }
       return {
         text: `Đã thanh toán bằng ví. Chúng tôi sẽ giao tài khoản ngay.\n\nĐơn: ${result.order.orderNumber}`,
-        buttons: [
-          [{ text: "🧾 Xem đơn", callbackData: `ord:view:${result.order.orderNumber}` }],
-        ],
+        buttons: [[{ text: "🧾 Xem đơn", callbackData: `ord:view:${result.order.orderNumber}` }]],
       };
     },
 

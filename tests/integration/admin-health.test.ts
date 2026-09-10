@@ -65,15 +65,18 @@ describe("admin health facts", () => {
     expect(facts.queues.openSupportTickets).toBe(1);
   });
 
-
   it("excludes a test-order payment intent from the operator queue", async () => {
     const customerId = newId();
     const categoryId = newId();
     const productId = newId();
     const variantId = newId();
     const orderId = newId();
-    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(ctx.db);
-    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', ${categoryId.slice(-8)}, true, 1)`.execute(ctx.db);
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
     await sql`
       insert into product (id, category_id, name_vi, slug, is_active, sort_order, is_test)
       values (${productId}, ${categoryId}, '🧪 Test', ${categoryId.slice(-8) + "t"}, true, 1, true)
@@ -98,7 +101,6 @@ describe("admin health facts", () => {
     expect(facts.queues.intentsAwaitingSettlement).toBe(0);
     expect(facts.queues.paymentsNeedingReview).toBe(0);
   });
-
 
   it("reports the durable ingress dead letters, not just the outbound outbox ones", async () => {
     for (const [source, status, id] of [

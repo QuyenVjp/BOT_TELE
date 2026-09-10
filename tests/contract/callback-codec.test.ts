@@ -98,8 +98,7 @@ const unified = () =>
   createCallbackTokenCodec({ key: KEY, keyVersion: 1, ttlSeconds: 900, clockSkewSeconds: 5 });
 
 describe("checkout callback tokens", () => {
-    createCallbackTokenCodec({ key: KEY, keyVersion: 1, ttlSeconds: 900, clockSkewSeconds: 5 });
-
+  createCallbackTokenCodec({ key: KEY, keyVersion: 1, ttlSeconds: 900, clockSkewSeconds: 5 });
 
   it("peeks EVERY action back to itself, including the extended (>=16) forms", () => {
     const variantId = newId();

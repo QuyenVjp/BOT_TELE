@@ -51,7 +51,6 @@ afterAll(async () => {
 });
 
 describe("admin callback state kinds are persisted by the schema", () => {
-
   it("round-trips the payload the wizard sub-flow resolvers read back", async () => {
     // The resolver selects `payload_redacted as payload`; a wrong column name there throws on
     // EVERY draft text message and strands them all in RETRY instead of advancing the wizard.

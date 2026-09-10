@@ -4187,7 +4187,12 @@ async function bootstrap(): Promise<void> {
                 ? {
                     text: `✅ Đã cập nhật ${adminProductContentField(field)?.label ?? field}.`,
                     buttons: [
-                      [{ text: "⬅️ Danh sách mục", callbackData: `admin:products:content:${productId}` }],
+                      [
+                        {
+                          text: "⬅️ Danh sách mục",
+                          callbackData: `admin:products:content:${productId}`,
+                        },
+                      ],
                       [{ text: "🛍 Sản phẩm", callbackData: "admin:products" }],
                     ],
                   }
@@ -4200,7 +4205,12 @@ async function bootstrap(): Promise<void> {
               return {
                 text: `⚠️ Không lưu được: ${code === "INVALID_CONTENT_LENGTH" ? "nội dung quá dài (tối đa 2000 ký tự)." : code === "INVALID_NAME" ? "tên sản phẩm không được để trống." : code} `,
                 buttons: [
-                  [{ text: "⬅️ Danh sách mục", callbackData: `admin:products:content:${productId}` }],
+                  [
+                    {
+                      text: "⬅️ Danh sách mục",
+                      callbackData: `admin:products:content:${productId}`,
+                    },
+                  ],
                   [{ text: "🛍 Sản phẩm", callbackData: "admin:products" }],
                 ],
               };
@@ -4722,9 +4732,8 @@ async function bootstrap(): Promise<void> {
               and expires_at > now()
             order by created_at desc limit 1
           `.execute(dbHandle.db);
-          const pendingProductId = (
-            state.rows[0]?.payload as { productId?: unknown } | undefined
-          )?.productId;
+          const pendingProductId = (state.rows[0]?.payload as { productId?: unknown } | undefined)
+            ?.productId;
           const productId = typeof pendingProductId === "string" ? pendingProductId : null;
           if (!productId) {
             // No pending state: fall back to the product the owner just viewed, if any draft pointer

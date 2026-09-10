@@ -455,7 +455,11 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
         throw new Error("Invalid checkout wallet callback payload");
       }
       const amountVnd = input.amountVnd;
-      if (!Number.isSafeInteger(amountVnd) || amountVnd! <= 0 || amountVnd! > MAX_CALLBACK_PRICE_VND) {
+      if (
+        !Number.isSafeInteger(amountVnd) ||
+        amountVnd! <= 0 ||
+        amountVnd! > MAX_CALLBACK_PRICE_VND
+      ) {
         throw new Error("Invalid checkout wallet amount");
       }
       const amount = Buffer.alloc(6);

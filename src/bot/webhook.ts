@@ -435,7 +435,7 @@ async function normalizeTelegramUpdate(
           ? ("ADMIN" as const)
           : normalizedMessageText?.rootProductDraftText
             ? ("ADMIN" as const)
-          : classifyAction(callbackData, command);
+            : classifyAction(callbackData, command);
   const actorUsername = normalizeUsernameMetadata(actor.username);
   const contact = update.message?.contact;
   const contactPhoneNumber =
@@ -681,7 +681,9 @@ function sanitizeProductContentText(normalized: string): string | null {
   }
   const trimmed = out.trim();
   if (!trimmed) return null;
-  return trimmed.length <= MAX_DRAFT_PROSE_CHARS ? trimmed : trimmed.slice(0, MAX_DRAFT_PROSE_CHARS);
+  return trimmed.length <= MAX_DRAFT_PROSE_CHARS
+    ? trimmed
+    : trimmed.slice(0, MAX_DRAFT_PROSE_CHARS);
 }
 
 function isSafeDraftProse(normalized: string, maxBytes: number): boolean {

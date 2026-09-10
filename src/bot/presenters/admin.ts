@@ -66,7 +66,12 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   { id: "payments", label: ADMIN_COPY.payments, callbackData: "admin:payments", enabled: true },
   { id: "customers", label: ADMIN_COPY.customers, callbackData: "admin:customers", enabled: true },
   { id: "preorders", label: "💰 Đặt cọc", callbackData: "admin:preorders", enabled: true },
-  { id: "notifications", label: "🔔 Thông báo", callbackData: "admin:notifications", enabled: true },
+  {
+    id: "notifications",
+    label: "🔔 Thông báo",
+    callbackData: "admin:notifications",
+    enabled: true,
+  },
   { id: "marketing", label: "📢 Broadcast", callbackData: "admin:marketing", enabled: true },
   { id: "suppliers", label: ADMIN_COPY.suppliers, callbackData: "admin:suppliers", enabled: true },
   { id: "support", label: "🛡 Hỗ trợ/BH", callbackData: "admin:support", enabled: true },
@@ -1684,10 +1689,7 @@ export function presentAdminNotifications(input: {
       `🚫 Đã tắt nhận marketing: ${input.marketingOptOuts}`,
       `📤 Đang chờ gửi trong outbox: ${input.outboxBacklog}`,
     ].join("\n"),
-    buttons: [
-      [{ text: "📢 Broadcast", callbackData: "admin:marketing" }],
-      adminNav("admin:menu"),
-    ],
+    buttons: [[{ text: "📢 Broadcast", callbackData: "admin:marketing" }], adminNav("admin:menu")],
   };
 }
 

@@ -391,7 +391,13 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       broadcastText,
       walletTopupText,
     } = setup();
-    for (const mock of [workflowMessageText, importDocument, quantityAdjustText, broadcastText, walletTopupText]) {
+    for (const mock of [
+      workflowMessageText,
+      importDocument,
+      quantityAdjustText,
+      broadcastText,
+      walletTopupText,
+    ]) {
       mock.mockResolvedValue(null);
     }
     catalogSearch.mockResolvedValueOnce({ text: "kết quả tìm kiếm", buttons: [] });

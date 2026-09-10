@@ -405,10 +405,7 @@ export function wizardValidationMessage(errorCode: string, step: string): string
   const label = WIZARD_STEP_LABELS[step];
   const sentence = WIZARD_ERROR_SENTENCES[errorCode] ?? "Nội dung chưa hợp lệ cho bước này.";
   const hint = WIZARD_STEP_HINTS[step];
-  return [
-    label ? `Ở bước ${label}: ${sentence}` : sentence,
-    hint ? `👉 ${hint}` : null,
-  ]
+  return [label ? `Ở bước ${label}: ${sentence}` : sentence, hint ? `👉 ${hint}` : null]
     .filter((line): line is string => line !== null)
     .join("\n");
 }

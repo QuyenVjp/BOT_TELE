@@ -30,12 +30,16 @@ afterAll(async () => {
 async function seedProduct(): Promise<{ productId: string; version: number }> {
   const categoryId = newId();
   const productId = newId();
-  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', ${categoryId.slice(-8)}, true, 1)`.execute(ctx.db);
+  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', ${categoryId.slice(-8)}, true, 1)`.execute(
+    ctx.db,
+  );
   await sql`
     insert into product (id, category_id, name_vi, slug, is_active, sort_order)
     values (${productId}, ${categoryId}, 'Claude Pro', ${productId.slice(-8)}, true, 1)
   `.execute(ctx.db);
-  const row = await sql<{ version: number }>`select version from product where id = ${productId}`.execute(ctx.db);
+  const row = await sql<{
+    version: number;
+  }>`select version from product where id = ${productId}`.execute(ctx.db);
   return { productId, version: row.rows[0]!.version };
 }
 
@@ -57,7 +61,9 @@ describe("admin product content edit", () => {
     const { productId, version } = await seedProduct();
 
     expect(await update(productId, version, "warranty", "Bảo hành 12 tháng")).toBe(true);
-    expect(await update(productId, version + 1, "whatCustomerReceives", "Email và mật khẩu")).toBe(true);
+    expect(await update(productId, version + 1, "whatCustomerReceives", "Email và mật khẩu")).toBe(
+      true,
+    );
 
     const row = await sql<{ warranty_vi: string | null; what_customer_receives_vi: string | null }>`
       select warranty_vi, what_customer_receives_vi from product where id = ${productId}
