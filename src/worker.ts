@@ -3385,9 +3385,18 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
+        // The field buttons must not carry the variant id: Telegram caps callback data at 64 bytes,
+        // and `admin:products:variant-field:<id>:<key>` overflowed for three of the five fields, which
+        // the ingress drops silently. The id rides in this state instead, exactly as the product
+        // content edit does it.
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "ADMIN_VARIANT_UPDATE",
+          payload: { productId: row.product_id, variantId: row.id },
+          ttlMinutes: 30,
+        });
         return presentAdminVariantDraft({
           productId: row.product_id,
-          variantId: row.id,
           sku: row.sku,
           name: row.name,
           priceVnd: BigInt(row.price_vnd),
@@ -3405,20 +3414,34 @@ async function bootstrap(): Promise<void> {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const field = ADMIN_VARIANT_FIELDS.find((entry) => entry.key === input.fieldKey);
-        const row = (
-          await sql<{
-            id: string;
-            product_id: string;
-            name: string;
-            price_vnd: string;
-            duration_code: string;
-            warranty_days: number;
-            low_stock_threshold: number | null;
-            version: number;
-          }>`select id, product_id, name_vi as name, price_vnd::text as price_vnd, duration_code, warranty_days, low_stock_threshold, version from product_variant where id=${input.variantId} limit 1`.execute(
-            dbHandle.db,
-          )
-        ).rows[0];
+        const pending = await sql<{ payload_redacted: Record<string, unknown> }>`
+          select payload_redacted from admin_callback_state
+           where admin_telegram_user_id = ${input.telegramUserId}
+             and kind = 'ADMIN_VARIANT_UPDATE'
+             and not (payload_redacted ? 'field')
+             and expires_at > now()
+           order by created_at desc
+           limit 1
+        `.execute(dbHandle.db);
+        const pendingPayload = pending.rows[0]?.payload_redacted;
+        const variantId =
+          typeof pendingPayload?.variantId === "string" ? pendingPayload.variantId : null;
+        const row = variantId
+          ? (
+              await sql<{
+                id: string;
+                product_id: string;
+                name: string;
+                price_vnd: string;
+                duration_code: string;
+                warranty_days: number;
+                low_stock_threshold: number | null;
+                version: number;
+              }>`select id, product_id, name_vi as name, price_vnd::text as price_vnd, duration_code, warranty_days, low_stock_threshold, version from product_variant where id=${variantId} limit 1`.execute(
+                dbHandle.db,
+              )
+            ).rows[0]
+          : undefined;
         if (!field || !row)
           return {
             text: "Biến thể không còn hợp lệ.",

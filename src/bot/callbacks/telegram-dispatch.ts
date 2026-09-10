@@ -290,7 +290,6 @@ export interface TelegramDomainDispatcherDeps {
     }): Promise<PresentedMessage>;
     variantEditField?(input: {
       telegramUserId: string;
-      variantId: string;
       fieldKey: string;
       chatType: string;
       correlationId: string;
@@ -1739,14 +1738,15 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Sửa biến thể không khả dụng.");
-        } else if (route.startsWith("products:variant-field:")) {
-          const rest = route.slice("products:variant-field:".length);
-          const separator = rest.lastIndexOf(":");
+        } else if (route.startsWith("products:vf:")) {
+          // Only the field key travels here. Telegram caps callback data at 64 bytes, and
+          // `admin:products:variant-field:<26-char id>:<key>` overflowed for three of the five fields
+          // (durationCode, warrantyDays, lowStockThreshold) — the ingress drops those silently, so the
+          // buttons would simply have done nothing. The variant comes from the menu's pending state.
           message = admin.variantEditField
             ? await admin.variantEditField({
                 telegramUserId: envelope.actorUserId,
-                variantId: rest.slice(0, separator),
-                fieldKey: rest.slice(separator + 1),
+                fieldKey: route.slice("products:vf:".length),
                 chatType: envelope.chatType,
                 correlationId,
               })

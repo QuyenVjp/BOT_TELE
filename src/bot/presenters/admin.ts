@@ -1829,7 +1829,6 @@ const formatVnd = (value: bigint): string => `${value.toLocaleString("vi-VN")} �
  */
 export function presentAdminVariantDraft(input: {
   productId: string;
-  variantId: string;
   sku: string;
   name: string;
   priceVnd: bigint;
@@ -1858,7 +1857,7 @@ export function presentAdminVariantDraft(input: {
       ...ADMIN_VARIANT_FIELDS.map((field) => [
         {
           text: `✏️ ${field.label}`,
-          callbackData: `admin:products:variant-field:${input.variantId}:${field.key}`,
+          callbackData: `admin:products:vf:${field.key}`,
         },
       ]),
       [{ text: "⬅️ Sản phẩm", callbackData: `admin:products:detail:${input.productId}` }],

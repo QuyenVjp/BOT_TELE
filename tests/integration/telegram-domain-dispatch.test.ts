@@ -885,20 +885,19 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       correlationId: "telegram:variant-edit",
     });
 
-    // Goal §78/§172: the field picker. The variant id is a hyphenated UUID and the field key carries
-    // no separator of its own, so the split has to take the LAST colon; splitting on the first would
-    // hand the id a trailing ":priceVnd" and the field key would never arrive.
+    // Goal §78/§172. The route carries the field key alone: Telegram caps callback data at 64 bytes,
+    // and the first cut of this (`variant-field:<id>:<key>`) overflowed for three of the five fields,
+    // which the ingress drops without a word. A route with no id in it cannot grow past the cap.
     await dispatcher.handle({
       actorUserId: USER,
       chatId: USER,
       chatType: "private",
       messageId: "variant-field",
       action: "ADMIN",
-      callbackData: "admin:products:variant-field:11111111-2222-3333-4444-555555555555:priceVnd",
+      callbackData: "admin:products:vf:priceVnd",
     });
     expect(adminVariantEditField).toHaveBeenCalledWith({
       telegramUserId: USER,
-      variantId: "11111111-2222-3333-4444-555555555555",
       fieldKey: "priceVnd",
       chatType: "private",
       correlationId: "telegram:variant-field",
