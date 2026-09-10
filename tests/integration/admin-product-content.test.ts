@@ -99,7 +99,7 @@ describe("admin product content edit", () => {
     await expect(update(productId, version, "name", "   ")).rejects.toThrow(/INVALID_NAME/);
   });
 
-  it("covers exactly the nine commercial content fields", () => {
+  it("covers exactly the commercial content fields, search tags included", () => {
     expect(Object.keys(ADMIN_PRODUCT_CONTENT_FIELDS)).toEqual([
       "name",
       "shortDescription",
@@ -110,6 +110,8 @@ describe("admin product content edit", () => {
       "deliveryEta",
       "terms",
       "support",
+      // Goal §27/§28: the searchable tags the owner sets here are the terms search reads.
+      "tags",
     ]);
   });
 });
