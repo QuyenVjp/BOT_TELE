@@ -5319,6 +5319,9 @@ async function bootstrap(): Promise<void> {
                   fulfillmentType: draft.fulfillmentType,
                   inventoryFields: draft.inventoryFields,
                   ...(draft.description === undefined ? {} : { description: draft.description }),
+                  ...(draft.shortDescriptionVi === undefined
+                    ? {}
+                    : { shortDescriptionVi: draft.shortDescriptionVi }),
                   ...(draft.descriptionVi === undefined
                     ? {}
                     : { descriptionVi: draft.descriptionVi }),

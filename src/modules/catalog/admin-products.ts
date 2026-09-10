@@ -17,6 +17,8 @@ export interface AdminProductInput {
   slug: string;
   sku: string;
   description?: string | undefined;
+  /** Short one-line description shown in listings. Distinct from the full description. */
+  shortDescriptionVi?: string | undefined;
   descriptionVi?: string | undefined;
   whatCustomerReceivesVi?: string | undefined;
   usageInstructionsVi?: string | undefined;
@@ -313,7 +315,7 @@ export async function createAdminProduct(input: AdminProductInput): Promise<Admi
     const variantId = newId();
     const product = await sql<{
       id: string;
-    }>`insert into product (id, category_id, name_vi, slug, short_description_vi, description_vi, what_customer_receives_vi, usage_instructions_vi, delivery_eta_vi, warranty_vi, support_vi, terms_vi, tags, is_test, is_active, is_archived, is_featured, featured_rank) values (${productId}, ${input.categoryId}, ${input.name.trim()}, ${input.slug}, ${input.description ?? null}, ${input.descriptionVi ?? null}, ${input.whatCustomerReceivesVi ?? null}, ${input.usageInstructionsVi ?? null}, ${input.deliveryEtaVi ?? null}, ${input.warrantyVi ?? null}, ${input.supportVi ?? null}, ${input.termsVi ?? null}, ${input.tags ?? null}, ${input.isTest ?? false}, ${input.active ?? true}, ${input.isArchived ?? false}, ${input.isFeatured ?? false}, ${input.featuredRank ?? 0}) returning id`.execute(
+    }>`insert into product (id, category_id, name_vi, slug, short_description_vi, description_vi, what_customer_receives_vi, usage_instructions_vi, delivery_eta_vi, warranty_vi, support_vi, terms_vi, tags, is_test, is_active, is_archived, is_featured, featured_rank) values (${productId}, ${input.categoryId}, ${input.name.trim()}, ${input.slug}, ${input.shortDescriptionVi ?? input.description ?? null}, ${input.descriptionVi ?? null}, ${input.whatCustomerReceivesVi ?? null}, ${input.usageInstructionsVi ?? null}, ${input.deliveryEtaVi ?? null}, ${input.warrantyVi ?? null}, ${input.supportVi ?? null}, ${input.termsVi ?? null}, ${input.tags ?? null}, ${input.isTest ?? false}, ${input.active ?? true}, ${input.isArchived ?? false}, ${input.isFeatured ?? false}, ${input.featuredRank ?? 0}) returning id`.execute(
       trx,
     );
     if (!product.rows[0]) throw new Error("CATEGORY_NOT_FOUND");
