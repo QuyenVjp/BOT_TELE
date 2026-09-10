@@ -414,16 +414,21 @@ export async function presentAdminCustomers(
   };
 }
 
+/**
+ * The CRM search prompt's lifetime. The admission row and the gating state must share it: if the row
+ * outlives the state, the ingress still admits the query while the gate finds nothing, and the text
+ * falls through to the broadcast or import handlers — with a live draft that turns the owner's search
+ * query into a broadcast body. Short on purpose: it means "type your query now", and it keeps the
+ * prompt from winning the text chain long after the owner has moved on.
+ */
+const CUSTOMER_SEARCH_PROMPT_TTL_MINUTES = 3;
+
 export async function presentAdminCustomerSearchPrompt(db: Db, adminTelegramUserId: string) {
   await createAdminCallbackState(db, {
     adminTelegramUserId,
     kind: "CUSTOMER_SEARCH_PROMPT",
     payload: {},
-    // Deliberately short. The admission row the ingress needs lives ten minutes, and while this state
-    // is live it wins the dispatcher's text chain over the broadcast, import and quantity prompts — so
-    // a long TTL would misroute the first line meant for one of those. This matches "the owner types a
-    // query right now".
-    ttlMinutes: 3,
+    ttlMinutes: CUSTOMER_SEARCH_PROMPT_TTL_MINUTES,
   });
   // The ingress admits a typed query only while a `customer_search_prompt` row is live, and until now
   // this prompt wrote only the callback state — so a query typed here was dropped before dispatch and
@@ -431,7 +436,8 @@ export async function presentAdminCustomerSearchPrompt(db: Db, adminTelegramUser
   // makes admission line up with the consumer in handleAdminCustomerFreeText.
   await sql`
     insert into customer_search_prompt (chat_id, expires_at)
-    values (${adminTelegramUserId}, now() + interval '10 minutes')
+    values (${adminTelegramUserId},
+            now() + (${CUSTOMER_SEARCH_PROMPT_TTL_MINUTES} * interval '1 minute'))
     on conflict (chat_id) do update set expires_at = excluded.expires_at, created_at = now()
   `.execute(db);
 
