@@ -665,6 +665,34 @@ async function queueCustomerCriticalNotification(
   return true;
 }
 
+/** Queue a critical notice to the owner's own chat. Same shape as the low-stock alert. */
+async function queueRootCriticalNotification(
+  trx: Executor,
+  notice: { campaignId: string; content: string },
+  rootTelegramUserId: number | undefined,
+): Promise<boolean> {
+  if (rootTelegramUserId === undefined) return false;
+  const root = await sql<{ customer_id: string; chat_id: string }>`
+    select customer_id, channel_user_id as chat_id
+    from channel_identity
+    where channel = 'TELEGRAM' and channel_user_id = ${String(rootTelegramUserId)}
+    limit 1
+  `.execute(trx);
+  const target = root.rows[0];
+  if (!target) return false;
+  await sql`
+    insert into notification_campaign(id, class, content, status, created_by, idempotency_key)
+    values (${notice.campaignId}, 'CRITICAL_SERVICE', ${notice.content}, 'QUEUED', 'system', ${notice.campaignId})
+    on conflict (idempotency_key) do nothing
+  `.execute(trx);
+  await sql`
+    insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+    values (${newId()}, ${notice.campaignId}, ${target.customer_id}, ${target.chat_id})
+    on conflict (campaign_id, customer_id) do nothing
+  `.execute(trx);
+  return true;
+}
+
 async function queueRootLowStockAlert(
   trx: Executor,
   event: OutboxEvent,
@@ -758,6 +786,120 @@ function shopCancelNotification(
   };
 }
 
+/**
+ * Warranty claim notices (goal: warranty vertical).
+ *
+ * Admin alert on submission so a claim is never left waiting silently, and customer notices on
+ * every resolution. The copy never exposes a credential, never promises money before it has moved,
+ * and never claims a refund was paid before the admin confirms the transfer.
+ */
+function warrantyAdminAlert(event: OutboxEvent): { campaignId: string; content: string } | null {
+  if (event.eventType !== "WarrantyClaimOpened") return null;
+  const p = event.payloadRedacted;
+  if (typeof p.claimNumber !== "string" || typeof p.customerId !== "string") return null;
+  const amount = typeof p.calculatedRefundVnd === "string" ? BigInt(p.calculatedRefundVnd) : 0n;
+  return {
+    campaignId: `warranty-opened:${event.aggregateId}`,
+    content: [
+      "🚨 YÊU CẦU BẢO HÀNH MỚI",
+      "",
+      `Mã: ${p.claimNumber}`,
+      `Khách: ${String(p.customerId).slice(-4).padStart(8, "•")}`,
+      typeof p.orderNumber === "string" ? `Đơn: ${p.orderNumber}` : null,
+      `Lỗi: ${String(p.issueType ?? "")}`,
+      `Đã dùng: ${String(p.usedDays ?? "?")} ngày`,
+      `Còn bảo hành: ${String(p.remainingDays ?? "?")} ngày`,
+      "",
+      `💰 Hoàn dự kiến nếu lỗi hợp lệ: ${amount.toLocaleString("vi-VN")} ₫`,
+      "Admin xác minh tài khoản đã giao trước khi quyết định.",
+    ]
+      .filter((line): line is string => line !== null)
+      .join("\n"),
+  };
+}
+
+function warrantyCustomerNotice(
+  event: OutboxEvent,
+): { campaignId: string; customerId: string; content: string } | null {
+  const p = event.payloadRedacted;
+  const customerId = typeof p.customerId === "string" ? p.customerId : null;
+  if (!customerId) return null;
+  const amount =
+    typeof p.amountVnd === "string" && /^[0-9]{1,19}$/.test(p.amountVnd)
+      ? BigInt(p.amountVnd)
+      : null;
+  switch (event.eventType) {
+    case "WarrantyRefundDue":
+      return {
+        campaignId: `warranty-refund-due:${event.aggregateId}`,
+        customerId,
+        content: [
+          "✅ YÊU CẦU BẢO HÀNH ĐÃ ĐƯỢC DUYỆT",
+          "",
+          amount ? `Tiền hoàn: ${amount.toLocaleString("vi-VN")} ₫` : null,
+          "Trạng thái: ⏳ Chờ shop chuyển tiền",
+          "",
+          "Admin sẽ thực hiện chuyển khoản sau khi xác minh thông tin nhận tiền.",
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      };
+    case "WarrantyRefundPaid":
+      return {
+        campaignId: `warranty-refund-paid:${event.aggregateId}`,
+        customerId,
+        content: [
+          "💸 HOÀN TIỀN ĐÃ ĐƯỢC XỬ LÝ",
+          "",
+          amount ? `Số tiền: ${amount.toLocaleString("vi-VN")} ₫` : null,
+          "Trạng thái: ✅ Shop đã xác nhận chuyển khoản",
+          "",
+          "Nếu sau thời gian ngân hàng xử lý bạn chưa nhận được tiền, hãy liên hệ Admin.",
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      };
+    case "WarrantyClaimRejected":
+      return {
+        campaignId: `warranty-rejected:${event.aggregateId}`,
+        customerId,
+        content: [
+          "❌ Yêu cầu chưa đủ điều kiện bảo hành",
+          "",
+          typeof p.reason === "string" && p.reason ? `Lý do: ${p.reason}` : null,
+          "Nếu bạn cần trao đổi thêm, hãy liên hệ Admin.",
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      };
+    case "WarrantyClaimNeedsInfo":
+      return {
+        campaignId: `warranty-needs-info:${event.aggregateId}`,
+        customerId,
+        content: [
+          "🔎 Shop cần thêm thông tin cho yêu cầu bảo hành",
+          "",
+          typeof p.note === "string" && p.note ? p.note : null,
+          "Vui lòng trả lời trong chat này để shop tiếp tục kiểm tra.",
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      };
+    case "WarrantyReplacementApproved":
+      return {
+        campaignId: `warranty-replacement:${event.aggregateId}`,
+        customerId,
+        content: [
+          "🔄 Yêu cầu đổi tài khoản đã được duyệt",
+          "",
+          "Shop đã gửi thông tin nhận hàng mới cho đơn của bạn.",
+        ].join("\n"),
+      };
+    default:
+      return null;
+  }
+}
+
 export async function handleNotificationOutboxEvent(
   db: Db,
   event: OutboxEvent,
@@ -775,10 +917,14 @@ export async function handleNotificationOutboxEvent(
     event.eventType === "WalletRefunded";
   const wallet = walletNotification(event);
   const shopCancel = shopCancelNotification(event);
+  const warrantyAdmin = warrantyAdminAlert(event);
+  const warrantyCustomer = warrantyCustomerNotice(event);
   if (walletEvent && !wallet)
     return { kind: "TERMINAL_REVIEW", errorCode: "WALLET_NOTIFICATION_PAYLOAD_INVALID" };
-  if (!stock && !lowStock && !wallet && !shopCancel) return { kind: "PUBLISHED" };
+  if (!stock && !lowStock && !wallet && !shopCancel && !warrantyAdmin && !warrantyCustomer)
+    return { kind: "PUBLISHED" };
   let missingWalletTarget = false;
+  let missingWarrantyTarget = false;
   let missingLowStockTarget = false;
   let missingShopCancelTarget = false;
   await withTransaction(db, async (trx) => {
@@ -811,7 +957,19 @@ export async function handleNotificationOutboxEvent(
     if (shopCancel && !(await queueCustomerCriticalNotification(trx, shopCancel))) {
       missingShopCancelTarget = true;
     }
+    // The admin alert goes to the owner's own chat, the customer notices to the customer.
+    if (
+      warrantyAdmin &&
+      !(await queueRootCriticalNotification(trx, warrantyAdmin, options.rootTelegramUserId))
+    ) {
+      missingWarrantyTarget = true;
+    }
+    if (warrantyCustomer && !(await queueCustomerCriticalNotification(trx, warrantyCustomer))) {
+      missingWarrantyTarget = true;
+    }
   });
+  if (missingWarrantyTarget)
+    return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
   if (missingWalletTarget)
     return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
   if (missingLowStockTarget)

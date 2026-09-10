@@ -53,6 +53,11 @@ describe("warranty claims", () => {
   async function seed(options?: {
     warrantyDays?: number;
     withReplacementStock?: number;
+    warrantyEnabled?: boolean;
+    prorationEnabled?: boolean;
+    policyVersion?: number;
+    replacementAllowed?: boolean;
+    refundAllowed?: boolean;
   }): Promise<Fixture> {
     const warrantyDays = options?.warrantyDays ?? 30;
     const customerId = newId();

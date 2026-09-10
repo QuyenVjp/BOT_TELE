@@ -1176,4 +1176,86 @@ describe("notification service", () => {
 
     expect(alerts.rows[0]?.count).toBe("1");
   });
+
+  // Warranty notices: the owner is told the moment a claim arrives, and the customer is told at each
+  // resolution — without a credential in either message and without claiming money that has not
+  // moved.
+  it("queues the admin alert for a new claim and the customer notices at each resolution", async () => {
+    const customerId = await seedCustomer("777001");
+    const claimId = newId();
+    // the admin alert resolves the owner through channel_identity
+    const rootChatId = "424242";
+    await seedCustomer(rootChatId);
+    const rootTelegramUserId = Number(rootChatId);
+
+    const opened = await handleNotificationOutboxEvent(
+      ctx.db,
+      {
+        id: newId(),
+        aggregateType: "WarrantyClaim",
+        aggregateId: claimId,
+        aggregateVersion: 1,
+        eventType: "WarrantyClaimOpened",
+        payloadRedacted: {
+          claimId,
+          claimNumber: "BH-ABC123",
+          orderNumber: "ORD-TEST-1",
+          customerId,
+          issueType: "LOST_BENEFITS",
+          usedDays: 18,
+          remainingDays: 12,
+          calculatedRefundVnd: "40000",
+        },
+        attemptCount: 0,
+        claimedBy: "test",
+        generation: 1,
+      },
+      { rootTelegramUserId },
+    );
+    expect(opened).toMatchObject({ kind: "PUBLISHED" });
+
+    const adminCampaign = await sql<{ content: string; class: string }>`
+      select content, class from notification_campaign where id = ${`warranty-opened:${claimId}`}
+    `.execute(ctx.db);
+    expect(adminCampaign.rows[0]).toMatchObject({ class: "CRITICAL_SERVICE" });
+    expect(adminCampaign.rows[0]!.content).toContain("YÊU CẦU BẢO HÀNH MỚI");
+    expect(adminCampaign.rows[0]!.content).toContain("40.000");
+    expect(adminCampaign.rows[0]!.content).toContain("Còn bảo hành: 12 ngày");
+
+    const due = await handleNotificationOutboxEvent(ctx.db, {
+      id: newId(),
+      aggregateType: "WarrantyClaim",
+      aggregateId: claimId,
+      aggregateVersion: 1,
+      eventType: "WarrantyRefundDue",
+      payloadRedacted: { claimId, customerId, amountVnd: "40000" },
+      attemptCount: 0,
+      claimedBy: "test",
+      generation: 1,
+    });
+    expect(due).toMatchObject({ kind: "PUBLISHED" });
+    const dueCampaign = await sql<{ content: string }>`
+      select content from notification_campaign where id = ${`warranty-refund-due:${claimId}`}
+    `.execute(ctx.db);
+    expect(dueCampaign.rows[0]!.content).toContain("Chờ shop chuyển tiền");
+    // it must not claim the money already moved
+    expect(dueCampaign.rows[0]!.content).not.toContain("Đã hoàn tiền");
+
+    const paid = await handleNotificationOutboxEvent(ctx.db, {
+      id: newId(),
+      aggregateType: "WarrantyClaim",
+      aggregateId: claimId,
+      aggregateVersion: 1,
+      eventType: "WarrantyRefundPaid",
+      payloadRedacted: { claimId, customerId, amountVnd: "40000" },
+      attemptCount: 0,
+      claimedBy: "test",
+      generation: 1,
+    });
+    expect(paid).toMatchObject({ kind: "PUBLISHED" });
+    const paidCampaign = await sql<{ content: string }>`
+      select content from notification_campaign where id = ${`warranty-refund-paid:${claimId}`}
+    `.execute(ctx.db);
+    expect(paidCampaign.rows[0]!.content).toContain("Shop đã xác nhận chuyển khoản");
+  });
 });
