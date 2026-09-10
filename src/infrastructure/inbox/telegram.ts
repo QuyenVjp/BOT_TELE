@@ -5,6 +5,7 @@ import type {
   TelegramRateLimitAction,
 } from "../../modules/risk/service.js";
 import type { Db } from "../db/transaction.js";
+import { describeHandlerError } from "./error-detail.js";
 
 export type TelegramChatType = "private" | "group" | "supergroup";
 export type TelegramInboxAction = TelegramRateLimitAction;
@@ -117,6 +118,11 @@ export interface TelegramInbox {
     claim: TelegramInboxClaim,
     options: {
       errorCode: string;
+      /**
+       * What actually went wrong, bounded and redacted. The code alone cannot tell a bug from a
+       * constraint violation, which is why a real diagnosis had to be read out of a log line.
+       */
+      errorDetail?: string | null;
       maxAttempts: number;
       retryAfterSeconds: number;
       /**
@@ -311,6 +317,7 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
         update webhook_inbox
         set processing_status = 'PROCESSED', processed_at = now(), claimed_by = null,
             claim_expires_at = null, next_attempt_at = null, last_error_code = null,
+            last_error_detail = null,
             envelope = ${redactEnvelopeSql(sql`envelope`)}
         where id = ${claim.id}
           and processing_status = 'PROCESSING'
@@ -343,6 +350,7 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
               next_attempt_at = now() + make_interval(secs => ${retrySeconds}),
               dead_lettered_at = null,
               last_error_code = ${options.errorCode},
+              last_error_detail = ${options.errorDetail ?? null},
               attempt_count = greatest(attempt_count - 1, 0),
               claimed_by = null,
               claim_expires_at = null,
@@ -362,6 +370,7 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
             next_attempt_at = ${terminal ? null : sql`now() + make_interval(secs => ${options.retryAfterSeconds})`},
             dead_lettered_at = ${terminal ? sql`now()` : null},
             last_error_code = ${options.errorCode},
+            last_error_detail = ${options.errorDetail ?? null},
             claimed_by = null,
             claim_expires_at = null,
             envelope = ${terminal ? redactEnvelopeSql(sql`envelope`) : sql`envelope`}
@@ -600,10 +609,11 @@ export async function processTelegramInboxBatch(input: {
       await input.handler(claim.envelope);
       if (await input.inbox.markProcessed(claim)) result.processed += 1;
       else result.stale += 1;
-    } catch {
+    } catch (error) {
       const delay = boundedBackoffSeconds(claim.attemptCount);
       const state = await input.inbox.markFailed(claim, {
         errorCode: "HANDLER_FAILED",
+        errorDetail: describeHandlerError(error),
         maxAttempts: input.maxAttempts ?? 10,
         retryAfterSeconds: delay,
       });

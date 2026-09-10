@@ -6,6 +6,7 @@ import {
   type VerifiedSePayEvidence,
 } from "../../modules/payments/sepay-ingress.js";
 import type { Db } from "../db/transaction.js";
+import { describeHandlerError } from "./error-detail.js";
 
 export interface SePayInboxEnvelope {
   evidence: {
@@ -71,7 +72,13 @@ export interface SePayInbox {
   markProcessed(claim: SePayInboxClaim): Promise<boolean>;
   markFailed(
     claim: SePayInboxClaim,
-    options: { errorCode: string; maxAttempts: number; retryAfterSeconds: number },
+    options: {
+      errorCode: string;
+      /** What actually went wrong, bounded and redacted — see inbox/error-detail.ts. */
+      errorDetail?: string | null;
+      maxAttempts: number;
+      retryAfterSeconds: number;
+    },
   ): Promise<"RETRY" | "DEAD" | "STALE">;
 }
 
@@ -290,7 +297,8 @@ export function createPostgresSePayInbox(db: Db): SePayInbox {
     async markProcessed(claim) {
       const result = await sql`
         update webhook_inbox set processing_status = 'PROCESSED', processed_at = now(),
-          claimed_by = null, claim_expires_at = null, next_attempt_at = null, last_error_code = null
+          claimed_by = null, claim_expires_at = null, next_attempt_at = null,
+          last_error_code = null, last_error_detail = null
         where source = 'sepay' and id = ${claim.id} and processing_status = 'PROCESSING'
           and claimed_by = ${claim.owner} and claim_generation = ${claim.generation}
         returning id
@@ -307,6 +315,7 @@ export function createPostgresSePayInbox(db: Db): SePayInbox {
         update webhook_inbox set processing_status = ${terminal ? "DEAD" : "RETRY"},
           next_attempt_at = ${terminal ? null : sql`now() + make_interval(secs => ${options.retryAfterSeconds})`},
           dead_lettered_at = ${terminal ? sql`now()` : null}, last_error_code = ${options.errorCode},
+          last_error_detail = ${options.errorDetail ?? null},
           claimed_by = null, claim_expires_at = null
         where source = 'sepay' and id = ${claim.id} and processing_status = 'PROCESSING'
           and claimed_by = ${claim.owner} and claim_generation = ${claim.generation}
@@ -337,9 +346,10 @@ export async function processSePayInboxBatch(input: {
       if (!applied.ok) throw new Error("EVIDENCE_REJECTED");
       if (await input.inbox.markProcessed(claim)) result.processed += 1;
       else result.stale += 1;
-    } catch {
+    } catch (error) {
       const state = await input.inbox.markFailed(claim, {
         errorCode: "HANDLER_FAILED",
+        errorDetail: describeHandlerError(error),
         maxAttempts: input.maxAttempts ?? 8,
         retryAfterSeconds: Math.min(300, 2 ** Math.min(8, Math.max(0, claim.attemptCount - 1))),
       });
