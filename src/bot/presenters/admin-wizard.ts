@@ -75,6 +75,7 @@ export function presentWizardDescriptionStep(type: FulfillmentType | undefined):
     buttons: [
       [{ text: "✨ Dùng mẫu mô tả", callbackData: "admin:products:desc:template" }],
       [{ text: "✏️ Tự nhập", callbackData: "admin:products:desc:custom" }],
+      [{ text: "🧩 Nhập từng mục", callbackData: "admin:products:desc:fields" }],
       ...BACK_CANCEL,
     ],
   };
@@ -266,5 +267,82 @@ export function presentWizardAdvancedPrompt(): PresentedMessage {
   return {
     text: "⚙️ TRƯỜNG NÂNG CAO\n\nNhập danh sách tên trường, phân tách bởi dấu phẩy.\nVí dụ: Email, Mật khẩu, Ngày hết hạn\n\n(Khuyến nghị dùng nút bấm ở màn hình trước.)",
     buttons: BACK_CANCEL,
+  };
+}
+
+/**
+ * Goal §76 — the per-field content editor.
+ *
+ * The wizard's description step offers a preset template or one free-text message; neither can
+ * enter the individual fields the customer contract calls for, and the database stores them
+ * separately. This sub-flow fills each one on its own without adding a wizard step: the draft
+ * stays on `description` and the pending field rides the existing sub-flow state's payload.
+ */
+export const WIZARD_DESCRIPTION_FIELDS = [
+  { key: "shortDescriptionVi", label: "📝 Mô tả ngắn", prompt: "Nhập mô tả ngắn (một dòng)." },
+  { key: "descriptionVi", label: "📝 Mô tả đầy đủ", prompt: "Nhập mô tả đầy đủ." },
+  { key: "whatCustomerReceivesVi", label: "📦 Bạn nhận được", prompt: "Khách sẽ nhận được gì?" },
+  { key: "usageInstructionsVi", label: "📘 Hướng dẫn", prompt: "Hướng dẫn sử dụng." },
+  { key: "warrantyVi", label: "🛡 Bảo hành", prompt: "Chính sách bảo hành." },
+  { key: "deliveryEtaVi", label: "⏱ Thời gian giao", prompt: "Dự kiến giao hàng." },
+  { key: "termsVi", label: "📄 Điều khoản", prompt: "Điều khoản / lưu ý." },
+] as const;
+
+export type WizardDescriptionFieldKey = (typeof WIZARD_DESCRIPTION_FIELDS)[number]["key"];
+
+export function wizardDescriptionField(
+  key: string,
+): (typeof WIZARD_DESCRIPTION_FIELDS)[number] | undefined {
+  return WIZARD_DESCRIPTION_FIELDS.find((field) => field.key === key);
+}
+
+/** The field menu: one row per field, marked filled, with a way forward and back. */
+export function presentWizardDescriptionFields(draft?: ProductDraft): PresentedMessage {
+  const filled = (key: WizardDescriptionFieldKey): boolean => {
+    const value = draft?.[key];
+    return typeof value === "string" && value.trim().length > 0;
+  };
+  const remaining = WIZARD_DESCRIPTION_FIELDS.filter((field) => !filled(field.key)).length;
+  return {
+    text: [
+      "Bước 5/8 — 🧩 NỘI DUNG SẢN PHẨM",
+      "",
+      "Chọn từng mục để nhập riêng. Mục đã có nội dung được đánh dấu ✅.",
+      remaining === 0 ? "Đã đủ nội dung." : `Còn ${remaining} mục chưa nhập (không bắt buộc).`,
+    ].join("\n"),
+    buttons: [
+      ...WIZARD_DESCRIPTION_FIELDS.map((field) => [
+        {
+          text: `${filled(field.key) ? "✅" : "⬜"} ${field.label}`,
+          callbackData: `admin:products:df:edit:${field.key}`,
+        },
+      ]),
+      [{ text: "✅ Tiếp tục", callbackData: "admin:products:df:done" }],
+      ...BACK_CANCEL,
+    ],
+  };
+}
+
+/** Prompt for exactly one field. The label is echoed so the owner knows what is being asked. */
+export function presentWizardDescriptionFieldPrompt(
+  key: string,
+  current?: string | undefined,
+): PresentedMessage {
+  const field = wizardDescriptionField(key);
+  return {
+    text: [
+      `Bước 5/8 — ${field ? field.label : "NỘI DUNG"}`,
+      "",
+      field ? field.prompt : "Nhập nội dung.",
+      current && current.trim() ? `\n(Hiện tại: ${current.trim().slice(0, 200)})` : "",
+      "",
+      "Gửi một tin nhắn. Gõ - để xoá nội dung của mục này.",
+    ]
+      .filter((line) => line !== "")
+      .join("\n"),
+    buttons: [
+      [{ text: "⬅️ Danh sách mục", callbackData: "admin:products:desc:fields" }],
+      ...BACK_CANCEL,
+    ],
   };
 }

@@ -552,6 +552,23 @@ export interface TelegramDomainDispatcherDeps {
         chatType: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
+      /** Goal §76 per-field content editor. */
+      descriptionFields?(input: {
+        telegramUserId: string;
+        chatType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
+      descriptionFieldEdit?(input: {
+        telegramUserId: string;
+        chatType: string;
+        correlationId: string;
+        fieldKey: string;
+      }): Promise<PresentedMessage>;
+      descriptionFieldsDone?(input: {
+        telegramUserId: string;
+        chatType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
       descriptionCustom?(input: {
         telegramUserId: string;
         chatType: string;
@@ -1235,6 +1252,32 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Mô tả sản phẩm không khả dụng.");
+        } else if (route === "products:desc:fields") {
+          message = admin.workflow?.descriptionFields
+            ? await admin.workflow.descriptionFields({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Trình nhập nội dung không khả dụng.");
+        } else if (route.startsWith("products:df:edit:")) {
+          const fieldKey = route.slice("products:df:edit:".length);
+          message = admin.workflow?.descriptionFieldEdit
+            ? await admin.workflow.descriptionFieldEdit({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+                fieldKey,
+              })
+            : safeError("Trình nhập nội dung không khả dụng.");
+        } else if (route === "products:df:done") {
+          message = admin.workflow?.descriptionFieldsDone
+            ? await admin.workflow.descriptionFieldsDone({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Trình nhập nội dung không khả dụng.");
         } else if (route === "products:desc:custom") {
           message = admin.workflow?.descriptionCustom
             ? await admin.workflow.descriptionCustom({

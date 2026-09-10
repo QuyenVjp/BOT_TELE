@@ -873,6 +873,9 @@ async function bootstrap(): Promise<void> {
     presentWizardCategoryStep,
     presentFulfillmentTypeChoices,
     presentWizardDescriptionStep,
+    presentWizardDescriptionFields,
+    presentWizardDescriptionFieldPrompt,
+    wizardDescriptionField,
     presentWizardDescriptionCustomPrompt,
     presentWizardVariantStep,
     presentWizardDeliveryStep,
@@ -1075,6 +1078,13 @@ async function bootstrap(): Promise<void> {
     minVnd: config.WALLET_TOPUP_MIN_VND,
     maxVnd: config.WALLET_TOPUP_MAX_VND,
   };
+  /** Read the field key a per-field content prompt was opened for, if any. */
+  function readDescriptionFieldKey(payload: unknown): string | null {
+    if (!payload || typeof payload !== "object") return null;
+    const value = (payload as { field?: unknown }).field;
+    return typeof value === "string" && value.length > 0 ? value : null;
+  }
+
   function walletTopupPickerMessage(account: WalletAccount): PresentedMessage {
     const presets = WALLET_TOPUP_PRESET_AMOUNTS.filter(
       (amount) => amount >= walletTopupBounds.minVnd && amount <= walletTopupBounds.maxVnd,
@@ -4119,8 +4129,8 @@ async function bootstrap(): Promise<void> {
             return this.variantText?.(input) ?? null;
 
           // Wizard sub-flow text states (category create / custom field / advanced / custom description).
-          const subState = await sql<{ id: string; kind: string }>`
-            select id, kind from admin_callback_state
+          const subState = await sql<{ id: string; kind: string; payload: unknown }>`
+            select id, kind, payload from admin_callback_state
             where admin_telegram_user_id = ${input.telegramUserId}
               and kind in ('WIZARD_CATEGORY_CREATE','WIZARD_CUSTOM_FIELD','WIZARD_ADVANCED','WIZARD_DESC_CUSTOM')
               and expires_at > now()
@@ -4189,7 +4199,31 @@ async function bootstrap(): Promise<void> {
               await repo.save(next);
               return renderWizardStep(next);
             }
-            // WIZARD_DESC_CUSTOM
+            // WIZARD_DESC_CUSTOM — with a payload field it fills ONE content field and returns to
+            // the field menu; without one it is the original single free-text description.
+            const fieldKey = readDescriptionFieldKey(pendingSub.payload);
+            if (fieldKey) {
+              const field = wizardDescriptionField(fieldKey);
+              if (!field)
+                return {
+                  text: "Mục nội dung không hợp lệ.",
+                  buttons: [[{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]],
+                };
+              // "-" clears the field: an owner who typed something wrong needs a way back to empty
+              // without inventing placeholder text.
+              const value = text === "-" ? undefined : text.slice(0, 2000);
+              await sql`delete from admin_callback_state where id = ${pendingSub.id}`.execute(
+                dbHandle.db,
+              );
+              const next = {
+                ...draft,
+                [field.key]: value,
+                step: "description" as const,
+                expiresAt: Date.now() + 15 * 60_000,
+              };
+              await repo.save(next);
+              return presentWizardDescriptionFields(next);
+            }
             const description = text.slice(0, 2000);
             if (!description)
               return {
@@ -4547,6 +4581,65 @@ async function bootstrap(): Promise<void> {
             payload: {},
           });
           return presentWizardDescriptionCustomPrompt();
+        },
+        async descriptionFields(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "description")
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước mô tả.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          return presentWizardDescriptionFields(current);
+        },
+        async descriptionFieldEdit(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "description" || !wizardDescriptionField(input.fieldKey))
+            return {
+              text: "Mục nội dung không còn khả dụng.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "WIZARD_DESC_CUSTOM",
+            payload: { field: input.fieldKey },
+          });
+          return presentWizardDescriptionFieldPrompt(
+            input.fieldKey,
+            typeof current[wizardDescriptionField(input.fieldKey)!.key] === "string"
+              ? (current[wizardDescriptionField(input.fieldKey)!.key] as string)
+              : undefined,
+          );
+        },
+        async descriptionFieldsDone(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const current = await productDraftWorkflow.get(input.telegramUserId);
+          if (!current || current.step !== "description")
+            return {
+              text: "Phiên tạo sản phẩm không còn ở bước mô tả.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          const repo = createProductDraftRepository(dbHandle.db);
+          const next = {
+            ...current,
+            step: "variant" as const,
+            expiresAt: Date.now() + 15 * 60_000,
+          };
+          await repo.save(next);
+          return renderWizardStep(next);
         },
         async deliveryToggle(input) {
           if (
