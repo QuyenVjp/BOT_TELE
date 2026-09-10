@@ -51,6 +51,7 @@ import {
   presentWarrantyIssueTypes,
   presentWarrantyNotCovered,
   presentWarrantyPolicy,
+  presentWarrantyReportPreview,
 } from "./bot/presenters/warranty.js";
 import {
   listClaimTimeline,
@@ -58,7 +59,11 @@ import {
   ISSUE_TYPE_LABELS,
   type WarrantyIssueType,
 } from "./modules/warranty/claims.js";
-import { isWithinWarranty, warrantyEndOf } from "./modules/warranty/proration.js";
+import {
+  computeProratedRefund,
+  isWithinWarranty,
+  warrantyEndOf,
+} from "./modules/warranty/proration.js";
 import type { WalletAccount } from "./modules/wallet/ledger.js";
 import type { Vault } from "./infrastructure/vault/port.js";
 import {
@@ -731,6 +736,7 @@ async function warrantyOrderContext(
       orderNumber: string;
       assetId: string | null;
       warrantyEnd: string;
+      productName: string;
     }
 > {
   const rows = await sql<{
@@ -740,10 +746,12 @@ async function warrantyOrderContext(
     warranty_days: number;
     warranty_enabled: boolean;
     asset_id: string | null;
+    product_name: string;
   }>`
     select o.id, o.order_number, o.completed_at,
            coalesce(o.warranty_days, 0) as warranty_days,
            coalesce(v.warranty_enabled, false) as warranty_enabled,
+           o.product_name_vi as product_name,
            (select a.id from digital_asset a
              where a.delivered_order_id = o.id
              order by a.updated_at asc, a.id asc limit 1) as asset_id
@@ -769,6 +777,43 @@ async function warrantyOrderContext(
     orderNumber: row.order_number,
     assetId: row.asset_id,
     warrantyEnd,
+    productName: row.product_name,
+  };
+}
+
+/** The report-time estimate for an order, using exactly the rule the claim will store. */
+async function warrantyEstimate(
+  db: Db,
+  orderId: string,
+): Promise<{ remainingDays: number; refundVnd: bigint } | null> {
+  const rows = await sql<{
+    price_vnd: string;
+    warranty_days: number;
+    completed_at: Date | string | null;
+    warranty_proration_enabled: boolean;
+    warranty_enabled: boolean;
+  }>`
+    select o.price_vnd::text as price_vnd, coalesce(o.warranty_days, 0) as warranty_days,
+           o.completed_at, v.warranty_proration_enabled, v.warranty_enabled
+    from "order" o
+    join product_variant v on v.id = o.variant_id
+    where o.id = ${orderId}
+    limit 1
+  `.execute(db);
+  const row = rows.rows[0];
+  if (!row || !row.warranty_enabled || !row.completed_at || row.warranty_days <= 0) return null;
+  const start =
+    row.completed_at instanceof Date ? row.completed_at : new Date(String(row.completed_at));
+  const paid = BigInt(row.price_vnd);
+  const snapshot = computeProratedRefund({
+    warrantyDays: row.warranty_days,
+    warrantyStart: start,
+    paidAmountVnd: paid,
+    reportedAt: new Date(),
+  });
+  return {
+    remainingDays: snapshot.remainingDays,
+    refundVnd: row.warranty_proration_enabled ? snapshot.refundVnd : paid,
   };
 }
 
@@ -1188,6 +1233,30 @@ async function bootstrap(): Promise<void> {
           return presentWarrantyExpired({ warrantyEnd: context.warrantyEnd });
         if (context.kind === "not_covered") return presentWarrantyNotCovered();
         return presentWarrantyIssueTypes({ orderNumber: context.orderNumber });
+      },
+      /** Goal §41: confirm before submitting, with the estimate clearly conditional. */
+      async preview(input) {
+        const customerId = resolveCustomerId ? await resolveCustomerId(input.telegramUserId) : null;
+        if (!customerId) return safeWarrantyMessage("Không xác minh được khách hàng.");
+        if (!isWarrantyIssueType(input.issueType))
+          return safeWarrantyMessage("Tình trạng bạn chọn không hợp lệ.");
+        const context = await warrantyOrderContext(dbHandle.db, customerId, input.variantId);
+        if (context.kind === "none")
+          return safeWarrantyMessage("Bạn chưa có đơn đã giao cho sản phẩm này.");
+        if (context.kind === "expired")
+          return presentWarrantyExpired({ warrantyEnd: context.warrantyEnd });
+        if (context.kind === "not_covered") return presentWarrantyNotCovered();
+        const estimate = await warrantyEstimate(dbHandle.db, context.orderId);
+        if (!estimate) return safeWarrantyMessage("Chưa xem được thông tin bảo hành của đơn này.");
+        return presentWarrantyReportPreview({
+          productName: context.productName,
+          orderNumber: context.orderNumber,
+          issueType: input.issueType,
+          note: null,
+          warrantyEnd: context.warrantyEnd,
+          remainingDays: estimate.remainingDays,
+          estimatedRefundVnd: estimate.refundVnd,
+        });
       },
       async report(input) {
         const customerId = resolveCustomerId ? await resolveCustomerId(input.telegramUserId) : null;

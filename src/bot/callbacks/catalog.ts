@@ -90,6 +90,12 @@ export interface CatalogCallbacks {
       variantId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    preview(input: {
+      telegramUserId: string;
+      variantId: string;
+      issueType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     report(input: {
       telegramUserId: string;
       variantId: string;

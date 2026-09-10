@@ -126,6 +126,12 @@ export interface TelegramDomainDispatcherDeps {
         variantId: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
+      preview(input: {
+        telegramUserId: string;
+        variantId: string;
+        issueType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
       report(input: {
         telegramUserId: string;
         variantId: string;
@@ -1020,8 +1026,21 @@ export function createTelegramDomainDispatcher(
             })
           : safeError("Bảo hành không khả dụng.");
       } else if (envelope.callbackData?.startsWith("warranty:type:")) {
+        // Choosing a symptom previews the claim — goal §41 — it does not submit it.
         const [issueType, variantId] = envelope.callbackData
           .slice("warranty:type:".length)
+          .split(":");
+        message = deps.catalog.warranty
+          ? await deps.catalog.warranty.preview({
+              telegramUserId: envelope.actorUserId,
+              variantId: variantId ?? "",
+              issueType: issueType ?? "",
+              correlationId,
+            })
+          : safeError("Bảo hành không khả dụng.");
+      } else if (envelope.callbackData?.startsWith("warranty:submit:")) {
+        const [variantId, issueType] = envelope.callbackData
+          .slice("warranty:submit:".length)
           .split(":");
         message = deps.catalog.warranty
           ? await deps.catalog.warranty.report({
