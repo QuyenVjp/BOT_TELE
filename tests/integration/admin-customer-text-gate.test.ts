@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
-import { handleAdminCustomerFreeText } from "../../src/worker.js";
+import { handleAdminCustomerFreeText, presentAdminCustomerSearchPrompt } from "../../src/worker.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
@@ -25,6 +25,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await sql`delete from admin_callback_state`.execute(ctx.db);
   await sql`delete from admin_customer_message_draft`.execute(ctx.db);
+  await sql`delete from customer_search_prompt`.execute(ctx.db);
 });
 
 const call = (text: string) =>
