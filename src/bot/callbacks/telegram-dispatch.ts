@@ -993,6 +993,12 @@ export interface TelegramDomainDispatcherDeps {
     ackMs: number | null;
     serverIssueAckMs?: number | null;
     telegramRttMs?: number | null;
+    /**
+     * Server work up to just before the reply is handed to Telegram. `renderMs` is measured after
+     * `await responder.send(...)`, so it also carries the ack and send round trips and cannot answer
+     * "is our handler slow" — which is exactly the question a latency target asks.
+     */
+    serverRenderMs?: number | null;
     renderMs: number;
     action: string;
   }) => void;
@@ -1063,6 +1069,9 @@ export function createTelegramDomainDispatcher(
           telegramUserId: envelope.actorUserId,
           resolveOrderId: deps.resolveOrderIdByNumber,
         });
+        // Marked before the reply leaves: `renderMs` is measured after `await responder.send(...)`,
+        // so it carries both Telegram round trips and cannot answer whether the handler is slow.
+        const serverRenderMark = Date.now();
         if (await isRenderCurrent(deps, envelope)) {
           await deps.responder.send({
             chatId: envelope.chatId,
@@ -1074,6 +1083,7 @@ export function createTelegramDomainDispatcher(
           ackMs,
           serverIssueAckMs,
           telegramRttMs,
+          serverRenderMs: serverRenderMark - startedAt,
           renderMs: Date.now() - startedAt,
           action: verified.ok ? verified.value.action : "STALE",
         });
@@ -2674,6 +2684,8 @@ export function createTelegramDomainDispatcher(
         telegramUserId: envelope.actorUserId,
         resolveOrderId: deps.resolveOrderIdByNumber,
       });
+      // Same reason as above: this mark, not `renderMs`, is what isolates server work.
+      const serverRenderMark = Date.now();
       if (await isRenderCurrent(deps, envelope)) {
         await deps.responder.send({
           chatId: envelope.chatId,
@@ -2689,6 +2701,7 @@ export function createTelegramDomainDispatcher(
           ackMs,
           serverIssueAckMs,
           telegramRttMs,
+          serverRenderMs: serverRenderMark - startedAt,
           renderMs: Date.now() - startedAt,
           action: envelope.callbackData?.split(":")[0] ?? "callback",
         });

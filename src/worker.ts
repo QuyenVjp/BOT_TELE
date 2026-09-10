@@ -2080,6 +2080,9 @@ async function bootstrap(): Promise<void> {
           ack_ms: event.ackMs,
           server_issue_ack_ms: event.serverIssueAckMs,
           telegram_rtt_ms: event.telegramRttMs,
+          // Isolates our own handler work: render_ms is taken after the reply is sent, so it also
+          // carries both Telegram round trips and cannot answer a latency target on its own.
+          server_render_ms: event.serverRenderMs,
           render_ms: event.renderMs,
           action: event.action,
         },
