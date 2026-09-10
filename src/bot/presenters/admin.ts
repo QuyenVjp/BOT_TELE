@@ -1261,7 +1261,7 @@ export function presentAdminInventoryItems(input: {
       ...input.items.map((item) => [
         {
           text: `${item.ref} · ${item.statusLabel}`,
-          callbackData: `admin:inventory:item:${input.variantId}:${item.ref}`,
+          callbackData: `admin:inventory:item:${item.ref}`,
         },
       ]),
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
@@ -1292,7 +1292,7 @@ export function presentAdminInventoryItemActions(input: {
       ...input.actions.map((entry) => [
         {
           text: entry.label,
-          callbackData: `admin:inventory:item-act:${input.variantId}:${input.ref}:${entry.action}`,
+          callbackData: `admin:inventory:item-act:${input.ref}:${entry.action}`,
         },
       ]),
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:items:${input.variantId}` }],
@@ -1330,13 +1330,13 @@ export function presentAdminInventoryItemConfirm(input: {
       [
         {
           text: "✅ Thực hiện",
-          callbackData: `admin:inventory:item-confirm:${input.variantId}:${input.ref}:${input.action}`,
+          callbackData: `admin:inventory:item-confirm:${input.ref}:${input.action}`,
         },
       ],
       [
         {
           text: ADMIN_COPY.back,
-          callbackData: `admin:inventory:item:${input.variantId}:${input.ref}`,
+          callbackData: `admin:inventory:item:${input.ref}`,
         },
       ],
       adminNav("admin:menu"),

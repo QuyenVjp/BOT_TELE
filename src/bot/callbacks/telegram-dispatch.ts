@@ -267,14 +267,12 @@ export interface TelegramDomainDispatcherDeps {
     }): Promise<PresentedMessage>;
     inventoryItemActions?(input: {
       telegramUserId: string;
-      variantId: string;
       ref: string;
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
     inventoryItemAction?(input: {
       telegramUserId: string;
-      variantId: string;
       ref: string;
       action: string;
       chatType: string;
@@ -282,7 +280,6 @@ export interface TelegramDomainDispatcherDeps {
     }): Promise<PresentedMessage>;
     inventoryItemConfirm?(input: {
       telegramUserId: string;
-      variantId: string;
       ref: string;
       action: string;
       reason: string;
@@ -1554,11 +1551,10 @@ export function createTelegramDomainDispatcher(
               })
             : safeError("Dữ liệu kho không khả dụng.");
         } else if (route.startsWith("inventory:item-act:")) {
-          const [, , variantId, ref, action] = route.split(":");
+          const [, , ref, action] = route.split(":");
           message = admin.inventoryItemAction
             ? await admin.inventoryItemAction({
                 telegramUserId: envelope.actorUserId,
-                variantId: variantId ?? "",
                 ref: ref ?? "",
                 action: action ?? "",
                 chatType: envelope.chatType,
@@ -1566,11 +1562,10 @@ export function createTelegramDomainDispatcher(
               })
             : safeError("Dữ liệu kho không khả dụng.");
         } else if (route.startsWith("inventory:item-confirm:")) {
-          const [, , variantId, ref, action] = route.split(":");
+          const [, , ref, action] = route.split(":");
           message = admin.inventoryItemConfirm
             ? await admin.inventoryItemConfirm({
                 telegramUserId: envelope.actorUserId,
-                variantId: variantId ?? "",
                 ref: ref ?? "",
                 action: action ?? "",
                 reason: "Owner inventory hygiene",
@@ -1579,12 +1574,11 @@ export function createTelegramDomainDispatcher(
               })
             : safeError("Dữ liệu kho không khả dụng.");
         } else if (route.startsWith("inventory:item:")) {
-          const [, , variantId, ref] = route.split(":");
+          const ref = route.slice("inventory:item:".length);
           message = admin.inventoryItemActions
             ? await admin.inventoryItemActions({
                 telegramUserId: envelope.actorUserId,
-                variantId: variantId ?? "",
-                ref: ref ?? "",
+                ref,
                 chatType: envelope.chatType,
                 correlationId,
               })

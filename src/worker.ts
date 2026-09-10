@@ -682,6 +682,25 @@ export async function restockVariantLabel(db: Db, variantId: string): Promise<st
   return row ? `${row.product_name} — ${row.variant_name}` : null;
 }
 
+/**
+ * Resolve a stock item and its variant from the display ref alone. The ref is derived from the
+ * asset id, which keeps every callback payload inside Telegram's 64-byte limit — carrying the
+ * variant id as well overflowed it and the send failed with BUTTON_DATA_INVALID.
+ */
+async function lookupInventoryItemByRef(
+  db: Db,
+  ref: string,
+): Promise<{ id: string; variant_id: string; variant_name: string } | null> {
+  const found = await sql<{ id: string; variant_id: string; variant_name: string }>`
+    select a.id, a.variant_id, v.name_vi as variant_name
+    from digital_asset a
+    join product_variant v on v.id = a.variant_id
+    where right(a.id, 8) = ${ref}
+    limit 1
+  `.execute(db);
+  return found.rows[0] ?? null;
+}
+
 export async function presentRestockList(db: Db, customerId: string) {
   const rows = (
     await sql<{ variant_id: string; product_name: string; variant_name: string }>`
@@ -3081,10 +3100,11 @@ async function bootstrap(): Promise<void> {
       async inventoryItemActions(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const item = await lookupInventoryItemByRef(dbHandle.db, input.ref);
         const gate = await adminCallbacks.handle({
           command: "order.inspect",
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
-          targetId: input.variantId,
+          targetId: item?.variant_id ?? input.ref,
           reason: "Admin inventory item access",
           correlationId: input.correlationId,
         });
@@ -3092,27 +3112,28 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const variant = await sql<{ name_vi: string }>`
-          select name_vi from product_variant where id = ${input.variantId} limit 1
-        `.execute(dbHandle.db);
-        const { listInventoryItems, ITEM_ACTION_LABELS } =
-          await import("./modules/digital-goods/inventory-item-ops.js");
-        const items = await listInventoryItems(dbHandle.db, { variantId: input.variantId });
-        const item = items.find((row) => row.ref === input.ref);
-        if (!variant.rows[0] || !item) {
+        if (!item) {
           return {
             text: "Mục kho không còn hợp lệ.",
-            buttons: [
-              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
-            ],
+            buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
+          };
+        }
+        const { listInventoryItems, ITEM_ACTION_LABELS } =
+          await import("./modules/digital-goods/inventory-item-ops.js");
+        const items = await listInventoryItems(dbHandle.db, { variantId: item.variant_id });
+        const summary = items.find((row) => row.ref === input.ref);
+        if (!summary) {
+          return {
+            text: "Mục kho không còn hợp lệ.",
+            buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
           };
         }
         return presentAdminInventoryItemActions({
-          variantId: input.variantId,
-          variantName: variant.rows[0].name_vi,
-          ref: item.ref,
-          statusLabel: item.statusLabel,
-          actions: item.actions.map((action) => ({
+          variantId: item.variant_id,
+          variantName: item.variant_name,
+          ref: summary.ref,
+          statusLabel: summary.statusLabel,
+          actions: summary.actions.map((action) => ({
             action,
             label: ITEM_ACTION_LABELS[action],
           })),
@@ -3121,10 +3142,11 @@ async function bootstrap(): Promise<void> {
       async inventoryItemAction(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const item = await lookupInventoryItemByRef(dbHandle.db, input.ref);
         const gate = await adminCallbacks.handle({
           command: "order.inspect",
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
-          targetId: input.variantId,
+          targetId: item?.variant_id ?? input.ref,
           reason: "Admin inventory item action",
           correlationId: input.correlationId,
         });
@@ -3134,33 +3156,28 @@ async function bootstrap(): Promise<void> {
           );
         const { listInventoryItems, ITEM_ACTION_LABELS } =
           await import("./modules/digital-goods/inventory-item-ops.js");
-        if (!(input.action in ITEM_ACTION_LABELS)) {
+        if (!(input.action in ITEM_ACTION_LABELS) || !item) {
           return {
             text: "Thao tác kho không hợp lệ.",
-            buttons: [
-              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
-            ],
+            buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
           };
         }
         const action = input.action as keyof typeof ITEM_ACTION_LABELS;
-        const items = await listInventoryItems(dbHandle.db, { variantId: input.variantId });
-        const item = items.find((row) => row.ref === input.ref);
-        const variant = await sql<{ name_vi: string }>`
-          select name_vi from product_variant where id = ${input.variantId} limit 1
-        `.execute(dbHandle.db);
-        if (!variant.rows[0] || !item || !item.actions.includes(action)) {
+        const items = await listInventoryItems(dbHandle.db, { variantId: item.variant_id });
+        const summary = items.find((row) => row.ref === input.ref);
+        if (!summary || !summary.actions.includes(action)) {
           return {
             text: "Thao tác này không áp dụng cho mục đang chọn.",
             buttons: [
-              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
+              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${item.variant_id}` }],
             ],
           };
         }
         return presentAdminInventoryItemConfirm({
-          variantId: input.variantId,
-          variantName: variant.rows[0].name_vi,
-          ref: item.ref,
-          statusLabel: item.statusLabel,
+          variantId: item.variant_id,
+          variantName: item.variant_name,
+          ref: summary.ref,
+          statusLabel: summary.statusLabel,
           action,
           actionLabel: ITEM_ACTION_LABELS[action],
         });
@@ -3168,10 +3185,11 @@ async function bootstrap(): Promise<void> {
       async inventoryItemConfirm(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const item = await lookupInventoryItemByRef(dbHandle.db, input.ref);
         const gate = await adminCallbacks.handle({
           command: "order.inspect",
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
-          targetId: input.variantId,
+          targetId: item?.variant_id ?? input.ref,
           reason: "Admin inventory item action",
           correlationId: input.correlationId,
         });
@@ -3181,12 +3199,10 @@ async function bootstrap(): Promise<void> {
           );
         const { applyInventoryItemAction, ITEM_ACTION_LABELS, ITEM_STATUS_LABELS } =
           await import("./modules/digital-goods/inventory-item-ops.js");
-        if (!(input.action in ITEM_ACTION_LABELS)) {
+        if (!(input.action in ITEM_ACTION_LABELS) || !item) {
           return {
             text: "Thao tác kho không hợp lệ.",
-            buttons: [
-              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
-            ],
+            buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
           };
         }
         const action = input.action as keyof typeof ITEM_ACTION_LABELS;
@@ -3197,7 +3213,7 @@ async function bootstrap(): Promise<void> {
             adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
             expectedUsername: config.ADMIN_EXPECTED_USERNAME,
           },
-          variantId: input.variantId,
+          variantId: item.variant_id,
           ref: input.ref,
           action,
           reason: input.reason,
@@ -3213,12 +3229,12 @@ async function bootstrap(): Promise<void> {
           return {
             text: message,
             buttons: [
-              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
+              [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${item.variant_id}` }],
             ],
           };
         }
         return presentAdminInventoryItemDone({
-          variantId: input.variantId,
+          variantId: item.variant_id,
           ref: applied.ref,
           actionLabel: ITEM_ACTION_LABELS[action],
           statusLabel: ITEM_STATUS_LABELS[applied.status] ?? applied.status.toLowerCase(),

@@ -4,6 +4,10 @@ import {
   ADMIN_VISIBLE_ROUTE_KEYS,
   presentAdminDashboard,
   presentAdminInventory,
+  presentAdminInventoryItemActions,
+  presentAdminInventoryItemConfirm,
+  presentAdminInventoryItemDone,
+  presentAdminInventoryItems,
   presentAdminInventoryProduct,
   presentAdminInventoryVariant,
   presentInventoryImportPreview,
@@ -475,6 +479,58 @@ describe("admin operational presenters", () => {
         "admin:supc:01ARZ3NDEKTSV4RRFFQ69G5FAX",
       ]),
     );
+    for (const callback of callbacks) {
+      expect(Buffer.byteLength(callback, "utf8")).toBeLessThanOrEqual(64);
+    }
+  });
+
+  // Telegram rejects a button whose callback_data exceeds 64 bytes with BUTTON_DATA_INVALID, and
+  // the screen simply never arrives. Every inventory-item button therefore addresses the item by
+  // its derived ref instead of carrying the variant id too.
+  it("keeps every inventory-item callback inside Telegram's 64-byte limit", () => {
+    const variantId = "01M25ZS118M24RG8V3JJAD0J1W";
+    const ref = "FX956YSJ";
+    const items = presentAdminInventoryItems({
+      variantId,
+      variantName: "1 thang",
+      items: [
+        { ref, statusLabel: "khả dụng", actions: ["QUARANTINE", "REVOKE"] },
+        { ref: "FZ1PBZPD", statusLabel: "đã giao", actions: [] },
+      ],
+    });
+    const actions = presentAdminInventoryItemActions({
+      variantId,
+      variantName: "1 thang",
+      ref,
+      statusLabel: "khả dụng",
+      actions: [
+        { action: "QUARANTINE", label: "🛑 Cách ly" },
+        { action: "RESTORE", label: "♻️ Phục hồi" },
+        { action: "REVOKE", label: "🗑 Thu hồi" },
+      ],
+    });
+    const confirm = presentAdminInventoryItemConfirm({
+      variantId,
+      variantName: "1 thang",
+      ref,
+      statusLabel: "khả dụng",
+      action: "QUARANTINE",
+      actionLabel: "🛑 Cách ly",
+    });
+    const done = presentAdminInventoryItemDone({
+      variantId,
+      ref,
+      actionLabel: "🛑 Cách ly",
+      statusLabel: "đã cách ly",
+    });
+
+    const callbacks = [items, actions, confirm, done]
+      .flatMap((screen) => screen.buttons.flat())
+      .map((button) => button.callbackData);
+    expect(callbacks).toContain(`admin:inventory:items:${variantId}`);
+    expect(callbacks).toContain(`admin:inventory:item:${ref}`);
+    expect(callbacks).toContain(`admin:inventory:item-act:${ref}:REVOKE`);
+    expect(callbacks).toContain(`admin:inventory:item-confirm:${ref}:QUARANTINE`);
     for (const callback of callbacks) {
       expect(Buffer.byteLength(callback, "utf8")).toBeLessThanOrEqual(64);
     }
