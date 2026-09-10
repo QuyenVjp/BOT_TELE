@@ -1,4 +1,5 @@
 import type { InlineButton, PresentedMessage } from "./catalog.js";
+import { ORDER_STATUS_FALLBACK, ORDER_STATUS_LABEL } from "./history.js";
 import {
   FULFILLMENT_TYPE_LABELS,
   type FulfillmentType,
@@ -306,6 +307,17 @@ export function presentAdminOrdersMenu(): PresentedMessage {
     [{ text: "🛠 Xử lý thủ công", callbackData: "admin:manual" }],
   ]);
 }
+/**
+ * The admin lists used to print `COMPLETED` / `PROCESSING` while the customer list said
+ * "🎉 Hoàn tất" — the same internal code the owner-facing fix removed from the warranty surface.
+ * One accessor over the customer map keeps the two from drifting again.
+ */
+function adminOrderStatusLabel(status: string): string {
+  return (
+    (ORDER_STATUS_LABEL as Record<string, string | undefined>)[status] ?? ORDER_STATUS_FALLBACK
+  );
+}
+
 const ADMIN_ORDER_STATUS_LABELS: Record<AdminOrderStatusFilter, string> = {
   all: "Tất cả",
   pending_payment: "Chờ thanh toán",
@@ -326,7 +338,7 @@ export function presentAdminOrders(page: AdminOrderListPage): PresentedMessage {
       ? ["Không có đơn phù hợp."]
       : page.items.map(
           (order) =>
-            `• ${order.orderNumber} · ${order.status} · ${order.priceVnd.toLocaleString("vi-VN")} ₫ · ${order.displayName ?? order.telegramUserId ?? order.customerId}`,
+            `• ${order.orderNumber} · ${adminOrderStatusLabel(order.status)} · ${order.priceVnd.toLocaleString("vi-VN")} ₫ · ${order.displayName ?? order.telegramUserId ?? order.customerId}`,
         )),
   ];
   return {
@@ -334,7 +346,7 @@ export function presentAdminOrders(page: AdminOrderListPage): PresentedMessage {
     buttons: [
       ...page.items.map((order) => [
         {
-          text: `${order.orderNumber} · ${order.status}`,
+          text: `${order.orderNumber} · ${adminOrderStatusLabel(order.status)}`,
           callbackData: `admin:orders:view:${order.stateId}`,
         },
       ]),
@@ -1180,7 +1192,8 @@ export function presentAdminTestLab(input: {
       ...(input.canaryOrders.length === 0
         ? ["• (Chưa có giao dịch)"]
         : input.canaryOrders.map(
-            (o) => `• ${o.orderNumber} · ${o.status} · ${o.priceVnd.toLocaleString("vi-VN")} ₫`,
+            (o) =>
+              `• ${o.orderNumber} · ${adminOrderStatusLabel(o.status)} · ${o.priceVnd.toLocaleString("vi-VN")} ₫`,
           )),
     ].join("\n"),
     buttons: [

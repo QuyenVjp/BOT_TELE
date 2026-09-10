@@ -122,10 +122,14 @@ export interface CategoryWithCountsRow {
 export async function listCategoriesWithCounts(exec: Executor): Promise<CategoryWithCountsRow[]> {
   const result = await sql<CategoryWithCountsRow>`
     select c.id, c.name_vi, c.is_active, c.sort_order, c.parent_id,
-           count(p.id)::int as product_count
+           (
+             select count(distinct p.id)::int
+             from product p
+             join category leaf on leaf.id = p.category_id
+             where (leaf.id = c.id or leaf.parent_id = c.id)
+               and p.is_archived = false
+           ) as product_count
     from category c
-    left join product p on p.category_id = c.id and p.is_archived = false
-    group by c.id, c.name_vi, c.is_active, c.sort_order, c.parent_id
     order by c.sort_order asc, c.id asc
   `.execute(exec);
   return result.rows;
