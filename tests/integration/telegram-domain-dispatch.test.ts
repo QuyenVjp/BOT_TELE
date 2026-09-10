@@ -779,6 +779,36 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(send).toHaveBeenCalledTimes(3);
   });
 
+  it("parses the product list's filter and page out of the route", async () => {
+    const { dispatcher, adminProducts } = setup();
+
+    // The route family is `products:view:<view>[:<page>]` and it is matched before the plain
+    // `products` branch, so a mis-indexed split silently shows the wrong list. Pin both shapes.
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "products-view-1",
+      action: "ADMIN",
+      callbackData: "admin:products:view:test:2",
+    });
+    expect(adminProducts).toHaveBeenLastCalledWith(
+      expect.objectContaining({ view: "test", page: 2 }),
+    );
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "products-view-2",
+      action: "ADMIN",
+      callbackData: "admin:products:view",
+    });
+    expect(adminProducts).toHaveBeenLastCalledWith(
+      expect.objectContaining({ view: "all", page: 1 }),
+    );
+  });
+
   it("routes admin support queue and replacement approval callbacks", async () => {
     const { dispatcher, adminSupport, adminSupportApprove, send } = setup();
 
