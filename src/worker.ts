@@ -5507,6 +5507,14 @@ async function bootstrap(): Promise<void> {
                 isFeatured: draft.isFeatured ?? false,
                 preorderEnabled: draft.preorderEnabled ?? false,
                 lowStockThreshold: draft.lowStockThreshold ?? 3,
+                // Warranty policy (goal §60). Advancing through this step must not drop it.
+                warrantyEnabled: draft.warrantyEnabled ?? false,
+                warrantyDays: draft.warrantyDays ?? 0,
+                warrantyProrationEnabled: draft.warrantyProrationEnabled ?? true,
+                warrantyReplacementAllowed: draft.warrantyReplacementAllowed ?? true,
+                warrantyRefundAllowed: draft.warrantyRefundAllowed ?? true,
+                warrantyReplacementBehavior:
+                  draft.warrantyReplacementBehavior ?? "CONTINUE_ORIGINAL_END",
               }),
             );
             if (!result.ok) return renderWizardStep(draft);
@@ -5532,6 +5540,28 @@ async function bootstrap(): Promise<void> {
             draft.isFeatured = draft.isFeatured ? false : true;
           } else if (input.action === "toggle_preorder") {
             draft.preorderEnabled = draft.preorderEnabled ? false : true;
+          } else if (input.action === "warranty_toggle") {
+            draft.warrantyEnabled = !draft.warrantyEnabled;
+            // Turning it on with no duration yet would promise a warranty nobody defined.
+            if (draft.warrantyEnabled && !draft.warrantyDays) draft.warrantyDays = 30;
+            draft.warrantyProrationEnabled ??= true;
+            draft.warrantyReplacementAllowed ??= true;
+            draft.warrantyRefundAllowed ??= true;
+            draft.warrantyReplacementBehavior ??= "CONTINUE_ORIGINAL_END";
+          } else if (input.action.startsWith("warranty_days:")) {
+            const days = Number(input.action.slice("warranty_days:".length));
+            if (Number.isInteger(days) && days > 0 && days <= 3650) draft.warrantyDays = days;
+          } else if (input.action === "warranty_proration") {
+            draft.warrantyProrationEnabled = draft.warrantyProrationEnabled === false;
+          } else if (input.action === "warranty_replacement") {
+            draft.warrantyReplacementAllowed = draft.warrantyReplacementAllowed === false;
+          } else if (input.action === "warranty_refund") {
+            draft.warrantyRefundAllowed = draft.warrantyRefundAllowed === false;
+          } else if (input.action === "warranty_behavior") {
+            draft.warrantyReplacementBehavior =
+              draft.warrantyReplacementBehavior === "RESET_FROM_REPLACEMENT"
+                ? "CONTINUE_ORIGINAL_END"
+                : "RESET_FROM_REPLACEMENT";
           }
           await repo.save(draft);
           return renderWizardStep(draft);
@@ -5659,6 +5689,27 @@ async function bootstrap(): Promise<void> {
                         : true),
                   isFeatured: draft.isFeatured ?? false,
                   preorderEnabled: draft.preorderEnabled ?? false,
+                  // Warranty policy collected in step 8 (goal: warranty vertical).
+                  warrantyEnabled: draft.warrantyEnabled ?? false,
+                  warrantyDays: draft.warrantyDays ?? 0,
+                  ...(draft.warrantyProrationEnabled === undefined
+                    ? {}
+                    : { warrantyProrationEnabled: draft.warrantyProrationEnabled }),
+                  ...(draft.warrantyReplacementAllowed === undefined
+                    ? {}
+                    : { warrantyReplacementAllowed: draft.warrantyReplacementAllowed }),
+                  ...(draft.warrantyRefundAllowed === undefined
+                    ? {}
+                    : { warrantyRefundAllowed: draft.warrantyRefundAllowed }),
+                  ...(draft.warrantyReplacementBehavior === undefined
+                    ? {}
+                    : { warrantyReplacementBehavior: draft.warrantyReplacementBehavior }),
+                  ...(draft.warrantyCoverageVi === undefined
+                    ? {}
+                    : { warrantyCoverageVi: draft.warrantyCoverageVi }),
+                  ...(draft.warrantyExclusionsVi === undefined
+                    ? {}
+                    : { warrantyExclusionsVi: draft.warrantyExclusionsVi }),
                   lowStockThreshold: draft.lowStockThreshold ?? null,
                   priceVnd: draft.priceVnd,
                   reason: "Admin product creation",

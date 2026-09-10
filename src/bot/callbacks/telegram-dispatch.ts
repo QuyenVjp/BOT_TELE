@@ -1548,6 +1548,15 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Sửa biến thể không khả dụng.");
+        } else if (route.startsWith("products:warranty:")) {
+          message = admin.workflow?.visibilityAction
+            ? await admin.workflow.visibilityAction({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+                action: route.slice("products:warranty:".length),
+              })
+            : safeError("Cài đặt bảo hành không khả dụng.");
         } else if (route.startsWith("products:feature:")) {
           message = admin.productFeature
             ? await admin.productFeature({

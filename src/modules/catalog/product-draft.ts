@@ -56,6 +56,15 @@ export interface ProductDraft {
   isFeatured?: boolean | undefined;
   preorderEnabled?: boolean | undefined;
   lowStockThreshold?: number | undefined;
+  /** Warranty policy (goal: warranty vertical). Structured, never free text. */
+  warrantyEnabled?: boolean | undefined;
+  warrantyDays?: number | undefined;
+  warrantyProrationEnabled?: boolean | undefined;
+  warrantyReplacementAllowed?: boolean | undefined;
+  warrantyRefundAllowed?: boolean | undefined;
+  warrantyReplacementBehavior?: "CONTINUE_ORIGINAL_END" | "RESET_FROM_REPLACEMENT" | undefined;
+  warrantyCoverageVi?: string | undefined;
+  warrantyExclusionsVi?: string | undefined;
   variantName?: string | undefined;
   fulfillmentType?: FulfillmentType | undefined;
   inventoryFields?: InventoryField[] | undefined;
@@ -516,6 +525,14 @@ type DraftExtra = {
   visibility?: ProductDraft["visibility"];
   isFeatured?: boolean;
   preorderEnabled?: boolean;
+  warrantyEnabled?: boolean;
+  warrantyDays?: number;
+  warrantyProrationEnabled?: boolean;
+  warrantyReplacementAllowed?: boolean;
+  warrantyRefundAllowed?: boolean;
+  warrantyReplacementBehavior?: ProductDraft["warrantyReplacementBehavior"];
+  warrantyCoverageVi?: string;
+  warrantyExclusionsVi?: string;
 };
 
 function draftExtra(draft: ProductDraft): DraftExtra {
@@ -536,6 +553,18 @@ function draftExtra(draft: ProductDraft): DraftExtra {
   if (draft.visibility != null) extra.visibility = draft.visibility;
   if (draft.isFeatured != null) extra.isFeatured = draft.isFeatured;
   if (draft.preorderEnabled != null) extra.preorderEnabled = draft.preorderEnabled;
+  if (draft.warrantyEnabled != null) extra.warrantyEnabled = draft.warrantyEnabled;
+  if (draft.warrantyDays != null) extra.warrantyDays = draft.warrantyDays;
+  if (draft.warrantyProrationEnabled != null)
+    extra.warrantyProrationEnabled = draft.warrantyProrationEnabled;
+  if (draft.warrantyReplacementAllowed != null)
+    extra.warrantyReplacementAllowed = draft.warrantyReplacementAllowed;
+  if (draft.warrantyRefundAllowed != null)
+    extra.warrantyRefundAllowed = draft.warrantyRefundAllowed;
+  if (draft.warrantyReplacementBehavior != null)
+    extra.warrantyReplacementBehavior = draft.warrantyReplacementBehavior;
+  if (draft.warrantyCoverageVi != null) extra.warrantyCoverageVi = draft.warrantyCoverageVi;
+  if (draft.warrantyExclusionsVi != null) extra.warrantyExclusionsVi = draft.warrantyExclusionsVi;
   return extra;
 }
 
@@ -559,6 +588,22 @@ function parseDraftExtra(value: unknown): DraftExtra {
     out.visibility = v.visibility;
   if (typeof v.isFeatured === "boolean") out.isFeatured = v.isFeatured;
   if (typeof v.preorderEnabled === "boolean") out.preorderEnabled = v.preorderEnabled;
+  if (typeof v.warrantyEnabled === "boolean") out.warrantyEnabled = v.warrantyEnabled;
+  if (typeof v.warrantyDays === "number" && Number.isInteger(v.warrantyDays) && v.warrantyDays >= 0)
+    out.warrantyDays = v.warrantyDays;
+  if (typeof v.warrantyProrationEnabled === "boolean")
+    out.warrantyProrationEnabled = v.warrantyProrationEnabled;
+  if (typeof v.warrantyReplacementAllowed === "boolean")
+    out.warrantyReplacementAllowed = v.warrantyReplacementAllowed;
+  if (typeof v.warrantyRefundAllowed === "boolean")
+    out.warrantyRefundAllowed = v.warrantyRefundAllowed;
+  if (
+    v.warrantyReplacementBehavior === "CONTINUE_ORIGINAL_END" ||
+    v.warrantyReplacementBehavior === "RESET_FROM_REPLACEMENT"
+  )
+    out.warrantyReplacementBehavior = v.warrantyReplacementBehavior;
+  if (typeof v.warrantyCoverageVi === "string") out.warrantyCoverageVi = v.warrantyCoverageVi;
+  if (typeof v.warrantyExclusionsVi === "string") out.warrantyExclusionsVi = v.warrantyExclusionsVi;
   const dc = v.deliveryConfig;
   if (dc && typeof dc === "object") {
     const d = dc as Record<string, unknown>;
@@ -636,6 +681,26 @@ export function createProductDraftRepository(db: Kysely<Database>): ProductDraft
         ...(extra.visibility == null ? {} : { visibility: extra.visibility }),
         ...(extra.isFeatured == null ? {} : { isFeatured: extra.isFeatured }),
         ...(extra.preorderEnabled == null ? {} : { preorderEnabled: extra.preorderEnabled }),
+        ...(extra.warrantyEnabled == null ? {} : { warrantyEnabled: extra.warrantyEnabled }),
+        ...(extra.warrantyDays == null ? {} : { warrantyDays: extra.warrantyDays }),
+        ...(extra.warrantyProrationEnabled == null
+          ? {}
+          : { warrantyProrationEnabled: extra.warrantyProrationEnabled }),
+        ...(extra.warrantyReplacementAllowed == null
+          ? {}
+          : { warrantyReplacementAllowed: extra.warrantyReplacementAllowed }),
+        ...(extra.warrantyRefundAllowed == null
+          ? {}
+          : { warrantyRefundAllowed: extra.warrantyRefundAllowed }),
+        ...(extra.warrantyReplacementBehavior == null
+          ? {}
+          : { warrantyReplacementBehavior: extra.warrantyReplacementBehavior }),
+        ...(extra.warrantyCoverageVi == null
+          ? {}
+          : { warrantyCoverageVi: extra.warrantyCoverageVi }),
+        ...(extra.warrantyExclusionsVi == null
+          ? {}
+          : { warrantyExclusionsVi: extra.warrantyExclusionsVi }),
         ...(extra.deliveryEtaVi == null ? {} : { deliveryEtaVi: extra.deliveryEtaVi }),
         ...(extra.warrantyVi == null ? {} : { warrantyVi: extra.warrantyVi }),
         ...(extra.supportVi == null ? {} : { supportVi: extra.supportVi }),

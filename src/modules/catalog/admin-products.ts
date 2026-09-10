@@ -50,6 +50,18 @@ export interface AdminProductInput {
   isFeatured?: boolean;
   featuredRank?: number;
   preorderEnabled?: boolean;
+  /**
+   * Warranty policy (goal: warranty vertical). Structured so the customer can be shown a specific
+   * coverage and a claim can prove which policy it was judged under.
+   */
+  warrantyEnabled?: boolean;
+  warrantyDays?: number;
+  warrantyProrationEnabled?: boolean;
+  warrantyReplacementAllowed?: boolean;
+  warrantyRefundAllowed?: boolean;
+  warrantyReplacementBehavior?: "CONTINUE_ORIGINAL_END" | "RESET_FROM_REPLACEMENT";
+  warrantyCoverageVi?: string;
+  warrantyExclusionsVi?: string;
   supplierConfig?: {
     supplierId: string;
     externalSku: string;
@@ -320,7 +332,7 @@ export async function createAdminProduct(input: AdminProductInput): Promise<Admi
     );
     if (!product.rows[0]) throw new Error("CATEGORY_NOT_FOUND");
     const routing = legacyRoutingFor(input.fulfillmentType);
-    await sql`insert into product_variant (id, product_id, sku, name_vi, price_vnd, compare_at_price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields, low_stock_threshold, preorder_enabled, is_active) values (${variantId}, ${productId}, ${input.sku}, ${input.variantName.trim()}, ${input.priceVnd.toString()}, ${input.compareAtPriceVnd?.toString() ?? null}, 'CUSTOM', ${routing.deliveryType}, ${routing.stockPolicy}, ${input.fulfillmentType}, ${JSON.stringify(input.inventoryFields)}::jsonb, ${input.lowStockThreshold}, ${input.preorderEnabled ?? false}, ${input.active ?? true})`.execute(
+    await sql`insert into product_variant (id, product_id, sku, name_vi, price_vnd, compare_at_price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields, low_stock_threshold, preorder_enabled, is_active, warranty_enabled, warranty_days, warranty_proration_enabled, warranty_replacement_allowed, warranty_refund_allowed, warranty_replacement_behavior, warranty_coverage_vi, warranty_exclusions_vi) values (${variantId}, ${productId}, ${input.sku}, ${input.variantName.trim()}, ${input.priceVnd.toString()}, ${input.compareAtPriceVnd?.toString() ?? null}, 'CUSTOM', ${routing.deliveryType}, ${routing.stockPolicy}, ${input.fulfillmentType}, ${JSON.stringify(input.inventoryFields)}::jsonb, ${input.lowStockThreshold}, ${input.preorderEnabled ?? false}, ${input.active ?? true}, ${input.warrantyEnabled ?? false}, ${input.warrantyEnabled ? (input.warrantyDays ?? 0) : 0}, ${input.warrantyProrationEnabled ?? true}, ${input.warrantyReplacementAllowed ?? true}, ${input.warrantyRefundAllowed ?? true}, ${input.warrantyReplacementBehavior ?? "CONTINUE_ORIGINAL_END"}, ${input.warrantyCoverageVi ?? null}, ${input.warrantyExclusionsVi ?? null})`.execute(
       trx,
     );
     if (

@@ -189,7 +189,7 @@ export function presentWizardVisibilityStep(draft: ProductDraft): PresentedMessa
         ? "Bản nháp"
         : "Công khai";
   return {
-    text: `Bước 8/8 — ⚙️ CÀI ĐẶT HIỂN THỊ & BÁN HÀNG\n\nHiển thị: ${visibility}\nGhim nổi bật: ${draft.isFeatured ? "Có" : "Không"}\nĐặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}\nCảnh báo sắp hết: ${draft.lowStockThreshold ?? 3}`,
+    text: `Bước 8/8 — ⚙️ CÀI ĐẶT HIỂN THỊ & BÁN HÀNG\n\nHiển thị: ${visibility}\nGhim nổi bật: ${draft.isFeatured ? "Có" : "Không"}\nBảo hành: ${draft.warrantyEnabled ? `${draft.warrantyDays ?? 0} ngày${draft.warrantyProrationEnabled === false ? " · không chia theo thời gian" : " · hoàn theo thời gian còn lại"}` : "Không"}\nĐặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}\nCảnh báo sắp hết: ${draft.lowStockThreshold ?? 3}`,
     buttons: [
       [
         {
