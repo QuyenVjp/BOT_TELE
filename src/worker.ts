@@ -4156,11 +4156,14 @@ async function bootstrap(): Promise<void> {
             const field = typeof payload.field === "string" ? payload.field : null;
             const expectedVersion =
               typeof payload.expectedVersion === "number" ? payload.expectedVersion : null;
-            if (!productId || !field || expectedVersion === null)
-              return {
-                text: "Phiên sửa nội dung không hợp lệ. Vui lòng mở lại sản phẩm.",
-                buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
-              };
+            if (!productId || !field || expectedVersion === null) {
+              // Claiming this text would swallow unrelated input, so drop the unusable state and
+              // let the message fall through to its normal handler.
+              await sql`delete from admin_callback_state where id = ${pendingContent.id}`.execute(
+                dbHandle.db,
+              );
+              return null;
+            }
             const value = input.text.trim() === "-" ? "" : input.text.trim();
             await sql`delete from admin_callback_state where id = ${pendingContent.id}`.execute(
               dbHandle.db,

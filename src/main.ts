@@ -89,6 +89,9 @@ async function main(): Promise<void> {
       },
       productContentEditText: {
         adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+        // Only a REAL field prompt vouches for free text. The menu itself also writes a state
+        // (to carry the product id), and vouching on that alone would swallow every text the
+        // owner sends after merely opening the menu — including reply-keyboard keys.
         async isActive(telegramUserId: string) {
           if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return false;
           const row = (
@@ -96,6 +99,7 @@ async function main(): Promise<void> {
               select id from admin_callback_state
               where admin_telegram_user_id = ${telegramUserId}
                 and kind = 'ADMIN_PRODUCT_CONTENT_EDIT'
+                and payload_redacted ? 'field'
                 and expires_at > now()
               limit 1
             `.execute(dbHandle.db)
