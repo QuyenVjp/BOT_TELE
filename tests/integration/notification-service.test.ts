@@ -1221,6 +1221,12 @@ describe("notification service", () => {
     expect(adminCampaign.rows[0]!.content).toContain("YÊU CẦU BẢO HÀNH MỚI");
     expect(adminCampaign.rows[0]!.content).toContain("40.000");
     expect(adminCampaign.rows[0]!.content).toContain("Còn bảo hành: 12 ngày");
+    // Goal §16 words the symptom the way the customer's own screen does, and no internal code or
+    // state name ever reaches the owner's chat.
+    expect(adminCampaign.rows[0]!.content).toContain("Mất gói");
+    expect(adminCampaign.rows[0]!.content).not.toMatch(
+      /LOST_BENEFITS|ACCOUNT_LOCKED|CANNOT_SIGN_IN|WarrantyClaimOpened|SUBMITTED/,
+    );
 
     const due = await handleNotificationOutboxEvent(ctx.db, {
       id: newId(),
