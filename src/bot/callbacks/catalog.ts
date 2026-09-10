@@ -55,6 +55,8 @@ export interface CatalogCallbackDeps {
   searchPrompt?: {
     open(input: { chatId: string; correlationId: string }): Promise<void>;
   };
+  /** Warranty screens, passed through to the dispatcher. */
+  warranty?: CatalogCallbacks["warranty"];
 }
 
 export interface CatalogCallbacks {
@@ -75,6 +77,30 @@ export interface CatalogCallbacks {
   /** Goal §28: the search prompt's permission, passed through to the dispatcher. */
   searchPrompt?: {
     open(input: { chatId: string; correlationId: string }): Promise<void>;
+  };
+  /** Goal §6–§9: policy, defect report and claim view. */
+  warranty?: {
+    policy(input: {
+      telegramUserId: string;
+      variantId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    issueTypes(input: {
+      telegramUserId: string;
+      variantId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    report(input: {
+      telegramUserId: string;
+      variantId: string;
+      issueType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    claim(input: {
+      telegramUserId: string;
+      claimRef: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
   };
   search(rawQuery: string, identity?: CatalogIdentity | undefined): Promise<PresentedMessage>;
   storefront(input: {
@@ -140,6 +166,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
 
   const callbacks: CatalogCallbacks = {
     ...(deps.searchPrompt ? { searchPrompt: deps.searchPrompt } : {}),
+    ...(deps.warranty ? { warranty: deps.warranty } : {}),
     async mainMenu() {
       return callbacks.storefront({
         actorName: "bạn",

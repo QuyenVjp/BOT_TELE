@@ -601,11 +601,6 @@ function assertNoPayload(input: IssueCallbackTokenInput): void {
   }
 }
 
-/** 6 random bytes as 8 base64url characters: enough to separate two previews, short enough to fit. */
-export function encodeAttemptId(value: string): string {
-  return Buffer.from(value, "base64url").subarray(0, 6).toString("base64url");
-}
-
 function decodeAttemptId(value: string): Buffer | null {
   if (!/^[A-Za-z0-9_-]{8}$/.test(value)) return null;
   const bytes = Buffer.from(value, "base64url");

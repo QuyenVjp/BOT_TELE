@@ -52,6 +52,7 @@ export interface CatalogVariantRow {
   stock_display_mode?: "BAND" | "EXACT" | null;
   category_id?: string;
   preorder_enabled?: boolean;
+  warranty_enabled?: boolean;
 }
 
 export interface PageOptions {
@@ -315,7 +316,7 @@ export async function listSellableVariants(
     select
       v.id, v.product_id, p.name_vi as product_name_vi, v.sku, v.name_vi,
       v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
-      v.stock_policy, v.sort_order, v.fulfillment_type,
+      v.stock_policy, v.sort_order, v.fulfillment_type, v.warranty_enabled,
       q.available_quantity::int as available_quantity,
       ${VARIANT_READY_SQL} as is_ready,
       coalesce(v.preorder_enabled, false) as preorder_enabled,
@@ -361,7 +362,7 @@ export async function getVariantById(
     select
       v.id, v.product_id, p.name_vi as product_name_vi, v.sku, v.name_vi,
       v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
-      v.stock_policy, v.sort_order, v.fulfillment_type,
+      v.stock_policy, v.sort_order, v.fulfillment_type, v.warranty_enabled,
       q.available_quantity::int as available_quantity,
       ${VARIANT_READY_SQL} as is_ready,
       p.description_vi, p.what_customer_receives_vi, p.usage_instructions_vi,

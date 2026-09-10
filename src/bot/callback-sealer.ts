@@ -31,6 +31,12 @@ export async function sealPresentedMessageCallbacks(
         sealedRow.push(button);
         continue;
       }
+      // Warranty navigation is plain, like the admin routes: no money moves, no secret travels, and
+      // every handler re-authorizes against the actor's own order or claim.
+      if (button.callbackData.startsWith("warranty:")) {
+        sealedRow.push(button);
+        continue;
+      }
       if (
         /^wallet:(?:account|history|topup(?::(?:custom|confirm|status|change|cancel|amount:[1-9][0-9]{0,12}))?)$/.test(
           button.callbackData,

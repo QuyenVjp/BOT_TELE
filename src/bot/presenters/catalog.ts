@@ -9,6 +9,7 @@ import type {
 import type { StockOutcomeCode } from "../../modules/commerce/buy-now.js";
 import { isSupportedCatalogRoute } from "../../modules/catalog/domain.js";
 import { ADMIN_CONTACT_URL, SHOP_NAME } from "../../modules/catalog/shop-profile.js";
+import { WARRANTY_BLOCK_LINES } from "./warranty.js";
 
 /**
  * Authoritative product-card presenters + Vietnamese state/error copy (FR-001–FR-003,
@@ -232,12 +233,28 @@ export function presentProductDetail(
   if (detail.usage_instructions_vi) {
     lines.push("", "📘 HƯỚNG DẪN", ...bulletLines(detail.usage_instructions_vi));
   }
-  if (detail.warranty_vi) {
+  // Goal §5/§62: a warranty-enabled variant gets the canonical block and a way to read the
+  // structured policy; the free-text field stays as an extra note when the shop filled it in.
+  const warrantyVariant = detail.variants.find(
+    (variant) => variant.warranty_enabled === true && variant.warranty_days > 0,
+  );
+  if (warrantyVariant) {
+    lines.push("", ...WARRANTY_BLOCK_LINES);
+    if (detail.warranty_vi) lines.push("", detail.warranty_vi);
+  } else if (detail.warranty_vi) {
     lines.push("", "🛡 BẢO HÀNH", detail.warranty_vi);
   }
 
   lines.push("", "Chọn gói thời hạn:");
   const buttons: InlineButton[][] = [];
+  if (warrantyVariant) {
+    buttons.push([
+      {
+        text: "📘 Xem chính sách bảo hành",
+        callbackData: `warranty:policy:${warrantyVariant.id}`,
+      },
+    ]);
+  }
   for (const variant of detail.variants) {
     const price = formatVnd(makeVnd(BigInt(variant.price_vnd)));
     const buyNow = buyNowByVariantId[variant.id];

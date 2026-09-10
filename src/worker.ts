@@ -44,6 +44,21 @@ import type {
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
 import type { PresentedMessage } from "./bot/presenters/catalog.js";
+import {
+  presentWarrantyClaim,
+  presentWarrantyClaimSubmitted,
+  presentWarrantyExpired,
+  presentWarrantyIssueTypes,
+  presentWarrantyNotCovered,
+  presentWarrantyPolicy,
+} from "./bot/presenters/warranty.js";
+import {
+  listClaimTimeline,
+  openWarrantyClaim,
+  ISSUE_TYPE_LABELS,
+  type WarrantyIssueType,
+} from "./modules/warranty/claims.js";
+import { isWithinWarranty, warrantyEndOf } from "./modules/warranty/proration.js";
 import type { WalletAccount } from "./modules/wallet/ledger.js";
 import type { Vault } from "./infrastructure/vault/port.js";
 import {
@@ -682,6 +697,119 @@ export async function restockVariantLabel(db: Db, variantId: string): Promise<st
   return row ? `${row.product_name} — ${row.variant_name}` : null;
 }
 
+/** A warranty screen for a case we cannot serve; never a stack trace or an internal code. */
+function safeWarrantyMessage(text: string): PresentedMessage {
+  return {
+    text,
+    buttons: [
+      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+      [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+    ],
+  };
+}
+
+function isWarrantyIssueType(value: string): value is WarrantyIssueType {
+  return Object.prototype.hasOwnProperty.call(ISSUE_TYPE_LABELS, value);
+}
+
+/**
+ * The customer's fulfilled order for a variant, its delivered asset, and where the warranty window
+ * stands right now. Ownership is part of the query, so a forged callback cannot reach another
+ * customer's order.
+ */
+async function warrantyOrderContext(
+  db: Db,
+  customerId: string,
+  variantId: string,
+): Promise<
+  | { kind: "none" }
+  | { kind: "not_covered" }
+  | { kind: "expired"; warrantyEnd: string }
+  | {
+      kind: "ok";
+      orderId: string;
+      orderNumber: string;
+      assetId: string | null;
+      warrantyEnd: string;
+    }
+> {
+  const rows = await sql<{
+    id: string;
+    order_number: string;
+    completed_at: Date | string | null;
+    warranty_days: number;
+    warranty_enabled: boolean;
+    asset_id: string | null;
+  }>`
+    select o.id, o.order_number, o.completed_at,
+           coalesce(o.warranty_days, 0) as warranty_days,
+           coalesce(v.warranty_enabled, false) as warranty_enabled,
+           (select a.id from digital_asset a
+             where a.delivered_order_id = o.id
+             order by a.updated_at asc, a.id asc limit 1) as asset_id
+    from "order" o
+    join product_variant v on v.id = o.variant_id
+    where o.customer_id = ${customerId}
+      and o.variant_id = ${variantId}
+      and o.completed_at is not null
+    order by o.completed_at desc
+    limit 1
+  `.execute(db);
+  const row = rows.rows[0];
+  if (!row) return { kind: "none" };
+  if (!row.warranty_enabled || row.warranty_days <= 0) return { kind: "not_covered" };
+  const start =
+    row.completed_at instanceof Date ? row.completed_at : new Date(String(row.completed_at));
+  const terms = { warrantyDays: row.warranty_days, warrantyStart: start };
+  const warrantyEnd = warrantyEndOf(terms).toISOString();
+  if (!isWithinWarranty(terms, new Date())) return { kind: "expired", warrantyEnd };
+  return {
+    kind: "ok",
+    orderId: row.id,
+    orderNumber: row.order_number,
+    assetId: row.asset_id,
+    warrantyEnd,
+  };
+}
+
+/** The customer's own claim, by its human reference. */
+async function loadCustomerWarrantyClaim(
+  db: Db,
+  customerId: string,
+  claimRef: string,
+): Promise<{
+  id: string;
+  claim_number: string;
+  status: string;
+  remaining_days: number;
+  calculated_refund_vnd: string;
+  approved_refund_vnd: string | null;
+  product_name: string;
+} | null> {
+  const ref = claimRef.trim().toUpperCase();
+  const rows = await sql<{
+    id: string;
+    claim_number: string;
+    status: string;
+    remaining_days: number;
+    calculated_refund_vnd: string;
+    approved_refund_vnd: string | null;
+    product_name: string;
+  }>`
+    select c.id, c.claim_number, c.status, c.remaining_days,
+           c.calculated_refund_vnd::text as calculated_refund_vnd,
+           c.approved_refund_vnd::text as approved_refund_vnd,
+           p.name_vi as product_name
+    from warranty_claim c
+    join "order" o on o.id = c.order_id
+    join product_variant v on v.id = o.variant_id
+    join product p on p.id = v.product_id
+    where c.customer_id = ${customerId} and c.claim_number = ${ref}
+    limit 1
+  `.execute(db);
+  return rows.rows[0] ?? null;
+}
+
 /**
  * Resolve a stock item and its variant from the display ref alone. The ref is derived from the
  * asset id, which keeps every callback payload inside Telegram's 64-byte limit — carrying the
@@ -1016,6 +1144,98 @@ async function bootstrap(): Promise<void> {
   catalogCache.invalidate();
   const catalog = createCatalogCallbacks({
     db: dbHandle.db,
+    // Warranty (goal: warranty vertical). Every handler re-authorizes against the actor's own
+    // order, so a forged callback can only ever reach the caller's own data.
+    warranty: {
+      async policy(input) {
+        if (!resolveCustomerId) return safeWarrantyMessage("Bảo hành không khả dụng.");
+        const rows = await sql<{
+          product_name: string;
+          warranty_days: number;
+          warranty_enabled: boolean;
+          warranty_coverage_vi: string | null;
+          warranty_exclusions_vi: string | null;
+          price_vnd: string;
+        }>`
+          select p.name_vi as product_name, v.warranty_days, v.warranty_enabled,
+                 v.warranty_coverage_vi, v.warranty_exclusions_vi, v.price_vnd::text as price_vnd
+          from product_variant v
+          join product p on p.id = v.product_id
+          where v.id = ${input.variantId}
+          limit 1
+        `.execute(dbHandle.db);
+        const row = rows.rows[0];
+        if (!row) return safeWarrantyMessage("Không tìm thấy sản phẩm.");
+        if (!row.warranty_enabled || row.warranty_days <= 0) return presentWarrantyNotCovered();
+        return presentWarrantyPolicy({
+          productName: row.product_name,
+          warrantyDays: row.warranty_days,
+          coverageVi: row.warranty_coverage_vi,
+          exclusionsVi: row.warranty_exclusions_vi,
+          examplePriceVnd: BigInt(row.price_vnd),
+          variantId: input.variantId,
+        });
+      },
+      async issueTypes(input) {
+        const customerId = resolveCustomerId ? await resolveCustomerId(input.telegramUserId) : null;
+        if (!customerId) return safeWarrantyMessage("Không xác minh được khách hàng.");
+        const context = await warrantyOrderContext(dbHandle.db, customerId, input.variantId);
+        if (context.kind === "none")
+          return safeWarrantyMessage("Bạn chưa có đơn đã giao cho sản phẩm này.");
+        if (context.kind === "expired")
+          return presentWarrantyExpired({ warrantyEnd: context.warrantyEnd });
+        if (context.kind === "not_covered") return presentWarrantyNotCovered();
+        return presentWarrantyIssueTypes({ orderNumber: context.orderNumber });
+      },
+      async report(input) {
+        const customerId = resolveCustomerId ? await resolveCustomerId(input.telegramUserId) : null;
+        if (!customerId) return safeWarrantyMessage("Không xác minh được khách hàng.");
+        const context = await warrantyOrderContext(dbHandle.db, customerId, input.variantId);
+        if (context.kind === "none")
+          return safeWarrantyMessage("Bạn chưa có đơn đã giao cho sản phẩm này.");
+        if (context.kind === "expired")
+          return presentWarrantyExpired({ warrantyEnd: context.warrantyEnd });
+        if (context.kind === "not_covered") return presentWarrantyNotCovered();
+        if (!isWarrantyIssueType(input.issueType))
+          return safeWarrantyMessage("Tình trạng bạn chọn không hợp lệ.");
+        const opened = await openWarrantyClaim({
+          db: dbHandle.db,
+          customerId,
+          orderId: context.orderId,
+          ...(context.assetId ? { assetId: context.assetId } : {}),
+          issueType: input.issueType,
+          correlationId: input.correlationId,
+        });
+        if (!opened.ok) {
+          return safeWarrantyMessage(
+            opened.code === "WARRANTY_EXPIRED"
+              ? "⌛ Sản phẩm đã hết thời hạn bảo hành. Bạn vẫn có thể liên hệ hỗ trợ."
+              : "Chưa mở được yêu cầu bảo hành. Vui lòng thử lại sau.",
+          );
+        }
+        return presentWarrantyClaimSubmitted({
+          claimNumber: opened.claimNumber,
+          estimatedRefundVnd: opened.snapshot.refundVnd,
+          remainingDays: opened.snapshot.remainingDays,
+        });
+      },
+      async claim(input) {
+        const customerId = resolveCustomerId ? await resolveCustomerId(input.telegramUserId) : null;
+        if (!customerId) return safeWarrantyMessage("Không xác minh được khách hàng.");
+        const claim = await loadCustomerWarrantyClaim(dbHandle.db, customerId, input.claimRef);
+        if (!claim) return safeWarrantyMessage("Không tìm thấy yêu cầu bảo hành.");
+        return presentWarrantyClaim({
+          claimNumber: claim.claim_number,
+          productName: claim.product_name,
+          status: claim.status,
+          estimatedRefundVnd: BigInt(claim.calculated_refund_vnd),
+          approvedRefundVnd:
+            claim.approved_refund_vnd === null ? null : BigInt(claim.approved_refund_vnd),
+          remainingDays: claim.remaining_days,
+          timeline: await listClaimTimeline(dbHandle.db, claim.id),
+        });
+      },
+    },
     // Goal §28: one-shot permission so the search prompt can accept the product name it asks for.
     // Raw customer text stays dropped outside this window.
     searchPrompt: {

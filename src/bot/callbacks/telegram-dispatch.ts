@@ -114,6 +114,30 @@ export interface TelegramDomainDispatcherDeps {
     searchPrompt?: {
       open(input: { chatId: string; correlationId: string }): Promise<void>;
     };
+    /** Warranty (goal: warranty vertical): policy view, defect report and claim view. */
+    warranty?: {
+      policy(input: {
+        telegramUserId: string;
+        variantId: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
+      issueTypes(input: {
+        telegramUserId: string;
+        variantId: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
+      report(input: {
+        telegramUserId: string;
+        variantId: string;
+        issueType: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
+      claim(input: {
+        telegramUserId: string;
+        claimRef: string;
+        correlationId: string;
+      }): Promise<PresentedMessage>;
+    };
     productDetail?(
       productId: string,
       telegramUserId: string | bigint | number,
@@ -971,6 +995,42 @@ export function createTelegramDomainDispatcher(
       } else if (envelope.callbackData === "cat:search") {
         await deps.catalog.searchPrompt?.open({ chatId: envelope.chatId, correlationId });
         message = presentSearchPrompt();
+      } else if (envelope.callbackData?.startsWith("warranty:policy:")) {
+        message = deps.catalog.warranty
+          ? await deps.catalog.warranty.policy({
+              telegramUserId: envelope.actorUserId,
+              variantId: envelope.callbackData.slice("warranty:policy:".length),
+              correlationId,
+            })
+          : safeError("Bảo hành không khả dụng.");
+      } else if (envelope.callbackData?.startsWith("warranty:report:")) {
+        message = deps.catalog.warranty
+          ? await deps.catalog.warranty.issueTypes({
+              telegramUserId: envelope.actorUserId,
+              variantId: envelope.callbackData.slice("warranty:report:".length),
+              correlationId,
+            })
+          : safeError("Bảo hành không khả dụng.");
+      } else if (envelope.callbackData?.startsWith("warranty:claim:")) {
+        message = deps.catalog.warranty
+          ? await deps.catalog.warranty.claim({
+              telegramUserId: envelope.actorUserId,
+              claimRef: envelope.callbackData.slice("warranty:claim:".length),
+              correlationId,
+            })
+          : safeError("Bảo hành không khả dụng.");
+      } else if (envelope.callbackData?.startsWith("warranty:type:")) {
+        const [issueType, variantId] = envelope.callbackData
+          .slice("warranty:type:".length)
+          .split(":");
+        message = deps.catalog.warranty
+          ? await deps.catalog.warranty.report({
+              telegramUserId: envelope.actorUserId,
+              variantId: variantId ?? "",
+              issueType: issueType ?? "",
+              correlationId,
+            })
+          : safeError("Bảo hành không khả dụng.");
       } else if (
         envelope.callbackData === "delivery:open" ||
         envelope.callbackData?.startsWith("delivery:open:")
