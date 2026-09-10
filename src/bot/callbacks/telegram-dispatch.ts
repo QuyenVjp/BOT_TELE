@@ -994,9 +994,12 @@ export interface TelegramDomainDispatcherDeps {
     serverIssueAckMs?: number | null;
     telegramRttMs?: number | null;
     /**
-     * Server work up to just before the reply is handed to Telegram. `renderMs` is measured after
-     * `await responder.send(...)`, so it also carries the ack and send round trips and cannot answer
-     * "is our handler slow" — which is exactly the question a latency target asks.
+     * Server work up to just before the reply is handed to Telegram, measured after the ack has been
+     * issued — so it is "ack round trip + handler", not handler alone. Subtract `telegramRttMs` to
+     * approximate handler work. `renderMs` is worse for this: it is taken after
+     * `await responder.send(...)`, so it carries both round trips. Neither number is a network-free
+     * handler time, and reading one as if it were is how a 1ms acknowledgement got reported as a
+     * missed target.
      */
     serverRenderMs?: number | null;
     renderMs: number;
