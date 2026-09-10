@@ -43,7 +43,6 @@ import type {
   presentAdminOrderDetail,
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
-import { presentAdminDenied } from "./bot/presenters/admin.js";
 import type { AdminCallbacks } from "./bot/callbacks/admin.js";
 import type { PresentedMessage } from "./bot/presenters/catalog.js";
 import {
@@ -967,8 +966,10 @@ async function requireRootAdmin(
   input: { telegramUserId: string; chatType: string; correlationId: string },
   targetId: string,
   reason: string,
-): Promise<PresentedMessage | null> {
-  if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+): Promise<null | "NOT_ROOT_ADMIN" | "WRONG_CONTEXT"> {
+  // Returns the reason rather than a screen: the presenter lives behind a dynamic import that the
+  // worker loads on demand, and every caller already has it in scope.
+  if (!adminCallbacks) return "NOT_ROOT_ADMIN";
   const gate = await adminCallbacks.handle({
     command: "order.inspect",
     actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
@@ -976,9 +977,7 @@ async function requireRootAdmin(
     reason,
     correlationId: input.correlationId,
   });
-  return gate.ok
-    ? null
-    : presentAdminDenied(gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN");
+  return gate.ok ? null : gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN";
 }
 
 /** A warranty screen for a case we cannot serve; never a stack trace or an internal code. */
@@ -3753,7 +3752,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const result = await verifyClaimDefect({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3780,7 +3779,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const result = await requestClaimInfo({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3808,7 +3807,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminWarrantyRejectReason({
@@ -3824,7 +3823,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const reason = decodeURIComponent(input.reason);
         const result = await rejectClaim({
           db: dbHandle.db,
@@ -3853,7 +3852,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const result = await approveClaimReplacement({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3883,7 +3882,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminRefundConfirm({
@@ -3905,7 +3904,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const result = await approveClaimRefund({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3933,7 +3932,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         // One pending prompt at a time: an older unexpired row would otherwise claim the next
@@ -3961,7 +3960,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminRefundPayout({
@@ -3984,7 +3983,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminRefundPaidConfirm({
@@ -4001,7 +4000,7 @@ async function bootstrap(): Promise<void> {
           input.claimId,
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const result = await markRefundPaid({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -4028,7 +4027,7 @@ async function bootstrap(): Promise<void> {
           "admin-warranty",
           "Admin warranty",
         );
-        if (denied) return denied;
+        if (denied) return presentAdminDenied(denied);
         const rows = await warrantyQueueRows(dbHandle.db, "refund_due");
         return presentAdminRefundQueue(rows);
       },
