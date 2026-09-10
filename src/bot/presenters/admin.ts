@@ -1860,8 +1860,6 @@ export const ADMIN_VARIANT_FIELDS = [
   { key: "warrantyDays", label: "Bảo hành (ngày)", kind: "number" },
 ] as const;
 
-const formatVnd = (value: bigint): string => `${value.toLocaleString("vi-VN")} ₫`;
-
 /**
  * The variant editor. The owner picks a field here and is asked for that one value; nothing on this
  * screen is an identifier, so the flow never asks anyone to type a UUID or a pipe-delimited row
