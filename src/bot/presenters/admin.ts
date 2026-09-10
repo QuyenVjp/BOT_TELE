@@ -745,7 +745,16 @@ export function presentProductDraftPreview(draft: {
       `Giao hàng: ${deliveryLine}`,
       ...(draft.descriptionVi ? [`Mô tả: ${draft.descriptionVi}`] : []),
       ...(draft.deliveryEtaVi ? [`Thời gian giao: ${draft.deliveryEtaVi}`] : []),
-      `Bảo hành: ${draft.warrantyVi ?? "Theo chính sách cửa hàng"}`,
+      // Goal §79: the preview states the structured term, not just the marketing copy.
+      `Bảo hành: ${
+        draft.warrantyEnabled
+          ? `${draft.warrantyDays ?? 0} ngày${
+              draft.warrantyProrationEnabled === false
+                ? " (không chia theo thời gian)"
+                : " · hoàn theo thời gian còn lại"
+            }`
+          : (draft.warrantyVi ?? "Không")
+      }`,
       `Hiển thị: ${draft.visibility === "TEST_ONLY" ? "🧪 Chỉ test" : draft.visibility === "DRAFT" ? "📝 Bản nháp" : "🟢 Công khai"}`,
       `Ghim trang chủ: ${draft.isFeatured ? "⭐ Có" : "Không"}`,
       `Đặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}`,

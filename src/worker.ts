@@ -5540,7 +5540,8 @@ async function bootstrap(): Promise<void> {
             draft.isFeatured = draft.isFeatured ? false : true;
           } else if (input.action === "toggle_preorder") {
             draft.preorderEnabled = draft.preorderEnabled ? false : true;
-          } else if (input.action === "warranty_toggle") {
+            // The route is already namespaced by `products:warranty:`, so these are the bare suffixes.
+          } else if (input.action === "toggle") {
             draft.warrantyEnabled = !draft.warrantyEnabled;
             // Turning it on with no duration yet would promise a warranty nobody defined.
             if (draft.warrantyEnabled && !draft.warrantyDays) draft.warrantyDays = 30;
@@ -5548,16 +5549,16 @@ async function bootstrap(): Promise<void> {
             draft.warrantyReplacementAllowed ??= true;
             draft.warrantyRefundAllowed ??= true;
             draft.warrantyReplacementBehavior ??= "CONTINUE_ORIGINAL_END";
-          } else if (input.action.startsWith("warranty_days:")) {
-            const days = Number(input.action.slice("warranty_days:".length));
+          } else if (input.action.startsWith("days:")) {
+            const days = Number(input.action.slice("days:".length));
             if (Number.isInteger(days) && days > 0 && days <= 3650) draft.warrantyDays = days;
-          } else if (input.action === "warranty_proration") {
+          } else if (input.action === "proration") {
             draft.warrantyProrationEnabled = draft.warrantyProrationEnabled === false;
-          } else if (input.action === "warranty_replacement") {
+          } else if (input.action === "replacement") {
             draft.warrantyReplacementAllowed = draft.warrantyReplacementAllowed === false;
-          } else if (input.action === "warranty_refund") {
+          } else if (input.action === "refund") {
             draft.warrantyRefundAllowed = draft.warrantyRefundAllowed === false;
-          } else if (input.action === "warranty_behavior") {
+          } else if (input.action === "behavior") {
             draft.warrantyReplacementBehavior =
               draft.warrantyReplacementBehavior === "RESET_FROM_REPLACEMENT"
                 ? "CONTINUE_ORIGINAL_END"
