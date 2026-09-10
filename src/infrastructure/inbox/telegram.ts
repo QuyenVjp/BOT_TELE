@@ -1,4 +1,4 @@
-import { sql } from "kysely";
+import { sql, type RawBuilder } from "kysely";
 import { newId } from "../../shared/ids/index.js";
 import type {
   DistributedRateLimiter,
@@ -51,6 +51,17 @@ export interface TelegramCommandEnvelope {
     query: string;
     inlineMessageId?: string;
   };
+  /**
+   * Set when the durable payload has been stripped of every non-retained field.
+   * Present means nothing credential-bearing remains in this inbox row.
+   */
+  redactedAt?: string;
+  /**
+   * Inbox `received_at` of the update, stamped at claim time. This is the ordering key the
+   * UI supersession guard uses: a retried event keeps its original timestamp, so a render
+   * that would land on top of a newer screen is dropped.
+   */
+  receivedAt?: string;
 }
 
 export interface AcceptTelegramInput {
@@ -102,12 +113,30 @@ export interface TelegramInbox {
   markProcessed(claim: TelegramInboxClaim): Promise<boolean>;
   markFailed(
     claim: TelegramInboxClaim,
-    options: { errorCode: string; maxAttempts: number; retryAfterSeconds: number },
+    options: {
+      errorCode: string;
+      maxAttempts: number;
+      retryAfterSeconds: number;
+      /**
+       * Whether this failure consumes the retry budget. Defaults to true.
+       * Rate limiting is transient backpressure, not an application failure: passing
+       * false refunds the attempt and never dead-letters, so a burst drains instead of
+       * being dropped after `maxAttempts` tight-loop attempts.
+       */
+      countsTowardBudget?: boolean;
+    },
   ): Promise<"RETRY" | "DEAD" | "STALE">;
   stats(): Promise<TelegramInboxStats>;
+  /**
+   * Strip credential-bearing payload from rows that no longer need it: terminal rows
+   * immediately, in-flight rows only once they have aged past the retry grace window.
+   * Idempotent and batch-bounded; safe to run on every scheduler tick.
+   */
+  sanitizePayloads(options: { batchSize: number; retryGraceSeconds: number }): Promise<number>;
   prune(options: {
     processedRetentionDays: number;
     deadRetentionDays: number;
+    staleRetryRetentionDays?: number;
     batchSize: number;
   }): Promise<number>;
 }
@@ -120,10 +149,67 @@ interface StoredInboxRow {
   claimed_by: string;
   claim_generation: string;
   attempt_count: number;
+  received_at: Date;
 }
 
 const HASH_PATTERN = /^[a-f0-9]{64}$/;
 const ERROR_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+/**
+ * Envelope keys allowed to survive redaction.
+ *
+ * Everything else is dropped the moment the update no longer needs to be replayed:
+ * `messageText` carries admin inventory pastes (`email|password`), `searchQuery` /
+ * `replyToText` carry user prose, `contactPhoneNumber` is direct PII and `document`
+ * holds an uploaded credential CSV. Those belong in the vault, never in an inbox row.
+ * What remains is delivery identity, routing and dedup/audit metadata.
+ */
+export const RETAINED_ENVELOPE_KEYS = [
+  "actorUserId",
+  "chatId",
+  "chatType",
+  "messageId",
+  "callbackQueryId",
+  "action",
+  "command",
+  "rootProductDraftText",
+  "inventoryImportText",
+  "firstName",
+  "lastName",
+  "languageCode",
+  "messageThreadId",
+  "replyToMessageId",
+  "replyToBot",
+  "newChatMembers",
+  "contactSharedAt",
+] as const;
+
+/** Keep only {@link RETAINED_ENVELOPE_KEYS} and stamp the redaction marker. */
+export function sanitizeTelegramEnvelope(
+  envelope: TelegramCommandEnvelope,
+): TelegramCommandEnvelope {
+  const retained: Record<string, unknown> = {};
+  for (const key of RETAINED_ENVELOPE_KEYS) {
+    const value = envelope[key];
+    if (value !== undefined) retained[key] = value;
+  }
+  return { ...retained, redactedAt: new Date().toISOString() } as TelegramCommandEnvelope;
+}
+
+/**
+ * jsonb expression that reduces `payload` to the retained keys and marks it redacted.
+ * Already-redacted values pass through untouched so repeated runs are stable.
+ */
+function redactEnvelopeSql(payload: RawBuilder<unknown>): RawBuilder<unknown> {
+  return sql`case
+    when ${payload} ? 'redactedAt' then ${payload}
+    else (
+      select coalesce(jsonb_object_agg(e.key, e.value), '{}'::jsonb)
+      from jsonb_each(${payload}) as e
+      where e.key = any(${[...RETAINED_ENVELOPE_KEYS]}::text[])
+    ) || jsonb_build_object('redactedAt', to_char(now() at time zone 'utc', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'))
+  end`;
+}
 
 export function createPostgresTelegramInbox(db: Db): TelegramInbox {
   return {
@@ -211,7 +297,7 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
         from candidates c
         where w.id = c.id
         returning w.id, w.source_event_id, w.raw_hash, w.envelope, w.claimed_by,
-                  w.claim_generation::text, w.attempt_count
+                  w.claim_generation::text, w.attempt_count, w.received_at
       `.execute(db);
       return rows.rows.map(mapClaim);
     },
@@ -220,7 +306,8 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
       const result = await sql<{ id: string }>`
         update webhook_inbox
         set processing_status = 'PROCESSED', processed_at = now(), claimed_by = null,
-            claim_expires_at = null, next_attempt_at = null, last_error_code = null
+            claim_expires_at = null, next_attempt_at = null, last_error_code = null,
+            envelope = ${redactEnvelopeSql(sql`envelope`)}
         where id = ${claim.id}
           and processing_status = 'PROCESSING'
           and claimed_by = ${claim.owner}
@@ -242,6 +329,28 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
       ) {
         throw new Error("Invalid inbox retry delay");
       }
+      if (options.countsTowardBudget === false) {
+        // Throttled: keep the failure budget intact and reschedule exactly when the
+        // bucket refills. Never terminal — the bound is the inbox retention window.
+        const retrySeconds = Math.max(1, Math.ceil(options.retryAfterSeconds));
+        const throttled = await sql<{ processing_status: "RETRY" }>`
+          update webhook_inbox
+          set processing_status = 'RETRY',
+              next_attempt_at = now() + make_interval(secs => ${retrySeconds}),
+              dead_lettered_at = null,
+              last_error_code = ${options.errorCode},
+              attempt_count = greatest(attempt_count - 1, 0),
+              claimed_by = null,
+              claim_expires_at = null,
+              envelope = envelope
+          where id = ${claim.id}
+            and processing_status = 'PROCESSING'
+            and claimed_by = ${claim.owner}
+            and claim_generation = ${claim.generation}
+          returning processing_status
+        `.execute(db);
+        return throttled.rows[0]?.processing_status ?? "STALE";
+      }
       const terminal = claim.attemptCount >= options.maxAttempts;
       const result = await sql<{ processing_status: "RETRY" | "DEAD" }>`
         update webhook_inbox
@@ -250,7 +359,8 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
             dead_lettered_at = ${terminal ? sql`now()` : null},
             last_error_code = ${options.errorCode},
             claimed_by = null,
-            claim_expires_at = null
+            claim_expires_at = null,
+            envelope = ${terminal ? redactEnvelopeSql(sql`envelope`) : sql`envelope`}
         where id = ${claim.id}
           and processing_status = 'PROCESSING'
           and claimed_by = ${claim.owner}
@@ -285,18 +395,61 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
       };
     },
 
+    async sanitizePayloads(options) {
+      if (
+        !Number.isInteger(options.batchSize) ||
+        options.batchSize < 1 ||
+        options.batchSize > 1000
+      ) {
+        throw new Error("Invalid Telegram inbox sanitize batch size");
+      }
+      if (
+        !Number.isInteger(options.retryGraceSeconds) ||
+        options.retryGraceSeconds < 1 ||
+        options.retryGraceSeconds > 30 * 86_400
+      ) {
+        throw new Error("Invalid Telegram inbox retry grace");
+      }
+      const result = await sql<{ id: string }>`
+        with candidates as (
+          select id
+          from webhook_inbox
+          where source = 'telegram'
+            and not (envelope ? 'redactedAt')
+            and (
+              processing_status in ('PROCESSED', 'DEAD')
+              or received_at < now() - make_interval(secs => ${options.retryGraceSeconds})
+            )
+          order by received_at, id
+          for update skip locked
+          limit ${options.batchSize}
+        )
+        update webhook_inbox w
+        set envelope = ${redactEnvelopeSql(sql`w.envelope`)}
+        from candidates c
+        where w.id = c.id
+        returning w.id
+      `.execute(db);
+      return result.rows.length;
+    },
+
     async prune(options) {
+      const staleRetryRetentionDays = options.staleRetryRetentionDays ?? 7;
       if (
         !Number.isInteger(options.processedRetentionDays) ||
         options.processedRetentionDays < 1 ||
         !Number.isInteger(options.deadRetentionDays) ||
         options.deadRetentionDays < options.processedRetentionDays ||
+        !Number.isInteger(staleRetryRetentionDays) ||
+        staleRetryRetentionDays < 1 ||
         !Number.isInteger(options.batchSize) ||
         options.batchSize < 1 ||
         options.batchSize > 1000
       ) {
         throw new Error("Invalid Telegram inbox retention policy");
       }
+      // Source-scoped to `telegram` on purpose: SePay reconciliation evidence lives in
+      // the same table and is never pruned from here.
       const deleted = await sql<{ id: string }>`
         with expired as (
           select id
@@ -308,8 +461,11 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
               or
               (processing_status = 'DEAD' and dead_lettered_at <
                 now() - make_interval(days => ${options.deadRetentionDays}))
+              or
+              (processing_status = 'RETRY' and received_at <
+                now() - make_interval(days => ${staleRetryRetentionDays}))
             )
-          order by coalesce(processed_at, dead_lettered_at), id
+          order by coalesce(processed_at, dead_lettered_at, received_at), id
           for update skip locked
           limit ${options.batchSize}
         )
@@ -431,6 +587,7 @@ export async function processTelegramInboxBatch(input: {
           errorCode: "RATE_LIMITED",
           maxAttempts: input.maxAttempts ?? 10,
           retryAfterSeconds: budget.retryAfterSeconds,
+          countsTowardBudget: false,
         });
         if (state === "STALE") result.stale += 1;
         else result.throttled += 1;
@@ -526,7 +683,7 @@ function mapClaim(row: StoredInboxRow): TelegramInboxClaim {
   return {
     id: row.id,
     sourceEventId: row.source_event_id,
-    envelope: row.envelope,
+    envelope: { ...row.envelope, receivedAt: new Date(row.received_at).toISOString() },
     owner: row.claimed_by,
     generation: Number(row.claim_generation),
     attemptCount: row.attempt_count,

@@ -217,6 +217,43 @@ function buildEditReplyMarkup(replyMarkup: SendReplyMarkup): EditReplyMarkup {
   return new InlineKeyboard();
 }
 
+/**
+ * Prompt sent immediately before the persistent customer keyboard.
+ *
+ * Telegram allows exactly one `reply_markup` per message, so a screen carrying both context
+ * inline buttons and `MAIN_REPLY_KEYBOARD` cannot deliver the keyboard on that same message —
+ * and the keyboard is the part that survives navigation. It therefore rides a second,
+ * deliberately minimal message, and only when a NEW message is created (never on an edit).
+ */
+const PERSISTENT_KEYBOARD_PROMPT =
+  "⌨️ Bàn phím nhanh ở dưới: Mua hàng · Đơn hàng · Tài khoản · Nạp ví · Bảo hành · Hỗ trợ";
+
+/** Markup for the follow-up keyboard message, or null when this screen needs none. */
+function pendingReplyKeyboardMarkup(message: PresentedMessage): ReplyKeyboardMarkup | null {
+  if (message.buttons.length === 0 || !message.replyKeyboard) return null;
+  return buildReplyKeyboard(message.replyKeyboard);
+}
+
+/** Deliver the persistent customer keyboard on its own message after a new screen is created. */
+async function sendPersistentKeyboard(
+  input: { chatId: string; messageThreadId?: number | null },
+  markup: ReplyKeyboardMarkup,
+  api: TelegramApi,
+  trace: TelegramResponderTrace | undefined,
+): Promise<void> {
+  const result = await callTelegram("sendMessage", () =>
+    api.sendMessage(input.chatId, PERSISTENT_KEYBOARD_PROMPT, {
+      reply_markup: markup,
+      ...(input.messageThreadId ? { message_thread_id: input.messageThreadId } : {}),
+    }),
+  );
+  traceTelegram(trace, {
+    method: "sendMessage",
+    persistent_keyboard: true,
+    ...summarizeTelegramResult(result),
+  });
+}
+
 function telegramFileIds(result: unknown): { fileId: string; fileUniqueId: string | null } {
   if (!result || typeof result !== "object" || !("document" in result))
     throw new Error("Telegram document response missing");
@@ -383,6 +420,7 @@ export function createGrammyResponder(
       }
       const replyMarkup = buildReplyMarkup(input.message);
       const editReplyMarkup = buildEditReplyMarkup(replyMarkup);
+      const pendingKeyboard = pendingReplyKeyboardMarkup(input.message);
       traceTelegram(trace, {
         method: input.message.document
           ? "sendDocument"
@@ -405,6 +443,8 @@ export function createGrammyResponder(
           }),
         );
         traceTelegram(trace, { method: "sendDocument", ...summarizeTelegramResult(result) });
+        if (pendingKeyboard)
+          await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
         return;
       }
       if (input.message.photo && input.messageId) {
@@ -434,6 +474,8 @@ export function createGrammyResponder(
           }),
         );
         traceTelegram(trace, { method: "sendPhoto", ...summarizeTelegramResult(result) });
+        if (pendingKeyboard)
+          await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
         return;
       }
       if (input.messageId) {
@@ -457,6 +499,7 @@ export function createGrammyResponder(
         }),
       );
       traceTelegram(trace, { method: "sendMessage", ...summarizeTelegramResult(result) });
+      if (pendingKeyboard) await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
     },
   };
 }

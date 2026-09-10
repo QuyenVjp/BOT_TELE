@@ -82,14 +82,15 @@ describe("createGrammyResponder admin keyboards", () => {
   });
 
   it("keeps /start URL buttons when storefront also has a reply keyboard", async () => {
-    const calls: unknown[][] = [];
+    const sendCalls: unknown[][] = [];
+    const editCalls: unknown[][] = [];
     const api = {
       sendMessage: vi.fn(async (...args: unknown[]) => {
-        calls.push(args);
+        sendCalls.push(args);
         return { message_id: 4 };
       }),
       editMessageText: vi.fn(async (...args: unknown[]) => {
-        calls.push(args);
+        editCalls.push(args);
         return true;
       }),
       sendPhoto: vi.fn(),
@@ -109,10 +110,10 @@ describe("createGrammyResponder admin keyboards", () => {
       message,
     });
 
-    const sendOptions = calls[0]?.at(-1) as {
+    const sendOptions = sendCalls[0]?.at(-1) as {
       reply_markup?: { inline_keyboard?: Array<Array<{ text: string; url?: string }>> };
     };
-    const editOptions = calls[1]?.at(-1) as {
+    const editOptions = editCalls[0]?.at(-1) as {
       reply_markup?: { inline_keyboard?: Array<Array<{ text: string; url?: string }>> };
     };
     for (const options of [sendOptions, editOptions]) {
@@ -125,6 +126,51 @@ describe("createGrammyResponder admin keyboards", () => {
       );
       expect(buttons.every((button) => !button.url || !("callback_data" in button))).toBe(true);
     }
+  });
+
+  it("delivers the persistent customer keyboard on a follow-up message for /start only", async () => {
+    const sendCalls: unknown[][] = [];
+    const editCalls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(async (...args: unknown[]) => {
+        sendCalls.push(args);
+        return { message_id: 4 };
+      }),
+      editMessageText: vi.fn(async (...args: unknown[]) => {
+        editCalls.push(args);
+        return true;
+      }),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const message = presentStorefront({ actorName: "An", isRootAdmin: false });
+
+    await responder.send({ chatId: "customer-chat", messageId: null, message });
+
+    expect(sendCalls).toHaveLength(2);
+    const keyboardOptions = sendCalls[1]?.at(-1) as {
+      reply_markup?: {
+        keyboard?: Array<Array<{ text: string }>>;
+        resize_keyboard?: boolean;
+        one_time_keyboard?: boolean;
+      };
+    };
+    expect(keyboardOptions.reply_markup?.keyboard?.flat().map((button) => button.text)).toEqual([
+      "🛒 Mua hàng",
+      "🧾 Đơn hàng",
+      "👤 Tài khoản",
+      "💰 Nạp ví",
+      "🛡 Bảo hành",
+      "💬 Hỗ trợ",
+    ]);
+    expect(keyboardOptions.reply_markup?.resize_keyboard).toBe(true);
+    expect(keyboardOptions.reply_markup?.one_time_keyboard).not.toBe(true);
+
+    // An edit repaints the screen the user is already on and must never re-send the keyboard.
+    await responder.send({ chatId: "customer-chat", messageId: "42", message });
+    expect(editCalls).toHaveLength(1);
+    expect(sendCalls).toHaveLength(2);
   });
 
   it("renders contact-request reply keyboard for the account screen", async () => {

@@ -118,6 +118,24 @@ export const envSchema = z.object({
 
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(10),
+
+  /**
+   * Telegram inbox retention. Raw update envelopes can carry admin-pasted inventory
+   * credentials, so they are redacted down to delivery metadata as soon as they are
+   * durably processed (or dead-lettered, or aged past the retry grace) and the rows
+   * themselves are pruned on a bounded schedule. SePay rows in the same table are
+   * never touched by these jobs.
+   */
+  TELEGRAM_INBOX_PROCESSED_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(30),
+  TELEGRAM_INBOX_DEAD_RETENTION_DAYS: z.coerce.number().int().min(1).max(365).default(90),
+  TELEGRAM_INBOX_STALE_RETRY_RETENTION_DAYS: z.coerce.number().int().min(1).max(90).default(7),
+  TELEGRAM_INBOX_FAILED_PAYLOAD_GRACE_MINUTES: z.coerce
+    .number()
+    .int()
+    .min(1)
+    .max(10_080)
+    .default(60),
+  TELEGRAM_INBOX_PRUNE_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
 });
 
 export type Env = z.infer<typeof envSchema>;

@@ -55,7 +55,10 @@ import type {
 import type { PresentedMessage } from "./bot/presenters/catalog.js";
 import type { WalletAccount } from "./modules/wallet/ledger.js";
 import type { Vault } from "./infrastructure/vault/port.js";
-import { pruneTelegramUsernameData } from "./infrastructure/inbox/telegram.js";
+import {
+  pruneTelegramUsernameData,
+  createPostgresTelegramInbox,
+} from "./infrastructure/inbox/telegram.js";
 import type { SePayReconciliationPort } from "./modules/payments/reconciliation.js";
 import type { SupplierPort } from "./modules/supplier/port.js";
 import type { RecoveryTelemetry } from "./modules/recovery-result.js";
@@ -131,9 +134,27 @@ export interface RecoveryCycleResult {
   notificationHandoffs: RecoveryTelemetry;
   deliveryCapabilities: RecoveryTelemetry;
   usernamePrivacy: { observationsDeleted: number; identitiesCleared: number };
+  inboxRetention: { payloadsRedacted: number; rowsPruned: number };
   sePay: RecoveryTelemetry | null;
   supplier: RecoveryTelemetry | null;
 }
+
+/** Conservative, documented retention defaults for the Telegram inbox. */
+export const DEFAULT_TELEGRAM_INBOX_RETENTION = {
+  processedRetentionDays: 30,
+  deadRetentionDays: 90,
+  staleRetryRetentionDays: 7,
+  failedPayloadGraceSeconds: 3600,
+  batchSize: 200,
+} as const;
+
+export type TelegramInboxRetention = {
+  processedRetentionDays: number;
+  deadRetentionDays: number;
+  staleRetryRetentionDays: number;
+  failedPayloadGraceSeconds: number;
+  batchSize: number;
+};
 
 export async function runRecoveryJobsOnce(input: {
   db: Db;
@@ -142,8 +163,10 @@ export async function runRecoveryJobsOnce(input: {
   sePayPort: SePayReconciliationPort | null;
   supplierPort: SupplierPort | null;
   vault: Vault;
+  inboxRetention?: Partial<TelegramInboxRetention>;
 }): Promise<RecoveryCycleResult> {
   const now = input.now ?? new Date();
+  const inboxRetention = { ...DEFAULT_TELEGRAM_INBOX_RETENTION, ...input.inboxRetention };
   const orders = await recoverExpiredOrdersBatch(input.db, { batchSize: input.batchSize, now });
   const reservations = await recoverStaleReservationsBatch(input.db, {
     batchSize: input.batchSize,
@@ -167,6 +190,20 @@ export async function runRecoveryJobsOnce(input: {
     retentionDays: 30,
     now,
   });
+  // Admin inventory imports paste credentials into message text. The envelope is redacted
+  // at the moment of successful/failed processing, and this job catches everything else:
+  // historic rows, and in-flight rows that aged past the grace window.
+  const inbox = createPostgresTelegramInbox(input.db);
+  const payloadsRedacted = await inbox.sanitizePayloads({
+    batchSize: inboxRetention.batchSize,
+    retryGraceSeconds: inboxRetention.failedPayloadGraceSeconds,
+  });
+  const rowsPruned = await inbox.prune({
+    processedRetentionDays: inboxRetention.processedRetentionDays,
+    deadRetentionDays: inboxRetention.deadRetentionDays,
+    staleRetryRetentionDays: inboxRetention.staleRetryRetentionDays,
+    batchSize: inboxRetention.batchSize,
+  });
   const sePay = input.sePayPort
     ? await recoverSePayBatch(input.db, { batchSize: input.batchSize, now, port: input.sePayPort })
     : null;
@@ -185,6 +222,7 @@ export async function runRecoveryJobsOnce(input: {
     notificationHandoffs,
     deliveryCapabilities,
     usernamePrivacy,
+    inboxRetention: { payloadsRedacted, rowsPruned },
     sePay,
     supplier,
   };
@@ -734,6 +772,7 @@ async function bootstrap(): Promise<void> {
   } = await import("./modules/wallet/topup.js");
   const { createWalletPurchaseService } = await import("./modules/wallet/purchase.js");
   const { createTelegramDomainDispatcher } = await import("./bot/callbacks/telegram-dispatch.js");
+  const { createPostgresUiSurfaceRegistry } = await import("./bot/ui-surface.js");
   const { createGrammyDocumentSender, createGrammyResponder, ensureTelegramCommandMenu } =
     await import("./bot/grammy-responder.js");
   const { createSearchParser } = await import("./modules/catalog/search-parser-adapter.js");
@@ -1189,6 +1228,7 @@ async function bootstrap(): Promise<void> {
     codec: callbackCodec,
     resolveCustomerId,
     catalog,
+    uiSurface: createPostgresUiSurfaceRegistry(dbHandle.db),
     checkout,
     history,
     support,
@@ -5175,6 +5215,13 @@ async function bootstrap(): Promise<void> {
       sePayPort: sePayRecoveryPort,
       supplierPort: supplier,
       vault,
+      inboxRetention: {
+        processedRetentionDays: config.TELEGRAM_INBOX_PROCESSED_RETENTION_DAYS,
+        deadRetentionDays: config.TELEGRAM_INBOX_DEAD_RETENTION_DAYS,
+        staleRetryRetentionDays: config.TELEGRAM_INBOX_STALE_RETRY_RETENTION_DAYS,
+        failedPayloadGraceSeconds: config.TELEGRAM_INBOX_FAILED_PAYLOAD_GRACE_MINUTES * 60,
+        batchSize: config.TELEGRAM_INBOX_PRUNE_BATCH_SIZE,
+      },
     });
     logger.info(
       {

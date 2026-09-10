@@ -758,6 +758,13 @@ export interface TelegramDomainDispatcherDeps {
       },
     ): Promise<void>;
   };
+  /**
+   * Supersession guard for in-place Telegram surfaces. When absent the dispatcher renders
+   * unconditionally (unit dispatchers that never edit a live screen).
+   */
+  uiSurface?: {
+    claim(input: { chatId: string; messageId: string; eventReceivedAt: Date }): Promise<boolean>;
+  };
   observeCallback?: (event: {
     ackMs: number | null;
     serverIssueAckMs?: number | null;
@@ -936,11 +943,13 @@ export function createTelegramDomainDispatcher(
           telegramUserId: envelope.actorUserId,
           resolveOrderId: deps.resolveOrderIdByNumber,
         });
-        await deps.responder.send({
-          chatId: envelope.chatId,
-          messageId: envelope.messageId,
-          message: sealedEarly,
-        });
+        if (await isRenderCurrent(deps, envelope)) {
+          await deps.responder.send({
+            chatId: envelope.chatId,
+            messageId: envelope.messageId,
+            message: sealedEarly,
+          });
+        }
         deps.observeCallback?.({
           ackMs,
           renderMs: Date.now() - startedAt,
@@ -2280,14 +2289,16 @@ export function createTelegramDomainDispatcher(
         telegramUserId: envelope.actorUserId,
         resolveOrderId: deps.resolveOrderIdByNumber,
       });
-      await deps.responder.send({
-        chatId: envelope.chatId,
-        messageId: envelope.messageId,
-        ...(envelope.callbackQueryId && !acked
-          ? { callbackQueryId: envelope.callbackQueryId }
-          : {}),
-        message: sealed,
-      });
+      if (await isRenderCurrent(deps, envelope)) {
+        await deps.responder.send({
+          chatId: envelope.chatId,
+          messageId: envelope.messageId,
+          ...(envelope.callbackQueryId && !acked
+            ? { callbackQueryId: envelope.callbackQueryId }
+            : {}),
+          message: sealed,
+        });
+      }
       if (envelope.callbackQueryId) {
         deps.observeCallback?.({
           ackMs,
@@ -2301,6 +2312,28 @@ export function createTelegramDomainDispatcher(
 
 function normalizeTelegramCommand(command?: string): string | undefined {
   return command?.trim().toLowerCase();
+}
+
+/**
+ * True when this envelope may paint the message it was triggered from.
+ *
+ * A failed callback is retried with backoff and keeps its original `receivedAt`; by then the
+ * operator may have navigated that same message several screens forward. Rendering anyway
+ * would replace the current screen with stale output, so the surface registry rejects it.
+ * The callback query is still acknowledged — only the repaint is dropped.
+ */
+async function isRenderCurrent(
+  deps: TelegramDomainDispatcherDeps,
+  envelope: TelegramCommandEnvelope,
+): Promise<boolean> {
+  if (!deps.uiSurface || !envelope.messageId || !envelope.receivedAt) return true;
+  const receivedAt = new Date(envelope.receivedAt);
+  if (Number.isNaN(receivedAt.getTime())) return true;
+  return deps.uiSurface.claim({
+    chatId: envelope.chatId,
+    messageId: envelope.messageId,
+    eventReceivedAt: receivedAt,
+  });
 }
 
 function actionContext(
