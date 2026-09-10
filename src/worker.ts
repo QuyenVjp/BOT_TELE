@@ -5291,11 +5291,13 @@ async function bootstrap(): Promise<void> {
             kind: "WIZARD_DESC_CUSTOM",
             payload: { field: input.fieldKey },
           });
+          const field = wizardDescriptionField(input.fieldKey);
+          const existing = field
+            ? (current as unknown as Record<string, unknown>)[field.key]
+            : undefined;
           return presentWizardDescriptionFieldPrompt(
             input.fieldKey,
-            typeof current[wizardDescriptionField(input.fieldKey)!.key] === "string"
-              ? (current[wizardDescriptionField(input.fieldKey)!.key] as string)
-              : undefined,
+            typeof existing === "string" ? existing : undefined,
           );
         },
         async descriptionFieldsDone(input) {

@@ -337,6 +337,15 @@ export const WIZARD_DESCRIPTION_FIELDS = [
   { key: "warrantyVi", label: "🛡 Bảo hành", prompt: "Chính sách bảo hành." },
   { key: "deliveryEtaVi", label: "⏱ Thời gian giao", prompt: "Dự kiến giao hàng." },
   { key: "termsVi", label: "📄 Điều khoản", prompt: "Điều khoản / lưu ý." },
+] as const;
+
+export type WizardDescriptionFieldKey = (typeof WIZARD_DESCRIPTION_FIELDS)[number]["key"];
+
+/**
+ * Warranty prose (goal §60). Kept out of the step-5 content menu: it belongs to the warranty
+ * settings, and the prompt mechanism is shared so there is still one way to enter a field.
+ */
+export const WIZARD_WARRANTY_TEXT_FIELDS = [
   {
     key: "warrantyCoverageVi",
     label: "🛡 Phạm vi bảo hành",
@@ -349,12 +358,12 @@ export const WIZARD_DESCRIPTION_FIELDS = [
   },
 ] as const;
 
-export type WizardDescriptionFieldKey = (typeof WIZARD_DESCRIPTION_FIELDS)[number]["key"];
-
 export function wizardDescriptionField(
   key: string,
-): (typeof WIZARD_DESCRIPTION_FIELDS)[number] | undefined {
-  return WIZARD_DESCRIPTION_FIELDS.find((field) => field.key === key);
+): { key: string; label: string; prompt: string } | undefined {
+  const content = WIZARD_DESCRIPTION_FIELDS.find((field) => field.key === key);
+  if (content) return content;
+  return WIZARD_WARRANTY_TEXT_FIELDS.find((field) => field.key === key);
 }
 
 /** The field menu: one row per field, marked filled, with a way forward and back. */
