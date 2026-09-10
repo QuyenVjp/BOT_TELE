@@ -223,7 +223,7 @@ export function createPostgresSePayInbox(db: Db): SePayInbox {
         set mutation_count = mutation_count + 1,
             last_mutation_at = now(),
             last_error_code = 'DUPLICATE_MUTATION',
-            last_error_detail = 'SePay sent a different payload for an event id already recorded' 
+            last_error_detail = 'SePay sent a different payload for an event id already recorded'
         where id = ${row.id}
         `.execute(trx);
         await sql`
