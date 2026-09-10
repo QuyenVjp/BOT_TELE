@@ -22,7 +22,7 @@ import type { TelegramCommandEnvelope } from "../../infrastructure/inbox/telegra
 import type { CallbackTokenCodec, VerifiedCallbackToken } from "../callback-codec.js";
 import { sealPresentedMessageCallbacks } from "../callback-sealer.js";
 import { SUPPORT_REASON_CODES } from "../../modules/support/domain.js";
-import type { InlineQueryResultArticle } from "../grammy-responder.js";
+import type { InlineQueryResultArticle, SentTelegramMessage } from "../grammy-responder.js";
 
 export type TelegramBuyNowDispatchResult =
   { handled: false } | { handled: true; callbackQueryId: string; message: PresentedMessage };
@@ -746,7 +746,7 @@ export interface TelegramDomainDispatcherDeps {
       callbackQueryId?: string;
       message: PresentedMessage;
       messageThreadId?: number | null;
-    }): Promise<void>;
+    }): Promise<SentTelegramMessage | null>;
     answerInlineQuery?(
       inlineQueryId: string,
       results: InlineQueryResultArticle[],

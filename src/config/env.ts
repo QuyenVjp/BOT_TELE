@@ -134,7 +134,7 @@ export const envSchema = z.object({
     .int()
     .min(1)
     .max(10_080)
-    .default(60),
+    .default(10),
   TELEGRAM_INBOX_PRUNE_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
 });
 

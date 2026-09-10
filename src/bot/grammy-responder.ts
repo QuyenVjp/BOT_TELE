@@ -31,15 +31,26 @@ export interface InlineQueryResultArticle {
   thumb_url?: string;
 }
 
+/** Identity of the Telegram message a `send` created or edited. */
+export interface SentTelegramMessage {
+  chatId: string;
+  messageId: string;
+}
+
 export interface TelegramResponder {
   ack?(callbackQueryId: string): Promise<void>;
+  /**
+   * Create or edit a message. Resolves to the resulting Telegram message identity so callers
+   * can persist it (a durable panel must remember the id it owns), or `null` when the message
+   * was left untouched (nothing to change).
+   */
   send(input: {
     chatId: string;
     messageId: string | null;
     callbackQueryId?: string;
     message: PresentedMessage;
     messageThreadId?: number | null;
-  }): Promise<void>;
+  }): Promise<SentTelegramMessage | null>;
   answerInlineQuery?(
     inlineQueryId: string,
     results: InlineQueryResultArticle[],
@@ -255,6 +266,18 @@ async function sendPersistentKeyboard(
   });
 }
 
+/**
+ * Read the Bot API `Message` identity out of a send/edit result. Callers persist this (a
+ * durable panel owns exactly one message id); a missing id would otherwise be silently
+ * forgotten and the panel would be reposted on the next update.
+ */
+function sentMessage(chatId: string, result: unknown): SentTelegramMessage | null {
+  if (!result || typeof result !== "object" || !("message_id" in result)) return null;
+  const messageId: unknown = result.message_id;
+  if (typeof messageId !== "number" || !Number.isInteger(messageId)) return null;
+  return { chatId, messageId: String(messageId) };
+}
+
 function telegramFileIds(result: unknown): { fileId: string; fileUniqueId: string | null } {
   if (!result || typeof result !== "object" || !("document" in result))
     throw new Error("Telegram document response missing");
@@ -422,6 +445,10 @@ export function createGrammyResponder(
       const replyMarkup = buildReplyMarkup(input.message);
       const editReplyMarkup = buildEditReplyMarkup(replyMarkup);
       const pendingKeyboard = pendingReplyKeyboardMarkup(input.message);
+      // An edit that Telegram rejects as "not modified" still leaves the caller owning that
+      // message, so it is reported back rather than treated as a no-op.
+      const unchanged = (): SentTelegramMessage | null =>
+        input.messageId ? { chatId: input.chatId, messageId: input.messageId } : null;
       traceTelegram(trace, {
         method: input.message.document
           ? "sendDocument"
@@ -446,7 +473,7 @@ export function createGrammyResponder(
         traceTelegram(trace, { method: "sendDocument", ...summarizeTelegramResult(result) });
         if (pendingKeyboard)
           await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
-        return;
+        return sentMessage(input.chatId, result);
       }
       if (input.message.photo && input.messageId) {
         try {
@@ -461,9 +488,9 @@ export function createGrammyResponder(
             ),
           );
           traceTelegram(trace, { method: "editMessageMedia", ...summarizeTelegramResult(result) });
-          return;
+          return sentMessage(input.chatId, result) ?? unchanged();
         } catch (error) {
-          if (classifyTelegramError(error) === "message-not-modified") return;
+          if (classifyTelegramError(error) === "message-not-modified") return unchanged();
           if (classifyTelegramError(error) !== "non-editable-or-missing") throw error;
         }
       }
@@ -477,7 +504,7 @@ export function createGrammyResponder(
         traceTelegram(trace, { method: "sendPhoto", ...summarizeTelegramResult(result) });
         if (pendingKeyboard)
           await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
-        return;
+        return sentMessage(input.chatId, result);
       }
       if (input.messageId) {
         try {
@@ -487,9 +514,9 @@ export function createGrammyResponder(
             }),
           );
           traceTelegram(trace, { method: "editMessageText", ...summarizeTelegramResult(result) });
-          return;
+          return sentMessage(input.chatId, result) ?? unchanged();
         } catch (error) {
-          if (classifyTelegramError(error) === "message-not-modified") return;
+          if (classifyTelegramError(error) === "message-not-modified") return unchanged();
           if (classifyTelegramError(error) !== "non-editable-or-missing") throw error;
         }
       }
@@ -501,6 +528,7 @@ export function createGrammyResponder(
       );
       traceTelegram(trace, { method: "sendMessage", ...summarizeTelegramResult(result) });
       if (pendingKeyboard) await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
+      return sentMessage(input.chatId, result);
     },
   };
 }

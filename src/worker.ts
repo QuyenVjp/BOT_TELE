@@ -144,7 +144,7 @@ export const DEFAULT_TELEGRAM_INBOX_RETENTION = {
   processedRetentionDays: 30,
   deadRetentionDays: 90,
   staleRetryRetentionDays: 7,
-  failedPayloadGraceSeconds: 3600,
+  failedPayloadGraceSeconds: 600,
   batchSize: 200,
 } as const;
 
@@ -781,6 +781,7 @@ async function bootstrap(): Promise<void> {
     listSocialProofCandidates,
     evaluateSocialProofCandidate,
   } = await import("./modules/group/publication.js");
+  const { publishShopPanel } = await import("./modules/group/shop-panel.js");
   const { createGrammyDocumentSender, createGrammyResponder, ensureTelegramCommandMenu } =
     await import("./bot/grammy-responder.js");
   const { createSearchParser } = await import("./modules/catalog/search-parser-adapter.js");
@@ -4884,28 +4885,31 @@ async function bootstrap(): Promise<void> {
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const settings = await getGroupCommerceSettings(dbHandle.db);
         if (input.action === "refresh_pin") {
-          const panel = presentGroupShopPanel({
-            botUsername: BOT_USERNAME,
-          });
-          if (settings.shop_panel_message_id && telegramResponder.send) {
-            try {
-              await telegramResponder.send({
-                chatId: settings.group_chat_id,
-                messageId: settings.shop_panel_message_id,
-                message: panel,
-              });
-            } catch {
-              // fall through to send new
-            }
-          } else if (telegramResponder.send) {
-            await telegramResponder.send({
-              chatId: settings.group_chat_id,
-              messageId: null,
-              message: panel,
-            });
+          if (!telegramResponder.send) {
+            return {
+              text: "❌ Bot chưa kết nối được Telegram. Thử lại sau.",
+              buttons: [[{ text: "↩️ Quay lại Cộng đồng", callbackData: "admin:community" }]],
+            };
           }
+          // Create-once, edit-forever: the identity comes from the Bot API response and is
+          // persisted, so later refreshes edit the same message instead of reposting it.
+          const panel = await publishShopPanel(dbHandle.db, {
+            send: ({ chatId, messageId, message }) =>
+              telegramResponder.send!({ chatId, messageId, message }),
+            botUsername: BOT_USERNAME,
+            updatedBy: input.telegramUserId,
+          });
           return {
-            text: "✅ Đã làm mới bảng ghim shop trong nhóm cộng đồng.",
+            text: [
+              panel.created ? "✅ Đã tạo bảng shop trong nhóm cộng đồng." : null,
+              panel.replaced ? "♻️ Bảng cũ không còn nên đã tạo bảng thay thế." : null,
+              !panel.created && !panel.replaced ? "✅ Đã cập nhật bảng shop hiện có." : null,
+              "",
+              `Message ID: ${panel.messageId}`,
+              "Ghim thủ công trong Telegram nếu muốn (bot không có quyền ghim).",
+            ]
+              .filter((line) => line !== null)
+              .join("\n"),
             buttons: [[{ text: "↩️ Quay lại Cộng đồng", callbackData: "admin:community" }]],
           };
         }

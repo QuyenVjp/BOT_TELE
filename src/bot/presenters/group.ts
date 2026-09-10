@@ -22,11 +22,11 @@ export function presentGroupShopPanel(options: GroupShopPanelOptions): Presented
     buttons: [
       [
         { text: "🔥 Sản phẩm hot", callbackData: "grp:hot" },
-        { text: "🔎 Tìm trong nhóm", switchInlineQueryCurrentChat: "", callbackData: "" },
+        { text: "🔎 Xem sản phẩm", switchInlineQueryCurrentChat: "", callbackData: "" },
       ],
       [
         {
-          text: "🛒 Mở Shop riêng",
+          text: "🛒 Mở Shop",
           url: `https://t.me/${options.botUsername}?start=shop`,
           callbackData: "",
         },

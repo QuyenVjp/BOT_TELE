@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
-import { createGrammyResponder } from "../../src/bot/grammy-responder.js";
+import { GrammyError } from "grammy";
+import { createGrammyResponder, TelegramRetryableError } from "../../src/bot/grammy-responder.js";
 import { presentAdminMenu } from "../../src/bot/presenters/admin.js";
 import {
   presentCustomerAccountPrompt,
@@ -194,6 +195,115 @@ describe("createGrammyResponder admin keyboards", () => {
     });
 
     expect(sendCalls).toHaveLength(1);
+  });
+
+  it("returns the message identity Telegram assigned to a new send", async () => {
+    const api = {
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 909 }),
+      editMessageText: vi.fn(),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    const sent = await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: presentStorefront({ actorName: "An", isRootAdmin: false }),
+    });
+
+    expect(sent).toEqual({ chatId: "customer-chat", messageId: "909" });
+  });
+
+  it("reports the edited message identity, including a no-op edit", async () => {
+    const api = {
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 910 }),
+      editMessageText: vi.fn().mockResolvedValue({ message_id: 42 }),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const message = presentStorefront({ actorName: "An", isRootAdmin: false });
+
+    expect(await responder.send({ chatId: "c", messageId: "42", message })).toEqual({
+      chatId: "c",
+      messageId: "42",
+    });
+
+    api.editMessageText.mockRejectedValue(
+      new GrammyError(
+        "Call to 'editMessageText' failed!",
+        { ok: false, error_code: 400, description: "Bad Request: message is not modified" },
+        "editMessageText",
+        {},
+      ),
+    );
+    expect(await responder.send({ chatId: "c", messageId: "42", message })).toEqual({
+      chatId: "c",
+      messageId: "42",
+    });
+  });
+
+  it("returns the replacement identity when Telegram no longer holds the edited message", async () => {
+    const api = {
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 911 }),
+      editMessageText: vi
+        .fn()
+        .mockRejectedValue(
+          new GrammyError(
+            "Call to 'editMessageText' failed!",
+            { ok: false, error_code: 400, description: "Bad Request: message to edit not found" },
+            "editMessageText",
+            {},
+          ),
+        ),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    const sent = await responder.send({
+      chatId: "c",
+      messageId: "42",
+      message: presentStorefront({ actorName: "An", isRootAdmin: false }),
+    });
+
+    expect(sent).toEqual({ chatId: "c", messageId: "911" });
+    // The panel itself was re-posted as a new message rather than edited.
+    expect(String(api.sendMessage.mock.calls[0]?.[1])).toContain("TIER20");
+  });
+
+  it("does not silently swallow a transient edit failure", async () => {
+    const api = {
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 912 }),
+      editMessageText: vi.fn().mockRejectedValue(
+        new GrammyError(
+          "Call to 'editMessageText' failed!",
+          {
+            ok: false,
+            error_code: 429,
+            description: "Too Many Requests: retry after 30",
+            parameters: { retry_after: 30 },
+          },
+          "editMessageText",
+          {},
+        ),
+      ),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    const failure = await responder
+      .send({
+        chatId: "c",
+        messageId: "42",
+        message: presentStorefront({ actorName: "An", isRootAdmin: false }),
+      })
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TelegramRetryableError);
+    expect((failure as TelegramRetryableError).retryAfterSeconds).toBe(30);
+    expect(api.sendMessage).not.toHaveBeenCalled();
   });
 
   it("renders contact-request reply keyboard for the account screen", async () => {

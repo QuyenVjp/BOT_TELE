@@ -111,6 +111,7 @@ describe("catalog callback ACK", () => {
     });
     const send = vi.fn(async (_input: { callbackQueryId?: string }) => {
       order.events.push("send");
+      return { chatId: "123456789", messageId: "42" };
     });
     const storefront = vi.fn(async () => ({
       text: `🛒 ${SHOP_NAME}`,

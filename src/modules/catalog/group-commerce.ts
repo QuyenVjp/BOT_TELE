@@ -11,6 +11,7 @@ export interface GroupCommerceSettingsRow {
   group_reply_mode: "MENTION_ONLY" | "PASSIVE_COMMERCE";
   shop_panel_enabled: boolean;
   shop_panel_message_id: string | null;
+  shop_panel_chat_id: string | null;
   shop_panel_version: number;
   welcome_enabled: boolean;
   welcome_cooldown_seconds: number;
@@ -57,6 +58,7 @@ export async function updateGroupCommerceSettings(
       group_reply_mode = ${patch.group_reply_mode ?? current.group_reply_mode},
       shop_panel_enabled = ${patch.shop_panel_enabled ?? current.shop_panel_enabled},
       shop_panel_message_id = ${patch.shop_panel_message_id !== undefined ? patch.shop_panel_message_id : current.shop_panel_message_id},
+      shop_panel_chat_id = ${patch.shop_panel_chat_id !== undefined ? patch.shop_panel_chat_id : current.shop_panel_chat_id},
       shop_panel_version = ${patch.shop_panel_version ?? current.shop_panel_version},
       welcome_enabled = ${patch.welcome_enabled ?? current.welcome_enabled},
       welcome_cooldown_seconds = ${patch.welcome_cooldown_seconds ?? current.welcome_cooldown_seconds},
