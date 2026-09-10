@@ -38,6 +38,7 @@ const ALL_KINDS = Object.keys({
   WIZARD_ADVANCED: true,
   WIZARD_DESC_CUSTOM: true,
   ADMIN_PRODUCT_CONTENT_EDIT: true,
+  WARRANTY_REFUND_ADJUST_PROMPT: true,
 } satisfies Record<AdminStateKind, true>) as AdminStateKind[];
 
 let ctx: PgTestContext;

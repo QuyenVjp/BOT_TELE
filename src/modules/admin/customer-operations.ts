@@ -25,7 +25,9 @@ export type AdminStateKind =
   | "WIZARD_CUSTOM_FIELD"
   | "WIZARD_ADVANCED"
   | "WIZARD_DESC_CUSTOM"
-  | "ADMIN_PRODUCT_CONTENT_EDIT";
+  | "ADMIN_PRODUCT_CONTENT_EDIT"
+  /** Goal §26: the owner types an adjusted refund amount with its reason. */
+  | "WARRANTY_REFUND_ADJUST_PROMPT";
 
 export interface AdminCustomerListItem {
   id: string;

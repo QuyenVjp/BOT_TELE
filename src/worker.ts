@@ -45,6 +45,20 @@ import type {
 } from "./bot/presenters/admin.js";
 import type { PresentedMessage } from "./bot/presenters/catalog.js";
 import {
+  presentAdminRefundConfirm,
+  presentAdminRefundPaidConfirm,
+  presentAdminRefundPayout,
+  presentAdminRefundQueue,
+  presentAdminWarrantyActionDone,
+  presentAdminWarrantyClaim,
+  presentAdminWarrantyQueue,
+  presentAdminRefundAdjustPrompt,
+  presentAdminWarrantyRejectReason,
+  type AdminClaimView,
+  type WarrantyQueueRow,
+  type WarrantyQueueView,
+} from "./bot/presenters/warranty-admin.js";
+import {
   presentWarrantyClaim,
   presentWarrantyClaimSubmitted,
   presentWarrantyExpired,
@@ -54,8 +68,14 @@ import {
   presentWarrantyReportPreview,
 } from "./bot/presenters/warranty.js";
 import {
+  approveClaimRefund,
+  approveClaimReplacement,
   listClaimTimeline,
+  markRefundPaid,
   openWarrantyClaim,
+  rejectClaim,
+  requestClaimInfo,
+  verifyClaimDefect,
   ISSUE_TYPE_LABELS,
   type WarrantyIssueType,
 } from "./modules/warranty/claims.js";
@@ -701,6 +721,222 @@ export async function restockVariantLabel(db: Db, variantId: string): Promise<st
   ).rows[0];
   return row ? `${row.product_name} — ${row.variant_name}` : null;
 }
+
+function adminWarrantyError(text: string): PresentedMessage {
+  return {
+    text,
+    buttons: [
+      [{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }],
+      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+    ],
+  };
+}
+
+/** Every resolution refusal reads as a sentence the owner can act on, never as a code. */
+function adminClaimErrorText(code: string): string {
+  switch (code) {
+    case "NOT_ROOT_ADMIN":
+      return "Chỉ chủ shop mới xử lý được yêu cầu bảo hành.";
+    case "NOT_FOUND":
+      return "Không tìm thấy yêu cầu bảo hành.";
+    case "ILLEGAL_STATE":
+      return "Yêu cầu này đang ở trạng thái khác — mở lại để xem bước tiếp theo.";
+    case "NOT_ALLOWED_BY_POLICY":
+      return "Chính sách của sản phẩm này không cho phép thao tác đó.";
+    case "OUT_OF_STOCK":
+      return "Không còn tài khoản thay thế trong kho.";
+    case "INVALID_REASON":
+      return "Thiếu lý do hoặc số tiền không hợp lệ.";
+    default:
+      return "Không thực hiện được thao tác bảo hành.";
+  }
+}
+
+const WARRANTY_QUEUE_VIEWS: readonly WarrantyQueueView[] = [
+  "new",
+  "verifying",
+  "waiting_customer",
+  "refund_due",
+  "replacement",
+  "done",
+  "rejected",
+  "overdue",
+];
+
+function isWarrantyQueueView(value: string): value is WarrantyQueueView {
+  return (WARRANTY_QUEUE_VIEWS as readonly string[]).includes(value);
+}
+
+/** Which claim statuses belong to each queue view. */
+const WARRANTY_VIEW_STATUSES: Record<WarrantyQueueView, readonly string[]> = {
+  new: ["SUBMITTED"],
+  verifying: ["TRIAGE", "VERIFIED_DEFECT"],
+  waiting_customer: ["WAITING_CUSTOMER"],
+  refund_due: ["REFUND_APPROVED", "REFUND_DUE"],
+  replacement: ["REPLACEMENT_APPROVED"],
+  done: ["REFUND_PAID", "RESOLVED"],
+  rejected: ["REJECTED", "CANCELLED"],
+  overdue: [],
+};
+
+async function warrantyQueueCounts(db: Db): Promise<Record<WarrantyQueueView, number>> {
+  const counts: Record<WarrantyQueueView, number> = {
+    new: 0,
+    verifying: 0,
+    waiting_customer: 0,
+    refund_due: 0,
+    replacement: 0,
+    done: 0,
+    rejected: 0,
+    overdue: 0,
+  };
+  const grouped = await sql<{ status: string; n: string }>`
+    select status, count(*)::text as n from warranty_claim group by status
+  `.execute(db);
+  for (const row of grouped.rows) {
+    for (const view of WARRANTY_QUEUE_VIEWS) {
+      if (WARRANTY_VIEW_STATUSES[view].includes(row.status)) counts[view] += Number(row.n);
+    }
+  }
+  // Goal §44: a claim waiting on the shop past its review window is called out.
+  const overdue = await sql<{ n: string }>`
+    select count(*)::text as n from warranty_claim
+    where status in ('SUBMITTED', 'TRIAGE') and review_sla_due_at is not null and review_sla_due_at < now()
+  `.execute(db);
+  counts.overdue = Number(overdue.rows[0]?.n ?? 0);
+  counts.new = Math.max(0, counts.new - counts.overdue);
+  return counts;
+}
+
+async function warrantyQueueRows(db: Db, view: WarrantyQueueView): Promise<WarrantyQueueRow[]> {
+  const statuses = [...WARRANTY_VIEW_STATUSES[view]];
+  // Overdue is a filter over the waiting views, and an empty status list is not a valid `= any`.
+  const filter =
+    view === "overdue"
+      ? sql`status in ('SUBMITTED','TRIAGE') and review_sla_due_at is not null and review_sla_due_at < now()`
+      : statuses.length === 0
+        ? sql`false`
+        : sql`status = any(${sql.val(statuses)}::text[])`;
+  const rows = await sql<{
+    id: string;
+    claim_number: string;
+    status: string;
+    customer_id: string;
+    product_name: string;
+    approved_refund_vnd: string | null;
+    calculated_refund_vnd: string;
+  }>`
+    select c.id, c.claim_number, c.status, c.customer_id,
+           coalesce(c.approved_refund_vnd, c.calculated_refund_vnd)::text as approved_refund_vnd,
+           c.calculated_refund_vnd::text as calculated_refund_vnd,
+           p.name_vi as product_name
+    from warranty_claim c
+    join "order" o on o.id = c.order_id
+    join product_variant v on v.id = o.variant_id
+    join product p on p.id = v.product_id
+    where ${filter}
+    order by c.reported_at asc
+    limit 20
+  `.execute(db);
+  return rows.rows.map((row) => ({
+    claimId: row.id,
+    claimNumber: row.claim_number,
+    customerLabel: `Khách ${row.customer_id.slice(-4).toUpperCase()}`,
+    productName: row.product_name,
+    amountVnd: BigInt(row.approved_refund_vnd ?? row.calculated_refund_vnd),
+    statusLabel: row.status,
+  }));
+}
+
+/** Goal §18: one claim with everything the owner decides on. */
+async function loadAdminWarrantyClaim(db: Db, claimId: string): Promise<AdminClaimView | null> {
+  const rows = await sql<{
+    id: string;
+    claim_number: string;
+    status: string;
+    customer_id: string;
+    order_number: string;
+    product_name: string;
+    issue_type: string;
+    reported_at: Date | string;
+    warranty_start: Date | string;
+    warranty_end: Date | string;
+    used_days: number;
+    remaining_days: number;
+    paid_amount_vnd: string;
+    calculated_refund_vnd: string;
+    approved_refund_vnd: string | null;
+    original_asset_id: string | null;
+    coverage_snapshot: string | null;
+    exclusions_snapshot: string | null;
+    refund_bank_name: string | null;
+    refund_account_number: string | null;
+    refund_account_holder: string | null;
+    rejection_reason: string | null;
+  }>`
+    select c.id, c.claim_number, c.status, c.customer_id, o.order_number, p.name_vi as product_name,
+           c.issue_type, c.reported_at, c.warranty_start, c.warranty_end, c.used_days,
+           c.remaining_days, c.paid_amount_vnd::text as paid_amount_vnd,
+           c.calculated_refund_vnd::text as calculated_refund_vnd,
+           c.approved_refund_vnd::text as approved_refund_vnd, c.original_asset_id,
+           c.coverage_snapshot, c.exclusions_snapshot, c.refund_bank_name,
+           c.refund_account_number, c.refund_account_holder, c.rejection_reason
+    from warranty_claim c
+    join "order" o on o.id = c.order_id
+    join product_variant v on v.id = o.variant_id
+    join product p on p.id = v.product_id
+    where c.id = ${claimId}
+    limit 1
+  `.execute(db);
+  const row = rows.rows[0];
+  if (!row) return null;
+  const iso = (value: Date | string) =>
+    value instanceof Date ? value.toISOString() : String(value);
+  const openForDecision = ["SUBMITTED", "TRIAGE", "WAITING_CUSTOMER"].includes(row.status);
+  return {
+    id: row.id,
+    claimNumber: row.claim_number,
+    status: row.status,
+    statusLabel: WARRANTY_STATUS_LABELS[row.status] ?? row.status,
+    customerLabel: `Khách ${row.customer_id.slice(-4).toUpperCase()}`,
+    orderNumber: row.order_number,
+    productName: row.product_name,
+    issueType: row.issue_type as WarrantyIssueType,
+    reportedAt: iso(row.reported_at),
+    warrantyStart: iso(row.warranty_start),
+    warrantyEnd: iso(row.warranty_end),
+    usedDays: row.used_days,
+    remainingDays: row.remaining_days,
+    paidAmountVnd: BigInt(row.paid_amount_vnd),
+    calculatedRefundVnd: BigInt(row.calculated_refund_vnd),
+    approvedRefundVnd: row.approved_refund_vnd === null ? null : BigInt(row.approved_refund_vnd),
+    assetRef: row.original_asset_id ? `#${row.original_asset_id.slice(-8).toUpperCase()}` : null,
+    coverageSnapshot: row.coverage_snapshot,
+    exclusionsSnapshot: row.exclusions_snapshot,
+    bankName: row.refund_bank_name,
+    accountNumber: row.refund_account_number,
+    accountHolder: row.refund_account_holder,
+    rejectionReason: row.rejection_reason,
+    timeline: await listClaimTimeline(db, row.id),
+    canVerify: openForDecision,
+    canReplace: ["VERIFIED_DEFECT"].includes(row.status),
+    canRefund: ["VERIFIED_DEFECT"].includes(row.status),
+  };
+}
+
+const WARRANTY_STATUS_LABELS: Record<string, string> = {
+  SUBMITTED: "Mới",
+  TRIAGE: "Đang kiểm tra",
+  WAITING_CUSTOMER: "Chờ khách",
+  VERIFIED_DEFECT: "Đã xác nhận lỗi",
+  REPLACEMENT_APPROVED: "Đã duyệt đổi hàng",
+  REFUND_APPROVED: "Đã duyệt hoàn tiền",
+  REFUND_DUE: "Chờ chuyển tiền",
+  REFUND_PAID: "Đã hoàn tiền",
+  REJECTED: "Từ chối",
+  RESOLVED: "Đã xử lý",
+  CANCELLED: "Đã huỷ",
+};
 
 /** A warranty screen for a case we cannot serve; never a stack trace or an internal code. */
 function safeWarrantyMessage(text: string): PresentedMessage {
@@ -3427,6 +3663,252 @@ async function bootstrap(): Promise<void> {
           variantName: history.variantName,
           rows: history.rows,
         });
+      },
+      /** Goal §17/§18/§19/§25/§26/§31–§33: the owner's warranty surface. */
+      async warrantyQueue(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: "admin-warranty",
+          reason: "Admin warranty queue",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const view = isWarrantyQueueView(input.view) ? input.view : "new";
+        const counts = await warrantyQueueCounts(dbHandle.db);
+        const rows = await warrantyQueueRows(dbHandle.db, view);
+        return presentAdminWarrantyQueue({ view, counts, rows });
+      },
+      async warrantyClaim(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: input.claimId,
+          reason: "Admin warranty claim access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        return presentAdminWarrantyClaim(claim);
+      },
+      async warrantyVerify(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const result = await verifyClaimDefect({
+          db: dbHandle.db,
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          config: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          claimId: input.claimId,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        return presentAdminWarrantyActionDone({
+          claimNumber: claim?.claimNumber ?? input.claimId,
+          claimId: input.claimId,
+          message: "Đã xác nhận lỗi thuộc phạm vi bảo hành.",
+        });
+      },
+      async warrantyInfo(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const result = await requestClaimInfo({
+          db: dbHandle.db,
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          config: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          claimId: input.claimId,
+          note: "Shop cần bạn bổ sung mô tả hoặc ảnh chụp tình trạng tài khoản.",
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        return presentAdminWarrantyActionDone({
+          claimNumber: claim?.claimNumber ?? input.claimId,
+          claimId: input.claimId,
+          message: "Đã gửi yêu cầu bổ sung thông tin cho khách.",
+        });
+      },
+      async warrantyRejectReason(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        return presentAdminWarrantyRejectReason({
+          claimId: claim.id,
+          claimNumber: claim.claimNumber,
+        });
+      },
+      async warrantyReject(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const reason = decodeURIComponent(input.reason);
+        const result = await rejectClaim({
+          db: dbHandle.db,
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          config: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          claimId: input.claimId,
+          reason,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        return presentAdminWarrantyActionDone({
+          claimNumber: claim?.claimNumber ?? input.claimId,
+          claimId: input.claimId,
+          message: `Đã từ chối: ${reason}`,
+        });
+      },
+      async warrantyReplace(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const result = await approveClaimReplacement({
+          db: dbHandle.db,
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          config: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          claimId: input.claimId,
+          deliveryBaseUrl: config.APP_BASE_URL,
+          bundleTtlSeconds: config.DELIVERY_BUNDLE_TTL_SECONDS,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        return presentAdminWarrantyActionDone({
+          claimNumber: claim?.claimNumber ?? input.claimId,
+          claimId: input.claimId,
+          message: "Đã duyệt đổi tài khoản và gửi thông tin nhận hàng mới cho khách.",
+        });
+      },
+      /** Goal §25: the refund confirmation, with the calculation spelled out before approving. */
+      async warrantyRefund(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        return presentAdminRefundConfirm({
+          claimId: claim.id,
+          claimNumber: claim.claimNumber,
+          paidAmountVnd: claim.paidAmountVnd,
+          warrantyDays: claim.usedDays + claim.remainingDays,
+          usedDays: claim.usedDays,
+          remainingDays: claim.remainingDays,
+          recommendedVnd: claim.calculatedRefundVnd,
+          accountNumber: claim.accountNumber,
+        });
+      },
+      async warrantyRefundConfirm(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const result = await approveClaimRefund({
+          db: dbHandle.db,
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          config: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          claimId: input.claimId,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        return presentAdminWarrantyActionDone({
+          claimNumber: claim?.claimNumber ?? input.claimId,
+          claimId: input.claimId,
+          message:
+            "Đã duyệt hoàn tiền. Shop chuyển khoản thủ công, sau đó xác nhận trong mục Chờ hoàn tiền.",
+        });
+      },
+      async warrantyRefundAdjust(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "WARRANTY_REFUND_ADJUST_PROMPT",
+          payload: { claimId: input.claimId, recommendedVnd: claim.calculatedRefundVnd.toString() },
+        });
+        return presentAdminRefundAdjustPrompt({
+          claimId: input.claimId,
+          recommendedVnd: claim.calculatedRefundVnd,
+        });
+      },
+      async warrantyPayout(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        return presentAdminRefundPayout({
+          claimId: claim.id,
+          claimNumber: claim.claimNumber,
+          customerLabel: claim.customerLabel,
+          productName: claim.productName,
+          amountVnd: claim.approvedRefundVnd ?? claim.calculatedRefundVnd,
+          reason: `Bảo hành — ${claim.remainingDays} ngày chưa sử dụng`,
+          bankName: claim.bankName,
+          accountNumber: claim.accountNumber,
+          accountHolder: claim.accountHolder,
+        });
+      },
+      async warrantyPaid(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        return presentAdminRefundPaidConfirm({
+          claimId: claim.id,
+          claimNumber: claim.claimNumber,
+          amountVnd: claim.approvedRefundVnd ?? claim.calculatedRefundVnd,
+        });
+      },
+      async warrantyPaidConfirm(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const result = await markRefundPaid({
+          db: dbHandle.db,
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          config: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          claimId: input.claimId,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
+        const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
+        return presentAdminWarrantyActionDone({
+          claimNumber: claim?.claimNumber ?? input.claimId,
+          claimId: input.claimId,
+          message: "Đã ghi nhận chuyển khoản. Khách đã được thông báo.",
+        });
+      },
+      async warrantyRefundQueue(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const rows = await warrantyQueueRows(dbHandle.db, "refund_due");
+        return presentAdminRefundQueue(rows);
       },
       async inventoryItems(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");

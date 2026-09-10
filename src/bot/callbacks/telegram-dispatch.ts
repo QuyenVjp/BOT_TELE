@@ -299,6 +299,91 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    /** Warranty (goal: warranty vertical): the owner's queue, claim view and resolutions. */
+    warrantyQueue?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      view: string;
+    }): Promise<PresentedMessage>;
+    warrantyClaim?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyVerify?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyInfo?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyRejectReason?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyReject?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+      reason: string;
+    }): Promise<PresentedMessage>;
+    warrantyReplace?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyRefund?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyRefundConfirm?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyRefundAdjust?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyRefundQueue?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    warrantyPayout?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyPaid?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
+    warrantyPaidConfirm?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+      claimId: string;
+    }): Promise<PresentedMessage>;
     inventoryItems?(input: {
       telegramUserId: string;
       variantId: string;
@@ -1049,6 +1134,15 @@ export function createTelegramDomainDispatcher(
               issueType: issueType ?? "",
               correlationId,
             })
+          : safeError("Bảo hành không khả dụng.");
+      } else if (
+        envelope.callbackData === "admin:warranty" ||
+        envelope.callbackData?.startsWith("admin:warranty:")
+      ) {
+        // Goal §17–§33: the owner's warranty surface. Every handler is root-gated in the worker.
+        const route = envelope.callbackData.slice("admin:warranty".length).replace(/^:/u, "");
+        message = deps.admin?.warrantyQueue
+          ? await routeAdminWarranty(deps.admin, route, envelope, correlationId)
           : safeError("Bảo hành không khả dụng.");
       } else if (
         envelope.callbackData === "delivery:open" ||
@@ -2808,6 +2902,87 @@ async function staleNavigation(
     buttons: home.buttons,
     ...(home.replyKeyboard ? { replyKeyboard: home.replyKeyboard } : {}),
   };
+}
+
+/**
+ * Goal §17–§33: the owner's warranty routes. Every handler is root-gated inside the worker; this
+ * only parses the route so a new screen does not mean another branch in an already long chain.
+ */
+async function routeAdminWarranty(
+  surface: NonNullable<TelegramDomainDispatcherDeps["admin"]>,
+  route: string,
+  envelope: TelegramCommandEnvelope,
+  correlationId: string,
+): Promise<PresentedMessage> {
+  const [head, ...rest] = route.split(":");
+  const claimId = rest[0] ?? "";
+  const actor = { telegramUserId: envelope.actorUserId, chatType: envelope.chatType };
+  const missing = safeError("Bảo hành không khả dụng.");
+  switch (head) {
+    case "view":
+      return surface.warrantyQueue
+        ? surface.warrantyQueue({ ...actor, correlationId, view: claimId })
+        : missing;
+    case "refunds":
+      return surface.warrantyRefundQueue
+        ? surface.warrantyRefundQueue({ ...actor, correlationId })
+        : missing;
+    case "claim":
+      return surface.warrantyClaim
+        ? surface.warrantyClaim({ ...actor, correlationId, claimId })
+        : missing;
+    case "verify":
+      return surface.warrantyVerify
+        ? surface.warrantyVerify({ ...actor, correlationId, claimId })
+        : missing;
+    case "info":
+      return surface.warrantyInfo
+        ? surface.warrantyInfo({ ...actor, correlationId, claimId })
+        : missing;
+    case "reject":
+      return surface.warrantyRejectReason
+        ? surface.warrantyRejectReason({ ...actor, correlationId, claimId })
+        : missing;
+    case "reject-confirm":
+      return surface.warrantyReject && claimId
+        ? surface.warrantyReject({
+            ...actor,
+            correlationId,
+            claimId,
+            reason: rest.slice(1).join(":"),
+          })
+        : missing;
+    case "replace":
+      return surface.warrantyReplace
+        ? surface.warrantyReplace({ ...actor, correlationId, claimId })
+        : missing;
+    case "refund":
+      return surface.warrantyRefund
+        ? surface.warrantyRefund({ ...actor, correlationId, claimId })
+        : missing;
+    case "refund-confirm":
+      return surface.warrantyRefundConfirm
+        ? surface.warrantyRefundConfirm({ ...actor, correlationId, claimId })
+        : missing;
+    case "refund-adjust":
+      return surface.warrantyRefundAdjust
+        ? surface.warrantyRefundAdjust({ ...actor, correlationId, claimId })
+        : missing;
+    case "payout":
+      return surface.warrantyPayout
+        ? surface.warrantyPayout({ ...actor, correlationId, claimId })
+        : missing;
+    case "paid":
+      return surface.warrantyPaid
+        ? surface.warrantyPaid({ ...actor, correlationId, claimId })
+        : missing;
+    case "paid-confirm":
+      return surface.warrantyPaidConfirm
+        ? surface.warrantyPaidConfirm({ ...actor, correlationId, claimId })
+        : missing;
+    default:
+      return missing;
+  }
 }
 
 async function catalogHomeOrSearch(
