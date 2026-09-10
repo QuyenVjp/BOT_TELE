@@ -10,6 +10,7 @@ import {
   presentPreorderPayment,
 } from "../../src/modules/payments/service.js";
 import { classifyPaymentCode } from "../../src/modules/payments/payment-code.js";
+import { isKnownOutboxEventType } from "../../src/infrastructure/outbox/dispatch-policy.js";
 import { presentPreorderPaymentScreen } from "../../src/bot/presenters/payment.js";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
@@ -47,7 +48,7 @@ afterAll(async () => {
 beforeEach(async () => {
   await sql`truncate table outbox_event, payment_allocation, discrepancy, bank_transaction,
     payment_intent, preorder_reservation, digital_asset, product_variant, product, category,
-    customer cascade`.execute(ctx.db);
+    customer_profile_snapshot, customer cascade`.execute(ctx.db);
 });
 
 async function seedPreorderVariant(): Promise<{ customerId: string; variantId: string }> {
@@ -59,6 +60,17 @@ async function seedPreorderVariant(): Promise<{ customerId: string; variantId: s
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi-VN')`.execute(
     ctx.db,
   );
+  // Reachable, so a notice can actually be queued: an unreachable customer has no chat to deliver
+  // to, and the assertion below would pass for the wrong reason.
+  await sql`
+    insert into customer_profile_snapshot (customer_id, chat_id, telegram_user_id, reachable)
+    values (
+      ${customerId},
+      ${String(900_000_000 + Math.floor(Math.random() * 100_000_000))},
+      ${String(900_000_000 + Math.floor(Math.random() * 100_000_000))},
+      true
+    )
+  `.execute(ctx.db);
   await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', 'ai', true, 1)`.execute(
     ctx.db,
   );
@@ -310,5 +322,15 @@ describe("preorder deposit settlement", () => {
     expect(fresh.status).toBe("ALLOCATED");
     expect(fresh.forfeited_at).toBeNull();
     expect(await countRows("outbox_event", sql`event_type = 'PreorderHoldForfeited'`)).toBe(1);
+
+    // The event is only useful if the drain will accept it and the notice will reach the customer:
+    // an unlisted type dead-letters, and the customer whose deposit was kept is told nothing.
+    expect(isKnownOutboxEventType("PreorderHoldForfeited")).toBe(true);
+    expect(isKnownOutboxEventType("PreorderDepositPaid")).toBe(true);
+    expect(isKnownOutboxEventType("PaymentIntentPresented")).toBe(true);
+
+    // The notice itself is wired through warrantyCustomerNotice -> handleNotificationOutboxEvent;
+    // asserting the campaign row here would depend on the notification queue's own reachability
+    // rules rather than on this event, so the allowlist is what this test pins.
   });
 });

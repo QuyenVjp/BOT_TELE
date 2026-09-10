@@ -112,7 +112,12 @@ export function createFulfillmentOutboxHandler(
       event.eventType === "WarrantyClaimRejected" ||
       event.eventType === "WarrantyReplacementApproved" ||
       event.eventType === "WarrantyRefundDue" ||
-      event.eventType === "WarrantyRefundPaid"
+      event.eventType === "WarrantyRefundPaid" ||
+      // Preorder notices: a deposit that was kept, or a reservation the shop had to cancel, is
+      // money the customer must hear about.
+      event.eventType === "PreorderDepositPaid" ||
+      event.eventType === "PreorderHoldForfeited" ||
+      event.eventType === "PreorderShopCancelled"
     ) {
       return handleNotificationOutboxEvent(deps.db, event);
     }

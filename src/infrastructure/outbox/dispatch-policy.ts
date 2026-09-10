@@ -57,6 +57,13 @@ export const KNOWN_OUTBOX_EVENT_TYPES = [
   "WarrantyReplacementApproved",
   "WarrantyRefundDue",
   "WarrantyRefundPaid",
+  // Preorder (goal: deposit / balance legs) and payment-intent presentation. Without these the
+  // drain rejects the row as UNKNOWN_EVENT and dead-letters it — which is how the customer whose
+  // deposit was kept on an expired hold would have learned nothing at all.
+  "PaymentIntentPresented",
+  "PreorderDepositPaid",
+  "PreorderHoldForfeited",
+  "PreorderShopCancelled",
 ] as const;
 
 export type KnownOutboxEventType = (typeof KNOWN_OUTBOX_EVENT_TYPES)[number];

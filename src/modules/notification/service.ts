@@ -844,6 +844,40 @@ function warrantyCustomerNotice(
           "Shop sẽ liên hệ để đổi tài khoản hoặc hoàn tiền.",
         ].join("\n"),
       };
+    // The deposit landed: tell the customer, or their money disappears into silence until they
+    // think to reopen the reservation screen.
+    case "PreorderDepositPaid":
+      return {
+        campaignId: `preorder-deposit-paid:${event.aggregateId}`,
+        customerId,
+        content: [
+          "✅ ĐÃ NHẬN TIỀN CỌC",
+          "",
+          "Shop đã ghi nhận tiền cọc của bạn và giữ suất trong hàng chờ.",
+          "Shop sẽ thông báo ngay khi hàng về.",
+        ].join("\n"),
+      };
+    // The hold expired and the deposit is kept. Silence here is the worst outcome: the customer
+    // paid money and would only find out by opening the screen.
+    case "PreorderHoldForfeited": {
+      const deposit =
+        typeof p.depositVnd === "string" && /^[0-9]{1,19}$/.test(p.depositVnd)
+          ? BigInt(p.depositVnd)
+          : null;
+      return {
+        campaignId: `preorder-forfeited:${event.aggregateId}`,
+        customerId,
+        content: [
+          "⌛ HẾT HẠN GIỮ SUẤT ĐẶT CỌC",
+          "",
+          "Shop đã giữ hàng đến hạn nhưng chưa nhận được phần thanh toán còn lại, nên suất giữ hàng được nhả cho khách khác.",
+          deposit ? `Tiền cọc đã thanh toán: ${deposit.toLocaleString("vi-VN")} ₫` : null,
+          "Nếu bạn vẫn muốn mua, hãy đặt cọc lại hoặc liên hệ Hỗ trợ.",
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      };
+    }
     case "WarrantyRefundDue":
       return {
         campaignId: `warranty-refund-due:${event.aggregateId}`,

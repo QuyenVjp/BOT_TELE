@@ -417,6 +417,20 @@ export async function confirmPreorderDepositInTransaction(
       where id = ${row.id}
     `.execute(exec);
 
+  await sql`
+      insert into outbox_event (
+        id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted
+      ) values (
+        ${newId()}, 'PreorderReservation', ${row.id}, 1, 'PreorderDepositPaid',
+        jsonb_build_object(
+          'preorderId', ${row.id}::text,
+          'customerId', ${row.customer_id}::text,
+          'variantId', ${row.variant_id}::text,
+          'depositVnd', ${row.deposit_amount_vnd}::bigint
+        )
+      )
+    `.execute(exec);
+
   // Compute queue position
   const queuePos = await sql<{ pos: number }>`
       select count(*)::int as pos
