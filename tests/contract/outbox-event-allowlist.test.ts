@@ -19,15 +19,16 @@ function sourceFiles(dir: string): string[] {
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
     const path = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...sourceFiles(path));
-    else if (entry.name.endsWith(".ts")) out.push(path);
+    else if (entry.name.endsWith(".ts") || entry.name.endsWith(".sql")) out.push(path);
   }
   return out;
 }
 
 /**
- * Event types this codebase emits. The helper form is `eventType: "X"`; a raw SQL outbox insert
- * spells the type as a bare literal immediately before the payload builder, which is the only
- * position that distinguishes it from the aggregate type sitting earlier in the same statement.
+ * Event types this codebase emits. Emitters are TS helpers (`eventType: "X"`), raw SQL inserts in
+ * the worker modules, and SQL triggers in the migrations — so the scan covers .ts and .sql. Both SQL
+ * forms spell the type as a bare literal immediately before the payload builder, which is the only
+ * position that distinguishes it from the aggregate type earlier in the same statement.
  */
 function emittedEventTypes(): Map<string, string> {
   const found = new Map<string, string>();
@@ -52,6 +53,20 @@ describe("outbox event allowlist", () => {
       .map(([type, path]) => `${type} (emitted in ${path})`);
 
     expect(unknown).toEqual([]);
+  });
+
+  it("still detects the emitters that a naive scan misses", () => {
+    const detected = emittedEventTypes();
+    // Raw-SQL emits: invisible to an `eventType: "X"` scan, which is how three of this session's
+    // gaps hid. If the extraction breaks, this fails loudly instead of the guard passing empty.
+    for (const type of [
+      "PreorderStockAllocated",
+      "PreorderHoldForfeited",
+      "PreorderShopCancelled",
+      "TicketOpened",
+    ]) {
+      expect(detected.has(type), `${type} was not detected by the scan`).toBe(true);
+    }
   });
 
   it("keeps the allowlist free of duplicates", () => {

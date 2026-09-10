@@ -6854,7 +6854,10 @@ async function bootstrap(): Promise<void> {
       maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
       handler: (event) =>
         // These two carry notices the owner must receive, and the root chat id only exists here.
-        event.eventType === "StockDelta" || event.eventType === "WarrantyClaimOpened"
+        event.eventType === "StockDelta" ||
+        event.eventType === "WarrantyClaimOpened" ||
+        // Root-facing: without the root id the alert reports a missing target and dead-letters.
+        event.eventType === "TicketOpened"
           ? handleNotificationOutboxEvent(dbHandle.db, event, {
               rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
             })

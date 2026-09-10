@@ -794,6 +794,40 @@ function shopCancelNotification(
  * every resolution. The copy never exposes a credential, never promises money before it has moved,
  * and never claims a refund was paid before the admin confirms the transfer.
  */
+/** Owner-facing reason labels; the customer-facing wording lives in the support presenter. */
+const SUPPORT_REASON_ADMIN_LABELS: Record<string, string> = {
+  ASSET_NOT_WORKING: "Tài khoản không dùng được",
+  PAYMENT_QUESTION: "Thắc mắc thanh toán",
+  DELIVERY_NOT_RECEIVED: "Chưa nhận hàng",
+  REFUND_REQUEST: "Yêu cầu hoàn tiền",
+  GENERAL_QUESTION: "Câu hỏi chung",
+  OTHER: "Khác",
+};
+
+/**
+ * A customer opening a ticket is work the owner must see: the ticket exists in the queue either
+ * way, but nothing pushed it to the owner's chat. Same shape as the warranty alert, delivered to
+ * the root chat.
+ */
+function ticketOpenedAdminAlert(
+  event: OutboxEvent,
+): { campaignId: string; content: string } | null {
+  if (event.eventType !== "TicketOpened") return null;
+  const p = event.payloadRedacted;
+  if (typeof p.ticketId !== "string" || typeof p.customerId !== "string") return null;
+  const reason = typeof p.reasonCode === "string" ? p.reasonCode : "";
+  return {
+    campaignId: `ticket-opened:${event.aggregateId}`,
+    content: [
+      "🛡 YÊU CẦU HỖ TRỢ MỚI",
+      "",
+      `Khách: ${p.customerId.slice(-4).padStart(8, "•")}`,
+      `Loại: ${SUPPORT_REASON_ADMIN_LABELS[reason] ?? "Khác"}`,
+      "Mở mục Hỗ trợ để xử lý.",
+    ].join("\n"),
+  };
+}
+
 function warrantyAdminAlert(event: OutboxEvent): { campaignId: string; content: string } | null {
   if (event.eventType !== "WarrantyClaimOpened") return null;
   const p = event.payloadRedacted;
@@ -972,10 +1006,19 @@ export async function handleNotificationOutboxEvent(
   const wallet = walletNotification(event);
   const shopCancel = shopCancelNotification(event);
   const warrantyAdmin = warrantyAdminAlert(event);
+  const ticketAdmin = ticketOpenedAdminAlert(event);
   const warrantyCustomer = warrantyCustomerNotice(event);
   if (walletEvent && !wallet)
     return { kind: "TERMINAL_REVIEW", errorCode: "WALLET_NOTIFICATION_PAYLOAD_INVALID" };
-  if (!stock && !lowStock && !wallet && !shopCancel && !warrantyAdmin && !warrantyCustomer)
+  if (
+    !stock &&
+    !lowStock &&
+    !wallet &&
+    !shopCancel &&
+    !warrantyAdmin &&
+    !ticketAdmin &&
+    !warrantyCustomer
+  )
     return { kind: "PUBLISHED" };
   let missingWalletTarget = false;
   let missingWarrantyTarget = false;
@@ -1015,6 +1058,12 @@ export async function handleNotificationOutboxEvent(
     if (
       warrantyAdmin &&
       !(await queueRootCriticalNotification(trx, warrantyAdmin, options.rootTelegramUserId))
+    ) {
+      missingWarrantyTarget = true;
+    }
+    if (
+      ticketAdmin &&
+      !(await queueRootCriticalNotification(trx, ticketAdmin, options.rootTelegramUserId))
     ) {
       missingWarrantyTarget = true;
     }
