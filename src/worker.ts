@@ -1086,6 +1086,24 @@ async function bootstrap(): Promise<void> {
   const productDraftWorkflow = createDurableProductDraftWorkflow(
     createProductDraftRepository(dbHandle.db),
   );
+  /**
+   * Wizard sub-flows (custom field / advanced fields / new category / custom description)
+   * park a pending `admin_callback_state` row so the next text message is routed into the
+   * sub-flow. Leaving that prompt must drop the row: otherwise the next ordinary wizard
+   * answer is silently consumed as sub-flow input and the draft never advances.
+   */
+  const clearWizardSubFlowStates = async (telegramUserId: string): Promise<void> => {
+    await sql`
+      delete from admin_callback_state
+      where admin_telegram_user_id = ${telegramUserId}
+        and kind in (
+          'WIZARD_CATEGORY_CREATE',
+          'WIZARD_CUSTOM_FIELD',
+          'WIZARD_ADVANCED',
+          'WIZARD_DESC_CUSTOM'
+        )
+    `.execute(dbHandle.db);
+  };
   const renderWizardStep = async (draft: {
     step: string;
     name?: string | undefined;
@@ -4099,6 +4117,7 @@ async function bootstrap(): Promise<void> {
             input.chatType !== "private"
           )
             return presentAdminDenied("NOT_ROOT_ADMIN");
+          await clearWizardSubFlowStates(input.telegramUserId);
           const current = await productDraftWorkflow.get(input.telegramUserId);
           if (!current) return presentAdminMenu(await getStoreMode(dbHandle.db));
           const prev = previousStep(current);
@@ -4731,6 +4750,7 @@ async function bootstrap(): Promise<void> {
             input.chatType !== "private"
           )
             return presentAdminDenied("NOT_ROOT_ADMIN");
+          await clearWizardSubFlowStates(input.telegramUserId);
           await productDraftWorkflow.cancel(input.telegramUserId);
           const fileSession = await getFileArtifactImportSession(
             dbHandle.db,
