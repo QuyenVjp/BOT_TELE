@@ -412,7 +412,7 @@ export function presentAdminPaymentsMenu(statusText?: string | undefined): Prese
     : "Theo dõi thanh toán và đối soát.";
   // Goal §95: the queues an operator actually reconciles from. They used to be invisible from here.
   return {
-    text: `💳 ${ADMIN_COPY.payments}\n\n${body}`,
+    text: `${ADMIN_COPY.payments}\n\n${body}`,
     buttons: [
       [
         { text: "⏳ Chờ thanh toán", callbackData: "admin:payments:pending" },
