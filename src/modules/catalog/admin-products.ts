@@ -682,7 +682,14 @@ export async function updateAdminProductContent(
       set ${
         ARRAY_CONTENT_FIELDS.has(input.field)
           ? sql`${sql.ref(column)} = ${
-              value.length === 0 ? sql`'{}'::text[]` : sql`string_to_array(${value}, ',')::text[]`
+              value.length === 0
+                ? sql`'{}'::text[]`
+                : // Trim each term and drop the empties, so "claude, pro" never stores " pro".
+                  sql`array(
+                    select btrim(term)
+                    from unnest(string_to_array(${value}, ',')) as term
+                    where btrim(term) <> ''
+                  )::text[]`
             }`
           : sql`${sql.ref(column)} = ${value.length === 0 ? null : value}`
       },

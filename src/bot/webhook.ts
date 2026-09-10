@@ -632,6 +632,13 @@ async function normalizeSafeMessageText(
   if (!text || command) return null;
   const normalized = text.normalize("NFC").trim();
   if (SAFE_MESSAGE_TEXT[normalized]) return { text: normalized };
+  const searchQuery = normalizeCustomerSearchQuery(
+    normalized,
+    context.rootProductDraftText !== undefined
+      ? String(context.actorId) === String(context.rootProductDraftText.adminTelegramUserId)
+      : false,
+  );
+  if (searchQuery) return { text: searchQuery };
   if (
     context.inventoryImportText &&
     context.chatType === "private" &&
@@ -728,6 +735,24 @@ function isSafeInventoryImportText(normalized: string): boolean {
     if (/[\p{Cc}\p{Cf}\0]/u.test(ch)) return false;
   }
   return true;
+}
+
+/**
+ * Goal §28 — the search prompt invites the customer to send a product name, so a plain query has
+ * to survive the ingress. Everything the customer types that is not a known label was dropped
+ * here (the update arrived as UNKNOWN with no text), which made the prompt a dead end: only
+ * `/search <term>` worked. This admits a conservative query and nothing else — no commands, no
+ * URLs, no handles, no multi-line text, no phone-number-shaped input.
+ */
+function normalizeCustomerSearchQuery(value: string, isRootAdmin: boolean): string | null {
+  if (isRootAdmin) return null;
+  if (value.length < 2 || value.length > 64) return null;
+  if (value.startsWith("/")) return null;
+  if (/[\n\r\t]/.test(value)) return null;
+  if (/https?:\/\/|www\./iu.test(value)) return null;
+  if (/[@#]/u.test(value)) return null;
+  if (/^[+()0-9][0-9 ().-]{5,}$/u.test(value)) return null;
+  return value;
 }
 
 function normalizeRootProductDraftText(
