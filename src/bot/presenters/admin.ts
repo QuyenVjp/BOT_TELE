@@ -76,7 +76,7 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
   { id: "suppliers", label: ADMIN_COPY.suppliers, callbackData: "admin:suppliers", enabled: true },
   { id: "support", label: "🛡 Hỗ trợ/BH", callbackData: "admin:support", enabled: true },
   { id: "health", label: "🩺 Hệ thống", callbackData: "admin:health", enabled: true },
-  { id: "warranty", label: "🛡 Bảo hành", callbackData: "admin:warranty", enabled: true },
+  { id: "warranty", label: "🛡 Hàng chờ BH", callbackData: "admin:warranty", enabled: true },
   { id: "testing", label: "🧪 Test Lab", callbackData: "admin:testlab", enabled: true },
   {
     id: "operations",
