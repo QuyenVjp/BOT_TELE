@@ -43,6 +43,8 @@ export interface AdminProductInput {
   };
   active?: boolean;
   isTest?: boolean;
+  isArchived?: boolean;
+  visibility?: "PUBLIC" | "TEST_ONLY" | "DRAFT";
   isFeatured?: boolean;
   featuredRank?: number;
   preorderEnabled?: boolean;
@@ -120,7 +122,138 @@ export interface AdminProductMutation {
   correlationId: string;
 }
 
+export interface AdminProductUpdateInput {
+  actor: RootActor;
+  config: RootAdminConfig;
+  db: Db;
+  productId: string;
+  expectedVersion: number;
+  name?: string;
+  slug?: string;
+  description?: string | null;
+  active?: boolean;
+  isTest?: boolean;
+  isArchived?: boolean;
+  visibility?: "PUBLIC" | "TEST_ONLY" | "DRAFT";
+  isFeatured?: boolean;
+  featuredRank?: number;
+  reason: string;
+  correlationId: string;
+}
+
+export async function updateAdminProduct(input: AdminProductUpdateInput): Promise<boolean> {
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1)
+    throw new Error("INVALID_VERSION");
+  if (input.name !== undefined && (!input.name.trim() || input.name.length > 200))
+    throw new Error("INVALID_NAME");
+  if (input.slug !== undefined && !/^[a-z0-9][a-z0-9-]{0,127}$/.test(input.slug))
+    throw new Error("INVALID_SLUG");
+  if (!input.reason.trim() || input.reason.length > 500) throw new Error("INVALID_REASON");
+
+  const gate = await guardRootAction(input.db, {
+    actor: input.actor,
+    config: input.config,
+    correlationId: input.correlationId,
+    action: "product.updated",
+    targetType: "Product",
+    targetId: input.productId,
+  });
+  if (!gate.ok) throw new Error(gate.reason);
+
+  return withTransaction(input.db, async (trx) => {
+    const existing = await sql<{
+      is_test: boolean;
+      is_active: boolean;
+      is_archived: boolean;
+    }>`
+      select is_test, is_active, is_archived
+      from product
+      where id = ${input.productId} and version = ${input.expectedVersion}
+      for update
+    `.execute(trx);
+    const curr = existing.rows[0];
+    if (!curr) return false;
+
+    const mergedTest = input.isTest !== undefined ? input.isTest : curr.is_test;
+    const mergedArchived = input.isArchived !== undefined ? input.isArchived : curr.is_archived;
+    const mergedActive = input.active !== undefined ? input.active : curr.is_active;
+    const mergedVisibility =
+      input.visibility ??
+      (mergedTest ? "TEST_ONLY" : mergedArchived ? "DRAFT" : mergedActive ? "PUBLIC" : "DRAFT");
+
+    validateProductVisibilityInvariant({
+      isTest: mergedTest,
+      active: mergedActive,
+      visibility: mergedVisibility,
+      isArchived: mergedArchived,
+    });
+
+    const result = await sql<{ id: string }>`
+      update product
+      set name_vi = coalesce(${input.name?.trim() ?? null}, name_vi),
+          slug = coalesce(${input.slug ?? null}, slug),
+          description_vi = coalesce(${input.description ?? null}, description_vi),
+          is_active = ${mergedActive},
+          is_test = ${mergedTest},
+          is_archived = ${mergedArchived},
+          is_featured = coalesce(${input.isFeatured ?? null}, is_featured),
+          featured_rank = coalesce(${input.featuredRank ?? null}, featured_rank),
+          updated_at = now(),
+          version = version + 1
+      where id = ${input.productId} and version = ${input.expectedVersion}
+      returning id
+    `.execute(trx);
+    if (!result.rows[0]) return false;
+    await appendAuditEvent(trx, {
+      actorType: "ROOT_ADMIN",
+      actorId: String(input.actor.numericUserId),
+      action: "product.updated",
+      targetType: "Product",
+      targetId: input.productId,
+      reason: input.reason.trim(),
+      correlationId: input.correlationId,
+      metadataRedacted: {
+        isTest: input.isTest ?? null,
+        active: input.active ?? null,
+        visibility: input.visibility ?? null,
+      },
+    });
+    return true;
+  });
+}
+
+export function validateProductVisibilityInvariant(input: {
+  isTest?: boolean | undefined;
+  active?: boolean | undefined;
+  visibility?: "PUBLIC" | "TEST_ONLY" | "DRAFT" | undefined;
+  isArchived?: boolean | undefined;
+}): void {
+  const isTest = input.isTest === true;
+  const active = input.active !== false; // defaults to true unless explicitly false
+  const visibility = input.visibility ?? (isTest ? "TEST_ONLY" : "PUBLIC");
+  const isArchived = input.isArchived === true;
+
+  if (isTest && visibility === "PUBLIC") {
+    throw new Error("INVALID_TEST_VISIBILITY: Test product cannot have PUBLIC visibility");
+  }
+  if (isTest && active && visibility !== "TEST_ONLY") {
+    throw new Error("INVALID_TEST_VISIBILITY: Active test product requires TEST_ONLY visibility");
+  }
+  if (isArchived && active && visibility === "PUBLIC") {
+    throw new Error("INVALID_ARCHIVED_VISIBILITY: Archived product cannot be active public");
+  }
+  if (visibility === "DRAFT" && active) {
+    throw new Error("INVALID_DRAFT_STATE: DRAFT product cannot be active");
+  }
+}
+
 function validate(input: AdminProductInput): void {
+  validateProductVisibilityInvariant({
+    isTest: input.isTest,
+    active: input.active,
+    visibility: input.visibility,
+    isArchived: input.isArchived,
+  });
   if (!input.name.trim() || input.name.length > 200) throw new Error("INVALID_NAME");
   if (!input.variantName.trim() || input.variantName.length > 200)
     throw new Error("INVALID_VARIANT_NAME");
@@ -173,7 +306,7 @@ export async function createAdminProduct(input: AdminProductInput): Promise<Admi
     const variantId = newId();
     const product = await sql<{
       id: string;
-    }>`insert into product (id, category_id, name_vi, slug, short_description_vi, description_vi, what_customer_receives_vi, usage_instructions_vi, delivery_eta_vi, warranty_vi, support_vi, terms_vi, tags, is_test, is_active, is_featured, featured_rank) values (${productId}, ${input.categoryId}, ${input.name.trim()}, ${input.slug}, ${input.description ?? null}, ${input.descriptionVi ?? null}, ${input.whatCustomerReceivesVi ?? null}, ${input.usageInstructionsVi ?? null}, ${input.deliveryEtaVi ?? null}, ${input.warrantyVi ?? null}, ${input.supportVi ?? null}, ${input.termsVi ?? null}, ${input.tags ?? null}, ${input.isTest ?? false}, ${input.active ?? true}, ${input.isFeatured ?? false}, ${input.featuredRank ?? 0}) returning id`.execute(
+    }>`insert into product (id, category_id, name_vi, slug, short_description_vi, description_vi, what_customer_receives_vi, usage_instructions_vi, delivery_eta_vi, warranty_vi, support_vi, terms_vi, tags, is_test, is_active, is_archived, is_featured, featured_rank) values (${productId}, ${input.categoryId}, ${input.name.trim()}, ${input.slug}, ${input.description ?? null}, ${input.descriptionVi ?? null}, ${input.whatCustomerReceivesVi ?? null}, ${input.usageInstructionsVi ?? null}, ${input.deliveryEtaVi ?? null}, ${input.warrantyVi ?? null}, ${input.supportVi ?? null}, ${input.termsVi ?? null}, ${input.tags ?? null}, ${input.isTest ?? false}, ${input.active ?? true}, ${input.isArchived ?? false}, ${input.isFeatured ?? false}, ${input.featuredRank ?? 0}) returning id`.execute(
       trx,
     );
     if (!product.rows[0]) throw new Error("CATEGORY_NOT_FOUND");
