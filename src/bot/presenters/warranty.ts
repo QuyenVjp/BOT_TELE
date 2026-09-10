@@ -113,7 +113,11 @@ export function presentWarrantyOrderBlock(input: {
 }
 
 /** Goal §8: human issue types — the customer never sees or needs an asset id. */
-export function presentWarrantyIssueTypes(input: { orderNumber: string }): PresentedMessage {
+export function presentWarrantyIssueTypes(input: {
+  orderNumber: string;
+  /** Carried into every choice: the preview resolves the order through it. */
+  variantId: string;
+}): PresentedMessage {
   const types = Object.keys(ISSUE_TYPE_LABELS) as WarrantyIssueType[];
   return {
     text: [
@@ -126,7 +130,10 @@ export function presentWarrantyIssueTypes(input: { orderNumber: string }): Prese
     ].join("\n"),
     buttons: [
       ...types.map((type) => [
-        { text: ISSUE_TYPE_LABELS[type], callbackData: `warranty:type:${type}` },
+        {
+          text: ISSUE_TYPE_LABELS[type],
+          callbackData: `warranty:type:${type}:${input.variantId}`,
+        },
       ]),
       [{ text: "❌ Huỷ", callbackData: "ord:list" }],
     ],
@@ -142,6 +149,8 @@ export function presentWarrantyReportPreview(input: {
   warrantyEnd: string;
   remainingDays: number;
   estimatedRefundVnd: bigint;
+  /** Carried into the submit callback, so the claim is opened for the order the preview showed. */
+  variantId: string;
 }): PresentedMessage {
   return {
     text: [
@@ -161,8 +170,13 @@ export function presentWarrantyReportPreview(input: {
       "Shop sẽ kiểm tra tài khoản đã giao trước khi quyết định.",
     ].join("\n"),
     buttons: [
-      [{ text: "✅ Gửi yêu cầu", callbackData: "warranty:submit" }],
-      [{ text: "✏️ Sửa nội dung", callbackData: "warranty:rewrite" }],
+      [
+        {
+          text: "✅ Gửi yêu cầu",
+          callbackData: `warranty:submit:${input.variantId}:${input.issueType}`,
+        },
+      ],
+      [{ text: "✏️ Sửa nội dung", callbackData: `warranty:report:${input.variantId}` }],
       [{ text: "❌ Huỷ", callbackData: "shop:home" }],
     ],
   };

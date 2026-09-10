@@ -104,7 +104,15 @@ export function createFulfillmentOutboxHandler(
     if (
       event.eventType === "WalletTopupPresented" ||
       event.eventType === "WalletTopupCredited" ||
-      event.eventType === "WalletRefunded"
+      event.eventType === "WalletRefunded" ||
+      // Warranty customer notices (goal: warranty vertical). The admin alert for a new claim is
+      // routed in the worker, where the owner's chat id is available.
+      event.eventType === "WarrantyClaimNeedsInfo" ||
+      event.eventType === "WarrantyClaimVerified" ||
+      event.eventType === "WarrantyClaimRejected" ||
+      event.eventType === "WarrantyReplacementApproved" ||
+      event.eventType === "WarrantyRefundDue" ||
+      event.eventType === "WarrantyRefundPaid"
     ) {
       return handleNotificationOutboxEvent(deps.db, event);
     }

@@ -1,4 +1,5 @@
 import { sql } from "kysely";
+import { ISSUE_TYPE_LABELS } from "../warranty/claims.js";
 import type { OutboxEvent } from "../../infrastructure/outbox/repository.js";
 import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
@@ -806,7 +807,8 @@ function warrantyAdminAlert(event: OutboxEvent): { campaignId: string; content: 
       `Mã: ${p.claimNumber}`,
       `Khách: ${String(p.customerId).slice(-4).padStart(8, "•")}`,
       typeof p.orderNumber === "string" ? `Đơn: ${p.orderNumber}` : null,
-      `Lỗi: ${String(p.issueType ?? "")}`,
+      // The owner reads the human symptom, not the internal code (goal §16).
+      `Lỗi: ${ISSUE_TYPE_LABELS[p.issueType as keyof typeof ISSUE_TYPE_LABELS] ?? String(p.issueType ?? "")}`,
       `Đã dùng: ${String(p.usedDays ?? "?")} ngày`,
       `Còn bảo hành: ${String(p.remainingDays ?? "?")} ngày`,
       "",

@@ -47,6 +47,16 @@ export const KNOWN_OUTBOX_EVENT_TYPES = [
   "WalletRefunded",
   "GroupRestockPublished",
   "SocialProofEventCreated",
+  // Warranty (goal: warranty vertical). The owner alert and the customer notices are dispatched by
+  // the notification service; without these the events were rejected as UNKNOWN_EVENT and the claim
+  // sat silently with nobody told.
+  "WarrantyClaimOpened",
+  "WarrantyClaimNeedsInfo",
+  "WarrantyClaimVerified",
+  "WarrantyClaimRejected",
+  "WarrantyReplacementApproved",
+  "WarrantyRefundDue",
+  "WarrantyRefundPaid",
 ] as const;
 
 export type KnownOutboxEventType = (typeof KNOWN_OUTBOX_EVENT_TYPES)[number];

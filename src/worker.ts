@@ -1232,7 +1232,10 @@ async function bootstrap(): Promise<void> {
         if (context.kind === "expired")
           return presentWarrantyExpired({ warrantyEnd: context.warrantyEnd });
         if (context.kind === "not_covered") return presentWarrantyNotCovered();
-        return presentWarrantyIssueTypes({ orderNumber: context.orderNumber });
+        return presentWarrantyIssueTypes({
+          orderNumber: context.orderNumber,
+          variantId: input.variantId,
+        });
       },
       /** Goal §41: confirm before submitting, with the estimate clearly conditional. */
       async preview(input) {
@@ -1256,6 +1259,7 @@ async function bootstrap(): Promise<void> {
           warrantyEnd: context.warrantyEnd,
           remainingDays: estimate.remainingDays,
           estimatedRefundVnd: estimate.refundVnd,
+          variantId: input.variantId,
         });
       },
       async report(input) {
@@ -6021,7 +6025,8 @@ async function bootstrap(): Promise<void> {
       batchSize: 20,
       maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
       handler: (event) =>
-        event.eventType === "StockDelta"
+        // These two carry notices the owner must receive, and the root chat id only exists here.
+        event.eventType === "StockDelta" || event.eventType === "WarrantyClaimOpened"
           ? handleNotificationOutboxEvent(dbHandle.db, event, {
               rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
             })
