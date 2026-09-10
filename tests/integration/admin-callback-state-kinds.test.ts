@@ -37,6 +37,7 @@ const ALL_KINDS = Object.keys({
   WIZARD_CUSTOM_FIELD: true,
   WIZARD_ADVANCED: true,
   WIZARD_DESC_CUSTOM: true,
+  ADMIN_PRODUCT_CONTENT_EDIT: true,
 } satisfies Record<AdminStateKind, true>) as AdminStateKind[];
 
 let ctx: PgTestContext;

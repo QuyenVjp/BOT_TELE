@@ -1468,6 +1468,7 @@ export function presentAdminProductDetail(input: {
       ...(input.description ? ["", input.description] : []),
     ].join("\n"),
     buttons: [
+      [{ text: "✏️ Sửa nội dung", callbackData: `admin:products:content:${input.id}` }],
       [{ text: "➕ Thêm biến thể", callbackData: `admin:products:variant-add:${input.id}` }],
       ...(input.variants ?? []).flatMap((variant) => {
         const stockBacked =
@@ -1685,6 +1686,78 @@ export function presentAdminNotifications(input: {
     ].join("\n"),
     buttons: [
       [{ text: "📢 Broadcast", callbackData: "admin:marketing" }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+/** Goal §81 — edit a product's commercial content in place, one field at a time. */
+export const ADMIN_PRODUCT_CONTENT_FIELDS = [
+  { key: "name", label: "📝 Tên" },
+  { key: "shortDescription", label: "📝 Mô tả ngắn" },
+  { key: "description", label: "📝 Mô tả đầy đủ" },
+  { key: "whatCustomerReceives", label: "📦 Bạn nhận được" },
+  { key: "usageInstructions", label: "📘 Hướng dẫn" },
+  { key: "warranty", label: "🛡 Bảo hành" },
+  { key: "deliveryEta", label: "⏱ Thời gian giao" },
+  { key: "terms", label: "📄 Điều khoản" },
+  { key: "support", label: "💬 Hỗ trợ riêng" },
+] as const;
+
+export function adminProductContentField(
+  key: string,
+): (typeof ADMIN_PRODUCT_CONTENT_FIELDS)[number] | undefined {
+  return ADMIN_PRODUCT_CONTENT_FIELDS.find((field) => field.key === key);
+}
+
+export function presentAdminProductContentMenu(input: {
+  productId: string;
+  name: string;
+  values: Partial<Record<(typeof ADMIN_PRODUCT_CONTENT_FIELDS)[number]["key"], string | null>>;
+}): PresentedMessage {
+  const line = (key: (typeof ADMIN_PRODUCT_CONTENT_FIELDS)[number]["key"]): string => {
+    const value = input.values[key];
+    return value && value.trim() ? `${value.trim().slice(0, 40)}` : "(trống)";
+  };
+  return {
+    text: [
+      "✏️ SỬA NỘI DUNG SẢN PHẨM",
+      "",
+      input.name,
+      "",
+      "Chọn mục cần sửa. Sản phẩm được cập nhật tại chỗ, không tạo lại.",
+      ...ADMIN_PRODUCT_CONTENT_FIELDS.map((field) => `• ${field.label}: ${line(field.key)}`),
+    ].join("\n"),
+    buttons: [
+      ...ADMIN_PRODUCT_CONTENT_FIELDS.map((field) => [
+        {
+          text: `${field.label}`,
+          callbackData: `admin:products:cf:edit:${field.key}`,
+        },
+      ]),
+      [{ text: "⬅️ Quay lại", callbackData: `admin:products:detail:${input.productId}` }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentAdminProductContentPrompt(input: {
+  productId: string;
+  label: string;
+  current?: string | null;
+}): PresentedMessage {
+  return {
+    text: [
+      `✏️ ${input.label}`,
+      "",
+      input.current && input.current.trim()
+        ? `Hiện tại: ${input.current.trim().slice(0, 300)}`
+        : "Hiện tại: (trống)",
+      "",
+      "Gửi nội dung mới trong một tin nhắn. Gõ - để xoá nội dung này.",
+    ].join("\n"),
+    buttons: [
+      [{ text: "⬅️ Danh sách mục", callbackData: `admin:products:content:${input.productId}` }],
       adminNav("admin:menu"),
     ],
   };

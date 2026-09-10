@@ -26,6 +26,10 @@ import { resolveCatalogAudience } from "./modules/catalog/visibility.js";
 
 import { pathToFileURL } from "node:url";
 import { getAdminOverview } from "./modules/admin/overview.js";
+import {
+  updateAdminProductContent,
+  ADMIN_PRODUCT_CONTENT_FIELDS,
+} from "./modules/catalog/admin-products.js";
 import { getAdminHealthFacts } from "./modules/admin/health.js";
 import { loadBuildIdentity } from "./shared/build-identity.js";
 import { sql } from "kysely";
@@ -826,6 +830,9 @@ async function bootstrap(): Promise<void> {
     presentAdminDashboard,
     presentAdminSystemHealth,
     presentAdminNotifications,
+    presentAdminProductContentMenu,
+    presentAdminProductContentPrompt,
+    adminProductContentField,
     presentAdminInventory,
     presentAdminInventoryProduct,
     presentAdminInventoryVariant,
@@ -4129,6 +4136,74 @@ async function bootstrap(): Promise<void> {
           if (variantState?.kind === "ADMIN_VARIANT_UPDATE")
             return this.variantText?.(input) ?? null;
 
+          // In-place product content edit (goal §81). Resolved BEFORE the wizard sub-flows because
+          // it is not part of a draft: the pending state carries the product, field and version.
+          const contentState = await sql<{ id: string; payload: unknown }>`
+            select id, payload_redacted as payload from admin_callback_state
+            where admin_telegram_user_id = ${input.telegramUserId}
+              and kind = 'ADMIN_PRODUCT_CONTENT_EDIT'
+              and expires_at > now()
+            order by created_at desc limit 1
+          `.execute(dbHandle.db);
+          const pendingContent = contentState.rows[0];
+          if (pendingContent) {
+            const payload = (pendingContent.payload ?? {}) as {
+              productId?: unknown;
+              field?: unknown;
+              expectedVersion?: unknown;
+            };
+            const productId = typeof payload.productId === "string" ? payload.productId : null;
+            const field = typeof payload.field === "string" ? payload.field : null;
+            const expectedVersion =
+              typeof payload.expectedVersion === "number" ? payload.expectedVersion : null;
+            if (!productId || !field || expectedVersion === null)
+              return {
+                text: "Phiên sửa nội dung không hợp lệ. Vui lòng mở lại sản phẩm.",
+                buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+              };
+            const value = input.text.trim() === "-" ? "" : input.text.trim();
+            await sql`delete from admin_callback_state where id = ${pendingContent.id}`.execute(
+              dbHandle.db,
+            );
+            try {
+              const updated = await updateAdminProductContent({
+                actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+                config: {
+                  adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+                  expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+                },
+                db: dbHandle.db,
+                productId,
+                expectedVersion,
+                field,
+                value,
+                reason: `Sửa nội dung sản phẩm qua bot (${field})`,
+                correlationId: input.correlationId,
+              });
+              return updated
+                ? {
+                    text: `✅ Đã cập nhật ${adminProductContentField(field)?.label ?? field}.`,
+                    buttons: [
+                      [{ text: "⬅️ Danh sách mục", callbackData: `admin:products:content:${productId}` }],
+                      [{ text: "🛍 Sản phẩm", callbackData: "admin:products" }],
+                    ],
+                  }
+                : {
+                    text: "Sản phẩm vừa thay đổi ở nơi khác. Vui lòng mở lại để sửa tiếp.",
+                    buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+                  };
+            } catch (error) {
+              const code = error instanceof Error ? error.message : "UNKNOWN";
+              return {
+                text: `⚠️ Không lưu được: ${code === "INVALID_CONTENT_LENGTH" ? "nội dung quá dài (tối đa 2000 ký tự)." : code === "INVALID_NAME" ? "tên sản phẩm không được để trống." : code} `,
+                buttons: [
+                  [{ text: "⬅️ Danh sách mục", callbackData: `admin:products:content:${productId}` }],
+                  [{ text: "🛍 Sản phẩm", callbackData: "admin:products" }],
+                ],
+              };
+            }
+          }
+
           // Wizard sub-flow text states (category create / custom field / advanced / custom description).
           // The column is `payload_redacted` (the insert API calls it `payload`); selecting the
           // wrong name threw on every draft text message and left them all in RETRY.
@@ -4569,6 +4644,106 @@ async function bootstrap(): Promise<void> {
             payload: {},
           });
           return presentWizardDescriptionCustomPrompt();
+        },
+        async productContentMenu(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const rows = await sql<{
+            id: string;
+            name_vi: string;
+            version: number;
+            short_description_vi: string | null;
+            description_vi: string | null;
+            what_customer_receives_vi: string | null;
+            usage_instructions_vi: string | null;
+            warranty_vi: string | null;
+            delivery_eta_vi: string | null;
+            terms_vi: string | null;
+            support_vi: string | null;
+          }>`
+            select id, name_vi, version, short_description_vi, description_vi,
+              what_customer_receives_vi, usage_instructions_vi, warranty_vi,
+              delivery_eta_vi, terms_vi, support_vi
+            from product where id = ${input.productId} limit 1
+          `.execute(dbHandle.db);
+          const row = rows.rows[0];
+          if (!row)
+            return {
+              text: "Không tìm thấy sản phẩm.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          return presentAdminProductContentMenu({
+            productId: row.id,
+            name: row.name_vi,
+            values: {
+              name: row.name_vi,
+              shortDescription: row.short_description_vi,
+              description: row.description_vi,
+              whatCustomerReceives: row.what_customer_receives_vi,
+              usageInstructions: row.usage_instructions_vi,
+              warranty: row.warranty_vi,
+              deliveryEta: row.delivery_eta_vi,
+              terms: row.terms_vi,
+              support: row.support_vi,
+            },
+          });
+        },
+        async productContentEdit(input) {
+          if (
+            Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+            input.chatType !== "private"
+          )
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          const field = adminProductContentField(input.fieldKey);
+          if (!field)
+            return {
+              text: "Mục nội dung không hợp lệ.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          // The field route carries only the key, so the product it belongs to comes from the most
+          // recent content menu the owner opened.
+          const state = await sql<{ payload: unknown }>`
+            select payload_redacted as payload from admin_callback_state
+            where admin_telegram_user_id = ${input.telegramUserId}
+              and kind = 'ADMIN_PRODUCT_CONTENT_EDIT'
+              and expires_at > now()
+            order by created_at desc limit 1
+          `.execute(dbHandle.db);
+          const pendingProductId = (
+            state.rows[0]?.payload as { productId?: unknown } | undefined
+          )?.productId;
+          const productId = typeof pendingProductId === "string" ? pendingProductId : null;
+          if (!productId) {
+            // No pending state: fall back to the product the owner just viewed, if any draft pointer
+            // exists. Otherwise the menu must be opened fresh.
+            return {
+              text: "Hãy mở lại sản phẩm rồi chọn mục cần sửa.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          }
+          const rows = await sql<{ version: number; value: string | null }>`
+            select version, ${sql.ref(ADMIN_PRODUCT_CONTENT_FIELDS[field.key])} as value
+            from product where id = ${productId} limit 1
+          `.execute(dbHandle.db);
+          const row = rows.rows[0];
+          if (!row)
+            return {
+              text: "Không tìm thấy sản phẩm.",
+              buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            };
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "ADMIN_PRODUCT_CONTENT_EDIT",
+            payload: { productId, field: field.key, expectedVersion: row.version },
+          });
+          return presentAdminProductContentPrompt({
+            productId,
+            label: field.label,
+            current: row.value,
+          });
         },
         async descriptionFields(input) {
           if (

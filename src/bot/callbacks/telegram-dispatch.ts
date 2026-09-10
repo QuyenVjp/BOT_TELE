@@ -552,6 +552,19 @@ export interface TelegramDomainDispatcherDeps {
         chatType: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
+      /** Goal §81 in-place product content editing. */
+      productContentMenu?(input: {
+        telegramUserId: string;
+        chatType: string;
+        correlationId: string;
+        productId: string;
+      }): Promise<PresentedMessage>;
+      productContentEdit?(input: {
+        telegramUserId: string;
+        chatType: string;
+        correlationId: string;
+        fieldKey: string;
+      }): Promise<PresentedMessage>;
       /** Goal §76 per-field content editor. */
       descriptionFields?(input: {
         telegramUserId: string;
@@ -1437,6 +1450,26 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Sửa biến thể không khả dụng.");
+        } else if (route.startsWith("products:content:")) {
+          const productId = route.slice("products:content:".length);
+          message = admin.workflow?.productContentMenu
+            ? await admin.workflow.productContentMenu({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+                productId,
+              })
+            : safeError("Sửa nội dung sản phẩm không khả dụng.");
+        } else if (route.startsWith("products:cf:edit:")) {
+          const fieldKey = route.slice("products:cf:edit:".length);
+          message = admin.workflow?.productContentEdit
+            ? await admin.workflow.productContentEdit({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+                fieldKey,
+              })
+            : safeError("Sửa nội dung sản phẩm không khả dụng.");
         } else if (route.startsWith("products:detail:")) {
           message = admin.productDetail
             ? await admin.productDetail({

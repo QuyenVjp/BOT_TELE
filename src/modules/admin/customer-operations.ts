@@ -24,7 +24,8 @@ export type AdminStateKind =
   | "WIZARD_CATEGORY_CREATE"
   | "WIZARD_CUSTOM_FIELD"
   | "WIZARD_ADVANCED"
-  | "WIZARD_DESC_CUSTOM";
+  | "WIZARD_DESC_CUSTOM"
+  | "ADMIN_PRODUCT_CONTENT_EDIT";
 
 export interface AdminCustomerListItem {
   id: string;

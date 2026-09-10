@@ -612,3 +612,83 @@ export async function updateAdminVariant(input: AdminVariantUpdateInput): Promis
     return true;
   });
 }
+
+/**
+ * Goal §81 — edit a product's commercial content without recreating it.
+ *
+ * Whitelisted single-field update: the owner edits one field at a time from the product screen, so
+ * an arbitrary column name or an arbitrary statement is never in reach. The same root gate and the
+ * same audit trail as `updateAdminProduct` apply, and the optimistic `version` guard is kept.
+ */
+export const ADMIN_PRODUCT_CONTENT_FIELDS = {
+  name: "name_vi",
+  shortDescription: "short_description_vi",
+  description: "description_vi",
+  whatCustomerReceives: "what_customer_receives_vi",
+  usageInstructions: "usage_instructions_vi",
+  warranty: "warranty_vi",
+  deliveryEta: "delivery_eta_vi",
+  terms: "terms_vi",
+  support: "support_vi",
+} as const;
+
+export type AdminProductContentField = keyof typeof ADMIN_PRODUCT_CONTENT_FIELDS;
+
+export interface AdminProductContentUpdateInput {
+  actor: RootActor;
+  config: RootAdminConfig;
+  db: Db;
+  productId: string;
+  expectedVersion: number;
+  field: string;
+  /** Trimmed value; an empty string clears the field. */
+  value: string;
+  reason: string;
+  correlationId: string;
+}
+
+export async function updateAdminProductContent(
+  input: AdminProductContentUpdateInput,
+): Promise<boolean> {
+  const column = ADMIN_PRODUCT_CONTENT_FIELDS[input.field as AdminProductContentField];
+  if (!column) throw new Error("INVALID_CONTENT_FIELD");
+  if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1)
+    throw new Error("INVALID_VERSION");
+  const value = input.value.trim();
+  if (value.length > 2_000) throw new Error("INVALID_CONTENT_LENGTH");
+  if (input.field === "name" && value.length === 0) throw new Error("INVALID_NAME");
+  if (!input.reason.trim() || input.reason.length > 500) throw new Error("INVALID_REASON");
+
+  const gate = await guardRootAction(input.db, {
+    actor: input.actor,
+    config: input.config,
+    correlationId: input.correlationId,
+    action: "product.content_updated",
+    targetType: "Product",
+    targetId: input.productId,
+  });
+  if (!gate.ok) throw new Error(gate.reason);
+
+  return withTransaction(input.db, async (trx) => {
+    const result = await sql<{ id: string }>`
+      update product
+      set ${sql.ref(column)} = ${value.length === 0 ? null : value},
+          updated_at = now(),
+          version = version + 1
+      where id = ${input.productId} and version = ${input.expectedVersion}
+      returning id
+    `.execute(trx);
+    if (!result.rows[0]) return false;
+    await appendAuditEvent(trx, {
+      actorType: "ROOT_ADMIN",
+      actorId: String(input.actor.numericUserId),
+      action: "product.content_updated",
+      targetType: "Product",
+      targetId: input.productId,
+      reason: input.reason.trim(),
+      correlationId: input.correlationId,
+      metadataRedacted: { field: input.field, cleared: value.length === 0 },
+    });
+    return true;
+  });
+}
