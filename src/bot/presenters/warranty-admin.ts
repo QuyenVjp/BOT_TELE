@@ -49,6 +49,20 @@ export type WarrantyQueueView =
   | "rejected"
   | "overdue";
 
+/** The owner reads the timeline as an operator log, not as the second-person customer copy. */
+const OWNER_TIMELINE_LABELS: Record<string, string> = {
+  SUBMITTED: "Khách gửi yêu cầu",
+  WAITING_CUSTOMER: "Chờ khách bổ sung thông tin",
+  VERIFIED_DEFECT: "Đã xác nhận lỗi",
+  REPLACEMENT_APPROVED: "Đã duyệt đổi hàng",
+  REFUND_APPROVED: "Đã duyệt hoàn tiền",
+  REFUND_DUE: "Chờ chuyển tiền",
+  REFUND_PAID: "Đã xác nhận chuyển tiền",
+  REJECTED: "Đã từ chối",
+  RESOLVED: "Đã xử lý xong",
+  CANCELLED: "Đã huỷ",
+};
+
 const VIEW_LABELS: Record<WarrantyQueueView, string> = {
   new: "🆕 Mới",
   verifying: "🔍 Chờ xác minh",
@@ -214,7 +228,9 @@ export function presentAdminWarrantyClaim(claim: AdminClaimView): PresentedMessa
       "Diễn biến:",
       ...claim.timeline.map(
         (event) =>
-          `• ${when(event.createdAt)} — ${event.kind}${event.safeNote ? `: ${event.safeNote}` : ""}`,
+          `• ${when(event.createdAt)} — ${OWNER_TIMELINE_LABELS[event.kind] ?? "Cập nhật"}${
+            event.safeNote ? `: ${event.safeNote}` : ""
+          }`,
       ),
       "",
       "Bạn kiểm tra tài khoản đã giao trước khi quyết định.",

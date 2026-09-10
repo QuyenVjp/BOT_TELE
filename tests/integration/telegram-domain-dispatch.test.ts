@@ -64,6 +64,19 @@ function setup() {
     text: "inventory",
     buttons: [[{ text: "📊 Tổng quan", callbackData: "admin:dashboard" }]],
   });
+  // The owner's warranty surface: the queue, a view switch, the payout queue and one claim.
+  const warrantyQueue = vi.fn().mockResolvedValue({
+    text: "warranty queue",
+    buttons: [[{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }]],
+  });
+  const warrantyRefundQueue = vi.fn().mockResolvedValue({
+    text: "refund queue",
+    buttons: [[{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }]],
+  });
+  const warrantyClaim = vi.fn().mockResolvedValue({
+    text: "claim",
+    buttons: [[{ text: "✅ Xác nhận lỗi", callbackData: "admin:warranty:verify:CLAIM-1" }]],
+  });
   const workflowMessageText = vi.fn().mockResolvedValue({
     text: "workflow",
     buttons: [[{ text: "cancel", callbackData: "admin:products:cancel" }]],
@@ -204,6 +217,9 @@ function setup() {
       variantCreatePrompt: adminVariantCreatePrompt,
       variantEditPrompt: adminVariantEditPrompt,
       inventory: adminInventory,
+      warrantyQueue,
+      warrantyRefundQueue,
+      warrantyClaim,
       stockAnnouncementPreview,
       customers: adminCustomers,
       customerState: adminCustomerState,
@@ -277,6 +293,9 @@ function setup() {
     adminProducts,
     adminProductDetail,
     adminInventory,
+    warrantyQueue,
+    warrantyRefundQueue,
+    warrantyClaim,
     workflowMessageText,
     workflowCancel,
     refresh,
@@ -995,6 +1014,53 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       expect(message.text).not.toMatch(/đang hoàn thiện|không khả dụng|không được hỗ trợ/i);
       expect(message.text.trim()).not.toBe("");
     }
+  });
+
+  it("opens the owner's warranty queue from the menu entry and honours an explicit view", async () => {
+    const { dispatcher, warrantyQueue, warrantyRefundQueue, warrantyClaim } = setup();
+
+    // The menu button sends the bare prefix: it must open the default queue, not an error.
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "warranty-1",
+      action: "ADMIN",
+      callbackData: "admin:warranty",
+    });
+    expect(warrantyQueue).toHaveBeenLastCalledWith(
+      expect.objectContaining({ view: "new", telegramUserId: USER, chatType: "private" }),
+    );
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "warranty-2",
+      action: "ADMIN",
+      callbackData: "admin:warranty:view:refund_due",
+    });
+    expect(warrantyQueue).toHaveBeenLastCalledWith(expect.objectContaining({ view: "refund_due" }));
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "warranty-3",
+      action: "ADMIN",
+      callbackData: "admin:warranty:refunds",
+    });
+    expect(warrantyRefundQueue).toHaveBeenCalledTimes(1);
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "warranty-4",
+      action: "ADMIN",
+      callbackData: "admin:warranty:claim:CLAIM-1",
+    });
+    expect(warrantyClaim).toHaveBeenLastCalledWith(expect.objectContaining({ claimId: "CLAIM-1" }));
   });
 
   it("routes plain text to active workflow before storefront fallback", async () => {

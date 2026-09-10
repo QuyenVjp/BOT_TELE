@@ -844,7 +844,7 @@ async function warrantyQueueRows(db: Db, view: WarrantyQueueView): Promise<Warra
     customerLabel: `Khách ${row.customer_id.slice(-4).toUpperCase()}`,
     productName: row.product_name,
     amountVnd: BigInt(row.approved_refund_vnd ?? row.calculated_refund_vnd),
-    statusLabel: row.status,
+    statusLabel: WARRANTY_STATUS_LABELS[row.status] ?? row.status,
   }));
 }
 
