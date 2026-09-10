@@ -201,8 +201,13 @@ describe("Group Commerce: Presenters & Privacy", () => {
   it("group shop panel provides compact commercial layout and search in group button", () => {
     const panel = presentGroupShopPanel({ botUsername: BOT_USERNAME });
     expect(panel.text).toContain("TIER20 SHOP");
-    expect(panel.buttons[0]![1]!.text).toBe("🔎 Tìm trong nhóm");
+    expect(panel.buttons[0]![1]!.text).toBe("🔎 Xem sản phẩm");
     expect(panel.buttons[0]![1]!.switchInlineQueryCurrentChat).toBe("");
+    const flat = panel.buttons.flat();
+    expect(flat.find((button) => button.text === "🛒 Mở Shop")?.url).toBe(
+      `https://t.me/${BOT_USERNAME}?start=shop`,
+    );
+    expect(flat.find((button) => button.text.includes("Admin"))?.url).toContain("t.me/");
   });
 
   it("privacy notices in group never expose sensitive data and direct to private bot", () => {
