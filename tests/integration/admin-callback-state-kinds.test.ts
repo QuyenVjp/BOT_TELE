@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { sql } from "kysely";
 import {
   createAdminCallbackState,
   type AdminStateKind,
@@ -49,6 +50,29 @@ afterAll(async () => {
 });
 
 describe("admin callback state kinds are persisted by the schema", () => {
+
+  it("round-trips the payload the wizard sub-flow resolvers read back", async () => {
+    // The resolver selects `payload_redacted as payload`; a wrong column name there throws on
+    // EVERY draft text message and strands them all in RETRY instead of advancing the wizard.
+    await createAdminCallbackState(ctx.db, {
+      adminTelegramUserId: "6659186592",
+      kind: "WIZARD_DESC_CUSTOM",
+      payload: { field: "warrantyVi" },
+    });
+
+    const result = await sql<{ payload: unknown; kind: string }>`
+      select kind, payload_redacted as payload
+      from admin_callback_state
+      where admin_telegram_user_id = ${"6659186592"}
+        and kind = 'WIZARD_DESC_CUSTOM'
+      order by created_at desc
+      limit 1
+    `.execute(ctx.db);
+
+    expect(result.rows[0]?.kind).toBe("WIZARD_DESC_CUSTOM");
+    expect(result.rows[0]?.payload).toEqual({ field: "warrantyVi" });
+  });
+
   it("accepts every kind declared by AdminStateKind", async () => {
     const failures: string[] = [];
     for (const kind of ALL_KINDS) {

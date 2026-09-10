@@ -4129,8 +4129,10 @@ async function bootstrap(): Promise<void> {
             return this.variantText?.(input) ?? null;
 
           // Wizard sub-flow text states (category create / custom field / advanced / custom description).
+          // The column is `payload_redacted` (the insert API calls it `payload`); selecting the
+          // wrong name threw on every draft text message and left them all in RETRY.
           const subState = await sql<{ id: string; kind: string; payload: unknown }>`
-            select id, kind, payload from admin_callback_state
+            select id, kind, payload_redacted as payload from admin_callback_state
             where admin_telegram_user_id = ${input.telegramUserId}
               and kind in ('WIZARD_CATEGORY_CREATE','WIZARD_CUSTOM_FIELD','WIZARD_ADVANCED','WIZARD_DESC_CUSTOM')
               and expires_at > now()
