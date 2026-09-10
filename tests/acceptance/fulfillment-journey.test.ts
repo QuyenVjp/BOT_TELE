@@ -481,4 +481,64 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
     if (!revealed.ok) return;
     expect(revealed.secret).toBe("Email: only@example.invalid");
   });
+
+  // A blob that leaves every later field of a multi-field schema empty must be refused at import
+  // time. It used to be counted "hợp lệ" because the required-field check only looked at explicit
+  // per-field columns, so the shop silently stocked credentials missing most of their fields.
+  it("refuses a row whose shape leaves required fields of a multi-field schema empty", async () => {
+    const customerId = newId();
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+    const inventoryFields = [
+      { name: "email", label: "Email", required: true, secret: false, customerVisible: true },
+      {
+        name: "username",
+        label: "Tên đăng nhập",
+        required: true,
+        secret: false,
+        customerVisible: true,
+      },
+      { name: "password", label: "Mật khẩu", required: true, secret: true, customerVisible: true },
+    ];
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Shape', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Shape Pack', ${"shape-" + categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields)
+      values (${variantId}, ${productId}, ${"SKU-" + variantId}, 'Shape', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT', ${JSON.stringify(inventoryFields)}::jsonb)
+    `.execute(ctx.db);
+
+    // One cell, no per-field columns: the earlier colon form stays supported…
+    const colon = await importDigitalInventory({
+      actor: rootActor,
+      config: rootConfig,
+      vault,
+      db: ctx.db,
+      input: `${variantId},alice:p@ss:note`,
+      reason: "colon shape",
+      correlationId: "shape-colon",
+    });
+    expect(colon).toMatchObject({ ok: true, summary: { imported: 1 } });
+
+    // …but a pipe blob for the same schema leaves two required fields empty and is refused.
+    const blob = await importDigitalInventory({
+      actor: rootActor,
+      config: rootConfig,
+      vault,
+      db: ctx.db,
+      input: `${variantId},a@example.invalid|alice|p@ss`,
+      reason: "blob shape",
+      correlationId: "shape-blob",
+    });
+    expect(blob).toMatchObject({ ok: true, summary: { imported: 0, invalid: 1 } });
+  });
 });

@@ -221,10 +221,21 @@ function isTemplatePlaceholder(value: string): boolean {
 }
 
 function missingRequiredField(row: ParsedLine, fields: InventoryField[]): boolean {
-  if (!row.fieldValues || fields.length === 0) return false;
+  if (fields.length === 0) return false;
+  // Validate the values the row will actually be stored with, not just the columns the client
+  // happened to send. A line that carries one blob for a multi-field schema used to skip this
+  // check entirely (no fieldValues), so a whole row was reported as "hợp lệ" while every field
+  // except the first landed empty:
+  //
+  //   variantId,email|user|pass   →  email="email|user|pass", username="", password=""
+  //
+  // Both supported shapes are covered: explicit per-field columns, and the colon-separated
+  // single-cell form. A blob that leaves every later field empty is caught here, so the preview
+  // counts it in "không hợp lệ" instead of importing a credential missing most of its fields.
+  const stored = parseCredentialValues(row, fields).values;
   return fields.some((field, index) => {
-    const value = (row.fieldValues![index] ?? "").trim();
-    return isTemplatePlaceholder(value) || (field.required && value.length === 0);
+    const raw = (stored[index]?.value ?? "").trim();
+    return isTemplatePlaceholder(raw) || (field.required && raw.length === 0);
   });
 }
 
