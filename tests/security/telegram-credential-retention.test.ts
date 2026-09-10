@@ -27,8 +27,8 @@ beforeEach(async () => {
   await sql`truncate table webhook_inbox cascade`.execute(ctx.db);
 });
 
-const FAKE_PASSWORD = "FINAL-REAL-PASS-004";
-const FAKE_LINE = `final.real.001@example.invalid|final.real.001@example.invalid|${FAKE_PASSWORD}`;
+const FAKE_MARKER = "FINAL-REAL-PASS-004";
+const FAKE_LINE = `final.real.001@example.invalid|final.real.001@example.invalid|${FAKE_MARKER}`;
 
 function importEnvelope(): TelegramCommandEnvelope {
   return {
@@ -73,12 +73,12 @@ describe("Telegram inbox credential retention", () => {
   it("redacts the pending payload as soon as the update is processed", async () => {
     const inbox = createPostgresTelegramInbox(ctx.db);
     await acceptOne(inbox, "1001");
-    expect(JSON.stringify(await envelopeOf("1001"))).toContain(FAKE_PASSWORD);
+    expect(JSON.stringify(await envelopeOf("1001"))).toContain(FAKE_MARKER);
 
     await claimAndProcess(inbox);
 
     const stored = await envelopeOf("1001");
-    expect(JSON.stringify(stored)).not.toContain(FAKE_PASSWORD);
+    expect(JSON.stringify(stored)).not.toContain(FAKE_MARKER);
     expect(JSON.stringify(stored)).not.toContain(FAKE_LINE);
     expect(stored).not.toHaveProperty("messageText");
     expect(typeof stored.redactedAt).toBe("string");
@@ -102,7 +102,7 @@ describe("Telegram inbox credential retention", () => {
 
     const redactedNow = await inbox.sanitizePayloads({ batchSize: 10, retryGraceSeconds: 3600 });
     expect(redactedNow).toBe(0);
-    expect(JSON.stringify(await envelopeOf("1002"))).toContain(FAKE_PASSWORD);
+    expect(JSON.stringify(await envelopeOf("1002"))).toContain(FAKE_MARKER);
 
     await sql`
       update webhook_inbox set received_at = now() - interval '2 hours'
@@ -110,7 +110,7 @@ describe("Telegram inbox credential retention", () => {
     `.execute(ctx.db);
     const redactedAged = await inbox.sanitizePayloads({ batchSize: 10, retryGraceSeconds: 3600 });
     expect(redactedAged).toBe(1);
-    expect(JSON.stringify(await envelopeOf("1002"))).not.toContain(FAKE_PASSWORD);
+    expect(JSON.stringify(await envelopeOf("1002"))).not.toContain(FAKE_MARKER);
 
     // Idempotent: a second pass has nothing left to do.
     expect(await inbox.sanitizePayloads({ batchSize: 10, retryGraceSeconds: 3600 })).toBe(0);
@@ -127,7 +127,7 @@ describe("Telegram inbox credential retention", () => {
     });
     expect(state).toBe("DEAD");
     const stored = await envelopeOf("1004");
-    expect(JSON.stringify(stored)).not.toContain(FAKE_PASSWORD);
+    expect(JSON.stringify(stored)).not.toContain(FAKE_MARKER);
     expect(typeof stored.redactedAt).toBe("string");
     expect(RETAINED_ENVELOPE_KEYS).not.toContain("messageText");
   });
@@ -200,7 +200,7 @@ describe("Telegram inbox credential retention", () => {
     });
     expect(pruned).toBe(0);
     expect((await inbox.stats()).dead).toBe(0);
-    expect(JSON.stringify(await envelopeOf("1008"))).toContain(FAKE_PASSWORD);
+    expect(JSON.stringify(await envelopeOf("1008"))).toContain(FAKE_MARKER);
   });
 });
 
