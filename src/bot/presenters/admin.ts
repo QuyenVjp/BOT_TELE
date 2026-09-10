@@ -1857,6 +1857,7 @@ export const ADMIN_PRODUCT_CONTENT_FIELDS = [
   { key: "deliveryEta", label: "⏱ Thời gian giao" },
   { key: "terms", label: "📄 Điều khoản" },
   { key: "support", label: "💬 Hỗ trợ riêng" },
+  { key: "tags", label: "🏷 Thẻ tìm kiếm" },
 ] as const;
 
 export function adminProductContentField(

@@ -49,6 +49,11 @@ async function seed() {
       (${supplierOkId}, ${catId}, 'Supplier Ready', 'supplier-ready', true, 4)
   `.execute(ctx.db);
 
+  // Tags are plain text terms the owner sets on the product (goal §27/§28).
+  await sql`
+    update product set tags = array['4k', 'gia dinh'] where id = ${spotifyId}
+  `.execute(ctx.db);
+
   // Aliases are pre-normalized (fold form) at write time.
   await sql`
     insert into product_alias (id, product_id, normalized_alias, locale, priority) values
@@ -165,5 +170,14 @@ describe("deterministic search (FR-004)", () => {
     expect(inCat.items.map((v) => v.sku).sort()).toEqual(["NF-1", "NF-2", "SP-1", "SUP-OK"]);
     const otherCat = await search({ categoryId: newId() });
     expect(otherCat.items).toHaveLength(0);
+  });
+
+  it("matches a product by its tags, accent-folded like the other terms", async () => {
+    await seed();
+    const byTag = await search({ query: "4k" });
+    expect(byTag.items.map((v) => v.sku)).toEqual(["SP-1"]);
+
+    const byAccentedTag = await search({ query: "gia dinh" });
+    expect(byAccentedTag.items.map((v) => v.sku)).toEqual(["SP-1"]);
   });
 });

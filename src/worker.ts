@@ -4931,10 +4931,11 @@ async function bootstrap(): Promise<void> {
             delivery_eta_vi: string | null;
             terms_vi: string | null;
             support_vi: string | null;
+            tags: string[] | null;
           }>`
             select id, name_vi, version, short_description_vi, description_vi,
               what_customer_receives_vi, usage_instructions_vi, warranty_vi,
-              delivery_eta_vi, terms_vi, support_vi
+              delivery_eta_vi, terms_vi, support_vi, tags
             from product where id = ${input.productId} limit 1
           `.execute(dbHandle.db);
           const row = rows.rows[0];
@@ -4963,6 +4964,7 @@ async function bootstrap(): Promise<void> {
               deliveryEta: row.delivery_eta_vi,
               terms: row.terms_vi,
               support: row.support_vi,
+              tags: row.tags?.length ? row.tags.join(", ") : null,
             },
           });
         },
@@ -4998,10 +5000,16 @@ async function bootstrap(): Promise<void> {
               buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
             };
           }
-          const rows = await sql<{ version: number; value: string | null }>`
-            select version, ${sql.ref(ADMIN_PRODUCT_CONTENT_FIELDS[field.key])} as value
-            from product where id = ${productId} limit 1
-          `.execute(dbHandle.db);
+          const rows =
+            field.key === "tags"
+              ? await sql<{ version: number; value: string | null }>`
+                  select version, array_to_string(tags, ', ') as value
+                  from product where id = ${productId} limit 1
+                `.execute(dbHandle.db)
+              : await sql<{ version: number; value: string | null }>`
+                  select version, ${sql.ref(ADMIN_PRODUCT_CONTENT_FIELDS[field.key])} as value
+                  from product where id = ${productId} limit 1
+                `.execute(dbHandle.db);
           const row = rows.rows[0];
           if (!row)
             return {

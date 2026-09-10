@@ -632,7 +632,12 @@ export const ADMIN_PRODUCT_CONTENT_FIELDS = {
   deliveryEta: "delivery_eta_vi",
   terms: "terms_vi",
   support: "support_vi",
+  /** Comma-separated in the UI; stored as the text[] the search predicate reads. */
+  tags: "tags",
 } as const;
+
+/** Fields whose column is a text[] rather than text. */
+const ARRAY_CONTENT_FIELDS: ReadonlySet<string> = new Set(["tags"]);
 
 export type AdminProductContentField = keyof typeof ADMIN_PRODUCT_CONTENT_FIELDS;
 
@@ -674,7 +679,13 @@ export async function updateAdminProductContent(
   return withTransaction(input.db, async (trx) => {
     const result = await sql<{ id: string }>`
       update product
-      set ${sql.ref(column)} = ${value.length === 0 ? null : value},
+      set ${
+        ARRAY_CONTENT_FIELDS.has(input.field)
+          ? sql`${sql.ref(column)} = ${
+              value.length === 0 ? sql`'{}'::text[]` : sql`string_to_array(${value}, ',')::text[]`
+            }`
+          : sql`${sql.ref(column)} = ${value.length === 0 ? null : value}`
+      },
           updated_at = now(),
           version = version + 1
       where id = ${input.productId} and version = ${input.expectedVersion}

@@ -101,8 +101,8 @@ function decodeCursor(raw: string): Cursor | null {
 
 /**
  * Search sellable variants with bounded, allowlisted filters. Text search folds
- * the query and matches (folded) product name, category name, or any product
- * alias. Every other filter only narrows the sellable set. Keyset-paginated on
+ * the query and matches (folded) product name, category name, parent (brand
+ * family) name, tags, or any product alias. Every other filter only narrows the sellable set. Keyset-paginated on
  * (sort_order, id) for a stable, gap-free cursor.
  */
 export async function searchCatalog(
@@ -135,6 +135,11 @@ export async function searchCatalog(
                     'simple',
                     translate(lower(a.normalized_alias), ${FOLD_FROM}, ${FOLD_TO})
                   ) @@ to_tsquery('simple', ${prefixTsQuery})
+          )
+          or exists (
+            select 1 from unnest(coalesce(p.tags, '{}'::text[])) as tag
+            where to_tsvector('simple', translate(lower(tag), ${FOLD_FROM}, ${FOLD_TO}))
+              @@ to_tsquery('simple', ${prefixTsQuery})
           )
         )`
     : sql``;
