@@ -991,6 +991,29 @@ function safeWarrantyMessage(text: string): PresentedMessage {
   };
 }
 
+/**
+ * What the customer reads when the shop moves their ticket. Kept apart from the
+ * owner's labels: the customer never sees an internal status code.
+ */
+const SUPPORT_TICKET_CUSTOMER_MESSAGE: Record<string, string> = {
+  WAITING_SHOP: "Shop đang xử lý yêu cầu hỗ trợ của bạn.",
+  WAITING_CUSTOMER: "Shop cần bạn bổ sung thông tin cho yêu cầu hỗ trợ.",
+  RESOLVED: "Yêu cầu hỗ trợ của bạn đã được xử lý.",
+  CLOSED: "Yêu cầu hỗ trợ đã đóng.",
+  MANUAL_REVIEW: "Shop đang xem xét thêm yêu cầu của bạn.",
+};
+
+/** A support screen we could not serve; never a stack trace or an internal code. */
+function adminSupportError(text: string): PresentedMessage {
+  return {
+    text,
+    buttons: [
+      [{ text: "🧾 Yêu cầu hỗ trợ", callbackData: "admin:support:tickets" }],
+      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+    ],
+  };
+}
+
 function isWarrantyIssueType(value: string): value is WarrantyIssueType {
   return Object.prototype.hasOwnProperty.call(ISSUE_TYPE_LABELS, value);
 }
@@ -1291,6 +1314,10 @@ async function bootstrap(): Promise<void> {
   } = await import("./modules/supplier/admin.js");
   const { approveReplacementCaseInTransaction } =
     await import("./modules/digital-goods/replacement.js");
+  // Loaded on demand like every other worker dependency: the whole surface is
+  // composed inside the worker entrypoint, where the module graph is built.
+  const { listOpenTickets, getAdminTicket, setTicketStatus } =
+    await import("./modules/support/service.js");
   const {
     presentAdminBroadcastAudience,
     presentAdminBroadcastPreview,
@@ -1339,6 +1366,8 @@ async function bootstrap(): Promise<void> {
     presentAdminSupplierVariant,
     presentAdminSuppliersMenu,
     presentAdminSupportQueue,
+    presentAdminSupportTickets,
+    presentAdminSupportTicket,
     presentAdminOrderDetail,
     presentAdminOrders: presentAdminOrdersPage,
     presentAdminOrderSearchPrompt,
@@ -2552,6 +2581,71 @@ async function bootstrap(): Promise<void> {
               action: "support.replacement.approve",
             })
           : presentHighRiskDone("support.replacement.approve");
+      },
+      async supportTickets(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          "admin-support",
+          "Admin support",
+        );
+        if (denied) return presentAdminDenied(denied);
+        return presentAdminSupportTickets(await listOpenTickets(dbHandle.db));
+      },
+      async supportTicket(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.ticketId,
+          "Admin support",
+        );
+        if (denied) return presentAdminDenied(denied);
+        const ticket = await getAdminTicket(dbHandle.db, input.ticketId);
+        if (!ticket) return adminSupportError("Không tìm thấy yêu cầu hỗ trợ.");
+        return presentAdminSupportTicket(ticket);
+      },
+      async supportTicketStatus(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.ticketId,
+          "Admin support",
+        );
+        if (denied) return presentAdminDenied(denied);
+        const result = await setTicketStatus({
+          db: dbHandle.db,
+          ticketId: input.ticketId,
+          toStatus: input.toStatus,
+          actorId: input.telegramUserId,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok)
+          return adminSupportError(
+            result.code === "NOT_FOUND"
+              ? "Không tìm thấy yêu cầu hỗ trợ."
+              : "Trạng thái này không còn phù hợp.",
+          );
+        // Stable per transition, so a replayed tap cannot message the customer twice.
+        const notified = await queueAdminCustomerMessage(dbHandle.db, {
+          customerId: result.customerId,
+          content:
+            SUPPORT_TICKET_CUSTOMER_MESSAGE[result.to] ??
+            "Yêu cầu hỗ trợ của bạn vừa được cập nhật.",
+          actorId: input.telegramUserId,
+          correlationId: `admin-support-status:${input.ticketId}:${result.from}:${result.to}`,
+        });
+        const ticket = await getAdminTicket(dbHandle.db, input.ticketId);
+        if (!ticket) return adminSupportError("Không tìm thấy yêu cầu hỗ trợ.");
+        const screen = presentAdminSupportTicket(ticket);
+        return {
+          ...screen,
+          text: `${screen.text}\n\n${
+            notified ? "Đã thông báo cho khách." : "Khách chưa có kênh nhận thông báo."
+          }`,
+        };
       },
       async manualTasks(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");

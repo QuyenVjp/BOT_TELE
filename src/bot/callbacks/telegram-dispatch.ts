@@ -586,6 +586,25 @@ export interface TelegramDomainDispatcherDeps {
       caseId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    /** Owner's ticket queue, one ticket, and an explicit status move (goal: support tickets). */
+    supportTickets?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supportTicket?(input: {
+      telegramUserId: string;
+      chatType: string;
+      ticketId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supportTicketStatus?(input: {
+      telegramUserId: string;
+      chatType: string;
+      ticketId: string;
+      toStatus: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     customers?(input: {
       telegramUserId: string;
       chatType: string;
@@ -2154,6 +2173,38 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Duyệt thay thế không khả dụng.");
+        } else if (route === "support:tickets") {
+          message = admin.supportTickets
+            ? await admin.supportTickets({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Yêu cầu hỗ trợ không khả dụng.");
+        } else if (route.startsWith("support:ticket:")) {
+          message = admin.supportTicket
+            ? await admin.supportTicket({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                ticketId: route.slice("support:ticket:".length),
+                correlationId,
+              })
+            : safeError("Yêu cầu hỗ trợ không khả dụng.");
+        } else if (route.startsWith("support:status:")) {
+          // `support:status:<ticketId>:<toStatus>` — both halves are validated by the worker,
+          // so a half-parsed route must not reach it as a status.
+          const rest = route.slice("support:status:".length);
+          const separator = rest.indexOf(":");
+          message =
+            admin.supportTicketStatus && separator > 0 && separator < rest.length - 1
+              ? await admin.supportTicketStatus({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  ticketId: rest.slice(0, separator),
+                  toStatus: rest.slice(separator + 1),
+                  correlationId,
+                })
+              : safeError("Cập nhật trạng thái không khả dụng.");
         } else {
           message = safeError("Lệnh quản trị không khả dụng.");
         }

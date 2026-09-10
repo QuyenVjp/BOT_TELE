@@ -11,6 +11,9 @@ import type {
   AdminOrderListPage,
   AdminOrderStatusFilter,
 } from "../../modules/admin/order-operations.js";
+import { canTicketTransition, type SupportTicketStatus } from "../../modules/support/domain.js";
+import type { AdminSupportTicketRow } from "../../modules/support/service.js";
+import { REASON_LABEL } from "./support.js";
 
 /**
  * Owner-safe Vietnamese admin presenters (T098, FR-021–FR-023).
@@ -513,15 +516,32 @@ export interface AdminSupportReplacementRow {
   safeSummary: string | null;
 }
 
+/**
+ * Owner-facing ticket status labels. Deliberately unlike the customer's copy in
+ * presenters/support.ts: the shop reads what it must do, the customer reads what
+ * it means for them. Keys double as the label set the transition buttons render.
+ */
+export const SUPPORT_STATUS_LABELS: Record<SupportTicketStatus, string> = {
+  OPEN: "Mới tiếp nhận",
+  WAITING_SHOP: "Shop đang xử lý",
+  WAITING_CUSTOMER: "Chờ khách bổ sung",
+  RESOLVED: "Đã xử lý",
+  CLOSED: "Đã đóng",
+  MANUAL_REVIEW: "Đang xem xét thêm",
+};
+
 export function presentAdminSupportQueue(rows: AdminSupportReplacementRow[]): PresentedMessage {
+  // The replacement queue is where `admin:support` lands; the ticket queue hangs
+  // off it, so that screen keeps its meaning.
+  const entry: InlineButton = { text: "🧾 Yêu cầu hỗ trợ", callbackData: "admin:support:tickets" };
   if (rows.length === 0) {
     return {
       text: [ADMIN_COPY.support, "", "Không có yêu cầu thay thế đang chờ duyệt."].join("\n"),
-      buttons: [[{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }]],
+      buttons: [[entry], [{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }]],
     };
   }
   const lines = [ADMIN_COPY.support, "", "Yêu cầu thay thế chờ duyệt:"];
-  const buttons: InlineButton[][] = [];
+  const buttons: InlineButton[][] = [[entry]];
   for (const row of rows) {
     lines.push(`• ${row.orderNumber} · ${row.reasonCode} · ${row.caseId.slice(-8)}`);
     if (row.safeSummary) lines.push(`  ${row.safeSummary}`);
@@ -530,6 +550,68 @@ export function presentAdminSupportQueue(rows: AdminSupportReplacementRow[]): Pr
     ]);
   }
   buttons.push([{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }]);
+  return { text: lines.join("\n"), buttons };
+}
+
+/** Open tickets, most urgent SLA first; one button opens each ticket. */
+export function presentAdminSupportTickets(rows: AdminSupportTicketRow[]): PresentedMessage {
+  if (rows.length === 0) {
+    return {
+      text: [ADMIN_COPY.support, "", "Không có yêu cầu hỗ trợ nào đang mở."].join("\n"),
+      buttons: [adminNav("admin:support")],
+    };
+  }
+  const lines = [ADMIN_COPY.support, "", `Yêu cầu đang mở: ${rows.length}`];
+  const buttons: InlineButton[][] = [];
+  for (const row of rows) {
+    lines.push(
+      `• ${row.customerLabel} · ${REASON_LABEL[row.reasonCode]} · ${SUPPORT_STATUS_LABELS[row.status]}`,
+    );
+    if (row.orderNumber) lines.push(`  Đơn: ${row.orderNumber}`);
+    lines.push(`  ${row.safeSummary}`);
+    buttons.push([
+      {
+        text: `🧾 ${row.customerLabel} · ${SUPPORT_STATUS_LABELS[row.status]}`,
+        callbackData: `admin:support:ticket:${row.id}`,
+      },
+    ]);
+  }
+  buttons.push(adminNav("admin:support"));
+  return { text: lines.join("\n"), buttons };
+}
+
+/**
+ * One ticket with only the transitions the state machine allows. A closed ticket
+ * therefore renders no status button at all — the owner gets navigation, not a
+ * dead action.
+ */
+export function presentAdminSupportTicket(ticket: AdminSupportTicketRow): PresentedMessage {
+  const when = (iso: string) =>
+    new Date(iso).toLocaleString("vi-VN", {
+      timeZone: "Asia/Ho_Chi_Minh",
+      day: "2-digit",
+      month: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  const lines = [
+    `🧾 Yêu cầu hỗ trợ · ${ticket.customerLabel}`,
+    "",
+    `Lý do: ${REASON_LABEL[ticket.reasonCode]}`,
+    `Trạng thái: ${SUPPORT_STATUS_LABELS[ticket.status]}`,
+  ];
+  if (ticket.orderNumber) lines.push(`Đơn: ${ticket.orderNumber}`);
+  if (ticket.dueAt) lines.push(`Hạn phản hồi: ${when(ticket.dueAt)}`);
+  lines.push("", ticket.safeSummary);
+  const buttons = (Object.keys(SUPPORT_STATUS_LABELS) as SupportTicketStatus[])
+    .filter((to) => canTicketTransition(ticket.status, to))
+    .map((to): InlineButton[] => [
+      {
+        text: SUPPORT_STATUS_LABELS[to],
+        callbackData: `admin:support:status:${ticket.id}:${to}`,
+      },
+    ]);
+  buttons.push(adminNav("admin:support:tickets"));
   return { text: lines.join("\n"), buttons };
 }
 
