@@ -467,6 +467,15 @@ describe("warranty claims", () => {
         bundleTtlSeconds: 900,
       }),
     ).toMatchObject({ ok: false, code: "NOT_ALLOWED_BY_POLICY" });
+    // refusing on policy must not leave anything behind: no case, no claimed stock
+    const cases = await sql<{
+      n: string;
+    }>`select count(*)::text as n from replacement_case`.execute(ctx.handle.db);
+    expect(cases.rows[0]!.n).toBe("0");
+    const reserved = await sql<{ n: string }>`
+      select count(*)::text as n from digital_asset where status = 'RESERVED'
+    `.execute(ctx.handle.db);
+    expect(reserved.rows[0]!.n).toBe("0");
 
     // A later product edit must not change what this claim was judged by.
     await sql`update product_variant set warranty_proration_enabled = true, warranty_replacement_allowed = true, warranty_policy_version = 8 where id = ${fixture.variantId}`.execute(
@@ -476,6 +485,38 @@ describe("warranty claims", () => {
       select policy_version, proration_enabled from warranty_claim where id = ${opened.claimId}
     `.execute(ctx.handle.db);
     expect(after.rows[0]).toMatchObject({ policy_version: 7, proration_enabled: false });
+  });
+
+  it("refuses a refund the policy disallows, creating no obligation", async () => {
+    const fixture = await seed({ refundAllowed: false });
+    const opened = await openWarrantyClaim({
+      db: ctx.handle.db,
+      customerId: fixture.customerId,
+      orderId: fixture.orderId,
+      assetId: fixture.assetId,
+      issueType: "LOST_BENEFITS",
+      correlationId: "t",
+      now: new Date(fixture.completedAt.getTime() + 18 * DAY),
+    });
+    if (!opened.ok) throw new Error("claim not opened");
+    const snapshot = await sql<{ refund_allowed: boolean }>`
+      select refund_allowed from warranty_claim where id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    expect(snapshot.rows[0]!.refund_allowed).toBe(false);
+
+    await verifyClaimDefect(admin(opened.claimId));
+    expect(await approveClaimRefund(admin(opened.claimId))).toMatchObject({
+      ok: false,
+      code: "NOT_ALLOWED_BY_POLICY",
+    });
+    const obligations = await sql<{ n: string }>`
+      select count(*)::text as n from shop_refund_obligation
+    `.execute(ctx.handle.db);
+    expect(obligations.rows[0]!.n).toBe("0");
+    const claim = await sql<{ status: string }>`
+      select status from warranty_claim where id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    expect(claim.rows[0]!.status).toBe("VERIFIED_DEFECT");
   });
 
   it("refuses to open a claim on a variant that has no warranty", async () => {
