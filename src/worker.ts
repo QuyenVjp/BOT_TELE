@@ -1151,13 +1151,14 @@ async function bootstrap(): Promise<void> {
         if (!resolveCustomerId) return safeWarrantyMessage("Bảo hành không khả dụng.");
         const rows = await sql<{
           product_name: string;
+          product_id: string;
           warranty_days: number;
           warranty_enabled: boolean;
           warranty_coverage_vi: string | null;
           warranty_exclusions_vi: string | null;
           price_vnd: string;
         }>`
-          select p.name_vi as product_name, v.warranty_days, v.warranty_enabled,
+          select p.name_vi as product_name, v.product_id, v.warranty_days, v.warranty_enabled,
                  v.warranty_coverage_vi, v.warranty_exclusions_vi, v.price_vnd::text as price_vnd
           from product_variant v
           join product p on p.id = v.product_id
@@ -1169,6 +1170,7 @@ async function bootstrap(): Promise<void> {
         if (!row.warranty_enabled || row.warranty_days <= 0) return presentWarrantyNotCovered();
         return presentWarrantyPolicy({
           productName: row.product_name,
+          productId: row.product_id,
           warrantyDays: row.warranty_days,
           coverageVi: row.warranty_coverage_vi,
           exclusionsVi: row.warranty_exclusions_vi,

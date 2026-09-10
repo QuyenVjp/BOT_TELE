@@ -34,6 +34,8 @@ export function presentWarrantyPolicy(input: {
   exclusionsVi: string | null;
   examplePriceVnd: bigint | null;
   variantId: string;
+  /** Where "Quay lại" goes: the product screen the customer came from. */
+  productId: string;
 }): PresentedMessage {
   const lines = [
     "🛡 CHÍNH SÁCH BẢO HÀNH",
@@ -63,6 +65,7 @@ export function presentWarrantyPolicy(input: {
     text: lines.join("\n"),
     buttons: [
       [{ text: "🛡 Báo lỗi / Bảo hành", callbackData: `warranty:report:${input.variantId}` }],
+      [{ text: "⬅️ Quay lại", callbackData: `shop:product:${input.productId}` }],
       ...BACK_HOME,
     ],
   };
