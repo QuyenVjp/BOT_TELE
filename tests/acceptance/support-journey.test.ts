@@ -29,6 +29,7 @@ interface Seeded {
   aliceOrderNumber: string;
   aliceOrderId: string;
   bobOrderNumber: string;
+  bobOrderId: string;
 }
 
 async function seedTwoCustomers(): Promise<Seeded> {
@@ -78,7 +79,7 @@ async function seedTwoCustomers(): Promise<Seeded> {
       199000, 'P1M', 'CREDENTIAL', 'PENDING_PAYMENT')
   `.execute(ctx.db);
 
-  return { aliceId, bobId, aliceOrderNumber, aliceOrderId, bobOrderNumber };
+  return { aliceId, bobId, aliceOrderNumber, aliceOrderId, bobOrderNumber, bobOrderId };
 }
 
 beforeEach(async () => {
@@ -109,6 +110,14 @@ describe("US4 history → support journey", () => {
     // 3. BOLA: Alice cannot open Bob's order by number.
     const bobAsAlice = await history.detail(seed.bobOrderNumber, seed.aliceId);
     expect(bobAsAlice.text.toLowerCase()).toMatch(/không|sở hữu|tìm thấy/);
+
+    // 3b. Callback tokens can only carry the internal order id (the callback codec encodes
+    // ULIDs, not the public order number), so opening a detail from the history list must
+    // work when given the id.
+    const byId = await history.detail(seed.aliceOrderId, seed.aliceId);
+    expect(byId.text).toContain(seed.aliceOrderNumber);
+    const bobById = await history.detail(seed.bobOrderId, seed.aliceId);
+    expect(bobById.text).toMatch(/không sở hữu đơn hàng/);
 
     // 4. Structured ticket open linked to Alice's order.
     const ticket = await support.open({
