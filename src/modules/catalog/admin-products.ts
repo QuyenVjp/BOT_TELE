@@ -498,10 +498,6 @@ function validateVariantUpdate(input: AdminVariantUpdateInput): void {
     (!Number.isInteger(input.depositAmountVnd) || input.depositAmountVnd < 0)
   )
     throw new Error("INVALID_DEPOSIT");
-  // A preorder with no deposit would publish a consent screen promising to hold stock for 0 ₫, so the
-  // two fields are validated together rather than trusted to arrive in order.
-  if (input.preorderEnabled === true && input.depositAmountVnd === undefined)
-    throw new Error("PREORDER_NEEDS_DEPOSIT");
   if (!input.reason.trim() || input.reason.length > 500) throw new Error("INVALID_REASON");
 }
 
@@ -621,6 +617,15 @@ export async function updateAdminVariant(input: AdminVariantUpdateInput): Promis
       returning id
     `.execute(trx);
     if (!result.rows[0]) return false;
+    // A preorder with no deposit would publish a consent screen promising to hold stock for 0 ₫. This
+    // has to be judged on the state the update PRODUCES: checking the incoming patch alone rejects a
+    // preorder switch on a variant that already carries a deposit.
+    const after = await sql<{ preorder_enabled: boolean; deposit_amount_vnd: string }>`
+      select preorder_enabled, deposit_amount_vnd::text as deposit_amount_vnd
+        from product_variant where id = ${input.variantId} limit 1
+    `.execute(trx);
+    if (after.rows[0]?.preorder_enabled && BigInt(after.rows[0].deposit_amount_vnd ?? "0") <= 0n)
+      throw new Error("PREORDER_NEEDS_DEPOSIT");
     await appendAuditEvent(trx, {
       actorType: "ROOT_ADMIN",
       actorId: String(input.actor.numericUserId),
