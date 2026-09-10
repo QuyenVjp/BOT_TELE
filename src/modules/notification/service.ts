@@ -878,6 +878,35 @@ function warrantyCustomerNotice(
           "Shop sẽ liên hệ để đổi tài khoản hoặc hoàn tiền.",
         ].join("\n"),
       };
+    // Stock arrived and the rest is owed. The deposit notice promised exactly this message, so
+    // without it the customer's first word after paying is the forfeit notice.
+    case "PreorderStockAllocated": {
+      const owed =
+        typeof p.balanceVnd === "number" && Number.isSafeInteger(p.balanceVnd)
+          ? BigInt(p.balanceVnd)
+          : typeof p.balanceVnd === "string" && /^[0-9]{1,19}$/.test(p.balanceVnd)
+            ? BigInt(p.balanceVnd)
+            : null;
+      const hours =
+        typeof p.balanceDueHours === "number" && Number.isSafeInteger(p.balanceDueHours)
+          ? p.balanceDueHours
+          : typeof p.holdHours === "number" && Number.isSafeInteger(p.holdHours)
+            ? p.holdHours
+            : null;
+      return {
+        campaignId: `preorder-allocated:${event.aggregateId}`,
+        customerId,
+        content: [
+          "📦 HÀNG ĐÃ VỀ — GIỮ SUẤT CHO BẠN",
+          "",
+          owed ? `Còn phải thanh toán: ${owed.toLocaleString("vi-VN")} ₫` : null,
+          hours ? `Bạn có ${hours} giờ để thanh toán phần còn lại.` : null,
+          "Mở «📌 Đặt cọc của tôi» để lấy mã chuyển khoản.",
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
+      };
+    }
     // The deposit landed: tell the customer, or their money disappears into silence until they
     // think to reopen the reservation screen.
     case "PreorderDepositPaid":

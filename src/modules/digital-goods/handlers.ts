@@ -116,6 +116,7 @@ export function createFulfillmentOutboxHandler(
       // Preorder notices: a deposit that was kept, or a reservation the shop had to cancel, is
       // money the customer must hear about.
       event.eventType === "PreorderDepositPaid" ||
+      event.eventType === "PreorderStockAllocated" ||
       event.eventType === "PreorderHoldForfeited" ||
       event.eventType === "PreorderShopCancelled" ||
       event.eventType === "TicketOpened"
