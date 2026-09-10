@@ -5,6 +5,7 @@ import type { Vault } from "./infrastructure/vault/port.js";
 import {
   registerTelegramWebhook,
   type RootProductDraftTextIngress,
+  type AdminInventoryImportTextIngress,
   type UpdateInbox,
 } from "./bot/webhook.js";
 import { registerDeliveryRoute } from "./modules/digital-goods/delivery-route.js";
@@ -47,6 +48,7 @@ export interface CreateAppDeps {
     /** Required: callers must choose a durable or explicit test inbox. */
     inbox: UpdateInbox;
     rootProductDraftText?: RootProductDraftTextIngress;
+    inventoryImportText?: AdminInventoryImportTextIngress;
   };
   sepay: {
     path: string;
@@ -101,6 +103,9 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
     ...(deps.telegram.rootProductDraftText === undefined
       ? {}
       : { rootProductDraftText: deps.telegram.rootProductDraftText }),
+    ...(deps.telegram.inventoryImportText === undefined
+      ? {}
+      : { inventoryImportText: deps.telegram.inventoryImportText }),
   });
 
   // --- SePay webhook (raw body preserved) ---------------------------------

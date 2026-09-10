@@ -1971,6 +1971,15 @@ export function createTelegramDomainDispatcher(
         message = deps.support.reasonMenu();
       } else if (envelope.contactPhoneNumber) {
         message = presentCustomerAccountPrompt();
+      } else if (envelope.inventoryImportText && envelope.messageText) {
+        message = deps.admin?.importText
+          ? ((await deps.admin.importText({
+              telegramUserId: envelope.actorUserId,
+              text: envelope.messageText,
+              chatType: envelope.chatType,
+              correlationId,
+            })) ?? safeError("Không thể xử lý nội dung nhập kho."))
+          : safeError("Nhập kho bằng văn bản không khả dụng.");
       } else if (envelope.document && deps.admin?.importDocument) {
         message =
           (await deps.admin.importDocument({

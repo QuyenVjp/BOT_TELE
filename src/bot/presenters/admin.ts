@@ -780,6 +780,7 @@ export function presentAdminProducts(
         { text: ADMIN_COPY.overview, callbackData: "admin:dashboard" },
         { text: ADMIN_COPY.inventory, callbackData: "admin:inventory" },
       ],
+      [{ text: "➕ Tạo sản phẩm", callbackData: "admin:products:create" }],
       ...visibleRows.map((row) => [
         {
           text: `${row.name} (${row.active ? "đang bán" : "tạm dừng"})`,
@@ -1442,14 +1443,28 @@ export function presentAdminProductDetail(input: {
     ].join("\n"),
     buttons: [
       [{ text: "➕ Thêm biến thể", callbackData: `admin:products:variant-add:${input.id}` }],
-      ...(input.variants ?? []).flatMap((variant) => [
-        [
-          {
-            text: `Sửa ${variant.name}`,
-            callbackData: `admin:products:variant-edit:${variant.id}`,
-          },
-        ],
-      ]),
+      ...(input.variants ?? []).flatMap((variant) => {
+        const stockBacked =
+          variant.fulfillmentType === "STOCK_ACCOUNT" || variant.fulfillmentType === "STOCK_CODE";
+        return [
+          [
+            {
+              text: `Sửa ${variant.name}`,
+              callbackData: `admin:products:variant-edit:${variant.id}`,
+            },
+          ],
+          ...(stockBacked
+            ? [
+                [
+                  {
+                    text: `📦 Nhập kho ${variant.name}`,
+                    callbackData: `admin:inventory:variant:${variant.id}`,
+                  },
+                ],
+              ]
+            : []),
+        ];
+      }),
       [{ text: ADMIN_COPY.back, callbackData: "admin:products" }],
       adminNav("admin:menu"),
     ],

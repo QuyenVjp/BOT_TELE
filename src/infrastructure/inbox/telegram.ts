@@ -21,6 +21,7 @@ export interface TelegramCommandEnvelope {
   command?: string;
   messageText?: string;
   rootProductDraftText?: true;
+  inventoryImportText?: true;
   searchQuery?: string;
   firstName?: string;
   lastName?: string;

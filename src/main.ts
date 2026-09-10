@@ -87,6 +87,23 @@ async function main(): Promise<void> {
           return row && isRootProductDraftTextStep(row.step) ? row.step : null;
         },
       },
+      inventoryImportText: {
+        adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+        async isActive(telegramUserId: string) {
+          if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return false;
+          const row = (
+            await sql<{ status: string }>`
+              select status
+              from admin_inventory_import
+              where admin_telegram_user_id = ${telegramUserId}
+                and expires_at > now()
+                and status in ('WAITING_INPUT', 'READY')
+              limit 1
+            `.execute(dbHandle.db)
+          ).rows[0];
+          return Boolean(row);
+        },
+      },
     },
     sepay: {
       path: "/webhooks/sepay",

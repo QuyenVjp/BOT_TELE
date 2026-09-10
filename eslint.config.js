@@ -3,7 +3,15 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "node_modules/**", "work/**", "outputs/**", "coverage/**", "**/*.md"],
+    ignores: [
+      "dist/**",
+      "node_modules/**",
+      "work/**",
+      "outputs/**",
+      "coverage/**",
+      ".playwright-cli/**",
+      "**/*.md",
+    ],
   },
   eslint.configs.recommended,
   ...tseslint.configs.recommended,

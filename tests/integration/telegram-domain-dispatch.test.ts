@@ -217,6 +217,9 @@ function setup() {
       manualComplete: adminManualComplete,
       support: adminSupport,
       supportApprove: adminSupportApprove,
+      categories: vi.fn().mockResolvedValue({ text: "categories", buttons: [] }),
+      preorders: vi.fn().mockResolvedValue({ text: "preorders", buttons: [] }),
+      testLab: vi.fn().mockResolvedValue({ text: "test lab", buttons: [] }),
       importPreview: vi.fn(),
       importConfirm: vi.fn(),
       importCancel: vi.fn(),
@@ -586,12 +589,10 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const sent = send.mock.calls[0]![0] as {
       message: { text: string; buttons: Array<Array<{ text: string }>> };
     };
-    expect(sent.message.text).toContain("BẢNG");
+    expect(sent.message.text).toContain("QUẢN TRỊ");
     const labels = sent.message.buttons.flat().map((button) => button.text);
-    expect(labels).toEqual(expect.arrayContaining(["🛍 Sản phẩm", "📦 Kho hàng", "🧾 Đơn hàng"]));
-    expect(labels).not.toEqual(
-      expect.arrayContaining(["Dashboard", "Products", "Inventory", "📊 Tổng quan"]),
-    );
+    expect(labels).toEqual(expect.arrayContaining(["📦 Sản phẩm", "📥 Kho hàng", "🧾 Đơn hàng"]));
+    expect(labels).not.toEqual(expect.arrayContaining(["Dashboard", "Products", "Inventory"]));
   });
 
   it("routes the live visible products callback to the injected products presenter", async () => {
@@ -1210,6 +1211,66 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(base.workflowMessageText).not.toHaveBeenCalled();
     expect(base.send).toHaveBeenCalledTimes(1);
     expect(base.send.mock.calls[0]![0].message.text).toBe("import preview");
+  });
+
+  it("routes inventoryImportText marker envelope directly to importText", async () => {
+    const base = setup();
+    const importText = vi.fn().mockResolvedValue({
+      text: "import preview from marker",
+      buttons: [[{ text: "confirm", callbackData: "admin:inventory:confirm" }]],
+    });
+    const dispatcher = createTelegramDomainDispatcher({
+      codec: base.codec,
+      resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
+      resolveOrderById: vi.fn(),
+      resolveOrderIdByNumber: vi.fn(),
+      resolveCatalogPage: vi.fn().mockResolvedValue(null),
+      catalog: {
+        mainMenu: base.mainMenu,
+        categoryList: vi.fn(),
+        categoryView: vi.fn(),
+        variantDetail: vi.fn(),
+        search: vi.fn(),
+      },
+      checkout: {
+        buyNowFromCallback: vi.fn(),
+        refresh: vi.fn(),
+        reopen: vi.fn(),
+        cancel: vi.fn(),
+      },
+      history: { list: vi.fn(), detail: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      admin: {
+        handleToken: vi.fn(),
+        mainMenu: base.adminMainMenu,
+        dashboard: base.adminDashboard,
+        products: base.adminProducts,
+        productDetail: base.adminProductDetail,
+        inventory: base.adminInventory,
+        importText,
+      },
+      responder: { send: base.send },
+    });
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "marker-import-1",
+      action: "ADMIN",
+      inventoryImportText: true,
+      messageText: "user1|pass1\nuser2|pass2",
+    });
+
+    expect(importText).toHaveBeenCalledTimes(1);
+    expect(importText).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      text: "user1|pass1\nuser2|pass2",
+      chatType: "private",
+      correlationId: "telegram:marker-import-1",
+    });
+    expect(base.send).toHaveBeenCalledTimes(1);
+    expect(base.send.mock.calls[0]![0].message.text).toBe("import preview from marker");
   });
 
   it("routes Telegram document envelopes to file import before storefront fallback", async () => {

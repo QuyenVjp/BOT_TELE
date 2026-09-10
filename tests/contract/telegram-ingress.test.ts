@@ -6,6 +6,7 @@ import {
   MAX_TEXT_LENGTH,
 } from "../../src/bot/middleware/security.js";
 import { registerTelegramWebhook, createInMemoryUpdateInbox } from "../../src/bot/webhook.js";
+import type { TelegramCommandEnvelope } from "../../src/infrastructure/inbox/telegram.js";
 
 /**
  * T021 — Telegram ingress boundaries (SR-004, FR-010, FR-024).
@@ -397,6 +398,161 @@ describe("root product draft text ingress", () => {
       expect(accepted).toHaveLength(1);
       expect(accepted[0]).not.toHaveProperty("messageText");
       expect(JSON.stringify(accepted[0])).not.toContain("secret-value");
+    } finally {
+      await ingress.close();
+    }
+  });
+});
+
+describe("admin inventory import text ingress", () => {
+  it("accepts safe multi-line CSV/pipe inventory paste when import session is active", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      inventoryImportText: {
+        adminTelegramUserId: 123456789,
+        isActive: async (id) => id === "123456789",
+      },
+    });
+    await ingress.ready();
+    try {
+      const payload = "email1|user1|pass1\nemail2|user2|pass2";
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9010, 123456789, payload),
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.action).toBe("ADMIN");
+      expect(accepted[0]?.inventoryImportText).toBe(true);
+      expect(accepted[0]?.messageText).toBe(payload);
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("rejects inventory paste when session is not active", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      inventoryImportText: {
+        adminTelegramUserId: 123456789,
+        isActive: async () => false,
+      },
+    });
+    await ingress.ready();
+    try {
+      const payload = "email1|user1|pass1\nemail2|user2|pass2";
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9011, 123456789, payload),
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]).not.toHaveProperty("messageText");
+      expect(accepted[0]?.inventoryImportText).toBeUndefined();
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("prefers an active inventory session over leftover product-draft description text", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    let draftStepCalls = 0;
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      inventoryImportText: {
+        adminTelegramUserId: 123456789,
+        isActive: async (id) => id === "123456789",
+      },
+      rootProductDraftText: {
+        adminTelegramUserId: 123456789,
+        activeStep: async () => {
+          draftStepCalls += 1;
+          return "description";
+        },
+      },
+    });
+    await ingress.ready();
+    try {
+      const payload =
+        "final.account.001@example.invalid|user1|pass1\nfinal.account.002@example.invalid|user2|pass2";
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9012, 123456789, payload),
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.action).toBe("ADMIN");
+      expect(accepted[0]?.inventoryImportText).toBe(true);
+      expect(accepted[0]?.rootProductDraftText).toBeUndefined();
+      expect(accepted[0]?.messageText).toBe(payload);
+      expect(draftStepCalls).toBe(0);
+    } finally {
+      await ingress.close();
+    }
+  });
+
+  it("strips Telegram Web format controls from inventory paste and still accepts it", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      inventoryImportText: {
+        adminTelegramUserId: 123456789,
+        isActive: async (id) => id === "123456789",
+      },
+    });
+    await ingress.ready();
+    try {
+      const payload = "email1\u200b|user1|pass1\nemail2|user2|pass2";
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(9013, 123456789, payload),
+      });
+
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]?.inventoryImportText).toBe(true);
+      expect(accepted[0]?.messageText).toBe("email1|user1|pass1\nemail2|user2|pass2");
     } finally {
       await ingress.close();
     }

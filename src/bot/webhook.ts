@@ -125,11 +125,17 @@ export interface RootProductDraftTextIngress {
   activeStep(telegramUserId: string): Promise<RootProductDraftTextStep | null>;
 }
 
+export interface AdminInventoryImportTextIngress {
+  adminTelegramUserId: number;
+  isActive(telegramUserId: string): Promise<boolean>;
+}
+
 export interface TelegramWebhookOptions {
   path: string;
   secretToken: string;
   inbox: UpdateInbox;
   rootProductDraftText?: RootProductDraftTextIngress;
+  inventoryImportText?: AdminInventoryImportTextIngress;
   metrics?: LatencyMetrics;
 }
 
@@ -149,7 +155,11 @@ export async function registerTelegramWebhook(
     const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body);
     const update = coerceUpdate(rawBody);
     const normalized = update
-      ? await normalizeTelegramUpdate(update, options.rootProductDraftText)
+      ? await normalizeTelegramUpdate(
+          update,
+          options.rootProductDraftText,
+          options.inventoryImportText,
+        )
       : null;
     if (!update || !normalized) {
       return reply.code(200).send({ ok: true });
@@ -212,6 +222,7 @@ function coerceUpdate(body: unknown): TelegramUpdate | undefined {
 async function normalizeTelegramUpdate(
   update: TelegramUpdate,
   rootProductDraftText?: RootProductDraftTextIngress,
+  inventoryImportText?: AdminInventoryImportTextIngress,
 ): Promise<TelegramCommandEnvelope | null> {
   if (
     !Number.isSafeInteger(update.update_id) ||
@@ -240,8 +251,13 @@ async function normalizeTelegramUpdate(
     actorId,
     chatType: chat?.type ?? "private",
     ...(rootProductDraftText ? { rootProductDraftText } : {}),
+    ...(inventoryImportText ? { inventoryImportText } : {}),
   });
-  const action = classifyAction(callbackData, command);
+  const action = normalizedMessageText?.inventoryImportText
+    ? ("ADMIN" as const)
+    : normalizedMessageText?.rootProductDraftText
+      ? ("ADMIN" as const)
+      : classifyAction(callbackData, command);
   const actorUsername = normalizeUsernameMetadata(actor.username);
   const contact = update.message?.contact;
   const contactPhoneNumber =
@@ -280,6 +296,7 @@ async function normalizeTelegramUpdate(
     ...(command ? { command } : {}),
     ...(normalizedMessageText?.text ? { messageText: normalizedMessageText.text } : {}),
     ...(normalizedMessageText?.rootProductDraftText ? { rootProductDraftText: true as const } : {}),
+    ...(normalizedMessageText?.inventoryImportText ? { inventoryImportText: true as const } : {}),
     ...(actor.first_name ? { firstName: actor.first_name } : {}),
     ...(actor.last_name ? { lastName: actor.last_name } : {}),
     ...(actor.language_code ? { languageCode: actor.language_code } : {}),
@@ -406,11 +423,25 @@ async function normalizeSafeMessageText(
     actorId: number;
     chatType: string;
     rootProductDraftText?: RootProductDraftTextIngress;
+    inventoryImportText?: AdminInventoryImportTextIngress;
   },
-): Promise<{ text: string; rootProductDraftText?: true } | null> {
+): Promise<{ text: string; rootProductDraftText?: true; inventoryImportText?: true } | null> {
   if (!text || command) return null;
   const normalized = text.normalize("NFC").trim();
   if (SAFE_MESSAGE_TEXT[normalized]) return { text: normalized };
+  if (
+    context.inventoryImportText &&
+    context.chatType === "private" &&
+    context.actorId === context.inventoryImportText.adminTelegramUserId
+  ) {
+    const active = await context.inventoryImportText.isActive(String(context.actorId));
+    if (active) {
+      const sanitized = sanitizeInventoryImportText(normalized);
+      if (sanitized && isSafeInventoryImportText(sanitized)) {
+        return { text: sanitized, inventoryImportText: true };
+      }
+    }
+  }
   if (
     context.rootProductDraftText &&
     context.chatType === "private" &&
@@ -434,6 +465,41 @@ function isSafeDraftProse(normalized: string, maxBytes: number): boolean {
     Buffer.byteLength(normalized, "utf8") <= maxBytes &&
     !/[\p{Cc}\p{Cf}\0]/u.test(normalized)
   );
+}
+
+const MAX_INVENTORY_IMPORT_TEXT_BYTES = 64 * 1024;
+const MAX_INVENTORY_IMPORT_LINES = 500;
+
+function sanitizeInventoryImportText(normalized: string): string {
+  let out = "";
+  for (const ch of normalized) {
+    if (ch === "\r" || ch === "\n" || ch === "\t") {
+      out += ch;
+      continue;
+    }
+    if (/[\p{Cc}\p{Cf}\0]/u.test(ch)) continue;
+    out += ch;
+  }
+  return out.trim();
+}
+
+function isSafeInventoryImportText(normalized: string): boolean {
+  if (
+    normalized.length === 0 ||
+    normalized.length > MAX_INVENTORY_IMPORT_TEXT_BYTES ||
+    Buffer.byteLength(normalized, "utf8") > MAX_INVENTORY_IMPORT_TEXT_BYTES
+  ) {
+    return false;
+  }
+  const lines = normalized.split(/\r?\n/).filter((l) => l.trim().length > 0);
+  if (lines.length === 0 || lines.length > MAX_INVENTORY_IMPORT_LINES) {
+    return false;
+  }
+  for (const ch of normalized) {
+    if (ch === "\r" || ch === "\n" || ch === "\t") continue;
+    if (/[\p{Cc}\p{Cf}\0]/u.test(ch)) return false;
+  }
+  return true;
 }
 
 function normalizeRootProductDraftText(

@@ -2507,7 +2507,7 @@ async function bootstrap(): Promise<void> {
               count(vs.id) filter (where vs.available <= 0)::int as out_stock
             from product p
             left join variant_stock vs on vs.product_id = p.id
-            where p.is_test = false and p.is_archived = false
+            where p.is_archived = false
             group by p.id, p.name_vi, p.is_active, p.sort_order
           )
           select id, name, active, variant_count, in_stock, low_stock, out_stock,
@@ -2522,7 +2522,7 @@ async function bootstrap(): Promise<void> {
         `.execute(dbHandle.db);
         const extraCounts = await sql<{ held: number; waiting: number }>`
           select
-            coalesce((select count(*)::int from digital_asset da join product_variant pv on pv.id = da.variant_id join product p on p.id = pv.product_id where da.status = 'RESERVED' and p.is_test = false and p.is_archived = false), 0)::int as held,
+            coalesce((select count(*)::int from digital_asset da join product_variant pv on pv.id = da.variant_id join product p on p.id = pv.product_id where da.status = 'RESERVED' and p.is_archived = false), 0)::int as held,
             coalesce((select count(*)::int from preorder_reservation pr where pr.status in ('WAITING_DEPOSIT', 'DEPOSIT_PAID')), 0)::int as waiting
         `.execute(dbHandle.db);
         const held = extraCounts.rows[0]?.held ?? 0;
@@ -3084,7 +3084,7 @@ async function bootstrap(): Promise<void> {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const prods = await sql<{ id: string; name_vi: string }>`
-          select id, name_vi from product where is_test = false and is_archived = false and is_active = true order by sort_order asc
+          select id, name_vi from product where is_archived = false and is_active = true order by sort_order asc
         `.execute(dbHandle.db);
         return presentAdminInventoryProductPicker(
           prods.rows.map((p) => ({ id: p.id, name: p.name_vi })),
@@ -3095,7 +3095,7 @@ async function bootstrap(): Promise<void> {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const prods = await sql<{ id: string; name_vi: string }>`
-          select id, name_vi from product where is_test = false and is_archived = false and is_active = true order by sort_order asc
+          select id, name_vi from product where is_archived = false and is_active = true order by sort_order asc
         `.execute(dbHandle.db);
         return presentAdminInventoryProductPicker(
           prods.rows.map((p) => ({ id: p.id, name: p.name_vi })),
@@ -3106,7 +3106,7 @@ async function bootstrap(): Promise<void> {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const prods = await sql<{ id: string; name_vi: string }>`
-          select id, name_vi from product where is_test = false and is_archived = false and is_active = true order by sort_order asc
+          select id, name_vi from product where is_archived = false and is_active = true order by sort_order asc
         `.execute(dbHandle.db);
         return presentAdminInventoryProductPicker(
           prods.rows.map((p) => ({ id: p.id, name: p.name_vi })),
@@ -3596,9 +3596,10 @@ async function bootstrap(): Promise<void> {
             };
       },
       async importConfirm(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const result = await confirmInventoryImportSession(dbHandle.db, vault, {
-          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           config: {
             adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
             expectedUsername: config.ADMIN_EXPECTED_USERNAME,
@@ -4674,9 +4675,39 @@ async function bootstrap(): Promise<void> {
           )
             return presentAdminDenied("NOT_ROOT_ADMIN");
           await productDraftWorkflow.cancel(input.telegramUserId);
+          const fileSession = await getFileArtifactImportSession(
+            dbHandle.db,
+            String(input.telegramUserId),
+          );
+          if (fileSession) {
+            await cancelFileArtifactImportSession(dbHandle.db, {
+              actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+              config: {
+                adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+                expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+              },
+              correlationId: input.correlationId,
+            });
+          }
+          const inventoryCancel = await cancelInventoryImportSession(dbHandle.db, vault, {
+            actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+            config: {
+              adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+              expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+            },
+            correlationId: input.correlationId,
+          });
+          if (!inventoryCancel.ok && inventoryCancel.code !== "NOT_FOUND") {
+            return presentAdminDenied(
+              inventoryCancel.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+            );
+          }
           return {
             text: "Đã huỷ thao tác.",
-            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+            buttons: [
+              [{ text: "📦 Kho hàng", callbackData: "admin:inventory" }],
+              [{ text: "🛍 Sản phẩm", callbackData: "admin:products" }],
+            ],
           };
         },
       },
