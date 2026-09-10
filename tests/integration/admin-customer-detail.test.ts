@@ -128,6 +128,43 @@ describe("admin customer wallet detail", () => {
     expect(detail.buttons).toEqual([[{ text: "Admin", callbackData: "admin:menu" }]]);
   });
 
+  it("finds a customer by order number and by telegram id, which is what the search prompt promises", async () => {
+    // The prompt says the owner may type "Telegram ID, username, số điện thoại đã chia sẻ, hoặc mã đơn
+    // hàng". Nothing covered the predicate: every other call here passes filter/cursor/limit only, so a
+    // broken numeric or order branch would have stayed green. The live run that found a row used an
+    // order number; this pins both branches against the seeded fixtures.
+    const customerId = await seedCustomerDetail();
+
+    const order = (
+      await sql<{ order_number: string }>`
+        select order_number from "order" where customer_id = ${customerId} limit 1
+      `.execute(ctx.db)
+    ).rows[0];
+    const profile = (
+      await sql<{ telegram_user_id: string | null }>`
+        select telegram_user_id from customer_profile_snapshot where customer_id = ${customerId} limit 1
+      `.execute(ctx.db)
+    ).rows[0];
+    expect(order).toBeDefined();
+    expect(profile?.telegram_user_id).toBeTruthy();
+
+    const byOrder = await listAdminCustomers(ctx.db, {
+      adminTelegramUserId: "1",
+      filter: "recent",
+      query: order!.order_number,
+      limit: 5,
+    });
+    expect(byOrder.items.map((c) => c.id)).toContain(customerId);
+
+    const byTelegramId = await listAdminCustomers(ctx.db, {
+      adminTelegramUserId: "1",
+      filter: "recent",
+      query: profile!.telegram_user_id!,
+      limit: 5,
+    });
+    expect(byTelegramId.items.map((c) => c.id)).toContain(customerId);
+  });
+
   it("populates balance, recent order, ledger, and paid spending with refund semantics", async () => {
     const customerId = await seedCustomerDetail();
 

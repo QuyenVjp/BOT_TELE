@@ -419,6 +419,11 @@ export async function presentAdminCustomerSearchPrompt(db: Db, adminTelegramUser
     adminTelegramUserId,
     kind: "CUSTOMER_SEARCH_PROMPT",
     payload: {},
+    // Deliberately short. The admission row the ingress needs lives ten minutes, and while this state
+    // is live it wins the dispatcher's text chain over the broadcast, import and quantity prompts — so
+    // a long TTL would misroute the first line meant for one of those. This matches "the owner types a
+    // query right now".
+    ttlMinutes: 3,
   });
   // The ingress admits a typed query only while a `customer_search_prompt` row is live, and until now
   // this prompt wrote only the callback state — so a query typed here was dropped before dispatch and
