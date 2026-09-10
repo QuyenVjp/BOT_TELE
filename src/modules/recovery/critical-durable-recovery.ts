@@ -315,7 +315,7 @@ async function recoverInbox(
   const updated = await sql<{ id: string }>`
     update webhook_inbox
     set processing_status='RETRY', next_attempt_at=now(), dead_lettered_at=null,
-        last_error_code=null, claimed_by=null, claim_expires_at=null,
+        last_error_code=null, last_error_detail=null, claimed_by=null, claim_expires_at=null,
         claim_generation=claim_generation+1
     where id=${input.id} and source=${source} and processing_status='DEAD' and claim_generation=${Number(row.claim_generation)}
     returning id

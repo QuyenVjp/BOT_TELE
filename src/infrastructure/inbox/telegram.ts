@@ -303,7 +303,8 @@ export function createPostgresTelegramInbox(db: Db): TelegramInbox {
             claim_generation = w.claim_generation + 1,
             claim_expires_at = now() + make_interval(secs => ${options.leaseSeconds}),
             attempt_count = w.attempt_count + 1,
-            last_error_code = null
+            last_error_code = null,
+            last_error_detail = null
         from candidates c
         where w.id = c.id
         returning w.id, w.source_event_id, w.raw_hash, w.envelope, w.claimed_by,

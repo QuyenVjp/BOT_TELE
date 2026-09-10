@@ -222,7 +222,8 @@ export function createPostgresSePayInbox(db: Db): SePayInbox {
         update webhook_inbox
         set mutation_count = mutation_count + 1,
             last_mutation_at = now(),
-            last_error_code = 'DUPLICATE_MUTATION'
+            last_error_code = 'DUPLICATE_MUTATION',
+            last_error_detail = 'SePay sent a different payload for an event id already recorded' 
         where id = ${row.id}
         `.execute(trx);
         await sql`
@@ -278,7 +279,8 @@ export function createPostgresSePayInbox(db: Db): SePayInbox {
         set processing_status = 'PROCESSING', claimed_by = ${options.owner},
             claim_generation = w.claim_generation + 1,
             claim_expires_at = now() + make_interval(secs => ${options.leaseSeconds}),
-            attempt_count = w.attempt_count + 1, last_error_code = null
+            attempt_count = w.attempt_count + 1, last_error_code = null,
+            last_error_detail = null
         from candidates c where w.id = c.id
         returning w.id, w.source_event_id, w.raw_hash, w.envelope, w.claimed_by,
                   w.claim_generation::text, w.attempt_count
