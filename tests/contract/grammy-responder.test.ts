@@ -173,6 +173,29 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(sendCalls).toHaveLength(2);
   });
 
+  it("does not post a keyboard message for screens that merely carry both markups", async () => {
+    const sendCalls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(async (...args: unknown[]) => {
+        sendCalls.push(args);
+        return { message_id: 4 };
+      }),
+      editMessageText: vi.fn(),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const message = presentStorefront({ actorName: "An", isRootAdmin: false });
+
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: { ...message, installPersistentKeyboard: false },
+    });
+
+    expect(sendCalls).toHaveLength(1);
+  });
+
   it("renders contact-request reply keyboard for the account screen", async () => {
     const calls: unknown[][] = [];
     const api = {

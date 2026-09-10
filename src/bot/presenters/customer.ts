@@ -129,7 +129,12 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
     [{ text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
   );
   if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);
-  return { text: lines.join("\n"), buttons, replyKeyboard: MAIN_REPLY_KEYBOARD };
+  return {
+    text: lines.join("\n"),
+    buttons,
+    replyKeyboard: MAIN_REPLY_KEYBOARD,
+    installPersistentKeyboard: true,
+  };
 }
 export function presentCustomerWarranty(summary?: string): PresentedMessage {
   return {

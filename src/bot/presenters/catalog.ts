@@ -59,6 +59,13 @@ export interface PresentedMessage {
   text: string;
   buttons: InlineButton[][];
   replyKeyboard?: ReplyKeyboard;
+  /**
+   * Set only where the persistent customer keyboard should be (re)installed — the /start
+   * storefront greeting. Telegram delivers one `reply_markup` per message, so a screen that
+   * also carries inline buttons needs a second message for the keyboard; asking for that on
+   * every such screen would post a redundant menu message each time.
+   */
+  installPersistentKeyboard?: boolean;
   /** Optional binary photo media, currently used only by payment QR screens. */
   photo?: Buffer;
   /** Optional document media, used for paid ZIP delivery and admin CSV templates. */

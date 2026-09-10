@@ -230,7 +230,8 @@ const PERSISTENT_KEYBOARD_PROMPT =
 
 /** Markup for the follow-up keyboard message, or null when this screen needs none. */
 function pendingReplyKeyboardMarkup(message: PresentedMessage): ReplyKeyboardMarkup | null {
-  if (message.buttons.length === 0 || !message.replyKeyboard) return null;
+  if (!message.installPersistentKeyboard || !message.replyKeyboard) return null;
+  if (message.buttons.length === 0) return null;
   return buildReplyKeyboard(message.replyKeyboard);
 }
 
