@@ -187,6 +187,11 @@ export interface AdminProductContentEditIngress {
   isActive(telegramUserId: string): Promise<boolean>;
 }
 
+export interface AdminWarrantyAdjustTextIngress {
+  adminTelegramUserId: number;
+  isActive(telegramUserId: string): Promise<boolean>;
+}
+
 export interface TelegramWebhookOptions {
   path: string;
   secretToken: string;
@@ -194,6 +199,8 @@ export interface TelegramWebhookOptions {
   rootProductDraftText?: RootProductDraftTextIngress;
   inventoryImportText?: AdminInventoryImportTextIngress;
   productContentEditText?: AdminProductContentEditIngress;
+  /** Goal §26: the owner's typed refund adjustment, admitted only while the prompt is pending. */
+  warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress;
   /** Goal §28: the search prompt's one-shot permission for a typed query. */
   customerSearchQuery?: CustomerSearchQueryIngress;
   metrics?: LatencyMetrics;
@@ -220,6 +227,7 @@ export async function registerTelegramWebhook(
           options.rootProductDraftText,
           options.inventoryImportText,
           options.productContentEditText,
+          options.warrantyRefundAdjustText,
           options.customerSearchQuery,
         )
       : null;
@@ -286,6 +294,7 @@ async function normalizeTelegramUpdate(
   rootProductDraftText?: RootProductDraftTextIngress,
   inventoryImportText?: AdminInventoryImportTextIngress,
   productContentEditText?: AdminProductContentEditIngress,
+  warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress,
   customerSearchQuery?: CustomerSearchQueryIngress,
 ): Promise<TelegramCommandEnvelope | null> {
   if (
@@ -383,6 +392,7 @@ async function normalizeTelegramUpdate(
     rootProductDraftText?: true;
     inventoryImportText?: true;
     productContentEditText?: true;
+    warrantyRefundAdjustText?: true;
   } | null = null;
   const isGroup = chatType === "group" || chatType === "supergroup";
   const isMentioned = Boolean(
@@ -432,6 +442,7 @@ async function normalizeTelegramUpdate(
       ...(rootProductDraftText ? { rootProductDraftText } : {}),
       ...(inventoryImportText ? { inventoryImportText } : {}),
       ...(productContentEditText ? { productContentEditText } : {}),
+      ...(warrantyRefundAdjustText ? { warrantyRefundAdjustText } : {}),
     });
   }
   const action =
@@ -439,11 +450,13 @@ async function normalizeTelegramUpdate(
       ? ("CATALOG" as const)
       : normalizedMessageText?.inventoryImportText
         ? ("ADMIN" as const)
-        : normalizedMessageText?.productContentEditText
+        : normalizedMessageText?.warrantyRefundAdjustText
           ? ("ADMIN" as const)
-          : normalizedMessageText?.rootProductDraftText
+          : normalizedMessageText?.productContentEditText
             ? ("ADMIN" as const)
-            : classifyAction(callbackData, command);
+            : normalizedMessageText?.rootProductDraftText
+              ? ("ADMIN" as const)
+              : classifyAction(callbackData, command);
   const actorUsername = normalizeUsernameMetadata(actor.username);
   const contact = update.message?.contact;
   const contactPhoneNumber =
@@ -497,6 +510,9 @@ async function normalizeTelegramUpdate(
     // marker never reaches the dispatcher and the vouched text is claimed by a generic handler.
     ...(normalizedMessageText?.productContentEditText
       ? { productContentEditText: true as const }
+      : {}),
+    ...(normalizedMessageText?.warrantyRefundAdjustText
+      ? { warrantyRefundAdjustText: true as const }
       : {}),
     ...(actor.first_name ? { firstName: actor.first_name } : {}),
     ...(actor.last_name ? { lastName: actor.last_name } : {}),
@@ -632,12 +648,14 @@ async function normalizeSafeMessageText(
     rootProductDraftText?: RootProductDraftTextIngress;
     inventoryImportText?: AdminInventoryImportTextIngress;
     productContentEditText?: AdminProductContentEditIngress;
+    warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress;
   },
 ): Promise<{
   text: string;
   rootProductDraftText?: true;
   inventoryImportText?: true;
   productContentEditText?: true;
+  warrantyRefundAdjustText?: true;
 } | null> {
   if (!text || command) return null;
   const normalized = text.normalize("NFC").trim();
@@ -672,6 +690,17 @@ async function normalizeSafeMessageText(
     if (active) {
       const sanitized = sanitizeProductContentText(normalized);
       if (sanitized) return { text: sanitized, productContentEditText: true };
+    }
+  }
+  if (
+    context.warrantyRefundAdjustText &&
+    context.chatType === "private" &&
+    context.actorId === context.warrantyRefundAdjustText.adminTelegramUserId
+  ) {
+    const active = await context.warrantyRefundAdjustText.isActive(String(context.actorId));
+    if (active) {
+      const sanitized = sanitizeProductContentText(normalized);
+      if (sanitized) return { text: sanitized, warrantyRefundAdjustText: true };
     }
   }
   if (

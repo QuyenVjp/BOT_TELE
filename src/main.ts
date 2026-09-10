@@ -119,6 +119,24 @@ async function main(): Promise<void> {
           return Boolean(row);
         },
       },
+      warrantyRefundAdjustText: {
+        adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+        // Only the prompt's own pending state vouches for free text (goal §26), so an unrelated
+        // message after the prompt expires is never read as a refund amount.
+        async isActive(telegramUserId: string) {
+          if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return false;
+          const row = (
+            await sql<{ id: string }>`
+              select id from admin_callback_state
+              where admin_telegram_user_id = ${telegramUserId}
+                and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
+                and expires_at > now()
+              limit 1
+            `.execute(dbHandle.db)
+          ).rows[0];
+          return Boolean(row);
+        },
+      },
       inventoryImportText: {
         adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
         async isActive(telegramUserId: string) {

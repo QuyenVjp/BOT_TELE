@@ -938,6 +938,22 @@ const WARRANTY_STATUS_LABELS: Record<string, string> = {
   CANCELLED: "Đã huỷ",
 };
 
+/**
+ * Goal §26: the owner's adjustment arrives as "<amount> | <reason>". The amount is validated here
+ * rather than trusted: a refund is money, and a typo must not become an approval.
+ */
+function parseRefundAdjustment(text: string): { amountVnd: bigint; reason: string } | null {
+  const separator = text.indexOf("|");
+  if (separator < 0) return null;
+  const rawAmount = text.slice(0, separator).replace(/[.,\s]/gu, "");
+  const reason = text.slice(separator + 1).trim();
+  if (!/^\d{1,10}$/u.test(rawAmount)) return null;
+  if (reason.length === 0 || reason.length > 200) return null;
+  const amountVnd = BigInt(rawAmount);
+  if (amountVnd <= 0n || amountVnd > 1_000_000_000n) return null;
+  return { amountVnd, reason };
+}
+
 /** A warranty screen for a case we cannot serve; never a stack trace or an internal code. */
 function safeWarrantyMessage(text: string): PresentedMessage {
   return {
@@ -3845,6 +3861,13 @@ async function bootstrap(): Promise<void> {
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        // One pending prompt at a time: an older unexpired row would otherwise claim the next
+        // unrelated message the owner sends.
+        await sql`
+          delete from admin_callback_state
+          where admin_telegram_user_id = ${input.telegramUserId}
+            and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
+        `.execute(dbHandle.db);
         await createAdminCallbackState(dbHandle.db, {
           adminTelegramUserId: input.telegramUserId,
           kind: "WARRANTY_REFUND_ADJUST_PROMPT",
@@ -5258,6 +5281,58 @@ async function bootstrap(): Promise<void> {
                 ],
               };
             }
+          }
+
+          // Refund adjustment (goal §26). The prompt is an explicit owner action, so claiming the
+          // next message is intended; a reply we cannot read is answered with the format rather
+          // than applied.
+          const adjustState = await sql<{ id: string; payload: unknown }>`
+            select id, payload_redacted as payload from admin_callback_state
+            where admin_telegram_user_id = ${input.telegramUserId}
+              and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
+              and expires_at > now()
+            order by created_at desc limit 1
+          `.execute(dbHandle.db);
+          const pendingAdjust = adjustState.rows[0];
+          if (pendingAdjust) {
+            const payload = (pendingAdjust.payload ?? {}) as { claimId?: unknown };
+            const claimId = typeof payload.claimId === "string" ? payload.claimId : null;
+            await sql`
+              delete from admin_callback_state
+              where admin_telegram_user_id = ${input.telegramUserId}
+                and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
+            `.execute(dbHandle.db);
+            if (!claimId) return null;
+            const adjusted = parseRefundAdjustment(input.text);
+            if (!adjusted) {
+              return {
+                text: [
+                  "Chưa đọc được số tiền.",
+                  "",
+                  "Gửi lại theo dạng: 40000 | Lý do điều chỉnh",
+                ].join("\n"),
+                buttons: [[{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }]],
+              };
+            }
+            const result = await approveClaimRefund({
+              db: dbHandle.db,
+              actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+              config: {
+                adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+                expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+              },
+              claimId,
+              amountVnd: adjusted.amountVnd,
+              overrideReason: adjusted.reason,
+              correlationId: input.correlationId,
+            });
+            if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
+            const claim = await loadAdminWarrantyClaim(dbHandle.db, claimId);
+            return presentAdminWarrantyActionDone({
+              claimNumber: claim?.claimNumber ?? claimId,
+              claimId,
+              message: `Đã duyệt hoàn ${formatMoneyVnd(makeVnd(Number(adjusted.amountVnd)))} — lý do: ${adjusted.reason}. Shop chuyển khoản thủ công, sau đó xác nhận trong mục Chờ hoàn tiền.`,
+            });
           }
 
           // Wizard sub-flow text states (category create / custom field / advanced / custom description).

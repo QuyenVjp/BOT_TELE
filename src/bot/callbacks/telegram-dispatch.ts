@@ -2446,6 +2446,16 @@ export function createTelegramDomainDispatcher(
             chatType: envelope.chatType,
             correlationId,
           })) ?? safeError("Không lưu được nội dung.");
+      } else if (envelope.warrantyRefundAdjustText && deps.admin?.workflow?.messageText) {
+        // The ingress vouched for this text as the owner's pending refund adjustment; it must not
+        // reach the customer text chain, which would answer with the storefront.
+        message =
+          (await deps.admin.workflow.messageText({
+            telegramUserId: envelope.actorUserId,
+            text: envelope.messageText ?? "",
+            chatType: envelope.chatType,
+            correlationId,
+          })) ?? safeError("Chưa đọc được số tiền. Gửi dạng: 40000 | Lý do điều chỉnh.");
       } else if (
         envelope.messageText &&
         (deps.walletTopupText ||
