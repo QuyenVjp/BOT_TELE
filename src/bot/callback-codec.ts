@@ -447,11 +447,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
       // The confirmed price rides in the token. Without it the wallet path would re-read the
       // live price and hand THAT to buyNow as the expected price, making the stale-price guard
       // self-fulfilling and silently charging a price the customer never saw.
-      if (
-        !input.resourceId ||
-        input.secondaryResourceId !== undefined ||
-        input.option !== undefined
-      ) {
+      if (!input.resourceId || input.option !== undefined) {
         throw new Error("Invalid checkout wallet callback payload");
       }
       const amountVnd = input.amountVnd;
@@ -464,7 +460,18 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
       }
       const amount = Buffer.alloc(6);
       amount.writeUIntBE(amountVnd!, 0, 6);
-      return Buffer.concat([encodeResourceId(input.resourceId), amount]);
+      // The attempt id is what makes a SECOND purchase of the same variant possible: the order
+      // idempotency key is derived from it, so tapping the same preview twice still collapses to
+      // one order, while a freshly rendered preview is a new attempt. Without it the key had to be
+      // derived from customer+variant, which permanently blocked repeat purchases of a variant.
+      if (input.secondaryResourceId === undefined)
+        return Buffer.concat([encodeResourceId(input.resourceId), amount]);
+      // The attempt id is 6 random bytes carried as 8 base64url characters. A full 16-byte ULID
+      // would push the finished token to 67 bytes and the issue() guard would refuse it — Telegram
+      // caps callback_data at 64 — so the attempt id is sized to fit: 51 bytes without it, 59 with.
+      const attempt = decodeAttemptId(input.secondaryResourceId);
+      if (!attempt) throw new Error("Invalid checkout wallet attempt id");
+      return Buffer.concat([encodeResourceId(input.resourceId), amount, attempt]);
     }
     case "CUSTOMER_NOTIFICATION_TOGGLE":
       assertOnlyResource(input);
@@ -544,8 +551,17 @@ function decodeActionPayload(
     return payload.byteLength === 26 ? { resourceId: payload.toString("utf8") } : null;
   }
   if (action === "CHECKOUT_WALLET") {
-    return payload.byteLength === 22
-      ? { resourceId: decodeUlid(payload.subarray(0, 16)), amountVnd: payload.readUIntBE(16, 6) }
+    if (payload.byteLength === 22)
+      return {
+        resourceId: decodeUlid(payload.subarray(0, 16)),
+        amountVnd: payload.readUIntBE(16, 6),
+      };
+    return payload.byteLength === 28
+      ? {
+          resourceId: decodeUlid(payload.subarray(0, 16)),
+          amountVnd: payload.readUIntBE(16, 6),
+          secondaryResourceId: payload.subarray(22, 28).toString("base64url"),
+        }
       : null;
   }
   if (action === "CATALOG_PAGE") {
@@ -583,6 +599,17 @@ function assertNoPayload(input: IssueCallbackTokenInput): void {
   ) {
     throw new Error("Callback action does not accept a payload");
   }
+}
+
+/** 6 random bytes as 8 base64url characters: enough to separate two previews, short enough to fit. */
+export function encodeAttemptId(value: string): string {
+  return Buffer.from(value, "base64url").subarray(0, 6).toString("base64url");
+}
+
+function decodeAttemptId(value: string): Buffer | null {
+  if (!/^[A-Za-z0-9_-]{8}$/.test(value)) return null;
+  const bytes = Buffer.from(value, "base64url");
+  return bytes.byteLength === 6 ? bytes : null;
 }
 
 function assertOnlyResource(input: IssueCallbackTokenInput): void {

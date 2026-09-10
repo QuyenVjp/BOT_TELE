@@ -159,6 +159,42 @@ beforeEach(async () => {
 });
 
 describe("checkout confirmation screen", () => {
+  // A customer must be able to buy the same variant twice, while a double tap of ONE confirmation
+  // screen must still produce one order. The order idempotency key therefore comes from the
+  // attempt bound into the wallet token the preview emitted, not from customer+variant — keying it
+  // on customer+variant made every repeat purchase return the first, already completed order.
+  it("allows a repeat purchase but collapses a double tap of the same screen", async () => {
+    const catalog = await seedCatalog();
+    const { preview, previewToken, wallet } = build(catalog, 1_000_000n);
+
+    const firstScreen = await preview(previewToken());
+    const firstWalletToken = firstScreen.buttons
+      .flat()
+      .find((button) => button.text === "👛 Ví TIER20")?.callbackData;
+    expect(firstWalletToken).toBeTruthy();
+
+    await wallet(firstWalletToken!);
+    expect(await orderCount()).toBe(1);
+    const firstOrder = await sql<{ id: string }>`select id from "order"`.execute(ctx.db);
+
+    // Same screen, same token: the second tap is the same attempt, so nothing new is created.
+    await wallet(firstWalletToken!);
+    expect(await orderCount()).toBe(1);
+    const sameOrder = await sql<{ id: string }>`select id from "order"`.execute(ctx.db);
+    expect(sameOrder.rows.map((row) => row.id)).toEqual(firstOrder.rows.map((row) => row.id));
+
+    // A newly rendered confirmation is a new attempt, so the customer can buy again.
+    const secondScreen = await preview(previewToken());
+    const secondWalletToken = secondScreen.buttons
+      .flat()
+      .find((button) => button.text === "👛 Ví TIER20")?.callbackData;
+    expect(secondWalletToken).toBeTruthy();
+    expect(secondWalletToken).not.toBe(firstWalletToken);
+
+    await wallet(secondWalletToken!);
+    expect(await orderCount()).toBe(2);
+  });
+
   it("renders the order summary without creating an order or a payment intent", async () => {
     const catalog = await seedCatalog();
     const { preview, previewToken } = build(catalog, null);

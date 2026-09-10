@@ -1,4 +1,5 @@
 import type { Db } from "../../infrastructure/db/transaction.js";
+import { randomBytes } from "node:crypto";
 import { buyNow, cancelUnpaidOrder, isStockOutcomeCode } from "../../modules/commerce/buy-now.js";
 import { findOrderByNumber } from "../../modules/commerce/repository.js";
 import { presentPaymentForOrder } from "../../modules/payments/service.js";
@@ -194,6 +195,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     telegramUserId: string,
     resourceId: string,
     amountVnd?: number,
+    attemptId?: string,
   ): string | null => {
     try {
       return (
@@ -202,6 +204,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
           telegramUserId,
           resourceId,
           ...(amountVnd === undefined ? {} : { amountVnd }),
+          ...(attemptId === undefined ? {} : { secondaryResourceId: attemptId }),
         }) ?? null
       );
     } catch {
@@ -240,11 +243,15 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
         return errorMessage("Sản phẩm tạm hết hàng. Vui lòng chọn sản phẩm khác.");
       }
       const qrCallbackData = issueQrToken(telegramUserId, variant.id, Number(variant.price_vnd));
+      // One attempt id per rendered preview: it separates "the customer tapped the same button
+      // twice" from "the customer is buying this variant again", which the order idempotency key
+      // has to tell apart.
       const walletCallbackData = choiceToken(
         "CHECKOUT_WALLET",
         telegramUserId,
         variant.id,
         Number(variant.price_vnd),
+        randomBytes(6).toString("base64url"),
       );
       const cancelCallbackData = choiceToken("SHOP_PRODUCT", telegramUserId, variant.product_id);
       if (!qrCallbackData || !walletCallbackData || !cancelCallbackData) {
@@ -312,9 +319,14 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       if (!deps.payOrderWithWallet)
         return errorMessage("Ví TIER20 không khả dụng. Vui lòng chọn VietQR.");
 
-      // Deterministic key: a double tap reuses the same Order (buyNow short-circuits on it)
-      // and the same wallet debit key, so one tap of intent produces exactly one effect.
-      const idempotencyKey = `wallet:${customerId}:${variant.id}`;
+      // Keyed on the attempt the customer confirmed, not on customer+variant: a double tap sends
+      // the same token and therefore the same key (one order), while a repeat purchase starts from
+      // a newly rendered preview and gets its own order. Deriving it from customer+variant made a
+      // second purchase of the same variant impossible — buyNow returned the old, completed order.
+      const attemptId = verified.value.secondaryResourceId;
+      const idempotencyKey = attemptId
+        ? `wallet:${customerId}:${attemptId}`
+        : `wallet:${customerId}:${variant.id}`;
       const result = await buyNow(deps.db, {
         customerId,
         variantId: variant.id,
