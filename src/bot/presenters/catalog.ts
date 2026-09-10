@@ -297,7 +297,25 @@ export function presentProductDetail(
 }
 
 /** Paginated sellable variant cards. */
-export function presentVariantList(
+export /** Customer-facing names for the backend's duration codes (goal §26). */
+const DURATION_LABELS: Record<string, string> = {
+  P1M: "1 tháng",
+  P3M: "3 tháng",
+  P6M: "6 tháng",
+  P12M: "12 tháng",
+  P24M: "24 tháng",
+  P1Y: "12 tháng",
+  LIFETIME: "Vĩnh viễn",
+  CUSTOM: "Tùy chọn",
+  TRIAL: "Dùng thử",
+};
+
+function durationLabel(code: string | null | undefined): string | null {
+  if (!code) return null;
+  return DURATION_LABELS[code.toUpperCase()] ?? null;
+}
+
+function presentVariantList(
   variants: CatalogVariantRow[],
   options: { nextCursor: string | null; title?: string },
 ): PresentedMessage {
@@ -313,7 +331,11 @@ export function presentVariantList(
 
   const lines = variants.map((v, i) => {
     const price = formatVnd(makeVnd(BigInt(v.price_vnd)));
-    return `${i + 1}. ${v.product_name_vi} — ${v.name_vi}\n   ${price} · ${v.duration_code ?? "—"} · ${deliveryLabel(v.delivery_type)}`;
+    // Duration codes are backend vocabulary (goal §26): the row said "P1M". An unrecognised code is
+    // dropped rather than printed raw — the variant name on the same line already names the offer.
+    const duration = durationLabel(v.duration_code);
+    const details = [price, duration, deliveryLabel(v.delivery_type)].filter(Boolean).join(" · ");
+    return `${i + 1}. ${v.product_name_vi} — ${v.name_vi}\n   ${details}`;
   });
 
   const buttons: InlineButton[][] = variants.map((v) => [

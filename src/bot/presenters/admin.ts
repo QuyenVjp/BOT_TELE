@@ -257,7 +257,12 @@ export function presentAdminCategories(input: {
             text: `✏️ ${c.parentId ? "↳ " : ""}${c.nameVi}`,
             callbackData: `admin:categories:rename:${c.id}`,
           },
-          { text: "🔁 Bật/Tắt", callbackData: `admin:categories:toggle:${c.id}` },
+          {
+            // The label names the node and the action. A bare "Bật/Tắt" is unreadable once the tree
+            // has more than a couple of rows: the owner cannot tell which category a row toggles.
+            text: `${c.active ? "⏸ Tắt" : "▶️ Bật"}: ${c.parentId ? "↳ " : ""}${c.nameVi}`,
+            callbackData: `admin:categories:toggle:${c.id}`,
+          },
         ],
         [
           { text: "⬆️", callbackData: `admin:categories:up:${c.id}` },
@@ -405,7 +410,39 @@ export function presentAdminPaymentsMenu(statusText?: string | undefined): Prese
   const body = statusText
     ? `${statusText}\nTheo dõi thanh toán và đối soát.`
     : "Theo dõi thanh toán và đối soát.";
-  return presentAdminSection(ADMIN_COPY.payments, body);
+  // Goal §95: the queues an operator actually reconciles from. They used to be invisible from here.
+  return {
+    text: `💳 ${ADMIN_COPY.payments}\n\n${body}`,
+    buttons: [
+      [
+        { text: "⏳ Chờ thanh toán", callbackData: "admin:payments:pending" },
+        { text: "⌛ Quá hạn", callbackData: "admin:payments:late" },
+      ],
+      [
+        { text: "✅ Đã thanh toán", callbackData: "admin:payments:paid" },
+        { text: "❓ Tiền chưa khớp", callbackData: "admin:payments:unmatched" },
+      ],
+      [
+        { text: "⚠️ Sai lệch", callbackData: "admin:payments:discrepancy" },
+        { text: "↩️ Cần hoàn tiền", callbackData: "admin:payments:refund" },
+      ],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentAdminPaymentOps(input: {
+  title: string;
+  rows: Array<{ id: string; label: string; detail: string }>;
+  emptyHint: string;
+}): PresentedMessage {
+  const body = input.rows.length
+    ? input.rows.map((row) => `• ${row.label}\n   ${row.detail}`).join("\n")
+    : input.emptyHint;
+  return {
+    text: `${input.title}\n\n${body}`,
+    buttons: [[{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }], adminNav("admin:menu")],
+  };
 }
 export interface AdminSupplierOverview {
   id: string;

@@ -288,6 +288,12 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    paymentsView?(input: {
+      telegramUserId: string;
+      chatType: string;
+      view: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     variantEditField?(input: {
       telegramUserId: string;
       fieldKey: string;
@@ -2175,6 +2181,16 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Nhắn khách theo đơn không khả dụng.");
+        } else if (route.startsWith("payments:")) {
+          const view = route.slice("payments:".length);
+          message = admin.paymentsView
+            ? await admin.paymentsView({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                view,
+                correlationId,
+              })
+            : safeError("Thanh toán không khả dụng.");
         } else if (route === "payments") {
           // The one visible route NOT backed by an `admin.*` member: its screen is composed from
           // the top-level `sepayReconciliationText` dep. Any future "every visible route has an

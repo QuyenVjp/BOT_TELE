@@ -149,6 +149,11 @@ import {
   resolveAdminOrderState,
   resolveOrderCustomerForRelay,
 } from "./modules/admin/order-operations.js";
+import {
+  ADMIN_PAYMENT_OPS_VIEWS,
+  listAdminPaymentOps,
+  type AdminPaymentOpsView,
+} from "./modules/admin/payment-ops.js";
 import { appendAuditEvent, listAuditEvents } from "./modules/identity/audit.js";
 
 export function marketingBroadcastClassForAudience(
@@ -1412,6 +1417,7 @@ async function bootstrap(): Promise<void> {
     presentProductDraftPreview,
     presentAdminVariantDraft,
     presentAdminVariantFieldPrompt,
+    presentAdminPaymentOps,
     ADMIN_VARIANT_FIELDS,
     presentAdminVariantMutationDone,
     presentKillSwitchDone,
@@ -3410,6 +3416,30 @@ async function bootstrap(): Promise<void> {
        * value alone, and the state it writes is what vouches for the reply — free text with no such
        * state open falls through to the rest of the text chain.
        */
+      /** Goal §95: the payment queues behind the admin payment screen. */
+      async paymentsView(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const view = input.view as AdminPaymentOpsView;
+        if (!ADMIN_PAYMENT_OPS_VIEWS.some((entry) => entry.view === view))
+          return {
+            text: "Mục thanh toán không hợp lệ.",
+            buttons: [[{ text: "💳 Thanh toán", callbackData: "admin:payments" }]],
+          };
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: `admin-payments-${view}`,
+          reason: "Admin payment queue access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const page = await listAdminPaymentOps(dbHandle.db, view);
+        return presentAdminPaymentOps(page);
+      },
       async variantEditField(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
