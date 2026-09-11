@@ -162,13 +162,19 @@ jobs:
         with:
           sarif_file: trivy-results.sarif
 
-  # Repository security posture. Skipped for fork pull requests because
-  # publishing results needs OIDC, which forks do not receive.
+  # Repository security posture. Two guards, both learned from real failures:
+  #  - the action only supports the DEFAULT branch ("Only the default branch main is
+  #    supported." fails the job outright), so a push to any other branch skips it;
+  #  - fork pull requests are skipped because publishing needs OIDC, which forks do not
+  #    receive.
   scorecard:
     name: OpenSSF Scorecard
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    if: >-
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: read
       security-events: write

@@ -17,17 +17,21 @@ import { ConfigError, loadConfig, resetConfigCache } from "../../src/config/inde
 // Fixture material only. Each long value is assembled at runtime so no literal in this
 // file is shaped like a committed credential — the secret scanner stays strict rather than
 // growing an allowlist entry for a test.
+/**
+ * Fixture material. Each value is long enough to satisfy the schema's minimum length and
+ * carries the `placeholder-value` marker that both secret scanners are told to ignore —
+ * a real credential never contains that marker, so the allowlist cannot hide one.
+ */
 const SECRET_VALUES = {
-  BUY_NOW_CALLBACK_HMAC_KEY: ["buy-now-callback-ke", "y-material-12345678"].join(""),
-  DELIVERY_SESSION_HMAC_KEY: ["delivery-session-ke", "y-material-12345678"].join(""),
-  SEPAY_WEBHOOK_HMAC_SECRET: ["sepay-webhook-hmac", "-material-12345678"].join(""),
-  SEPAY_API_TOKEN: ["sepay-api-token-m", "aterial-1234567890"].join(""),
-  VAULT_TOKEN: ["vault-token-mat", "erial-1234567890"].join(""),
-  SUPPLIER_API_TOKEN: ["supplier-api-token", "-material-12345678"].join(""),
-  DATABASE_URL: ["postgresql://shop:shop-loc", "al-only@localhost:5432/shop"].join(""),
-  // Assembled at runtime so the value is never a literal that looks like a committed credential.
-  TELEGRAM_BOT_TOKEN: ["1234567890", "AA-fixture-token-material-000"].join(":"),
-  TELEGRAM_WEBHOOK_SECRET: ["telegram-webhook-", "secret-material-1"].join(""),
+  BUY_NOW_CALLBACK_HMAC_KEY: "placeholder-value-buy-now-callback-key-000",
+  DELIVERY_SESSION_HMAC_KEY: "placeholder-value-delivery-session-key-000",
+  SEPAY_WEBHOOK_HMAC_SECRET: "placeholder-value-sepay-webhook-hmac-000",
+  SEPAY_API_TOKEN: "placeholder-value-sepay-api-token-000000",
+  VAULT_TOKEN: "placeholder-value-vault-token-000000000",
+  SUPPLIER_API_TOKEN: "placeholder-value-supplier-api-token-00",
+  DATABASE_URL: "postgresql://shop:shop-local-only@localhost:5432/shop",
+  TELEGRAM_BOT_TOKEN: "1234567890:placeholder-value-bot-token-000",
+  TELEGRAM_WEBHOOK_SECRET: "placeholder-value-webhook-secret-000",
 } as const;
 
 /** A complete production environment; overrides decide which invariant is under test. */

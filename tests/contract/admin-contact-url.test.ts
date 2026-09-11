@@ -1,6 +1,5 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { basename, join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   ADMIN_CONTACT_URL,
@@ -21,21 +20,47 @@ const URL_LITERAL_ALLOWLIST = new Set([
   "src/infrastructure/db/migrations/049_catalog_taxonomy.sql",
 ]);
 
-function rg(pattern: string, paths: string[], extraArgs: string[] = []): string {
-  try {
-    return execFileSync(
-      "rg",
-      ["-n", "--glob", "!node_modules/**", "--glob", "!dist/**", ...extraArgs, pattern, ...paths],
-      {
-        cwd: ROOT,
-        encoding: "utf8",
-      },
-    );
-  } catch (error) {
-    const err = error as { status?: number; stdout?: string };
-    if (err.status === 1) return "";
-    throw error;
+const SCAN_ROOTS = ["src", "tests", "scripts"] as const;
+const SKIPPED_DIRECTORIES = new Set(["node_modules", "dist", "coverage", ".git"]);
+/** Above this a file is not hand-written source worth scanning; skips the odd binary too. */
+const MAX_SCANNED_BYTES = 2_000_000;
+
+/**
+ * Minimal in-repo text search, in Node.
+ *
+ * This used to shell out to `rg`, which made the suite depend on a binary that is not
+ * guaranteed on a CI runner: the GitHub job failed with `spawnSync rg ENOENT` and took
+ * every other assertion in the run down with it. The scan is small and bounded, so it
+ * walks the tree directly — the same approach `scripts/secret-scan.mjs` already uses.
+ *
+ * Output mirrors `rg -n`: one `<path>:<line>:<text>` record per match, empty when none.
+ * Paths are repository-relative so the allowlist above stays portable.
+ */
+function searchText(pattern: string, roots: readonly string[] = SCAN_ROOTS): string {
+  const matcher = new RegExp(pattern);
+  const records: string[] = [];
+
+  const visit = (absolutePath: string): void => {
+    const stats = statSync(absolutePath);
+    if (stats.isDirectory()) {
+      if (SKIPPED_DIRECTORIES.has(basename(absolutePath))) return;
+      for (const entry of readdirSync(absolutePath)) visit(join(absolutePath, entry));
+      return;
+    }
+    if (!stats.isFile() || stats.size > MAX_SCANNED_BYTES) return;
+    const text = readFileSync(absolutePath, "utf8");
+    if (text.includes("\u0000")) return;
+    const relativePath = relative(ROOT, absolutePath);
+    text.split("\n").forEach((line, index) => {
+      if (matcher.test(line)) records.push(`${relativePath}:${index + 1}:${line}`);
+    });
+  };
+
+  for (const root of roots) {
+    const absolutePath = join(ROOT, root);
+    if (existsSync(absolutePath)) visit(absolutePath);
   }
+  return records.join("\n");
 }
 
 describe("canonical admin contact URL", () => {
@@ -49,13 +74,11 @@ describe("canonical admin contact URL", () => {
   });
 
   it("rejects the forbidden admin-handle typo anywhere in runtime or tests", () => {
-    const hits = rg(FORBIDDEN_ADMIN_HANDLE, ["src", "tests", "scripts"]);
-    expect(hits).toBe("");
+    expect(searchText(FORBIDDEN_ADMIN_HANDLE)).toBe("");
   });
 
   it("keeps the URL single-sourced outside the allowlist", () => {
-    const hits = rg(CANONICAL_ADMIN_CONTACT_URL, ["src", "tests", "scripts"])
-      .trim()
+    const hits = searchText(CANONICAL_ADMIN_CONTACT_URL)
       .split("\n")
       .filter(Boolean)
       .map((line) => line.split(":")[0] ?? line);

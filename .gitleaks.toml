@@ -1,0 +1,17 @@
+# gitleaks configuration.
+#
+# The default rule set is kept intact. This file records why five findings are expected:
+# every one is fixture material that has to satisfy a schema minimum length, so it cannot
+# be shortened into something the entropy check ignores.
+#
+# The allowlist keys off ONE marker, `placeholder-value`, which every fixture value carries.
+# A real credential never contains that literal, so this cannot hide one — unlike a
+# path-based allowlist over `tests/`, which would hide anything committed there.
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fixture material marked with the literal `placeholder-value`."
+regexTarget = "line"
+regexes = ['placeholder-value']

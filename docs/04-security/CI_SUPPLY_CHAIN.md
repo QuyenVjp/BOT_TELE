@@ -73,9 +73,19 @@ No job requests `contents: write` or `write-all`.
 | `scorecard` (`security.yml`)       | `contents: read`, `security-events: write`, `id-token: write` | OIDC token is required to publish public results; job is skipped for fork PRs                                       |
 | `verify` (`ci.yml`)                | inherits `contents: read`                                     | Runs the test matrix; publishes JUnit evidence via artifact upload only                                             |
 
-`scorecard` is guarded with
-`if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository`
-because `id-token: write` and publishing are unavailable to fork pull requests.
+`scorecard` carries two guards, each added after a real failure:
+
+```yaml
+if: >-
+  github.ref == format('refs/heads/{0}', github.event.repository.default_branch) &&
+  (github.event_name != 'pull_request' ||
+   github.event.pull_request.head.repo.full_name == github.repository)
+```
+
+- The action only supports the **default branch** and fails outright elsewhere with
+  `Only the default branch main is supported.` A push to `release/**` therefore skips it rather
+  than turning the workflow red for a reason no code change can fix.
+- Fork pull requests are skipped because `id-token: write` and publishing are unavailable to them.
 
 ## Scanner coverage against the THREAT_MODEL verification baseline
 
@@ -93,6 +103,33 @@ and names a supply-chain red-team lens. Coverage:
 
 CodeQL is the only SAST engine: adding Semgrep on top would re-report the same class of findings and
 double triage cost without adding coverage. Documented in `security.yml`.
+
+### The one secret-scan allowlist, and why it is scoped to a marker
+
+Fixture material in tests has to satisfy the config schema's minimum length (`BUY_NOW_CALLBACK_HMAC_KEY`
+and friends require 32+ characters), so test values cannot be shortened into something the
+entropy rule ignores. `.gitleaks.toml` therefore allowlists findings on a single literal,
+`placeholder-value`, which every fixture value contains:
+
+```toml
+[[allowlists]]
+regexTarget = "line"
+regexes = ['placeholder-value']
+```
+
+`scripts/secret-scan.mjs` carries the same one-entry marker in its existing `ALLOWLIST`. The scope is
+the point: a path-based allowlist over `tests/**` would hide anything anyone ever commits there, while
+a marker-based rule cannot hide a real credential, because no real credential contains the literal
+`placeholder-value`. Verified by scanning a control file that carries a live-looking token and no
+marker — gitleaks still reports it.
+
+### OSV scans the whole lockfile, including dev dependencies
+
+`npm run audit` is `--omit=dev`, so it is deliberately narrower than OSV. OSV reads `package-lock.json`
+whole, which is the stricter position and the one kept here: the four High advisories it reported were
+transitive `undici` and `uuid` versions behind `testcontainers`, and the fix was to move
+`testcontainers` 10 → 12 (which pulls `undici` 7 and `dockerode` 5) rather than to narrow the scan.
+A vulnerable HTTP client in the test toolchain still runs with repository access in CI.
 
 ## Failing policy for HIGH / CRITICAL
 

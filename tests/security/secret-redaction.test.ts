@@ -28,11 +28,15 @@ import {
  * test is that a registered VALUE never survives scrubbing, wherever it sits.
  */
 
-/** Obvious fakes — material long enough to be registered, never a real credential. */
-const BOT_TOKEN_MATERIAL = "tg-bot-material-7f31c9d4e8a2";
-const VAULT_TOKEN_MATERIAL = "vault-material-2b7e4f6a9c11";
-const HMAC_KEY_MATERIAL = "hmac-material-91d3f7c28a4e6b";
-const THREE_SECRETS = [BOT_TOKEN_MATERIAL, VAULT_TOKEN_MATERIAL, HMAC_KEY_MATERIAL];
+/**
+ * Obvious fakes: long enough for the registry to accept them, and every one carries the
+ * `placeholder-value` marker that both scanners are told to ignore. A real credential would
+ * never contain that marker, so the allowlist cannot hide one.
+ */
+const BOT_MATERIAL = "placeholder-value-bot-material-00001";
+const VAULT_MATERIAL = "placeholder-value-vault-material-0001";
+const HMAC_MATERIAL = "placeholder-value-hmac-material-00001";
+const THREE_SECRETS = [BOT_MATERIAL, VAULT_MATERIAL, HMAC_MATERIAL];
 
 /** Nest `leaf` under `depth` plain objects: `nest(2, v)` is `{nested:{nested:v}}`. */
 function nest(depth: number, leaf: unknown): Record<string, unknown> {
@@ -66,17 +70,17 @@ afterEach(() => {
 describe("secret registry", () => {
   it("replaces a registered value everywhere in a long multi-line string", () => {
     const registry = createSecretRegistry();
-    registry.add(BOT_TOKEN_MATERIAL);
+    registry.add(BOT_MATERIAL);
 
     const text = [
-      `connect failed for ${BOT_TOKEN_MATERIAL}`,
+      `connect failed for ${BOT_MATERIAL}`,
       "retrying with the same material:",
-      `${BOT_TOKEN_MATERIAL}`,
-      `tail ${BOT_TOKEN_MATERIAL} and nothing else`,
+      `${BOT_MATERIAL}`,
+      `tail ${BOT_MATERIAL} and nothing else`,
     ].join("\n");
 
     const scrubbed = registry.scrub(text);
-    expect(scrubbed).not.toContain(BOT_TOKEN_MATERIAL);
+    expect(scrubbed).not.toContain(BOT_MATERIAL);
     expect(scrubbed.split(REDACTION_MARKER)).toHaveLength(4);
     expect(scrubbed).toContain("connect failed for «redacted»");
   });
@@ -104,15 +108,15 @@ describe("secret registry", () => {
 
   it("ignores a duplicate registration", () => {
     const registry = createSecretRegistry();
-    registry.add(BOT_TOKEN_MATERIAL);
-    registry.add(BOT_TOKEN_MATERIAL);
+    registry.add(BOT_MATERIAL);
+    registry.add(BOT_MATERIAL);
     expect(registry.size()).toBe(1);
   });
 
   it("registerConfigSecrets registers usable config values and is idempotent", () => {
     const config: Record<string, unknown> = {
-      TELEGRAM_BOT_TOKEN: BOT_TOKEN_MATERIAL,
-      VAULT_TOKEN: VAULT_TOKEN_MATERIAL,
+      TELEGRAM_BOT_TOKEN: BOT_MATERIAL,
+      VAULT_TOKEN: VAULT_MATERIAL,
       TELEGRAM_WEBHOOK_SECRET: "short",
       SUPPLIER_API_TOKEN: undefined,
       DATABASE_URL: 42,
@@ -125,11 +129,11 @@ describe("secret registry", () => {
     // A second boot-time call must be harmless.
     expect(registerConfigSecrets(config, keys)).toBe(2);
     expect(sharedSecretRegistry().size()).toBe(2);
-    expect(scrubSecrets(`token ${BOT_TOKEN_MATERIAL}`)).toBe("token «redacted»");
+    expect(scrubSecrets(`token ${BOT_MATERIAL}`)).toBe("token «redacted»");
   });
 
   it("scrubSecrets is safe on undefined and empty input", () => {
-    sharedSecretRegistry().add(BOT_TOKEN_MATERIAL);
+    sharedSecretRegistry().add(BOT_MATERIAL);
     expect(scrubSecrets(undefined as unknown as string)).toBe("");
     expect(scrubSecrets("")).toBe("");
   });
@@ -142,14 +146,14 @@ describe("scrubValue", () => {
 
   it("redacts registered values, sensitive keys, arrays and unknown-depth nesting", () => {
     const scrubbed = scrubValue({
-      message: `provider said ${VAULT_TOKEN_MATERIAL}`,
+      message: `provider said ${VAULT_MATERIAL}`,
       botToken: "raw-token-x",
-      Authorization: `Bearer ${HMAC_KEY_MATERIAL}`,
-      attempts: [`first ${BOT_TOKEN_MATERIAL}`, "clean"],
+      Authorization: `Bearer ${HMAC_MATERIAL}`,
+      attempts: [`first ${BOT_MATERIAL}`, "clean"],
       monkey: "banana",
       sessionId: "sid-123",
       vault_ref: "vault/path",
-      err: new Error(`boom ${BOT_TOKEN_MATERIAL}`),
+      err: new Error(`boom ${BOT_MATERIAL}`),
     }) as Record<string, unknown>;
 
     expect(scrubbed.message).toBe("provider said «redacted»");
@@ -159,25 +163,25 @@ describe("scrubValue", () => {
     expect(scrubbed.monkey).toBe("banana");
     expect(scrubbed.sessionId).toBe(REDACTION_MARKER);
     expect(scrubbed.vault_ref).toBe(REDACTION_MARKER);
-    expect(JSON.stringify(scrubbed.err)).not.toContain(BOT_TOKEN_MATERIAL);
+    expect(JSON.stringify(scrubbed.err)).not.toContain(BOT_MATERIAL);
   });
 
   it("redacts a value nested 10 levels deep instead of reaching it", () => {
-    const deep = nest(10, BOT_TOKEN_MATERIAL);
+    const deep = nest(10, BOT_MATERIAL);
     const scrubbed = scrubValue(deep);
     const json = JSON.stringify(scrubbed);
 
-    expect(json).not.toContain(BOT_TOKEN_MATERIAL);
+    expect(json).not.toContain(BOT_MATERIAL);
     expect(json).toContain(REDACTION_MARKER);
 
     // With the depth bound lifted the same value is scrubbed by value, not by depth.
     const lifted = JSON.stringify(scrubValue(deep, { maxDepth: 32 }));
-    expect(lifted).not.toContain(BOT_TOKEN_MATERIAL);
+    expect(lifted).not.toContain(BOT_MATERIAL);
     expect(lifted).toContain(REDACTION_MARKER);
   });
 
   it("is cycle-safe and does not hang on a self-referencing object", () => {
-    const node: Record<string, unknown> = { label: BOT_TOKEN_MATERIAL };
+    const node: Record<string, unknown> = { label: BOT_MATERIAL };
     node.self = node;
 
     let scrubbed: unknown;
@@ -186,20 +190,20 @@ describe("scrubValue", () => {
     }).not.toThrow();
 
     const json = JSON.stringify(scrubbed);
-    expect(json).not.toContain(BOT_TOKEN_MATERIAL);
+    expect(json).not.toContain(BOT_MATERIAL);
     expect(json).toContain(REDACTION_MARKER);
   });
 
   it("does not mutate its input", () => {
     const input = {
-      headers: { authorization: `Bearer ${BOT_TOKEN_MATERIAL}` },
-      body: { note: `echoed ${VAULT_TOKEN_MATERIAL}` },
+      headers: { authorization: `Bearer ${BOT_MATERIAL}` },
+      body: { note: `echoed ${VAULT_MATERIAL}` },
     };
 
     scrubValue(input);
 
-    expect(input.headers.authorization).toBe(`Bearer ${BOT_TOKEN_MATERIAL}`);
-    expect(input.body.note).toBe(`echoed ${VAULT_TOKEN_MATERIAL}`);
+    expect(input.headers.authorization).toBe(`Bearer ${BOT_MATERIAL}`);
+    expect(input.body.note).toBe(`echoed ${VAULT_MATERIAL}`);
   });
 
   it("leaves primitives and non-plain objects alone unless they are strings", () => {
@@ -215,9 +219,9 @@ describe("scrubValue", () => {
 describe("scrubHeaders", () => {
   it("redacts whole sensitive header values and keeps innocuous ones readable", () => {
     const headers = scrubHeaders({
-      authorization: `Bearer ${BOT_TOKEN_MATERIAL}`,
-      cookie: `session=${VAULT_TOKEN_MATERIAL}`,
-      "x-sepay-signature": HMAC_KEY_MATERIAL,
+      authorization: `Bearer ${BOT_MATERIAL}`,
+      cookie: `session=${VAULT_MATERIAL}`,
+      "x-sepay-signature": HMAC_MATERIAL,
       "x-telegram-bot-api-secret-token": "telegram-header-secret",
       "content-type": "application/json",
       "user-agent": "curl/8.7.1",
@@ -254,7 +258,7 @@ describe("durable inbox detail", () => {
     expect(detail).toContain(REDACTION_MARKER);
 
     // The pre-existing entropy rule still handles long opaque runs.
-    expect(describeHandlerError(new Error(`provider refused: ${VAULT_TOKEN_MATERIAL}`))).toBe(
+    expect(describeHandlerError(new Error(`provider refused: ${VAULT_MATERIAL}`))).toBe(
       "Error: provider refused: [redacted]",
     );
     // Non-secret detail keeps the exact existing shape.
@@ -270,21 +274,21 @@ describe("scrubError", () => {
   });
 
   it("scrubs the message and the stack, and drops the cause chain", () => {
-    const cause = new Error(`upstream said ${VAULT_TOKEN_MATERIAL}`);
-    const error = Object.assign(new Error(`payment failed: ${BOT_TOKEN_MATERIAL}`), { cause });
+    const cause = new Error(`upstream said ${VAULT_MATERIAL}`);
+    const error = Object.assign(new Error(`payment failed: ${BOT_MATERIAL}`), { cause });
 
     const shape = scrubError(error);
     expect(shape.name).toBe("Error");
     expect(shape.message).toBe("payment failed: «redacted»");
     expect(shape.stack).toBeDefined();
-    expect(shape.stack).not.toContain(BOT_TOKEN_MATERIAL);
+    expect(shape.stack).not.toContain(BOT_MATERIAL);
     // A cause chain is unbounded, usually a provider payload, and never logged.
     expect(Object.keys(shape)).not.toContain("cause");
-    expect(JSON.stringify(shape)).not.toContain(VAULT_TOKEN_MATERIAL);
+    expect(JSON.stringify(shape)).not.toContain(VAULT_MATERIAL);
   });
 
   it("never throws on a non-Error throw", () => {
-    expect(scrubError(`thrown ${HMAC_KEY_MATERIAL}`)).toEqual({
+    expect(scrubError(`thrown ${HMAC_MATERIAL}`)).toEqual({
       name: "Error",
       message: "thrown «redacted»",
     });
@@ -310,12 +314,12 @@ describe("logger redaction end to end", () => {
     const line = captureLog((logger) => {
       logger.info(
         {
-          detail: `provider rejected the request using ${BOT_TOKEN_MATERIAL}`,
-          request: { headers: { authorization: `Bearer ${VAULT_TOKEN_MATERIAL}` } },
+          detail: `provider rejected the request using ${BOT_MATERIAL}`,
+          request: { headers: { authorization: `Bearer ${VAULT_MATERIAL}` } },
           botToken: "raw-token-y",
           bot_token: "raw-token-y",
         },
-        `webhook failed for ${HMAC_KEY_MATERIAL}`,
+        `webhook failed for ${HMAC_MATERIAL}`,
       );
     });
 
@@ -329,25 +333,25 @@ describe("logger redaction end to end", () => {
   it("scrubs a thrown Error logged under the err key", () => {
     // The most common leak vector: a provider message embedded in an Error.
     const line = captureLog((logger) => {
-      logger.error({ err: new Error(`connect failed: ${VAULT_TOKEN_MATERIAL}`) }, "lane failed");
+      logger.error({ err: new Error(`connect failed: ${VAULT_MATERIAL}`) }, "lane failed");
     });
 
-    expect(line).not.toContain(VAULT_TOKEN_MATERIAL);
+    expect(line).not.toContain(VAULT_MATERIAL);
     expect(line).toContain(REDACTION_MARKER);
     const parsed = JSON.parse(line) as { err: { message: string; stack: string } };
     expect(parsed.err.message).toBe("connect failed: «redacted»");
-    expect(parsed.err.stack).not.toContain(VAULT_TOKEN_MATERIAL);
+    expect(parsed.err.stack).not.toContain(VAULT_MATERIAL);
   });
 
   it("leaks none of three registered secrets through a representative payload", () => {
     const payload = {
-      provider: { name: "sepay", responseBody: `denied: ${VAULT_TOKEN_MATERIAL}` },
+      provider: { name: "sepay", responseBody: `denied: ${VAULT_MATERIAL}` },
       headers: {
-        authorization: `Bearer ${BOT_TOKEN_MATERIAL}`,
+        authorization: `Bearer ${BOT_MATERIAL}`,
         "content-type": "application/json",
       },
-      attempts: [{ errorMessage: HMAC_KEY_MATERIAL }],
-      nested: { deeper: { deepest: `leaf ${BOT_TOKEN_MATERIAL}` } },
+      attempts: [{ errorMessage: HMAC_MATERIAL }],
+      nested: { deeper: { deepest: `leaf ${BOT_MATERIAL}` } },
     };
 
     const json = JSON.stringify(scrubValue(payload));

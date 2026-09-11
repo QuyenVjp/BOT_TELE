@@ -17,7 +17,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
           status: "success",
           data: [
             {
-              id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+              id: "00000000-0000-4000-8000-000000000001",
               transaction_date: "2026-07-17T10:30:00+07:00",
               account_number: "0123456789",
               va: null,
@@ -60,7 +60,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
     expect(isVerifiedSePayEvidence(rows[0])).toBe(true);
     expect(rows[0]).toMatchObject({
       provider: "sepay",
-      providerTransactionId: "api:a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      providerTransactionId: "api:00000000-0000-4000-8000-000000000001",
       direction: "IN",
       merchantAccountId: "0123456789",
       amountVnd: 150000,
@@ -121,7 +121,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
       fetchImpl,
       resolveHost: PUBLIC_RESOLVER,
     });
-    const sinceId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
+    const sinceId = "00000000-0000-4000-8000-000000000001";
     await port.listTransactions(1, 2, 100, { page: 3, sinceId });
     const [request] = fetchImpl.mock.calls[0]!;
     const url = new URL(String(request));

@@ -49,6 +49,9 @@ const ALLOWLIST = [
   /SuperSecretPass(?:-42|123)/,
   /totally-bogus-token-value-/,
   /user@example\.com:SuperSecretPass/,
+  // The shared marker every fixture value in tests/ carries. A real credential never
+  // contains this literal, so allowing it cannot hide one.
+  /placeholder-value/,
 ];
 
 async function* walk(dir) {
