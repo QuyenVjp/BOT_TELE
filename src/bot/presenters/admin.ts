@@ -1064,7 +1064,7 @@ function importInstruction(input: {
   switch (input.fulfillmentType) {
     case "STOCK_ACCOUNT": {
       const fields = input.fields?.map((field) => field.name).join(", ") || "dữ liệu";
-      return `Dán dạng pipe theo trường: ${fields}; hoặc tải CSV mẫu, điền đúng cột rồi dán/gửi tệp .csv/.txt.`;
+      return `Dán theo các trường: ${fields} (hỗ trợ phân cách bằng |, khoảng trắng, tab, hoặc :); hoặc tải CSV mẫu, điền đúng cột rồi dán/gửi tệp .csv/.txt.`;
     }
     case "STOCK_CODE":
       return "Dán mỗi mã một dòng hoặc gửi tệp .txt/.csv; bot chỉ xem trước số dòng, không ghi kho trước khi xác nhận.";

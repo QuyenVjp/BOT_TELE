@@ -183,54 +183,328 @@ async function inventoryFieldsForSecretImportVariant(
   const parsed = INVENTORY_FIELDS_SCHEMA.safeParse(row.inventory_fields);
   return parsed.success ? parsed.data : [];
 }
+const FIELD_ALIASES: Record<string, string[]> = {
+  email: ["email", "mail", "tài khoản", "tai khoan", "user", "username", "login", "tk"],
+  password: ["password", "pass", "mật khẩu", "mat khau", "pwd", "mk"],
+  recovery: [
+    "recovery",
+    "2fa",
+    "khôi phục",
+    "khoi phuc",
+    "twofactor",
+    "two_factor",
+    "otp",
+    "secret",
+    "secret_key",
+    "backup",
+    "email khôi phục/2fa",
+    "email khôi phục",
+  ],
+  username: ["username", "user", "tên đăng nhập", "ten dang nhap", "login"],
+  code: ["code", "key", "license", "mã", "ma", "gift code", "giftcode"],
+};
+
+function matchFieldByLabel(
+  label: string,
+  fields: readonly InventoryField[],
+): InventoryField | null {
+  const norm = label.trim().toLowerCase();
+  const exact = fields.find((f) => f.name.toLowerCase() === norm || f.label.toLowerCase() === norm);
+  if (exact) return exact;
+
+  for (const field of fields) {
+    const aliases = FIELD_ALIASES[field.name.toLowerCase()] ?? [];
+    if (aliases.some((a) => a === norm || norm.startsWith(a + " ") || norm.endsWith(" " + a))) {
+      return field;
+    }
+  }
+  return null;
+}
+
+function tryParseLabeledLines(
+  rawInput: string,
+  fields: readonly InventoryField[],
+): string[][] | null {
+  const lines = rawInput
+    .split(/\r?\n/u)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return null;
+
+  let hasAnyLabel = false;
+  for (const line of lines) {
+    const m = line.match(/^([^:=]{1,40})\s*[:=]\s*(.+)$/u);
+    if (m && matchFieldByLabel(m[1]!, fields)) {
+      hasAnyLabel = true;
+      break;
+    }
+  }
+  if (!hasAnyLabel) return null;
+
+  const rawBlocks = rawInput
+    .split(/\r?\n\s*\r?\n/u)
+    .map((b) => b.trim())
+    .filter(Boolean);
+  const records: string[][] = [];
+
+  for (const block of rawBlocks) {
+    const blockLines = block
+      .split(/\r?\n/u)
+      .map((l) => l.trim())
+      .filter(Boolean);
+    let currentMap: Record<string, string> = {};
+    const flush = () => {
+      if (Object.keys(currentMap).length > 0) {
+        records.push(fields.map((f) => currentMap[f.name] ?? ""));
+        currentMap = {};
+      }
+    };
+
+    for (const line of blockLines) {
+      const m = line.match(/^([^:=]{1,40})\s*[:=]\s*(.+)$/u);
+      if (m) {
+        const matched = matchFieldByLabel(m[1]!, fields);
+        if (matched) {
+          if (currentMap[matched.name] !== undefined) {
+            flush();
+          }
+          currentMap[matched.name] = m[2]!.trim();
+          continue;
+        }
+      }
+    }
+    flush();
+  }
+
+  return records.length > 0 ? records : null;
+}
+
+function normalizePartCount(parts: string[], expectedCount: number): string[] {
+  if (expectedCount <= 1) return [parts.join(" ")];
+  if (parts.length === expectedCount) return parts;
+  if (parts.length < expectedCount) {
+    return [...parts, ...Array(expectedCount - parts.length).fill("")];
+  }
+  const head = parts.slice(0, expectedCount - 1);
+  const tail = parts.slice(expectedCount - 1).join(" ");
+  return [...head, tail];
+}
+
+function splitLineByDelimiters(line: string, expectedCount: number): string[] {
+  const trimmed = line.trim();
+  if (!trimmed) return [];
+
+  // 1. Pipe: |
+  if (trimmed.includes("|")) {
+    const parts = trimmed.split("|").map((p) => p.trim());
+    if (parts.length >= 2) return normalizePartCount(parts, expectedCount);
+  }
+
+  // 2. Tab: \t
+  if (trimmed.includes("\t")) {
+    const parts = trimmed.split("\t").map((p) => p.trim());
+    if (parts.length >= 2) return normalizePartCount(parts, expectedCount);
+  }
+
+  // 3. Multi-dash: ---, ----, --
+  if (/[-–—]{2,}/u.test(trimmed)) {
+    const parts = trimmed.split(/\s*[-–—]{2,}\s*/u).map((p) => p.trim());
+    if (parts.length >= 2) return normalizePartCount(parts, expectedCount);
+  }
+
+  // 4. Double slash: //
+  if (trimmed.includes("//")) {
+    const parts = trimmed.split(/\s*\/\/\s*/u).map((p) => p.trim());
+    if (parts.length >= 2) return normalizePartCount(parts, expectedCount);
+  }
+
+  // 5. Slash with spaces: ' / '
+  if (/\s+\/\s+/u.test(trimmed)) {
+    const parts = trimmed.split(/\s+\/\s+/u).map((p) => p.trim());
+    if (parts.length >= 2) return normalizePartCount(parts, expectedCount);
+  }
+
+  // 6. Semicolon: ;
+  if (trimmed.includes(";")) {
+    const parts = trimmed.split(";").map((p) => p.trim());
+    if (parts.length >= 2) return normalizePartCount(parts, expectedCount);
+  }
+
+  // 7. Colon: :
+  if (trimmed.includes(":")) {
+    const parts = trimmed.split(":").map((p) => p.trim());
+    if (parts.length >= 2) {
+      return normalizePartCount(parts, expectedCount);
+    }
+  }
+
+  // 8. Comma: ,
+  if (trimmed.includes(",")) {
+    const parts = trimmed.split(",").map((p) => p.trim());
+    if (parts.length >= 2) {
+      return normalizePartCount(parts, expectedCount);
+    }
+  }
+
+  // 9. Whitespace: \s+
+  const spaceParts = trimmed
+    .split(/\s+/u)
+    .map((p) => p.trim())
+    .filter(Boolean);
+  if (spaceParts.length >= 2) {
+    return normalizePartCount(spaceParts, expectedCount);
+  }
+
+  return [trimmed];
+}
+
+function groupInputLines(rawInput: string, fields: readonly InventoryField[]): string[][] {
+  const expectedCount = fields.length;
+  const blocks = rawInput
+    .split(/\r?\n\s*\r?\n/u)
+    .map((b) => b.trim())
+    .filter(Boolean);
+  if (blocks.length > 1) {
+    return blocks.flatMap((block) => groupInputLines(block, fields));
+  }
+
+  const lines = rawInput
+    .split(/\r?\n/u)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return [];
+  if (lines.length === 1) {
+    return [splitLineByDelimiters(lines[0]!, expectedCount)];
+  }
+
+  const isFirstFieldEmail =
+    fields[0]?.name.toLowerCase().includes("email") ||
+    fields[0]?.label.toLowerCase().includes("email");
+
+  const lineParts = lines.map((l) => splitLineByDelimiters(l, expectedCount));
+
+  if (lineParts.every((p) => p.length >= expectedCount)) {
+    return lineParts;
+  }
+
+  const allTokens = lines.flatMap((l) =>
+    l
+      .split(/\s+/u)
+      .map((t) => t.trim())
+      .filter(Boolean),
+  );
+  if (allTokens.length === expectedCount) {
+    return [allTokens];
+  }
+
+  if (isFirstFieldEmail) {
+    const groupedRecords: string[][] = [];
+    let currentTokens: string[] = [];
+    for (const line of lines) {
+      const tokens = line
+        .split(/\s+/u)
+        .map((t) => t.trim())
+        .filter(Boolean);
+      const startsWithEmail = tokens[0]?.includes("@");
+      if (startsWithEmail && currentTokens.length > 0) {
+        groupedRecords.push(normalizePartCount(currentTokens, expectedCount));
+        currentTokens = [];
+      }
+      currentTokens.push(...tokens);
+    }
+    if (currentTokens.length > 0) {
+      groupedRecords.push(normalizePartCount(currentTokens, expectedCount));
+    }
+    if (groupedRecords.length > 0 && groupedRecords.every((r) => r[0]?.includes("@"))) {
+      return groupedRecords;
+    }
+  }
+
+  if (
+    lines.length % expectedCount === 0 &&
+    lines.every((l) => !l.includes(" ") && !l.includes("|"))
+  ) {
+    const chunked: string[][] = [];
+    for (let i = 0; i < lines.length; i += expectedCount) {
+      chunked.push(lines.slice(i, i + expectedCount));
+    }
+    return chunked;
+  }
+
+  return lineParts;
+}
+
 export function bindSecretsToVariant(
   rawInput: string,
   variantId: string,
   fields: readonly InventoryField[],
 ): string {
-  // The paste prompt tells the owner to send one record per line with the configured fields
-  // separated by "|". Honour that documented format: a line carrying pipes is split on them, and
-  // everything else still goes through the CSV parser (the template and header paths above are
-  // comma-based). Without this, a pipe line collapses into a single value and the customer
-  // receives one unlabelled blob instead of the configured fields.
-  if (fields.length > 1 && rawInput.includes("|") && !rawInput.includes(",")) {
-    const rows = rawInput
+  if (!rawInput.trim()) return "";
+
+  // 1. Single field (e.g. code/key)
+  if (fields.length <= 1) {
+    const records = parseCsvRecords(rawInput);
+    if (records && records.length > 0) {
+      const [firstRecord, ...dataRecords] = records;
+      if (firstRecord?.[0] === "variantId") {
+        return dataRecords
+          .map((record) => (record[0] === variantId ? record.map(csvCell).join(",") : ","))
+          .join("\n");
+      }
+      if (firstRecord?.[0] === fields[0]?.name) {
+        return dataRecords
+          .map((record) => [variantId, ...record].map(csvCell).join(","))
+          .join("\n");
+      }
+    }
+    const lines = rawInput
       .split(/\r?\n/u)
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .map((line) => [variantId, ...line.split("|").map((part) => part.trim())]);
-    if (rows.length > 0) return rows.map((row) => row.map(csvCell).join(",")).join("\n");
+      .map((l) => l.trim())
+      .filter(Boolean);
+    return lines.map((line) => [variantId, line].map(csvCell).join(",")).join("\n");
   }
 
+  // 2. Official CSV template headers (variantId or matching field names)
   const records = parseCsvRecords(rawInput);
-  if (!records || records.length === 0) {
-    const trimmed = rawInput.trim();
-    return trimmed ? [variantId, trimmed].map(csvCell).join(",") : "";
-  }
-  const [firstRecord, ...dataRecords] = records;
-  const firstCell = firstRecord?.[0] ?? "";
-  if (firstCell === "variantId") {
-    return dataRecords
-      .map((record) => (record[0] === variantId ? record.map(csvCell).join(",") : ","))
-      .join("\n");
-  }
-  if (firstRecord) {
-    const fieldIndexByHeader = fields.map((field) => firstRecord.indexOf(field.name));
-    if (
-      firstRecord.length === fields.length &&
-      fieldIndexByHeader.every((index) => index >= 0) &&
-      new Set(fieldIndexByHeader).size === fields.length
-    ) {
+  if (records && records.length > 0) {
+    const [firstRecord, ...dataRecords] = records;
+    const firstCell = firstRecord?.[0] ?? "";
+    if (firstCell === "variantId") {
       return dataRecords
-        .map((record) =>
-          [variantId, ...fieldIndexByHeader.map((index) => record[index] ?? "")]
-            .map(csvCell)
-            .join(","),
-        )
+        .map((record) => (record[0] === variantId ? record.map(csvCell).join(",") : ","))
         .join("\n");
     }
+    if (firstRecord) {
+      const fieldIndexByHeader = fields.map((field) => firstRecord.indexOf(field.name));
+      if (
+        firstRecord.length === fields.length &&
+        fieldIndexByHeader.every((index) => index >= 0) &&
+        new Set(fieldIndexByHeader).size === fields.length
+      ) {
+        return dataRecords
+          .map((record) =>
+            [variantId, ...fieldIndexByHeader.map((index) => record[index] ?? "")]
+              .map(csvCell)
+              .join(","),
+          )
+          .join("\n");
+      }
+    }
   }
-  return records.map((record) => [variantId, ...record].map(csvCell).join(",")).join("\n");
+
+  // 3. Labeled input (e.g. Email: ... \n Password: ...)
+  const labeled = tryParseLabeledLines(rawInput, fields);
+  if (labeled) {
+    return labeled.map((row) => [variantId, ...row].map(csvCell).join(",")).join("\n");
+  }
+
+  // 4. Delimited lines or chunked multi-line input
+  const rows = groupInputLines(rawInput, fields);
+  if (rows.length > 0) {
+    return rows.map((row) => [variantId, ...row].map(csvCell).join(",")).join("\n");
+  }
+
+  return [variantId, rawInput.trim()].map(csvCell).join(",");
 }
 
 function selectedVariantFrom(session: InventoryImportSession): string | null {
