@@ -2,7 +2,7 @@ import { sql } from "kysely";
 import type { Db } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
-import { findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
+import { findOrderByIdForOwnerForUpdate, transitionOrder } from "../commerce/repository.js";
 import { isFeature001SellablePolicy } from "../catalog/domain.js";
 import { orderHasActiveReservation } from "../digital-goods/repository.js";
 import { voidLiveIntentsForOrder } from "../payments/repository.js";
@@ -14,7 +14,7 @@ export type WalletPurchaseResult =
   | { ok: true; kind: "ALREADY_PAID"; orderId: string }
   | {
       ok: false;
-      code: "NOT_FOUND" | "NOT_OWNED" | "ALREADY_PAID" | "INSUFFICIENT_FUNDS" | "ORDER_NOT_PAYABLE";
+      code: "NOT_FOUND" | "ALREADY_PAID" | "INSUFFICIENT_FUNDS" | "ORDER_NOT_PAYABLE";
       message: string;
     };
 
@@ -39,10 +39,9 @@ export function createWalletPurchaseService(db: Db) {
             message: "Cửa hàng hiện đang tạm đóng cửa.",
           };
         }
-        const order = await findOrderByIdForUpdate(trx, input.orderId);
+        // Owner-scoped lock: a foreign order and a missing one are the same refusal.
+        const order = await findOrderByIdForOwnerForUpdate(trx, input.orderId, input.customerId);
         if (!order) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
-        if (order.customerId !== input.customerId)
-          return { ok: false, code: "NOT_OWNED", message: "Bạn không sở hữu đơn hàng này." };
         if (
           order.status === "PAID" ||
           order.status === "PROCESSING" ||

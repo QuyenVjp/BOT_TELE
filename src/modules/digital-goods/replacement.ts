@@ -2,7 +2,12 @@ import { sql } from "kysely";
 import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
-import { findOrderById, findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
+import {
+  findOrderByIdForOwner,
+  findOrderByIdForOwnerForUpdate,
+  findOrderByIdForUpdate,
+  transitionOrder,
+} from "../commerce/repository.js";
 import { issueReplacementDeliveryBundleInTransaction } from "./delivery.js";
 import { findDeliveredAssetHistoryForOrder } from "./repository.js";
 
@@ -32,7 +37,7 @@ export type OpenReplacementResult =
   | { ok: true; caseId: string; status: ReplacementCaseStatus }
   | {
       ok: false;
-      code: "NOT_FOUND" | "ORDER_NOT_OWNED" | "NO_ASSET" | "NOT_ELIGIBLE" | "WARRANTY_EXPIRED";
+      code: "NOT_FOUND" | "NO_ASSET" | "NOT_ELIGIBLE" | "WARRANTY_EXPIRED";
       message: string;
     };
 
@@ -81,21 +86,17 @@ export async function openReplacementCase(
   db: Db,
   input: OpenReplacementInput,
 ): Promise<OpenReplacementResult> {
-  const found = await findOrderById(db, input.orderId);
+  // Ownership is in the query at both the pre-check and the locked re-read: a foreign order and
+  // a missing one are the same refusal, so a guessed id yields no existence oracle.
+  const found = await findOrderByIdForOwner(db, input.orderId, input.customerId);
   if (!found) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
-  if (found.customerId !== input.customerId) {
-    return { ok: false, code: "ORDER_NOT_OWNED", message: "Bạn không sở hữu đơn hàng này." };
-  }
 
   return withTransaction(db, async (trx) => {
-    const order = await findOrderByIdForUpdate(trx, input.orderId);
+    const order = await findOrderByIdForOwnerForUpdate(trx, input.orderId, input.customerId);
     if (!order) {
       return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
-    }
-    if (order.customerId !== input.customerId) {
-      return { ok: false, code: "ORDER_NOT_OWNED", message: "Bạn không sở hữu đơn hàng này." };
     }
 
     // Eligible once the order has been paid and fulfillment has started/finished.

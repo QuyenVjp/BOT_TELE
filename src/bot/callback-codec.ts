@@ -9,6 +9,8 @@ const PAYLOAD_BYTES = 35;
 const SIGNATURE_BYTES = 10;
 const TOKEN_BYTES = PAYLOAD_BYTES + SIGNATURE_BYTES;
 const ENCODED_BYTES = 60;
+/** Telegram's hard cap on `callback_data`; every codec in this module must respect it. */
+const MAX_CALLBACK_DATA_BYTES = 64;
 const NONCE_BYTES = 8;
 const ULID_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const MAX_UINT32 = 0xffff_ffff;
@@ -104,7 +106,7 @@ export function createBuyNowCallbackCodec(config: BuyNowCallbackCodecConfig): Bu
       const signature = sign(key, telegramUserId, payload);
       const callbackData =
         CALLBACK_PREFIX + Buffer.concat([payload, signature]).toString("base64url");
-      if (Buffer.byteLength(callbackData, "utf8") > 64) {
+      if (Buffer.byteLength(callbackData, "utf8") > MAX_CALLBACK_DATA_BYTES) {
         throw new Error("Encoded callback exceeds Telegram's 64-byte limit");
       }
       return callbackData;
@@ -342,7 +344,7 @@ export function createCallbackTokenCodec(config: BuyNowCallbackCodecConfig): Cal
       actionPayload.copy(payload, 5);
       const signature = signUnified(key, telegramUserId, payload);
       const token = UNIFIED_PREFIX + Buffer.concat([payload, signature]).toString("base64url");
-      if (Buffer.byteLength(token, "utf8") > 64) {
+      if (Buffer.byteLength(token, "utf8") > MAX_CALLBACK_DATA_BYTES) {
         throw new Error("Encoded callback exceeds Telegram's 64-byte limit");
       }
       return token;
@@ -354,7 +356,7 @@ export function createCallbackTokenCodec(config: BuyNowCallbackCodecConfig): Cal
       if (
         typeof callbackData !== "string" ||
         !callbackData.startsWith(UNIFIED_PREFIX) ||
-        Buffer.byteLength(callbackData, "utf8") > 64
+        Buffer.byteLength(callbackData, "utf8") > MAX_CALLBACK_DATA_BYTES
       ) {
         return { ok: false, code: "MALFORMED" };
       }
@@ -648,9 +650,17 @@ function signUnified(key: Buffer, telegramUserId: string, payload: Buffer): Buff
     .subarray(0, UNIFIED_SIGNATURE_BYTES);
 }
 
-/** Untrusted action hint used only to select a rate-limit bucket before verification. */
+/**
+ * Untrusted action hint used only to select a rate-limit bucket before verification.
+ *
+ * Scoped to the customer `cb:` prefix: admin tokens carry the distinct `adm:` prefix, so they
+ * never decode here and can never be classified as a customer action.
+ */
 export function peekCallbackAction(callbackData: string): CallbackAction | null {
-  if (!callbackData.startsWith(UNIFIED_PREFIX) || Buffer.byteLength(callbackData, "utf8") > 64)
+  if (
+    !callbackData.startsWith(UNIFIED_PREFIX) ||
+    Buffer.byteLength(callbackData, "utf8") > MAX_CALLBACK_DATA_BYTES
+  )
     return null;
   const encoded = callbackData.slice(UNIFIED_PREFIX.length);
   if (!/^[A-Za-z0-9_-]+$/.test(encoded)) return null;
@@ -671,3 +681,10 @@ export function peekCallbackAction(callbackData: string): CallbackAction | null 
   if (extended && actionCode < 16) return null;
   return ACTION_BY_CODE.get(actionCode) ?? null;
 }
+// An admin-scoped signed callback codec (`adm:`) was prototyped here and then removed: it
+// had no production caller, and every privileged callback it would have signed is already
+// gated by stronger, live controls — the numeric-id root identity check plus the private-chat
+// requirement (`guardRootAction`), the durable expiring confirmation challenge, and step-up
+// for the actions that move money or reach every customer. A second, unproven signing scheme
+// would have been a third mechanism to keep correct, and Telegram already guarantees
+// `callback_query.from.id` is authentic, so the actor id is never read from the payload.

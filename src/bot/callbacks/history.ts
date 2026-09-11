@@ -1,7 +1,7 @@
 import { sql } from "kysely";
 import type { Db } from "../../infrastructure/db/transaction.js";
 import { listOrderHistory, getOrderDetailForCustomer } from "../../modules/commerce/history.js";
-import { findOrderByNumber } from "../../modules/commerce/repository.js";
+import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
 import { isId } from "../../shared/ids/index.js";
 import {
   presentOrderHistory,
@@ -97,13 +97,17 @@ export function createHistoryCallbacks(deps: HistoryCallbackDeps): HistoryCallba
       // customer-scoped helper (BOLA defense in depth).
       const orderId = isId(orderReference)
         ? orderReference
-        : ((await findOrderByNumber(deps.db, orderReference))?.id ?? null);
-      if (!orderId) return errorMessage("Không tìm thấy đơn hàng.");
+        : ((await findOrderByNumberForOwner(deps.db, orderReference, customerId))?.id ?? null);
+      if (!orderId) {
+        return errorMessage("Không tìm thấy đơn hàng hoặc bạn không sở hữu đơn hàng này.");
+      }
       const owned = await getOrderDetailForCustomer(deps.db, {
         orderId,
         customerId,
       });
-      if (!owned) return errorMessage("Bạn không sở hữu đơn hàng này.");
+      if (!owned) {
+        return errorMessage("Không tìm thấy đơn hàng hoặc bạn không sở hữu đơn hàng này.");
+      }
       return presentOrderDetail(owned, await orderWarrantyState(deps.db, owned));
     },
   };

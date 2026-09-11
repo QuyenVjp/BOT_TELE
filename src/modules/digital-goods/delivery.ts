@@ -4,7 +4,11 @@ import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
-import { findOrderById, findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
+import {
+  findOrderById,
+  findOrderByIdForOwnerForUpdate,
+  transitionOrder,
+} from "../commerce/repository.js";
 import { markAssetDelivered } from "./repository.js";
 import { hashDeliverySessionNonce, type DeliverySessionClaims } from "./delivery-session.js";
 import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfillment-type.js";
@@ -206,8 +210,9 @@ export async function issueReplacementDeliveryBundleInTransaction(
   exec: Executor,
   input: IssueInput,
 ): Promise<IssueResult> {
-  const order = await findOrderByIdForUpdate(exec, input.orderId);
-  if (!order || order.customerId !== input.customerId) {
+  // Owner-scoped lock: a foreign order and a missing one are the same `null`.
+  const order = await findOrderByIdForOwnerForUpdate(exec, input.orderId, input.customerId);
+  if (!order) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
 
@@ -274,8 +279,8 @@ export async function issueReplacementDeliveryBundleInTransaction(
  */
 export async function issueDeliveryBundle(db: Db, input: IssueInput): Promise<IssueResult> {
   return withTransaction(db, async (trx) => {
-    const order = await findOrderByIdForUpdate(trx, input.orderId);
-    if (!order || order.customerId !== input.customerId) {
+    const order = await findOrderByIdForOwnerForUpdate(trx, input.orderId, input.customerId);
+    if (!order) {
       return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
     }
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import { ISSUE_TYPE_LABELS } from "../warranty/claims.js";
 import type { OutboxEvent } from "../../infrastructure/outbox/repository.js";
@@ -6,6 +7,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import { newId } from "../../shared/ids/index.js";
+import { appendAuditEvent } from "../identity/audit.js";
 
 export type NotificationClass =
   "TRANSACTIONAL" | "CRITICAL_SERVICE" | "SHOP_UPDATE" | "PURCHASE_ACTIVITY";
@@ -182,8 +184,35 @@ export async function previewBroadcastAudience(
   exec: Executor,
   audience: BroadcastAudience,
   rootTelegramUserId?: string,
+  campaignClass?: NotificationClass,
 ): Promise<number> {
-  const r = await sql<{ count: number }>`select count(*)::int
+  return (await selectBroadcastAudience(exec, audience, rootTelegramUserId, campaignClass)).length;
+}
+
+/** One frozen recipient of a broadcast. */
+export interface BroadcastRecipient {
+  customerId: string;
+  chatId: string;
+}
+
+/**
+ * The single audience query. Preview counts it and confirmation materialises the
+ * deliveries from it, so "what the operator was shown" and "what is sent" cannot
+ * drift apart by two copies of the same filter evolving separately.
+ *
+ * `campaignClass` carries the critical-service exemption on the `all` audience:
+ * a CRITICAL_SERVICE notice reaches every reachable customer, not only the ones
+ * who opted into shop updates. Omitted, the stricter opt-in rule applies.
+ */
+export async function selectBroadcastAudience(
+  exec: Executor,
+  audience: BroadcastAudience,
+  rootTelegramUserId?: string,
+  campaignClass?: NotificationClass,
+): Promise<BroadcastRecipient[]> {
+  const r = await sql<{ customer_id: string; chat_id: string }>`select distinct
+      c.id as customer_id,
+      coalesce(cps.chat_id, ci.channel_user_id) as chat_id
     from customer c
     left join customer_profile_snapshot cps on cps.customer_id=c.id
     left join channel_identity ci on ci.customer_id=c.id and ci.channel='TELEGRAM'
@@ -192,22 +221,263 @@ export async function previewBroadcastAudience(
       and (cps.customer_id is null or cps.reachable)
       and coalesce(cps.chat_id,ci.channel_user_id) is not null
       and ((${audience}='root' and ci.channel_user_id=${rootTelegramUserId ?? null})
-        or (${audience}='all' and np.shop_updates is true)
+        or (${audience}='all' and (${campaignClass ?? null}='CRITICAL_SERVICE' or np.shop_updates is true))
         or (${audience}='shop' and np.shop_updates is true)
-        or (${audience}='activity' and np.purchase_activity is true))`.execute(exec);
-  return r.rows[0]?.count ?? 0;
+        or (${audience}='activity' and np.purchase_activity is true))
+    order by customer_id`.execute(exec);
+  return r.rows.map((row) => ({ customerId: row.customer_id, chatId: row.chat_id }));
+}
+
+/**
+ * Deterministic fingerprint of a frozen recipient set.
+ *
+ * Sorted, with explicit unit/record separators, so two different audiences
+ * cannot collide by boundary shifting. This is an integrity identity — it
+ * detects drift between preview and confirmation; it is not a secret.
+ */
+export function hashBroadcastAudience(recipients: readonly BroadcastRecipient[]): string {
+  const canonical = recipients
+    .map((recipient) => `${recipient.customerId}\u001f${recipient.chatId}`)
+    .sort()
+    .join("\u001e");
+  return createHash("sha256").update(canonical, "utf8").digest("hex");
+}
+
+export function hashBroadcastContent(content: string): string {
+  return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+function recipientsToJson(recipients: readonly BroadcastRecipient[]): string {
+  return JSON.stringify(
+    recipients.map((recipient) => ({
+      customer_id: recipient.customerId,
+      chat_id: recipient.chatId,
+    })),
+  );
+}
+
+/** Persist the frozen recipient set for one stage of the broadcast lifecycle. */
+async function freezeBroadcastAudience(
+  exec: Executor,
+  campaignId: string,
+  stage: "PREVIEW" | "CONFIRMED",
+  recipients: readonly BroadcastRecipient[],
+): Promise<void> {
+  await sql`
+    insert into notification_campaign_audience (campaign_id, stage, customer_id, chat_id)
+    select ${campaignId}, ${stage}, v.customer_id, v.chat_id
+    from jsonb_to_recordset(${recipientsToJson(recipients)}::jsonb)
+      as v(customer_id text, chat_id text)
+    on conflict (campaign_id, stage, customer_id) do nothing
+  `.execute(exec);
 }
 
 export async function markBroadcastPreviewed(
   exec: Executor,
-  input: { campaignId: string; createdBy: string; content: string },
+  input: {
+    campaignId: string;
+    createdBy: string;
+    content: string;
+    /** Needed to freeze a `root`-only audience at preview time. */
+    rootTelegramUserId?: string;
+  },
 ): Promise<boolean> {
+  const found = await sql<{ audience: BroadcastAudience; class: NotificationClass }>`
+    select audience, class from notification_campaign where id=${input.campaignId}
+  `.execute(exec);
+  const target = found.rows[0];
+  if (!target) return false;
+
+  const recipients = await selectBroadcastAudience(
+    exec,
+    target.audience,
+    input.rootTelegramUserId,
+    target.class,
+  );
   const r = await sql<{ id: string }>`update notification_campaign
-    set content=${input.content.trim()}, previewed_at=now()
+    set content=${input.content.trim()},
+        previewed_at=now(),
+        revision=revision+1,
+        previewed_content_hash=${hashBroadcastContent(input.content.trim())},
+        previewed_audience_hash=${hashBroadcastAudience(recipients)},
+        previewed_audience_count=${recipients.length}
     where id=${input.campaignId} and created_by=${input.createdBy} and status='DRAFT'
       and ${input.content.trim().length > 0} and ${input.content.length <= 4096}
     returning id`.execute(exec);
-  return r.rows.length === 1;
+  if (r.rows.length !== 1) return false;
+
+  await freezeBroadcastAudience(exec, input.campaignId, "PREVIEW", recipients);
+  return true;
+}
+
+export type BroadcastRefusal =
+  "NOT_FOUND" | "NOT_DRAFT" | "NOT_PREVIEWED" | "NOT_OWNED" | "STALE_PREVIEW" | "COOLDOWN_ACTIVE";
+
+export type BroadcastConfirmation =
+  | { ok: true; queued: number; revision: number; audienceHash: string }
+  | { ok: false; reason: BroadcastRefusal };
+
+export interface ConfirmBroadcastInput {
+  campaignId: string;
+  createdBy?: string;
+  rootTelegramUserId?: string;
+  correlationId: string;
+  /** An audience this large is rate limited by `cooldownSeconds`. */
+  largeAudienceThreshold: number;
+  cooldownSeconds: number;
+  /** Injectable clock so cooldown behaviour is testable. */
+  now?: Date;
+}
+
+/** Refuse a large/global send while the previous one is still cooling down. */
+async function broadcastCooldownActive(
+  exec: Executor,
+  audienceSize: number,
+  input: ConfirmBroadcastInput,
+): Promise<boolean> {
+  if (audienceSize < input.largeAudienceThreshold || input.cooldownSeconds <= 0) return false;
+  const throttle = await sql<{ last_large_audience_at: Date | null }>`
+    select last_large_audience_at from broadcast_throttle where id='main' for update
+  `.execute(exec);
+  const last = throttle.rows[0]?.last_large_audience_at ?? null;
+  if (last === null) return false;
+  const now = input.now ?? new Date();
+  return now.getTime() - new Date(last).getTime() < input.cooldownSeconds * 1000;
+}
+
+/**
+ * Confirm a previewed broadcast: freeze the recipient set, then queue it.
+ *
+ * Fail-closed order:
+ *  1. the campaign exists, belongs to this admin, and is still a DRAFT;
+ *  2. it was previewed;
+ *  3. its content still hashes to the previewed content — a divergence means the
+ *     operator's confirmation refers to text they never reviewed;
+ *  4. the frozen preview audience, when one exists, still matches the live
+ *     audience — otherwise the preview is stale and must be re-reviewed;
+ *  5. a large/global send respects the cooldown;
+ *  6. only then are deliveries materialised from the frozen set, with the
+ *     CONFIRMED snapshot written in the same transaction.
+ *
+ * A worker retry cannot fan out twice: the campaign leaves DRAFT exactly once
+ * and `notification_delivery` is keyed by (campaign_id, customer_id).
+ */
+export async function confirmBroadcast(
+  exec: Executor,
+  input: ConfirmBroadcastInput,
+): Promise<BroadcastConfirmation> {
+  const found = await sql<{
+    status: string;
+    audience: BroadcastAudience;
+    class: NotificationClass;
+    created_by: string;
+    revision: number;
+    content: string;
+    previewed_at: Date | null;
+    previewed_content_hash: string | null;
+    previewed_audience_hash: string | null;
+  }>`select status, audience, class, created_by, revision, content, previewed_at,
+            previewed_content_hash, previewed_audience_hash
+    from notification_campaign where id=${input.campaignId} for update`.execute(exec);
+  const campaign = found.rows[0];
+  if (!campaign) return { ok: false, reason: "NOT_FOUND" };
+  if (input.createdBy !== undefined && campaign.created_by !== input.createdBy) {
+    return { ok: false, reason: "NOT_OWNED" };
+  }
+  if (campaign.status !== "DRAFT") return { ok: false, reason: "NOT_DRAFT" };
+  if (campaign.previewed_at === null) return { ok: false, reason: "NOT_PREVIEWED" };
+
+  const previewRows = await sql<{ customer_id: string; chat_id: string }>`
+    select customer_id, chat_id from notification_campaign_audience
+    where campaign_id=${input.campaignId} and stage='PREVIEW'
+    order by customer_id
+  `.execute(exec);
+  const frozen: BroadcastRecipient[] = previewRows.rows.map((row) => ({
+    customerId: row.customer_id,
+    chatId: row.chat_id,
+  }));
+
+  const live = await selectBroadcastAudience(
+    exec,
+    campaign.audience,
+    input.rootTelegramUserId,
+    campaign.class,
+  );
+
+  // A frozen preview exists, so it is the reviewed set. Content that no longer
+  // matches its previewed hash, or an audience that has since moved, means the
+  // operator is about to confirm something they did not see.
+  if (frozen.length > 0) {
+    if (campaign.previewed_content_hash !== hashBroadcastContent(campaign.content)) {
+      return { ok: false, reason: "STALE_PREVIEW" };
+    }
+    if (
+      campaign.previewed_audience_hash !== null &&
+      hashBroadcastAudience(live) !== campaign.previewed_audience_hash
+    ) {
+      return { ok: false, reason: "STALE_PREVIEW" };
+    }
+  }
+
+  const recipients = frozen.length > 0 ? frozen : live;
+  const audienceHash = hashBroadcastAudience(recipients);
+
+  if (await broadcastCooldownActive(exec, recipients.length, input)) {
+    return { ok: false, reason: "COOLDOWN_ACTIVE" };
+  }
+
+  await freezeBroadcastAudience(exec, input.campaignId, "CONFIRMED", recipients);
+
+  const now = input.now ?? new Date();
+  const queued = await sql<{ n: number }>`with confirmed as (
+      update notification_campaign
+      set status='QUEUED',
+          confirmed_at=${now.toISOString()},
+          confirmed_by=${input.createdBy ?? null},
+          audience_hash=${audienceHash}
+      where id=${input.campaignId} and status='DRAFT' and previewed_at is not null
+      returning id
+    ) insert into notification_delivery(id,campaign_id,customer_id,chat_id)
+    select md5(${input.campaignId}||v.customer_id),${input.campaignId},v.customer_id,v.chat_id
+    from confirmed, jsonb_to_recordset(${recipientsToJson(recipients)}::jsonb)
+      as v(customer_id text, chat_id text)
+    on conflict (campaign_id,customer_id) do nothing
+    returning 1 as n`.execute(exec);
+
+  if (queued.rows.length !== recipients.length) {
+    // Lost the DRAFT race to another confirmer: the campaign is no longer ours.
+    return { ok: false, reason: "NOT_DRAFT" };
+  }
+
+  if (recipients.length >= input.largeAudienceThreshold && input.cooldownSeconds > 0) {
+    await sql`
+      update broadcast_throttle set last_large_audience_at=${now.toISOString()} where id='main'
+    `.execute(exec);
+  }
+
+  await appendAuditEvent(exec, {
+    actorType: "ROOT_ADMIN",
+    actorId: input.createdBy ?? "unknown",
+    action: "broadcast.confirmed",
+    targetType: "NotificationCampaign",
+    targetId: input.campaignId,
+    reason: `queued=${queued.rows.length} audience=${recipients.length}`,
+    correlationId: input.correlationId,
+    metadataRedacted: {
+      revision: campaign.revision,
+      audience: campaign.audience,
+      audienceCount: recipients.length,
+      audienceHash,
+      contentHash: campaign.previewed_content_hash,
+    },
+  });
+
+  return {
+    ok: true,
+    queued: queued.rows.length,
+    revision: campaign.revision,
+    audienceHash,
+  };
 }
 
 export async function createBroadcast(
@@ -304,39 +574,58 @@ export async function enqueueBroadcastRecipients(
   rootTelegramUserId?: string,
   createdBy?: string,
 ): Promise<number> {
-  const r = await sql<{ n: number }>`with campaign as (
-      update notification_campaign set status='QUEUED'
-      where id=${campaignId} and status='DRAFT'
-        and (${createdBy ?? null}::text is null or created_by=${createdBy ?? null})
-        and previewed_at is not null
-      returning id,audience,class
+  // Compatibility path for existing callers: queue a previewed draft and return
+  // the number of new deliveries. It now also freezes the CONFIRMED recipient
+  // snapshot, so the "QUEUED implies a durable audience" invariant holds on this
+  // path too. New code should prefer `confirmBroadcast`, which additionally
+  // refuses a stale preview and applies the large-broadcast cooldown.
+  const found = await sql<{
+    status: string;
+    audience: BroadcastAudience;
+    class: NotificationClass;
+    created_by: string;
+  }>`select status, audience, class, created_by from notification_campaign
+    where id=${campaignId} for update`.execute(exec);
+  const campaign = found.rows[0];
+  if (!campaign || campaign.status !== "DRAFT") return 0;
+  if (createdBy !== undefined && campaign.created_by !== createdBy) return 0;
+
+  const previewed = await sql<{ id: string }>`
+    select id from notification_campaign
+    where id=${campaignId} and status='DRAFT' and previewed_at is not null
+  `.execute(exec);
+  if (previewed.rows.length !== 1) return 0;
+
+  const recipients = await selectBroadcastAudience(
+    exec,
+    campaign.audience,
+    rootTelegramUserId,
+    campaign.class,
+  );
+  await freezeBroadcastAudience(exec, campaignId, "CONFIRMED", recipients);
+
+  const queued = await sql<{ n: number }>`with confirmed as (
+      update notification_campaign
+      set status='QUEUED',
+          confirmed_at=now(),
+          confirmed_by=${createdBy ?? null},
+          audience_hash=${hashBroadcastAudience(recipients)}
+      where id=${campaignId} and status='DRAFT' and previewed_at is not null
+      returning id
     ) insert into notification_delivery(id,campaign_id,customer_id,chat_id)
-    select md5(${campaignId}||c.id),${campaignId},c.id,coalesce(cps.chat_id,ci.channel_user_id)
-    from campaign nc
-    join customer c on c.status='ACTIVE'
-    left join customer_profile_snapshot cps on cps.customer_id=c.id
-    left join channel_identity ci on ci.customer_id=c.id and ci.channel='TELEGRAM'
-    left join notification_preference np on np.customer_id=c.id
-    where nc.audience <> 'root'
-      and (cps.customer_id is null or cps.reachable)
-      and coalesce(cps.chat_id,ci.channel_user_id) is not null
-      and ((nc.audience='all' and (nc.class='CRITICAL_SERVICE' or np.shop_updates is true))
-        or (nc.audience='shop' and np.shop_updates is true)
-        or (nc.audience='activity' and np.purchase_activity is true))
-    union all
-    select md5(${campaignId}||ci.customer_id),${campaignId},ci.customer_id,coalesce(cps.chat_id,ci.channel_user_id)
-    from campaign nc
-    join channel_identity ci on ci.channel='TELEGRAM' and ci.channel_user_id=${rootTelegramUserId ?? null}
-    join customer c on c.id=ci.customer_id and c.status='ACTIVE'
-    left join customer_profile_snapshot cps on cps.customer_id=c.id
-    where nc.audience='root'
-      and (cps.customer_id is null or cps.reachable)
-      and coalesce(cps.chat_id,ci.channel_user_id) is not null
-    on conflict (campaign_id,customer_id) do nothing returning 1 as n`.execute(exec);
-  return r.rows.length;
+    select md5(${campaignId}||v.customer_id),${campaignId},v.customer_id,v.chat_id
+    from confirmed, jsonb_to_recordset(${recipientsToJson(recipients)}::jsonb)
+      as v(customer_id text, chat_id text)
+    on conflict (campaign_id,customer_id) do nothing
+    returning 1 as n`.execute(exec);
+  return queued.rows.length;
 }
 
-export async function cancelBroadcast(exec: Executor, campaignId: string): Promise<number> {
+export async function cancelBroadcast(
+  exec: Executor,
+  campaignId: string,
+  actor?: { actorId: string; correlationId: string },
+): Promise<number> {
   const r = await sql<{ n: number }>`with cancelled as (
       update notification_campaign set status='CANCELLED'
       where id=${campaignId} and status in ('DRAFT','QUEUED') returning id
@@ -344,6 +633,23 @@ export async function cancelBroadcast(exec: Executor, campaignId: string): Promi
     where campaign_id in (select id from cancelled) and status in ('PENDING','RETRY') returning 1 as n`.execute(
     exec,
   );
+  if (actor) {
+    const cancelled = await sql<{ status: string; revision: number }>`
+      select status, revision from notification_campaign where id=${campaignId}
+    `.execute(exec);
+    if (cancelled.rows[0]?.status === "CANCELLED") {
+      await appendAuditEvent(exec, {
+        actorType: "ROOT_ADMIN",
+        actorId: actor.actorId,
+        action: "broadcast.cancelled",
+        targetType: "NotificationCampaign",
+        targetId: campaignId,
+        reason: `suppressed=${r.rows.length}`,
+        correlationId: actor.correlationId,
+        metadataRedacted: { suppressed: r.rows.length, revision: cancelled.rows[0].revision },
+      });
+    }
+  }
   return r.rows.length;
 }
 

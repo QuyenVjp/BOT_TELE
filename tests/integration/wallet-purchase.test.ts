@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createWalletPurchaseService } from "../../src/modules/wallet/purchase.js";
+import { createWalletLedgerService } from "../../src/modules/wallet/ledger.js";
 import {
   dockerAvailable,
   startPostgresContainer,
@@ -35,13 +36,20 @@ async function seedPaidCandidate(): Promise<{
   const productId = newId();
   const variantId = newId();
   const orderId = newId();
-  const walletAccountId = newId();
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi-VN')`.execute(
     ctx.db,
   );
-  await sql`insert into wallet_account (id, customer_id, balance_vnd) values (${walletAccountId}, ${customerId}, 250000)`.execute(
-    ctx.db,
-  );
+  // Fund through the real ledger path. A raw `insert into wallet_account … balance_vnd`
+  // would create an unreconciled cache, which the double-entry invariant refuses.
+  const funded = await createWalletLedgerService(ctx.db).credit({
+    customerId,
+    amountVnd: 250_000n,
+    idempotencyKey: `topup:seed:${orderId}`,
+    correlationId: `seed:${orderId}`,
+    reason: "seed funding",
+  });
+  if (!funded.ok) throw new Error(`seed funding failed: ${funded.code}`);
+  const walletAccountId = funded.account.id;
   await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'C', ${categoryId.slice(-8)}, true, 1)`.execute(
     ctx.db,
   );
@@ -142,7 +150,7 @@ describe.skipIf(!hasDocker)("wallet purchase atomic service", () => {
     expect(wallet.rows[0]?.balance_vnd).toBe("250000");
     const entries = await sql<{
       count: string;
-    }>`select count(*)::text as count from wallet_ledger where wallet_account_id = ${walletAccountId}`.execute(
+    }>`select count(*)::text as count from wallet_ledger where wallet_account_id = ${walletAccountId} and idempotency_key like 'purchase:%'`.execute(
       ctx.db,
     );
     expect(entries.rows[0]?.count).toBe("0");

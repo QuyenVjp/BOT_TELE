@@ -18,6 +18,9 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Node
     BUY_NOW_CALLBACK_HMAC_KEY: "buy-now-callback-key-material-12345678",
     DELIVERY_SESSION_HMAC_KEY: "delivery-session-key-material-12345678",
     ADMIN_TELEGRAM_USER_ID: "123456789",
+    // An admin id means the sensitive surface exists, and production refuses to start with it
+    // single-factor. Every valid production fixture must therefore enable step-up.
+    ADMIN_STEP_UP_REQUIRED: "true",
     SEPAY_WEBHOOK_HMAC_SECRET: "test-sepay-hmac-secret-do-not-use-in-prod",
     SEPAY_API_TOKEN: ["sepay", "api", "token", "material"].join("-"),
     SEPAY_MERCHANT_ACCOUNT_ID: "0123456789",

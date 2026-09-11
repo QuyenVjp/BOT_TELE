@@ -155,7 +155,9 @@ describe("createGrammyResponder admin keyboards", () => {
     await responder.send({ chatId: "customer-chat", messageId: null, message });
 
     expect(sendCalls).toHaveLength(2);
-    expect(api.deleteMessage).toHaveBeenCalledWith("customer-chat", 4);
+    // The delivery message is what holds the reply keyboard open: deleting it retracts the
+    // keyboard in the client, so the bottom buttons flash open and vanish. Regression guard.
+    expect(api.deleteMessage).not.toHaveBeenCalled();
     const keyboardOptions = sendCalls[1]?.at(-1) as {
       reply_markup?: {
         keyboard?: Array<Array<{ text: string }>>;
@@ -173,11 +175,21 @@ describe("createGrammyResponder admin keyboards", () => {
     ]);
     expect(keyboardOptions.reply_markup?.resize_keyboard).toBe(true);
     expect(keyboardOptions.reply_markup?.one_time_keyboard).not.toBe(true);
+    // One short pointer line: not an empty placeholder, and not a restatement of the labels.
+    const deliveryText = sendCalls[1]?.[1];
+    expect(typeof deliveryText).toBe("string");
+    expect(deliveryText as string).not.toBe(".");
+    expect((deliveryText as string).length).toBeGreaterThan(0);
+    expect((deliveryText as string).length).toBeLessThanOrEqual(60);
+    for (const label of ["Mua hàng", "Đơn hàng", "Tài khoản", "Nạp ví", "Bảo hành", "Hỗ trợ"]) {
+      expect(deliveryText as string).not.toContain(label);
+    }
 
     // An edit repaints the screen the user is already on and must never re-send the keyboard.
     await responder.send({ chatId: "customer-chat", messageId: "42", message });
     expect(editCalls).toHaveLength(1);
     expect(sendCalls).toHaveLength(2);
+    expect(api.deleteMessage).not.toHaveBeenCalled();
   });
 
   it("does not post a keyboard message for screens that merely carry both markups", async () => {

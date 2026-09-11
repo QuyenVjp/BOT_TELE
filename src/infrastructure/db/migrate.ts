@@ -232,10 +232,14 @@ async function cliMain(): Promise<void> {
 const invokedPath = process.argv[1];
 const isEntry = invokedPath !== undefined && import.meta.url === pathToFileURL(invokedPath).href;
 if (isEntry) {
-  cliMain().catch((err: unknown) => {
-    process.stderr.write(
-      `migrate failed: ${err instanceof Error ? err.message : "unknown error"}\n`,
-    );
+  cliMain().catch(async (err: unknown) => {
+    // This CLI never builds the app logger, so the registry starts empty and a raw
+    // `DATABASE_URL` inside a connection failure would print verbatim. Seed it from the
+    // environment first, then scrub.
+    const { registerConfigSecrets, scrubError } = await import("../observability/redact.js");
+    const { SECRET_ENV_KEYS } = await import("../../config/index.js");
+    registerConfigSecrets(process.env, SECRET_ENV_KEYS);
+    process.stderr.write(`migrate failed: ${scrubError(err).message}\n`);
     process.exit(1);
   });
 }

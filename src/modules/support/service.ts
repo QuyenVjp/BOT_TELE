@@ -1,10 +1,10 @@
 import { sql } from "kysely";
-import type { Db, Executor } from "../../infrastructure/db/transaction.js";
+import type { Db } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { newId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
-import { findOrderById } from "../commerce/repository.js";
+import { findOrderByIdForOwner } from "../commerce/repository.js";
 import { openReplacementCase } from "../digital-goods/replacement.js";
 import {
   canTicketTransition,
@@ -41,7 +41,7 @@ export type OpenTicketResult =
   | { ok: true; ticketId: string; status: SupportTicketStatus; replacementCaseId?: string }
   | {
       ok: false;
-      code: "INVALID_REASON" | "ORDER_NOT_FOUND" | "ORDER_NOT_OWNED" | "EMPTY_SUMMARY";
+      code: "INVALID_REASON" | "ORDER_NOT_FOUND" | "EMPTY_SUMMARY";
       message: string;
     };
 
@@ -66,7 +66,7 @@ export interface SupportService {
     ticketId: string;
     customerId: string;
     correlationId: string;
-  }): Promise<{ ok: true } | { ok: false; code: "NOT_FOUND" | "NOT_OWNED"; message: string }>;
+  }): Promise<{ ok: true } | { ok: false; code: "NOT_FOUND"; message: string }>;
 }
 
 interface TicketRow {
@@ -117,18 +117,12 @@ export function createSupportService(db: Db): SupportService {
         };
       }
 
-      // Ownership: a linked Order must belong to the customer.
+      // Ownership is in the query, so a linked Order that belongs to somebody else is
+      // indistinguishable from one that does not exist.
       if (input.orderId) {
-        const order = await findOrderById(db, input.orderId);
+        const order = await findOrderByIdForOwner(db, input.orderId, input.customerId);
         if (!order) {
           return { ok: false, code: "ORDER_NOT_FOUND", message: "Không tìm thấy đơn hàng." };
-        }
-        if (order.customerId !== input.customerId) {
-          return {
-            ok: false,
-            code: "ORDER_NOT_OWNED",
-            message: "Bạn không sở hữu đơn hàng này.",
-          };
         }
       }
 
@@ -217,29 +211,20 @@ export function createSupportService(db: Db): SupportService {
     },
 
     async closeTicket(input) {
-      const existing = await findTicket(db, input.ticketId);
-      if (!existing) {
-        return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy ticket." };
-      }
-      if (existing.customer_id !== input.customerId) {
-        return { ok: false, code: "NOT_OWNED", message: "Bạn không sở hữu ticket này." };
-      }
-      await sql`
+      // The owner predicate is in the UPDATE, so a foreign ticket and a missing one are the
+      // same refusal and the read above is not needed at all.
+      const closed = await sql<{ id: string }>`
         update support_ticket
         set status = 'CLOSED', updated_at = now(), version = version + 1
         where id = ${input.ticketId} and customer_id = ${input.customerId}
+        returning id
       `.execute(db);
+      if (closed.rows.length === 0) {
+        return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy ticket." };
+      }
       return { ok: true };
     },
   };
-}
-
-async function findTicket(exec: Executor, ticketId: string): Promise<TicketRow | null> {
-  const result = await sql<TicketRow>`
-    select id, customer_id, order_id, reason_code, status, safe_summary, due_at, created_at
-    from support_ticket where id = ${ticketId} limit 1
-  `.execute(exec);
-  return result.rows[0] ?? null;
 }
 
 /** Owner-facing ticket row. A short customer label, never a raw telegram identity. */

@@ -36,7 +36,7 @@ function dispatcherFor(uiSurface?: {
   const dispatcher = createTelegramDomainDispatcher({
     codec,
     resolveCustomerId: vi.fn().mockResolvedValue("cust"),
-    resolveOrderById: vi.fn().mockResolvedValue(null),
+    resolveOrderByIdForOwner: vi.fn().mockResolvedValue(null),
     resolveOrderIdByNumber: vi.fn().mockResolvedValue(null),
     resolveCatalogPage: vi.fn().mockResolvedValue(null),
     catalog: {

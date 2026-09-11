@@ -174,7 +174,7 @@ function setup() {
   const dispatcher = createTelegramDomainDispatcher({
     codec,
     resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-    resolveOrderById: vi
+    resolveOrderByIdForOwner: vi
       .fn()
       .mockImplementation(async (id: string) => (id === order.id ? order : null)),
     resolveOrderIdByNumber: vi
@@ -1223,7 +1223,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-      resolveOrderById: vi.fn(),
+      resolveOrderByIdForOwner: vi.fn(),
       resolveOrderIdByNumber: vi.fn(),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {
@@ -1275,7 +1275,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-      resolveOrderById: vi.fn(),
+      resolveOrderByIdForOwner: vi.fn(),
       resolveOrderIdByNumber: vi.fn(),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {
@@ -1327,7 +1327,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-      resolveOrderById: vi.fn(),
+      resolveOrderByIdForOwner: vi.fn(),
       resolveOrderIdByNumber: vi.fn(),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {
@@ -1368,7 +1368,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-      resolveOrderById: vi.fn(),
+      resolveOrderByIdForOwner: vi.fn(),
       resolveOrderIdByNumber: vi.fn(),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {
@@ -1432,7 +1432,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-      resolveOrderById: vi.fn(),
+      resolveOrderByIdForOwner: vi.fn(),
       resolveOrderIdByNumber: vi.fn(),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {
@@ -1489,7 +1489,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-      resolveOrderById: vi.fn(),
+      resolveOrderByIdForOwner: vi.fn(),
       resolveOrderIdByNumber: vi.fn(),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {
@@ -1544,7 +1544,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
       resolveCustomerId: vi.fn().mockResolvedValue(CUSTOMER),
-      resolveOrderById: vi.fn(),
+      resolveOrderByIdForOwner: vi.fn(),
       resolveOrderIdByNumber: vi.fn(),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {

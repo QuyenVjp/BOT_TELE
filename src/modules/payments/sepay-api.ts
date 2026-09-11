@@ -3,6 +3,10 @@ import { z } from "zod";
 import type { PaymentEvidence } from "./domain.js";
 import type { SePayReconciliationPort } from "./reconciliation.js";
 import { brandVerifiedSePayApiEvidence } from "./sepay-ingress.js";
+import {
+  assertOutboundTargetAllowed,
+  type OutboundPolicyOptions,
+} from "../../infrastructure/net/outbound-policy.js";
 
 const MAX_RESPONSE_BYTES = 1_000_000;
 
@@ -67,6 +71,12 @@ export function createSePayApiPort(options: {
   token: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  /**
+   * Test seam for the outbound-policy DNS lookup. Production omits it and the policy
+   * resolves through `node:dns`. It cannot disable the policy: the resolved addresses
+   * are still classified, so an injected resolver returning a private address is refused.
+   */
+  resolveHost?: (hostname: string) => Promise<readonly string[]>;
 }): SePayReconciliationPort {
   const baseUrl = new URL(options.baseUrl);
   if (baseUrl.protocol !== "https:" || baseUrl.hostname !== "userapi.sepay.vn") {
@@ -75,6 +85,10 @@ export function createSePayApiPort(options: {
       "SePay API base URL must use the official HTTPS host",
     );
   }
+  // Same outbound policy as every other egress: the host is pinned above, and this
+  // re-verifies the RESOLVED address, so a DNS answer pointing at loopback/metadata is
+  // refused even for the official hostname.
+  const outboundOptions: OutboundPolicyOptions = { allowedHosts: ["userapi.sepay.vn"] };
   if (options.token.trim().length === 0) {
     throw new SePayApiError("INVALID_CONFIG", "SePay API token is required");
   }
@@ -120,6 +134,21 @@ export function createSePayApiPort(options: {
         url.searchParams.set("since_id", listOptions.sinceId);
       }
 
+      // Resolved and classified BEFORE the transport is opened, and deliberately outside the
+      // transport try/catch below: a refused address is a policy decision, not a transport
+      // failure, and folding it into `HTTP_ERROR` would hide a security refusal as a flaky
+      // request.
+      //
+      // The ORIGIN is validated, not the full request URL: this request legitimately carries
+      // query parameters, and the policy (correctly) refuses a URL that has them. Scheme,
+      // host, port and every resolved address are what the policy is for, and the path and
+      // query are built here from validated values, never from caller input.
+      await assertOutboundTargetAllowed(
+        baseUrl.origin,
+        outboundOptions,
+        options.resolveHost ? { resolve: options.resolveHost } : {},
+      );
+
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), timeoutMs);
       let response: Response;
@@ -127,6 +156,8 @@ export function createSePayApiPort(options: {
         await waitForOfficialRate();
         response = await fetchImpl(url, {
           method: "GET",
+          // A provider redirect would carry our bearer token to whatever host it names.
+          redirect: "error",
           headers: { authorization: `Bearer ${options.token}`, accept: "application/json" },
           signal: controller.signal,
         });

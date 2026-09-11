@@ -51,7 +51,7 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
     const dispatcher = createTelegramDomainDispatcher({
       codec,
       resolveCustomerId: (telegramUserId) => resolveTelegramCustomerId(ctx.db, telegramUserId),
-      resolveOrderById: vi.fn().mockResolvedValue(null),
+      resolveOrderByIdForOwner: vi.fn().mockResolvedValue(null),
       resolveOrderIdByNumber: vi.fn().mockResolvedValue(null),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {

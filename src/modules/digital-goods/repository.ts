@@ -3,7 +3,7 @@ import type { Db, Executor, Trx } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { nextVersion } from "../../infrastructure/db/version.js";
 import { newId } from "../../shared/ids/index.js";
-import type { AssetStatus } from "./domain.js";
+import type { AssetStatus, DeliveryBundleStatus } from "./domain.js";
 import { emitQuantityStockDeltaEvents } from "../catalog/quantity-stock.js";
 
 /**
@@ -402,6 +402,88 @@ export async function findDeliveredAssetHistoryForOrder(
     where delivered_order_id = ${orderId}
       and status in ('DELIVERED', 'COMPROMISED', 'REVOKED')
     order by updated_at asc, id asc
+    limit 1
+  `.execute(exec);
+  return result.rows[0] ?? null;
+}
+
+/*
+ * Owner-scoped reads (BOLA/IDOR).
+ *
+ * A digital asset and a delivery bundle are owned by a customer only through
+ * their Order, so the predicates join to `"order"` and compare the customer id
+ * there. The bundle read also checks the denormalized `bundle.customer_id`: a
+ * writer bug that stamped the wrong owner must not become a disclosure.
+ *
+ * Failure shape: a non-owned resource is indistinguishable from a missing one —
+ * `null` and no throw.
+ */
+
+/** Owner-scoped active hold for an order; another customer's order yields null. */
+export async function findActiveAssetHoldByOrderForOwner(
+  exec: Executor,
+  orderId: string,
+  customerId: string,
+): Promise<AssetRow | null> {
+  const result = await sql<AssetRow>`
+    select a.id, a.variant_id, a.vault_ref, a.fingerprint_hash, a.status,
+           a.reserved_order_id, a.version
+    from digital_asset a
+    join "order" o on o.id = a.reserved_order_id
+    where a.reserved_order_id = ${orderId}
+      and o.customer_id = ${customerId}
+      and a.status in ('RESERVED','READY')
+    order by a.created_at asc, a.id asc
+    limit 1
+  `.execute(exec);
+  return result.rows[0] ?? null;
+}
+
+/** Owner-scoped delivered-asset history; another customer's order yields null. */
+export async function findDeliveredAssetHistoryForOrderForOwner(
+  exec: Executor,
+  orderId: string,
+  customerId: string,
+): Promise<AssetRow | null> {
+  const result = await sql<AssetRow>`
+    select a.id, a.variant_id, a.vault_ref, a.fingerprint_hash, a.status,
+           a.reserved_order_id, a.version
+    from digital_asset a
+    join "order" o on o.id = a.delivered_order_id
+    where a.delivered_order_id = ${orderId}
+      and o.customer_id = ${customerId}
+      and a.status in ('DELIVERED', 'COMPROMISED', 'REVOKED')
+    order by a.updated_at asc, a.id asc
+    limit 1
+  `.execute(exec);
+  return result.rows[0] ?? null;
+}
+
+/** Bundle projection for owner-scoped reads — never carries `token_hash`. */
+export interface DeliveryBundleOwnershipRow {
+  id: string;
+  order_id: string;
+  customer_id: string;
+  asset_id: string;
+  status: DeliveryBundleStatus;
+  expires_at: Date | string;
+}
+
+/** Owner-scoped live bundle for an order; another customer's order yields null. */
+export async function findActiveDeliveryBundleForOrderForOwner(
+  exec: Executor,
+  orderId: string,
+  customerId: string,
+): Promise<DeliveryBundleOwnershipRow | null> {
+  const result = await sql<DeliveryBundleOwnershipRow>`
+    select b.id, b.order_id, b.customer_id, b.asset_id, b.status, b.expires_at
+    from delivery_bundle b
+    join "order" o on o.id = b.order_id
+    where b.order_id = ${orderId}
+      and b.customer_id = ${customerId}
+      and o.customer_id = ${customerId}
+      and b.status in ('CREATED','AVAILABLE','VIEWED')
+    order by b.created_at desc, b.id desc
     limit 1
   `.execute(exec);
   return result.rows[0] ?? null;

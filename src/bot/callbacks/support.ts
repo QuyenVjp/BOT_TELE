@@ -1,5 +1,5 @@
 import type { Db } from "../../infrastructure/db/transaction.js";
-import { findOrderByNumber } from "../../modules/commerce/repository.js";
+import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
 import { createSupportService } from "../../modules/support/service.js";
 import { isSupportReasonCode } from "../../modules/support/domain.js";
 import {
@@ -58,7 +58,7 @@ export function createSupportCallbacks(deps: SupportCallbackDeps): SupportCallba
 
       let orderId: string | undefined;
       if (input.orderNumber) {
-        const order = await findOrderByNumber(deps.db, input.orderNumber);
+        const order = await findOrderByNumberForOwner(deps.db, input.orderNumber, input.customerId);
         if (!order) return errorMessage("Không tìm thấy đơn hàng.");
         // Ownership is re-checked inside the service.
         orderId = order.id;

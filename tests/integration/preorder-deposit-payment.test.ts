@@ -106,6 +106,7 @@ async function reserveDeposit(): Promise<{
   const presented = await presentPreorderPayment(ctx.db, {
     ...MERCHANT_INPUT,
     reservationId: created.reservationId,
+    customerId,
     leg: "DEPOSIT",
     correlationId: "test-preorder-deposit",
   });
@@ -192,6 +193,7 @@ describe("preorder deposit settlement", () => {
     const again = await presentPreorderPayment(ctx.db, {
       ...MERCHANT_INPUT,
       reservationId: f.reservationId,
+      customerId: f.customerId,
       leg: "DEPOSIT",
       correlationId: "test-preorder-deposit-refresh",
     });
@@ -268,6 +270,7 @@ describe("preorder deposit settlement", () => {
     const presented = await presentPreorderPayment(ctx.db, {
       ...MERCHANT_INPUT,
       reservationId,
+      customerId,
       leg: "BALANCE",
       correlationId: "test-preorder-balance",
     });

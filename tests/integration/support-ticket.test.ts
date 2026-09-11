@@ -122,7 +122,8 @@ describe("support ticket (FR-019)", () => {
       correlationId: "sup-3",
     });
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(res.code).toBe("ORDER_NOT_OWNED");
+    // A foreign order is indistinguishable from a missing one: no existence oracle.
+    if (!res.ok) expect(res.code).toBe("ORDER_NOT_FOUND");
   });
 
   it("allows an order-less general ticket", async () => {

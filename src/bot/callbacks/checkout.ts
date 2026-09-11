@@ -1,9 +1,9 @@
 import type { Db } from "../../infrastructure/db/transaction.js";
 import { randomBytes } from "node:crypto";
 import { buyNow, cancelUnpaidOrder, isStockOutcomeCode } from "../../modules/commerce/buy-now.js";
-import { findOrderByNumber } from "../../modules/commerce/repository.js";
+import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
 import { presentPaymentForOrder } from "../../modules/payments/service.js";
-import { findLiveIntentByOrder } from "../../modules/payments/repository.js";
+import { findLiveIntentByOrderForOwner } from "../../modules/payments/repository.js";
 import {
   normalizeTelegramUserId,
   type BuyNowCallbackCodec,
@@ -406,11 +406,8 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     },
 
     async refresh(orderNumber, customerId) {
-      const order = await findOrderByNumber(deps.db, orderNumber);
+      const order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
       if (!order) return errorMessage("Không tìm thấy đơn hàng.");
-      if (order.customerId !== customerId) {
-        return errorMessage("Bạn không sở hữu đơn hàng này.");
-      }
 
       // Pure internal projection — no SePay call, no mark-paid.
       if (order.status === "COMPLETED") {
@@ -454,7 +451,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       });
       if (!presented.ok) {
         // Intent may already be non-live (e.g. NEEDS_REVIEW on the intent).
-        const live = await findLiveIntentByOrder(deps.db, order.id);
+        const live = await findLiveIntentByOrderForOwner(deps.db, order.id, customerId);
         if (!live) return presentPaymentNeedsReview(order.orderNumber, order.id);
         return errorMessage("Không tải được mã thanh toán. Vui lòng thử lại.");
       }
@@ -473,7 +470,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     },
 
     async cancel(orderNumber, customerId, correlationId) {
-      const order = await findOrderByNumber(deps.db, orderNumber);
+      const order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
       if (!order) return errorMessage("Không tìm thấy đơn hàng.");
       const result = await cancelUnpaidOrder(deps.db, {
         orderId: order.id,

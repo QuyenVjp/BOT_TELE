@@ -309,10 +309,17 @@ export interface PreorderSettlementTarget {
  * Lock a reservation for a money settlement. Taking this lock BEFORE the payment
  * intent keeps settlement in the same lock order as shop-cancel and hold-expiry
  * (reservation → intent), so the two can never deadlock on each other.
+ *
+ * `ownerCustomerId` is mandatory for any caller whose reservation id came from a
+ * customer: it puts the owner predicate INSIDE the locked read, so a foreign
+ * reservation and a missing one are the same `null` (BOLA, no existence oracle).
+ * The settlement worker, which resolves a reservation from matched payment
+ * evidence rather than from customer input, omits it deliberately.
  */
 export async function lockPreorderForSettlement(
   exec: Executor,
   reservationId: string,
+  ownerCustomerId?: string,
 ): Promise<PreorderSettlementTarget | null> {
   const res = await sql<{
     id: string;
@@ -331,6 +338,8 @@ export async function lockPreorderForSettlement(
     join product_variant v on v.id = pr.variant_id
     join product p on p.id = v.product_id
     where pr.id = ${reservationId}
+      and (${ownerCustomerId ?? null}::text is null
+           or pr.customer_id = ${ownerCustomerId ?? null})
     for update of pr
   `.execute(exec);
   const row = res.rows[0];

@@ -68,4 +68,27 @@ describe("Feature 001 migration upgrade path (T183/T186)", () => {
     expect(migration).toMatch(/manual_fulfillment\.complete/i);
     expect(migration).toMatch(/support\.replacement\.approve/i);
   });
+
+  /**
+   * The runner applies files in `localeCompare` order and records them by
+   * filename, so two files sharing a prefix both apply — but in an order decided
+   * by the lexicographic tail of the name, not by intent. That silent ambiguity
+   * is how a forward-only migration ends up running before the table it alters.
+   *
+   * The repository deliberately uses a letter suffix (`009a_…`) to add a sibling
+   * to an already-applied prefix; that stays legal. Two files with the *same*
+   * prefix and the *same* suffix letter do not.
+   */
+  it("gives every migration a unique numeric prefix and suffix letter", async () => {
+    const files = await listMigrationFiles(migrationsDir);
+    const keys = files.map((file) => {
+      const match = /^(\d+)([a-z]?)/.exec(file);
+      expect(match, `migration ${file} must start with a numeric prefix`).not.toBeNull();
+      return `${match![1]}${match![2]}`;
+    });
+
+    const sorted = [...keys].sort();
+    const duplicated = sorted.filter((key, index) => key === sorted[index - 1]);
+    expect(duplicated).toEqual([]);
+  });
 });

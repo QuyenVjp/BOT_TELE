@@ -76,9 +76,12 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
       from generate_series(1, ${COUNTS.customers}) gs
     `.execute(trx);
 
+    // Wallets open empty: the double-entry invariant (migration 052) refuses an
+    // account whose cached balance is not backed by postings. The cache is
+    // materialised at the end, after the postings exist.
     await sql`
       insert into wallet_account (id, customer_id, balance_vnd)
-      select '01WAL0' || lpad(gs::text, 20, '0'), '01CST0' || lpad(gs::text, 20, '0'), 10000
+      select '01WAL0' || lpad(gs::text, 20, '0'), '01CST0' || lpad(gs::text, 20, '0'), 0
       from generate_series(1, ${COUNTS.customers}) gs
     `.execute(trx);
 
@@ -90,6 +93,35 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
         'rc-wallet-' || c || '-' || e, 'rc-wallet-' || c, 'RC synthetic topup'
       from generate_series(1, ${COUNTS.customers}) c cross join generate_series(1, 10) e
     `.execute(trx);
+
+    // Mirror each synthetic movement into the double-entry layer so the loaded
+    // dataset is internally consistent, then materialise the cached balance.
+    await sql`
+      insert into ledger_transaction
+        (id, transaction_type, wallet_account_id, idempotency_key, correlation_id, reason)
+      select '01LTX0' || lpad(((c - 1) * 10 + e)::text, 20, '0'), 'CREDIT_ADJUSTMENT',
+        '01WAL0' || lpad(c::text, 20, '0'), 'rc-wallet-ledger:' || c || '-' || e,
+        'rc-wallet-' || c, 'RC synthetic topup'
+      from generate_series(1, ${COUNTS.customers}) c cross join generate_series(1, 10) e
+    `.execute(trx);
+
+    await sql`
+      insert into ledger_posting (id, transaction_id, account_id, side, amount_minor)
+      select '01LPO0' || lpad(((c - 1) * 10 + e)::text, 20, '0') || '_w',
+        '01LTX0' || lpad(((c - 1) * 10 + e)::text, 20, '0'), a.id, 'CREDIT', 1000
+      from generate_series(1, ${COUNTS.customers}) c cross join generate_series(1, 10) e
+      join ledger_account a on a.wallet_account_id = '01WAL0' || lpad(c::text, 20, '0')
+    `.execute(trx);
+
+    await sql`
+      insert into ledger_posting (id, transaction_id, account_id, side, amount_minor)
+      select '01LPO0' || lpad(((c - 1) * 10 + e)::text, 20, '0') || '_c',
+        '01LTX0' || lpad(((c - 1) * 10 + e)::text, 20, '0'), sys.id, 'DEBIT', 1000
+      from generate_series(1, ${COUNTS.customers}) c cross join generate_series(1, 10) e
+      cross join (select id from ledger_account where code = 'SHOP:ADJUSTMENT_EXPENSE') sys
+    `.execute(trx);
+
+    await sql`update wallet_account set balance_vnd = 10000 where id like '01WAL0%'`.execute(trx);
 
     await sql`
       insert into "order"

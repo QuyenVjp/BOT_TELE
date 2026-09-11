@@ -183,6 +183,83 @@ export async function findLiveIntentByPreorderLeg(
   return row ? toMatchableIntent(row) : null;
 }
 
+/*
+ * Owner-scoped intent reads (BOLA/IDOR).
+ *
+ * A payment intent is owned by a customer either through its Order or through
+ * its preorder reservation. The predicate joins to that owner, so a foreign
+ * intent is never returned; the failure shape matches the un-scoped lookups — a
+ * non-owned intent is indistinguishable from a missing one (`null`, no throw).
+ */
+
+/** Intent columns qualified for owner-scoped joins (both sides own `id`/`status`). */
+const OWNER_SCOPED_INTENT_COLUMNS = sql`
+  i.id, i.order_id, i.preorder_id, i.kind, i.amount_vnd, i.merchant_account_id,
+  i.transfer_content, i.status, i.expires_at, i.version
+`;
+
+/**
+ * Owner-scoped intent read. Order-backed intents only: a preorder intent has no
+ * `order_id`, so use {@link findLiveIntentByPreorderLegForOwner} for those.
+ * Returns null when the id is missing, is a preorder leg, or belongs to another
+ * customer.
+ */
+export async function findIntentByIdForOwner(
+  exec: Executor,
+  intentId: string,
+  customerId: string,
+): Promise<(MatchableIntent & { version: number }) | null> {
+  const result = await sql<IntentRow>`
+    select ${OWNER_SCOPED_INTENT_COLUMNS}
+    from payment_intent i
+    join "order" o on o.id = i.order_id
+    where i.id = ${intentId} and o.customer_id = ${customerId}
+    limit 1
+  `.execute(exec);
+  const row = result.rows[0];
+  return row ? toMatchableIntent(row) : null;
+}
+
+/** Owner-scoped live intent for an order: another customer's order yields null. */
+export async function findLiveIntentByOrderForOwner(
+  exec: Executor,
+  orderId: string,
+  customerId: string,
+): Promise<(MatchableIntent & { version: number }) | null> {
+  const result = await sql<IntentRow>`
+    select ${OWNER_SCOPED_INTENT_COLUMNS}
+    from payment_intent i
+    join "order" o on o.id = i.order_id
+    where i.order_id = ${orderId}
+      and o.customer_id = ${customerId}
+      and i.status in ('CREATED','PRESENTED')
+    limit 1
+  `.execute(exec);
+  const row = result.rows[0];
+  return row ? toMatchableIntent(row) : null;
+}
+
+/** Owner-scoped live intent for one preorder leg; another customer's reservation yields null. */
+export async function findLiveIntentByPreorderLegForOwner(
+  exec: Executor,
+  preorderId: string,
+  kind: "DEPOSIT" | "BALANCE",
+  customerId: string,
+): Promise<(MatchableIntent & { version: number }) | null> {
+  const result = await sql<IntentRow>`
+    select ${OWNER_SCOPED_INTENT_COLUMNS}
+    from payment_intent i
+    join preorder_reservation p on p.id = i.preorder_id
+    where i.preorder_id = ${preorderId}
+      and p.customer_id = ${customerId}
+      and i.kind = ${kind}
+      and i.status in ('CREATED','PRESENTED')
+    limit 1
+  `.execute(exec);
+  const row = result.rows[0];
+  return row ? toMatchableIntent(row) : null;
+}
+
 export interface InsertIntentInput {
   id: string;
   /** Owning Order, or null for a preorder deposit/balance intent. */

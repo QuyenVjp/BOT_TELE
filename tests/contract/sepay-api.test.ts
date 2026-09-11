@@ -1,8 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSePayApiPort, SePayApiError } from "../../src/modules/payments/sepay-api.js";
 import { isVerifiedSePayEvidence } from "../../src/modules/payments/sepay-ingress.js";
+import { OutboundPolicyError } from "../../src/infrastructure/net/outbound-policy.js";
 
 const API_CREDENTIAL_FIXTURE = "test-only-sepay-api-credential";
+
+/** The adapter resolves DNS through the outbound policy; stub it at a public address so the
+ *  tests exercise the adapter contract rather than the network. */
+const PUBLIC_RESOLVER = async (): Promise<readonly string[]> => ["93.184.216.34"];
 
 describe("official SePay API v2 reconciliation adapter", () => {
   it("uses bounded official query parameters and mints verified API evidence", async () => {
@@ -46,6 +51,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
       baseUrl: "https://userapi.sepay.vn/v2",
       token: API_CREDENTIAL_FIXTURE,
       fetchImpl,
+      resolveHost: PUBLIC_RESOLVER,
     });
 
     const rows = await port.listTransactions(1_768_500_000, 1_768_503_600, 1);
@@ -77,6 +83,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
       baseUrl: "https://userapi.sepay.vn/v2",
       token: API_CREDENTIAL_FIXTURE,
       fetchImpl: () => Promise.resolve(new Response('{"status":"success","data":[{}]}')),
+      resolveHost: PUBLIC_RESOLVER,
     });
     await expect(malformed.listTransactions(1, 2, 10)).rejects.toThrow("schema");
 
@@ -87,6 +94,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
         Promise.resolve(
           new Response("rate limited", { status: 429, headers: { "retry-after": "17" } }),
         ),
+      resolveHost: PUBLIC_RESOLVER,
     });
     const error = await throttled.listTransactions(1, 2, 10).catch((value: unknown) => value);
     expect(error).toBeInstanceOf(SePayApiError);
@@ -111,6 +119,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
       baseUrl: "https://userapi.sepay.vn/v2",
       token: API_CREDENTIAL_FIXTURE,
       fetchImpl,
+      resolveHost: PUBLIC_RESOLVER,
     });
     const sinceId = "a1b2c3d4-e5f6-7890-abcd-ef1234567890";
     await port.listTransactions(1, 2, 100, { page: 3, sinceId });
@@ -130,6 +139,7 @@ describe("official SePay API v2 reconciliation adapter", () => {
       baseUrl: "https://userapi.sepay.vn/v2",
       token: API_CREDENTIAL_FIXTURE,
       timeoutMs: 100,
+      resolveHost: PUBLIC_RESOLVER,
       fetchImpl: (_input, init) =>
         new Promise((_resolve, reject) => {
           init?.signal?.addEventListener("abort", () =>
@@ -141,5 +151,23 @@ describe("official SePay API v2 reconciliation adapter", () => {
     expect(error).toBeInstanceOf(SePayApiError);
     expect(error).toMatchObject({ code: "HTTP_ERROR" });
     expect(String(error)).not.toContain(API_CREDENTIAL_FIXTURE);
+  });
+
+  it("refuses a DNS answer that points at a non-public address, and says so", async () => {
+    const fetchImpl = vi.fn<typeof fetch>();
+    const port = createSePayApiPort({
+      baseUrl: "https://userapi.sepay.vn/v2",
+      token: API_CREDENTIAL_FIXTURE,
+      fetchImpl,
+      // The official hostname resolving to a loopback/metadata address is the DNS-rebinding
+      // case: the hostname check at construction cannot catch it, the address check must.
+      resolveHost: async (): Promise<readonly string[]> => ["169.254.169.254"],
+    });
+
+    const error = await port.listTransactions(1, 2, 10).catch((value: unknown) => value);
+    expect(error).toBeInstanceOf(OutboundPolicyError);
+    expect(error).toMatchObject({ code: "ADDRESS_NOT_ALLOWED" });
+    // Nothing was sent, so the bearer token never left the process.
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 });

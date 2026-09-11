@@ -16,11 +16,16 @@ async function main(): Promise<void> {
     await import("dotenv/config");
   }
 
-  const { loadConfig, redactedConfig } = await import("./config/index.js");
+  const { loadConfig, redactedConfig, SECRET_ENV_KEYS } = await import("./config/index.js");
   const config = loadConfig(process.env);
 
   const { createLogger } = await import("./infrastructure/observability/logger.js");
   const logger = createLogger(config);
+
+  // Value-scanning redaction: path censoring only covers known keys, so the resolved
+  // secret values are registered once here and scrubbed everywhere after.
+  const { registerConfigSecrets } = await import("./infrastructure/observability/redact.js");
+  registerConfigSecrets(config, SECRET_ENV_KEYS);
 
   const { createDb } = await import("./infrastructure/db/client.js");
   const { createVault } = await import("./infrastructure/vault/adapter.js");
@@ -222,11 +227,13 @@ async function main(): Promise<void> {
 const invokedPath = process.argv[1];
 const isEntry = invokedPath !== undefined && import.meta.url === pathToFileURL(invokedPath).href;
 if (isEntry) {
-  main().catch((err: unknown) => {
-    // Never print the raw error object; it may carry config values.
-    process.stderr.write(
-      `main failed to start: ${err instanceof Error ? err.message : "unknown error"}\n`,
-    );
+  main().catch(async (err: unknown) => {
+    // The raw error object may carry config values, and a failed DB connect surfaces the
+    // connection string — so the message is scrubbed with the registered secret values
+    // before it reaches the terminal.
+    const { scrubError } = await import("./infrastructure/observability/redact.js");
+    const safe = scrubError(err);
+    process.stderr.write(`main failed to start: ${safe.message}\n`);
     process.exit(1);
   });
 }

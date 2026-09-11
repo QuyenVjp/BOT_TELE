@@ -7,6 +7,8 @@ import {
 } from "../../modules/catalog/fulfillment-type.js";
 import type { StoreMode } from "../../modules/commerce/store-mode.js";
 import type { AuditEvent } from "../../modules/identity/audit.js";
+import type { SensitiveAuthorizationRefusal } from "../../modules/identity/sensitive-action.js";
+import type { BroadcastRefusal } from "../../modules/notification/service.js";
 import type {
   AdminOrderDetail,
   AdminOrderListPage,
@@ -1950,6 +1952,81 @@ export function presentAdminDenied(reason: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT"): 
   return {
     text: [ADMIN_COPY.deniedTitle, "", ADMIN_COPY.deniedBody, hint].join("\n"),
     buttons: [[{ text: ADMIN_COPY.mainMenu, callbackData: "menu:main" }]],
+  };
+}
+
+/** Deterministic step-up challenge copy, shared with the callback refusal message. */
+export const STEP_UP_CHALLENGE_TEXT = "🔐 Thao tác nhạy cảm cần xác minh bảo mật.";
+export const STEP_UP_CHALLENGE_INSTRUCTION =
+  "Gửi /verify <mã 6 số> để lấy quyền, sau đó mở lại và xác nhận hành động.";
+
+export const STEP_UP_ENROLL_INSTRUCTION =
+  "Gửi /enroll_2fa để thiết lập, sau đó thực hiện lại hành động.";
+export const STEP_UP_LOCKED_OUT_TEXT =
+  "Xác minh bảo mật đang tạm khoá sau nhiều lần nhập sai. Vui lòng thử lại sau.";
+
+/** One owner-facing sentence per refusal. None of them contains a code, an OTP or a seed. */
+export const SENSITIVE_REFUSAL_TEXT: Record<SensitiveAuthorizationRefusal, string> = {
+  NOT_ROOT_ADMIN: "Không được phép.",
+  STEP_UP_REQUIRED: `${STEP_UP_CHALLENGE_TEXT}\n${STEP_UP_CHALLENGE_INSTRUCTION}`,
+  STEP_UP_GRANT_MISSING: `${STEP_UP_CHALLENGE_TEXT}\nXác minh trước đó đã hết hiệu lực. ${STEP_UP_CHALLENGE_INSTRUCTION}`,
+  STEP_UP_NOT_ENROLLED: `Chưa thiết lập xác minh bảo mật. ${STEP_UP_ENROLL_INSTRUCTION}`,
+  STEP_UP_LOCKED_OUT: STEP_UP_LOCKED_OUT_TEXT,
+};
+
+export const ADMIN_MENU_BUTTON: InlineButton = {
+  text: ADMIN_COPY.adminMenu,
+  callbackData: "admin:menu",
+};
+
+/**
+ * What the owner reads when a sensitive action needs its second factor. It names
+ * the action and the required category — both come from the fixed policy table —
+ * and nothing else: never a seed, an OTP or any code.
+ */
+export function presentStepUpRequired(input: {
+  action: string;
+  category: string | null;
+}): PresentedMessage {
+  const action = input.category === null ? input.action : `${input.action} (${input.category})`;
+  return {
+    text: [STEP_UP_CHALLENGE_TEXT, "", `Hành động: ${action}`, STEP_UP_CHALLENGE_INSTRUCTION].join(
+      "\n",
+    ),
+    buttons: [[ADMIN_MENU_BUTTON]],
+  };
+}
+
+/** Why a broadcast send was refused. One sentence per reason; none of them blames the operator. */
+export const BROADCAST_REFUSAL_TEXT: Record<BroadcastRefusal, string> = {
+  NOT_FOUND: "Không tìm thấy thông báo.",
+  NOT_DRAFT: "Thông báo này đã được gửi hoặc đã huỷ.",
+  NOT_PREVIEWED: "Cần xem trước nội dung và số người nhận trước khi gửi.",
+  NOT_OWNED: "Thông báo này không thuộc về bạn.",
+  STALE_PREVIEW:
+    "Nội dung hoặc danh sách người nhận đã thay đổi sau khi xem trước. Hãy xem trước lại rồi gửi.",
+  COOLDOWN_ACTIVE: "Vừa có một thông báo lớn được gửi. Vui lòng chờ trong ít phút.",
+};
+
+export function presentAdminBroadcastRefused(reason: BroadcastRefusal): PresentedMessage {
+  return {
+    text: `⛔ ${BROADCAST_REFUSAL_TEXT[reason]}`,
+    buttons: [[{ text: "📣 Tiếp thị", callbackData: "admin:marketing" }]],
+  };
+}
+
+/** The refusal screen for a sensitive action: challenge for step-up, otherwise the sentence. */
+export function presentSensitiveRefusal(input: {
+  code: SensitiveAuthorizationRefusal;
+  action: string;
+  category: string | null;
+}): PresentedMessage {
+  if (input.code === "STEP_UP_REQUIRED" || input.code === "STEP_UP_GRANT_MISSING") {
+    return presentStepUpRequired({ action: input.action, category: input.category });
+  }
+  return {
+    text: SENSITIVE_REFUSAL_TEXT[input.code],
+    buttons: [[ADMIN_MENU_BUTTON]],
   };
 }
 

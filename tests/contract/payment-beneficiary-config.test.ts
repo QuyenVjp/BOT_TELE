@@ -77,6 +77,7 @@ describe("payment beneficiary configuration contract (T171)", () => {
         SEPAY_API_TOKEN: "sepay-api-token-material-1234567890",
         DELIVERY_SESSION_HMAC_KEY: "delivery-session-key-material-12345678",
         BUY_NOW_CALLBACK_HMAC_KEY: "buy-now-callback-key-material-12345678",
+        ADMIN_STEP_UP_REQUIRED: "true",
         SEPAY_MERCHANT_ACCOUNT_ID: "0123456789",
         VIETQR_ACCOUNT_NUMBER: "0335920306",
       }),

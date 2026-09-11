@@ -228,6 +228,12 @@ export async function presentPaymentForOrder(
 }
 
 export interface PresentPreorderPaymentInput {
+  /**
+   * Server-derived owner of the reservation. Required: the owner predicate runs
+   * inside the locked read, so a foreign reservation reads exactly like a missing
+   * one and a leaked reservation id alone authorises nothing.
+   */
+  customerId: string;
   reservationId: string;
   /** Deposit (queue hold) or the remaining balance owed once stock is allocated. */
   leg: "DEPOSIT" | "BALANCE";
@@ -252,7 +258,7 @@ export type PresentPreorderPaymentResult =
       productName: string;
       variantName: string;
     }
-  | { ok: false; error: "NOT_FOUND" | "NOT_PAYABLE" | "AMOUNT_INVALID" | "NOT_OWNED" };
+  | { ok: false; error: "NOT_FOUND" | "NOT_PAYABLE" | "AMOUNT_INVALID" };
 
 /** Bounded deposit-QR window: long enough to open a bank app, short enough to free the queue. */
 const MIN_PREORDER_TTL_SECONDS = 300;
@@ -272,7 +278,7 @@ export async function presentPreorderPayment(
   input: PresentPreorderPaymentInput,
 ): Promise<PresentPreorderPaymentResult> {
   return withTransaction(db, async (trx) => {
-    const reservation = await lockPreorderForSettlement(trx, input.reservationId);
+    const reservation = await lockPreorderForSettlement(trx, input.reservationId, input.customerId);
     if (!reservation) return { ok: false, error: "NOT_FOUND" };
     if (preorderPayableLeg(reservation.status) !== input.leg) {
       return { ok: false, error: "NOT_PAYABLE" };

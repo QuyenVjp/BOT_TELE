@@ -7,6 +7,7 @@ import {
 } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
+import { assertOutboundTargetAllowed, OutboundPolicyError } from "../net/outbound-policy.js";
 import { AppError } from "../../shared/errors/index.js";
 import { newId } from "../../shared/ids/index.js";
 import type { Vault, VaultRef, VaultWriteOptions } from "./port.js";
@@ -51,6 +52,8 @@ interface ValidatedExternalVaultConfig {
   allowedHosts: ReadonlySet<string>;
   allowedPorts: ReadonlySet<number>;
   allowedCidrs: readonly ParsedCidr[];
+  allowedCidrSpecs: readonly string[];
+  allowInsecureLoopback: boolean;
   resolveHost: (hostname: string) => Promise<ResolvedVaultAddress[]>;
 }
 
@@ -200,6 +203,7 @@ function validateConfig(config: ExternalVaultConfig): ValidatedExternalVaultConf
   );
   const allowedPorts = new Set(policy?.allowedPorts ?? []);
   const allowedCidrs = (policy?.allowedCidrs ?? []).map(parseCidr);
+  const allowedCidrSpecs = policy?.allowedCidrs ?? [];
   const loopbackTest =
     config.testTransport?.allowInsecureLoopback === true && isLoopbackHost(hostname);
 
@@ -238,6 +242,8 @@ function validateConfig(config: ExternalVaultConfig): ValidatedExternalVaultConf
     allowedHosts,
     allowedPorts,
     allowedCidrs: allowedCidrs as ParsedCidr[],
+    allowedCidrSpecs,
+    allowInsecureLoopback: loopbackTest,
     resolveHost: config.testTransport?.resolveHost ?? defaultResolveHost,
   };
 }
@@ -336,6 +342,25 @@ async function resolveApprovedAddresses(
     )
   ) {
     throw new ExternalVaultError("VALIDATION");
+  }
+  try {
+    // Shared SSRF classification on the SAME resolution (no second lookup):
+    // metadata/loopback/private are refused even if the operator CIDR
+    // allowlist is looser than intended.
+    await assertOutboundTargetAllowed(
+      config.endpoint.href,
+      {
+        allowInsecureLoopback: config.allowInsecureLoopback,
+        allowedHosts: [...config.allowedHosts],
+        allowedPorts: [...config.allowedPorts],
+        allowedCidrs: config.allowedCidrSpecs,
+      },
+      { resolve: async () => addresses.map((row) => row.address) },
+    );
+  } catch (error) {
+    throw error instanceof OutboundPolicyError
+      ? new ExternalVaultError("VALIDATION")
+      : new ExternalVaultError();
   }
   return addresses;
 }

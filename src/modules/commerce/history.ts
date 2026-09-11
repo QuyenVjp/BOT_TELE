@@ -1,7 +1,7 @@
 import { sql } from "kysely";
 import type { Executor } from "../../infrastructure/db/transaction.js";
 import type { Order, OrderStatus } from "./order.js";
-import { findOrderById } from "./repository.js";
+import { findOrderByIdForOwner } from "./repository.js";
 
 /**
  * Customer-scoped Order history + detail read model (T084, FR-018, SR-003).
@@ -128,8 +128,6 @@ export async function getOrderDetailForCustomer(
   exec: Executor,
   input: { orderId: string; customerId: string },
 ): Promise<Order | null> {
-  const order = await findOrderById(exec, input.orderId);
-  if (!order) return null;
-  if (order.customerId !== input.customerId) return null;
-  return order;
+  // Ownership lives in the query, so a foreign order and a missing one are the same `null`.
+  return findOrderByIdForOwner(exec, input.orderId, input.customerId);
 }

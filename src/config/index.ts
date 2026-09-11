@@ -60,6 +60,11 @@ function productionHardeningIssues(config: AppConfig): string[] {
   if (config.VAULT_DRIVER === "memory") {
     issues.push('VAULT_DRIVER must not be "memory" in production');
   }
+  if (config.ADMIN_STEP_UP_REQUIRED && config.VAULT_DRIVER === "memory") {
+    issues.push(
+      'VAULT_DRIVER must not be "memory" while ADMIN_STEP_UP_REQUIRED is true in production',
+    );
+  }
   if (
     config.VAULT_DRIVER === "external" &&
     (config.VAULT_EGRESS_HOST_ALLOWLIST.length === 0 ||
@@ -75,6 +80,17 @@ function productionHardeningIssues(config: AppConfig): string[] {
   }
   if (config.ADMIN_TELEGRAM_USER_ID === 0) {
     issues.push("ADMIN_TELEGRAM_USER_ID must be a real numeric Telegram id in production");
+  }
+  // The sensitive admin surface (refunds, kill-switch, supplier routing,
+  // broadcast) exists as soon as an admin is configured, so step-up cannot be
+  // left off in production: `ADMIN_STEP_UP_REQUIRED` gates it.
+  if (config.ADMIN_TELEGRAM_USER_ID > 0 && !config.ADMIN_STEP_UP_REQUIRED) {
+    issues.push("ADMIN_STEP_UP_REQUIRED must be true in production when an admin is configured");
+  }
+  if (config.ADMIN_TELEGRAM_USER_ID > 0 && config.VAULT_DRIVER === "memory") {
+    issues.push(
+      'ADMIN_STEP_UP_REQUIRED cannot guard the admin surface while VAULT_DRIVER is "memory" in production',
+    );
   }
   if (config.TELEGRAM_BOT_TOKEN === "000000000:TEST_PLACEHOLDER_TOKEN_DO_NOT_USE") {
     issues.push("TELEGRAM_BOT_TOKEN must not use the documented placeholder in production");

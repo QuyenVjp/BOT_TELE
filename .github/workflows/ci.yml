@@ -2,7 +2,9 @@ name: ci
 
 on:
   push:
-    branches: [main, '001-telegram-shop-mvp']
+    # `release/**` makes release branches (e.g. release/wallet-broadcast-acceptance)
+    # first-class CI citizens instead of only being verified via pull_request.
+    branches: [main, "001-telegram-shop-mvp", "release/**"]
   pull_request:
 
 concurrency:
@@ -35,25 +37,41 @@ jobs:
     env:
       NODE_ENV: test
       DATABASE_URL: postgres://shop:shop_local_only@localhost:5432/shop
-      TELEGRAM_BOT_TOKEN: '000000000:TEST_PLACEHOLDER_TOKEN_DO_NOT_USE'
+      TELEGRAM_BOT_TOKEN: "000000000:TEST_PLACEHOLDER_TOKEN_DO_NOT_USE"
       TELEGRAM_WEBHOOK_SECRET: local-dev-webhook-secret-change-me
       SEPAY_WEBHOOK_HMAC_SECRET: local-dev-sepay-hmac-secret-change-me
       SEPAY_MERCHANT_ACCOUNT_ID: LOCAL-TEST-ACCOUNT
-      VIETQR_BANK_BIN: '970422'
-      VIETQR_ACCOUNT_NUMBER: '0000000000'
+      VIETQR_BANK_BIN: "970422"
+      VIETQR_ACCOUNT_NUMBER: "0000000000"
       VIETQR_ACCOUNT_NAME: SHOP DIGITAL
       VIETQR_BANK_NAME: MB Bank
-      ADMIN_TELEGRAM_USER_ID: '0'
+      ADMIN_TELEGRAM_USER_ID: "0"
       VAULT_DRIVER: memory
       SUPPLIER_DRIVER: fixture
 
     steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
+      # Every `uses:` below is pinned to a full commit SHA (supply-chain policy:
+      # see docs/04-security/CI_SUPPLY_CHAIN.md for the refresh procedure).
+      #
+      # `persist-credentials: false`: this workflow never pushes, so the token
+      # has no reason to sit in .git/config where a later step could read it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
-          node-version: '24'
-          cache: npm
+          persist-credentials: false
+
+      # No npm cache here, deliberately. This job publishes the JUnit evidence
+      # artifact, and a cache restored into an artifact-publishing run is a
+      # cache-poisoning vector: whoever can seed the cache can influence what
+      # gets published. `npm ci` runs cold instead, which costs seconds and
+      # removes the class of attack.
+      #
+      # zizmor's cache-poisoning heuristic is a false positive here at Low
+      # confidence: setup-node v4.4.0 declares `cache:` with no default, so
+      # caching activates only when that input is supplied — and it is not.
+      # Verified against the pinned action.yml.
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with: # zizmor: ignore[cache-poisoning] no cache input is set, so nothing is cached
+          node-version: "24"
 
       - name: Install locked dependencies
         run: npm ci
@@ -110,7 +128,7 @@ jobs:
 
       - name: Publish test evidence
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: test-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: test-results/*.xml

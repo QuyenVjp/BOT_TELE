@@ -66,6 +66,10 @@ export interface CreateAppDeps {
     session: DeliverySessionCodecConfig;
   };
   bodyLimitBytes: number;
+  /**
+   * `false` in production: the entrypoint logs structured events through the redacted
+   * logger itself, so Fastify's own request logger (which prints headers verbatim) stays off.
+   */
   logger?: { level: "silent" | "info" | "error" } | false;
 }
 

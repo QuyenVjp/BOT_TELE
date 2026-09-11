@@ -1,3 +1,5 @@
+import { scrubSecrets } from "../observability/redact.js";
+
 /**
  * The inbox retried a message and gave up without ever recording why. `HANDLER_FAILED` is not a
  * cause: it cannot distinguish a bug from a missing row from a constraint violation, and the one
@@ -48,5 +50,10 @@ export function describeHandlerError(error: unknown): string | null {
 
   const line = [name + (code ? ` [${code}]` : ""), redacted].filter(Boolean).join(": ");
   if (!line) return null;
-  return line.length <= MAX_DETAIL_CHARS ? line : `${line.slice(0, MAX_DETAIL_CHARS - 1)}…`;
+  // The ad-hoc passes above catch credential *shapes*; registered config secrets
+  // are exact values, so they are scrubbed value-wise before the length bound.
+  const scrubbed = scrubSecrets(line);
+  return scrubbed.length <= MAX_DETAIL_CHARS
+    ? scrubbed
+    : `${scrubbed.slice(0, MAX_DETAIL_CHARS - 1)}…`;
 }

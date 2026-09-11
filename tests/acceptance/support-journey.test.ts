@@ -117,7 +117,8 @@ describe("US4 history → support journey", () => {
     const byId = await history.detail(seed.aliceOrderId, seed.aliceId);
     expect(byId.text).toContain(seed.aliceOrderNumber);
     const bobById = await history.detail(seed.bobOrderId, seed.aliceId);
-    expect(bobById.text).toMatch(/không sở hữu đơn hàng/);
+    // Owner-scoped lookup: a foreign order reads exactly like a missing one.
+    expect(bobById.text).toMatch(/không tìm thấy đơn hàng/i);
 
     // 4. Structured ticket open linked to Alice's order.
     const ticket = await support.open({

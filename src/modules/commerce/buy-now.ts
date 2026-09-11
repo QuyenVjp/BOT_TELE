@@ -4,6 +4,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import type { Db } from "../../infrastructure/db/transaction.js";
 import {
   findOrderByIdempotency,
+  findOrderByIdForOwnerForUpdate,
   findOrderByIdForUpdate,
   insertOrder,
   transitionOrder,
@@ -40,7 +41,6 @@ export type BuyNowErrorCode =
   | "RESERVATION_LOST"
   | "POLICY_BLOCKED"
   | "IDEMPOTENCY_CONFLICT"
-  | "ORDER_NOT_OWNED"
   | "ALREADY_PAID"
   | "ORDER_NOT_CANCELLABLE"
   | "STORE_CLOSED"
@@ -183,7 +183,6 @@ const BUY_NOW_MESSAGES: Record<BuyNowErrorCode, string> = {
     "Sản phẩm cuối vừa được khách khác đặt trước. Bạn chưa bị trừ tiền và chưa có phiên thanh toán.",
   POLICY_BLOCKED: "Sản phẩm chưa được phép bán.",
   IDEMPOTENCY_CONFLICT: "Yêu cầu mua hàng không hợp lệ. Vui lòng mở lại sản phẩm.",
-  ORDER_NOT_OWNED: "Bạn không sở hữu đơn hàng này.",
   ALREADY_PAID: "Đơn hàng đã được thanh toán.",
   ORDER_NOT_CANCELLABLE: "Đơn hàng không thể hủy.",
   STORE_CLOSED: "Cửa hàng hiện đang tạm đóng cửa. Vui lòng quay lại sau.",
@@ -385,13 +384,11 @@ const PAID_ORDER_STATUSES: ReadonlySet<Order["status"]> = new Set([
 
 export async function cancelUnpaidOrder(db: Db, input: CancelInput): Promise<BuyNowResult> {
   return withTransaction(db, async (trx): Promise<BuyNowResult> => {
-    const order = await findOrderByIdForUpdate(trx, input.orderId);
+    // Owner-scoped lock: a foreign order and a missing one are the same `null`, so a guessed
+    // id yields no existence oracle (SR-003, BOLA).
+    const order = await findOrderByIdForOwnerForUpdate(trx, input.orderId, input.customerId);
     if (!order) {
       return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
-    }
-    // Ownership is checked on the locked authoritative row (SR-003).
-    if (order.customerId !== input.customerId) {
-      return { ok: false, code: "ORDER_NOT_OWNED", message: "Bạn không sở hữu đơn hàng này." };
     }
     if (PAID_ORDER_STATUSES.has(order.status)) {
       return { ok: false, code: "ALREADY_PAID", message: "Đơn hàng đã được thanh toán." };

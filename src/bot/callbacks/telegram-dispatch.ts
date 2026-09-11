@@ -76,7 +76,8 @@ export type WalletTopupAction =
 export interface TelegramDomainDispatcherDeps {
   codec: CallbackTokenCodec;
   resolveCustomerId(telegramUserId: string): Promise<string | null>;
-  resolveOrderById(orderId: string): Promise<OrderRef | null>;
+  /** Owner-scoped: a foreign order and a missing one are both `null`. */
+  resolveOrderByIdForOwner(orderId: string, customerId: string): Promise<OrderRef | null>;
   resolveOrderIdByNumber(orderNumber: string): Promise<string | null>;
   resolveCatalogPage(
     cursorVariantId: string,
@@ -3049,8 +3050,7 @@ async function ownedOrder(
   orderId: string,
   customerId: string,
 ): Promise<OrderRef | null> {
-  const order = await deps.resolveOrderById(orderId);
-  return order?.customerId === customerId ? order : null;
+  return deps.resolveOrderByIdForOwner(orderId, customerId);
 }
 
 function catalogActorIdentity(

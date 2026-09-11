@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { assertOutboundTargetAllowed } from "../../../infrastructure/net/outbound-policy.js";
 import type { Vault } from "../../../infrastructure/vault/port.js";
 import {
   AssetEnvelopeSchema,
@@ -67,7 +68,11 @@ export interface HttpSupplierOptions {
   timeoutMs: number;
   maxAttempts: number;
   vault: Vault;
-  testTransport?: { allowInsecureLoopback?: boolean; fetch?: typeof fetch };
+  testTransport?: {
+    allowInsecureLoopback?: boolean;
+    fetch?: typeof fetch;
+    resolve?: (hostname: string) => Promise<readonly string[]>;
+  };
 }
 
 function validateOptions(options: HttpSupplierOptions): URL {
@@ -139,6 +144,11 @@ async function readBounded(response: Response, signal: AbortSignal): Promise<unk
 export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPort {
   const base = validateOptions(options);
   const fetchImpl = options.testTransport?.fetch ?? fetch;
+  const policyOptions = {
+    allowInsecureLoopback: options.testTransport?.allowInsecureLoopback === true,
+    allowedPorts: [base.port ? Number(base.port) : base.protocol === "https:" ? 443 : 80],
+  };
+  const resolve = options.testTransport?.resolve;
 
   const request = async <T>(input: {
     method: "GET" | "POST";
@@ -153,7 +163,15 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
       throw new SupplierPortError("REQUEST_TOO_LARGE", "supplier request is invalid");
     }
     const attempts = input.attempts ?? options.maxAttempts;
+    const origin = base.toString();
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
+      // Re-resolve and re-classify before EVERY attempt: DNS may change between
+      // attempts (rebinding), so a validated base URL string is not sufficient.
+      try {
+        await assertOutboundTargetAllowed(origin, policyOptions, resolve ? { resolve } : undefined);
+      } catch {
+        throw new SupplierPortError("CONFIG_INVALID", "supplier endpoint is not allowed");
+      }
       const controller = new AbortController();
       const timer = setTimeout(
         () => controller.abort(new Error("SUPPLIER_TIMEOUT")),

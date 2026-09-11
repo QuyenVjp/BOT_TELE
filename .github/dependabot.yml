@@ -1,0 +1,43 @@
+version: 2
+
+# Every Dependabot pull request is validated by the same pipelines as human
+# pull requests: ci.yml and security.yml both run on `pull_request`, so an
+# update can only merge while build, typecheck, lint, format:check, the full
+# test matrix and all scanners are green. Dependabot updates are never merged
+# with red or skipped checks; if a bump cannot pass, it is pinned/held instead.
+updates:
+  - package-ecosystem: npm
+    directory: "/"
+    target-branch: main
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:40"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      # Minor/patch bumps arrive as one reviewable PR; major bumps stay
+      # separate because they need a real migration decision.
+      npm-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    target-branch: main
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:40"
+      timezone: UTC
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"
+    groups:
+      # Keeps the SHA pins in .github/workflows refreshed without flooding the
+      # queue (see docs/04-security/CI_SUPPLY_CHAIN.md for the pin policy).
+      actions-minor-patch:
+        patterns: ["*"]
+        update-types: [minor, patch]

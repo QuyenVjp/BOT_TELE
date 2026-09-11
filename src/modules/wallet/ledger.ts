@@ -39,6 +39,77 @@ export type WalletMutationPlan =
   | { ok: true; nextBalanceVnd: bigint }
   | { ok: false; code: WalletLedgerErrorCode; message: string };
 
+/**
+ * Accounting classification of a wallet movement (THREAT_MODEL SEC-002).
+ *
+ * `wallet_account.balance_vnd` is a materialised cache; the postings added by
+ * migration 052 are the authoritative record. Every movement is one balanced
+ * transaction: the customer wallet liability leg plus exactly one counter-leg
+ * naming where the money came from or went to.
+ */
+export type LedgerMovement =
+  "TOPUP" | "PURCHASE" | "REFUND" | "CREDIT_ADJUSTMENT" | "DEBIT_ADJUSTMENT";
+
+export interface LedgerMovementPlan {
+  transactionType: LedgerMovement;
+  /** Side of the customer wallet (liability) leg — always the wallet mutation kind. */
+  walletSide: WalletMutationKind;
+  /** Chart-of-accounts code for the counter-leg. */
+  counterAccountCode: string;
+  /** Side of the counter-leg (always the opposite of `walletSide`). */
+  counterSide: WalletMutationKind;
+}
+
+export const LEDGER_SYSTEM_ACCOUNT_CODES = {
+  BANK_SETTLEMENT: "EXTERNAL:BANK_SETTLEMENT",
+  SHOP_REVENUE: "SHOP:REVENUE",
+  REFUND_EXPENSE: "SHOP:REFUND_EXPENSE",
+  ADJUSTMENT_EXPENSE: "SHOP:ADJUSTMENT_EXPENSE",
+  ADJUSTMENT_INCOME: "SHOP:ADJUSTMENT_INCOME",
+} as const;
+
+/**
+ * Map a wallet movement onto its balanced posting pair.
+ *
+ * The `wallet_ledger` idempotency-key prefix is this codebase's existing
+ * movement convention (the admin customer view and the reconciliation queries
+ * already branch on `purchase:`/`refund:`), so it is the single source of truth
+ * here too. A recognised prefix only wins when its natural direction agrees with
+ * the amount's sign; anything else falls back to an explicit adjustment pair, so
+ * the result is always a balanced, cache-consistent transaction.
+ */
+export function planLedgerMovement(
+  kind: WalletMutationKind,
+  idempotencyKey: string,
+): LedgerMovementPlan {
+  let transactionType: LedgerMovement;
+  let counterAccountCode: string;
+  if (kind === "CREDIT" && idempotencyKey.startsWith("topup:")) {
+    transactionType = "TOPUP";
+    counterAccountCode = LEDGER_SYSTEM_ACCOUNT_CODES.BANK_SETTLEMENT;
+  } else if (kind === "DEBIT" && idempotencyKey.startsWith("purchase:")) {
+    transactionType = "PURCHASE";
+    counterAccountCode = LEDGER_SYSTEM_ACCOUNT_CODES.SHOP_REVENUE;
+  } else if (kind === "CREDIT" && idempotencyKey.startsWith("refund:")) {
+    transactionType = "REFUND";
+    counterAccountCode = LEDGER_SYSTEM_ACCOUNT_CODES.REFUND_EXPENSE;
+  } else if (kind === "CREDIT") {
+    transactionType = "CREDIT_ADJUSTMENT";
+    counterAccountCode = LEDGER_SYSTEM_ACCOUNT_CODES.ADJUSTMENT_EXPENSE;
+  } else {
+    transactionType = "DEBIT_ADJUSTMENT";
+    counterAccountCode = LEDGER_SYSTEM_ACCOUNT_CODES.ADJUSTMENT_INCOME;
+  }
+
+  return {
+    transactionType,
+    walletSide: kind,
+    counterAccountCode,
+    // The counter-leg always mirrors the wallet leg, so the pair balances exactly.
+    counterSide: kind === "CREDIT" ? "DEBIT" : "CREDIT",
+  };
+}
+
 type AccountRow = {
   id: string;
   customer_id: string;
@@ -179,6 +250,16 @@ async function applyMutation(
     )
   `.execute(exec);
 
+  await writeBalancedLedgerTransaction(exec, {
+    walletAccountId: current.id,
+    movement: planLedgerMovement(kind, input.idempotencyKey),
+    amountVnd: input.amountVnd,
+    idempotencyKey: input.idempotencyKey,
+    correlationId: input.correlationId,
+    reason: input.reason,
+    walletLedgerEntryId: entryId,
+  });
+
   const fresh = await lockAccount(exec, input.customerId);
   return {
     ok: true,
@@ -188,6 +269,86 @@ async function applyMutation(
       : { ...current, balanceVnd: plan.nextBalanceVnd, version: current.version + 1 },
     entryId,
   };
+}
+
+interface LedgerTransactionInput {
+  walletAccountId: string;
+  movement: LedgerMovementPlan;
+  amountVnd: bigint;
+  idempotencyKey: string;
+  correlationId: string;
+  reason: string;
+  walletLedgerEntryId: string;
+}
+
+/**
+ * Re-create the five system accounts if they are missing.
+ *
+ * `ledger_account` is truncated along with `wallet_account` by test and reset
+ * paths that use `TRUNCATE ... CASCADE`, so the writer cannot assume the seed
+ * rows still exist. `on conflict (code) do nothing` keeps this a no-op in the
+ * normal case.
+ */
+async function ensureSystemLedgerAccounts(exec: Executor): Promise<void> {
+  await sql`
+    insert into ledger_account (id, code, account_type, normal_side)
+    values
+      ('lac_sys_bank_settlement', ${LEDGER_SYSTEM_ACCOUNT_CODES.BANK_SETTLEMENT}, 'ASSET', 'DEBIT'),
+      ('lac_sys_shop_revenue', ${LEDGER_SYSTEM_ACCOUNT_CODES.SHOP_REVENUE}, 'REVENUE', 'CREDIT'),
+      ('lac_sys_refund_expense', ${LEDGER_SYSTEM_ACCOUNT_CODES.REFUND_EXPENSE}, 'EXPENSE', 'DEBIT'),
+      ('lac_sys_adjustment_expense', ${LEDGER_SYSTEM_ACCOUNT_CODES.ADJUSTMENT_EXPENSE}, 'EXPENSE', 'DEBIT'),
+      ('lac_sys_adjustment_income', ${LEDGER_SYSTEM_ACCOUNT_CODES.ADJUSTMENT_INCOME}, 'REVENUE', 'CREDIT')
+    on conflict (code) do nothing
+  `.execute(exec);
+}
+
+/**
+ * Append the immutable double-entry record for a wallet movement.
+ *
+ * Two legs, equal amounts, opposite sides — the deferred constraint trigger from
+ * migration 052 refuses to commit anything else, and a second deferred trigger
+ * refuses a commit whose `wallet_account.balance_vnd` disagrees with the ledger.
+ */
+async function writeBalancedLedgerTransaction(
+  exec: Executor,
+  input: LedgerTransactionInput,
+): Promise<void> {
+  await ensureSystemLedgerAccounts(exec);
+
+  const transactionId = newId();
+  await sql`
+    insert into ledger_transaction (
+      id, transaction_type, wallet_account_id, idempotency_key, correlation_id, reason
+    ) values (
+      ${transactionId}, ${input.movement.transactionType}, ${input.walletAccountId},
+      ${`wallet_ledger:${input.walletLedgerEntryId}`}, ${input.correlationId}, ${input.reason}
+    )
+  `.execute(exec);
+
+  await sql`
+    insert into ledger_posting (id, transaction_id, account_id, side, amount_minor)
+    select ${newId()}, ${transactionId}, a.id, ${input.movement.walletSide}, ${input.amountVnd.toString()}::bigint
+    from ledger_account a
+    where a.wallet_account_id = ${input.walletAccountId}
+    union all
+    select ${newId()}, ${transactionId}, c.id, ${input.movement.counterSide}, ${input.amountVnd.toString()}::bigint
+    from ledger_account c
+    where c.code = ${input.movement.counterAccountCode}
+  `.execute(exec);
+
+  const postings = await sql<{ count: number; debit: string; credit: string }>`
+    select count(*)::int as count,
+           coalesce(sum(amount_minor) filter (where side = 'DEBIT'), 0)::text as debit,
+           coalesce(sum(amount_minor) filter (where side = 'CREDIT'), 0)::text as credit
+    from ledger_posting
+    where transaction_id = ${transactionId}
+  `.execute(exec);
+  const written = postings.rows[0];
+  if (!written || written.count !== 2 || written.debit !== written.credit) {
+    // The deferred trigger would abort at COMMIT anyway; failing here keeps the
+    // error next to the cause instead of at the end of the transaction.
+    throw new Error("double-entry ledger posting failed to balance");
+  }
 }
 
 async function lockAccount(exec: Executor, customerId: string): Promise<AccountRow | null> {

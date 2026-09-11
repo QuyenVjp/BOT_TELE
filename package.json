@@ -30,6 +30,7 @@
     "migrate:production": "node scripts/run-production-migrate.mjs",
     "preflight:production": "node scripts/run-production-preflight.mjs",
     "secret-scan": "node scripts/secret-scan.mjs",
+    "verify:gate": "node scripts/verify-gate.mjs",
     "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {

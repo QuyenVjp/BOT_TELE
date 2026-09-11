@@ -1,0 +1,191 @@
+name: security
+
+# Supply-chain and static-analysis scanners, split out from ci.yml so a finding
+# fails its own check (with SARIF evidence in the Security tab) without hiding
+# test results. Policy, pin-refresh procedure and scanner coverage:
+# docs/04-security/CI_SUPPLY_CHAIN.md.
+on:
+  push:
+    branches: [main, "release/**"]
+  pull_request:
+  schedule:
+    # Weekly on Monday 03:17 UTC: unchanged dependencies still get re-checked
+    # against advisories published since the last run.
+    - cron: "17 3 * * 1"
+
+# Workflow-level default is the minimum: no job gets write access unless its own
+# `permissions:` block grants it.
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # SAST. CodeQL is the only static-analysis engine in this repository: adding
+  # Semgrep as well would duplicate the same class of findings and double the
+  # triage cost without adding a distinct coverage area.
+  #
+  # Build mode: `none`. JavaScript/TypeScript is interpreted, so CodeQL analyses
+  # the checked-out sources directly and does NOT need our `tsc` build output or
+  # `npm run build`. That keeps this job independent of the compiled `dist/`
+  # artifact and avoids running an untrusted build inside the scanner job.
+  codeql:
+    name: CodeQL (javascript-typescript)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3
+        with:
+          languages: javascript-typescript
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3
+        with:
+          category: "/language:javascript-typescript"
+
+  # Dependency advisories (npm, and any other lockfile OSV understands).
+  #
+  # The scanner is invoked through its reusable workflow, not the composite
+  # action: upstream marks the composite action "not intended to be used
+  # directly" and recommends the reusable workflow.
+  # https://google.github.io/osv-scanner/github-action/
+  dependency-scan:
+    name: Dependency scan (OSV-Scanner)
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    uses: google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@6e4298ebc4db23e847df9b2e2de2939d6f066c67 # v2.5.1
+    with:
+      scan-args: |-
+        --recursive
+        ./
+      results-file-name: osv-results.sarif
+      upload-sarif: true
+      fail-on-vuln: true
+
+  # Committed-secret detection on the diff. Comments are disabled so pull
+  # requests from forks are not blocked by missing comment permissions.
+  secret-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@ff98106e4c7b2bc287b24eaf42907196329070c7 # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_ENABLE_COMMENTS: false
+
+  # Dependency-graph SBOM (CycloneDX JSON). Covers package metadata only: no
+  # secrets, no environment values and no runtime data are read or embedded.
+  sbom:
+    name: SBOM (CycloneDX)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Generate CycloneDX SBOM
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        with:
+          format: cyclonedx-json
+          output-file: sbom.cyclonedx.json
+          # Uploaded below with our SHA-pinned actions/upload-artifact instead of
+          # letting the action pull its own floating upload tag.
+          upload-artifact: false
+
+      - name: Publish SBOM artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: sbom-cyclonedx-${{ github.run_id }}
+          path: sbom.cyclonedx.json
+          if-no-files-found: error
+          retention-days: 30
+
+  # Vulnerability and secret scan of the repository filesystem (there is no
+  # container image in this deployment, so `fs` is the honest scan type).
+  # No .trivyignore is used: every HIGH/CRITICAL finding must be triaged,
+  # and suppressing one requires a documented justification in this file.
+  container-scan:
+    name: Filesystem scan (Trivy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Scan filesystem for HIGH/CRITICAL vulnerabilities and secrets
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+          format: sarif
+          output: trivy-results.sarif
+
+      - name: Upload Trivy SARIF
+        # `always()` so the findings still reach the Security tab when the scan
+        # step above failed the job on exit-code 1.
+        if: always()
+        uses: github/codeql-action/upload-sarif@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3
+        with:
+          sarif_file: trivy-results.sarif
+
+  # Repository security posture. Skipped for fork pull requests because
+  # publishing results needs OIDC, which forks do not receive.
+  scorecard:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Run Scorecard
+        uses: ossf/scorecard-action@2d1146689b8cda280b9bc96326124645441f03bc # v2.4.4
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+
+      - name: Upload Scorecard SARIF
+        uses: github/codeql-action/upload-sarif@faaca9a8f6edddba5725ffe5adefdab6669a2eca # v3
+        with:
+          sarif_file: results.sarif

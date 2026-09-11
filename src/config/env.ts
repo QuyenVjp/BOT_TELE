@@ -136,6 +136,22 @@ export const envSchema = z.object({
     .max(10_080)
     .default(10),
   TELEGRAM_INBOX_PRUNE_BATCH_SIZE: z.coerce.number().int().min(1).max(1000).default(200),
+
+  /**
+   * Broadcast confirmation safety. An audience at or above the threshold is
+   * treated as a large/global send: it is rate limited by a cooldown so a
+   * mistyped or malicious broadcast cannot be repeated immediately at scale.
+   */
+  BROADCAST_LARGE_AUDIENCE_THRESHOLD: z.coerce.number().int().min(1).max(1_000_000).default(500),
+  BROADCAST_COOLDOWN_SECONDS: z.coerce.number().int().min(0).max(86_400).default(300),
+  /** Admin step-up gating for high-risk operations. Opt-in until enrolled. */
+  ADMIN_STEP_UP_REQUIRED: z
+    .enum(["true", "false"])
+    .default("false")
+    .transform((value) => value === "true"),
+  ADMIN_STEP_UP_TTL_SECONDS: z.coerce.number().int().positive().max(3600).default(300),
+  ADMIN_STEP_UP_LOCKOUT_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
+  ADMIN_STEP_UP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),
 });
 
 export type Env = z.infer<typeof envSchema>;

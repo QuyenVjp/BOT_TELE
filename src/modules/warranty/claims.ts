@@ -86,7 +86,6 @@ export type OpenClaimResult =
       ok: false;
       code:
         | "ORDER_NOT_FOUND"
-        | "ORDER_NOT_OWNED"
         | "NOT_FULFILLED"
         | "ASSET_NOT_DELIVERED"
         | "WARRANTY_EXPIRED"
@@ -170,12 +169,13 @@ export async function openWarrantyClaim(input: OpenClaimInput): Promise<OpenClai
       from "order" o
       join product_variant v on v.id = o.variant_id
       where o.id = ${input.orderId}
+        and o.customer_id = ${input.customerId}
       limit 1
     `.execute(trx);
     const order = orders.rows[0];
+    // Ownership is in the query: a claim is never opened for someone else's order, and a
+    // foreign order is indistinguishable from a missing one.
     if (!order) return { ok: false, code: "ORDER_NOT_FOUND" };
-    // Ownership is checked before anything else: a claim is never opened for someone else's order.
-    if (order.customer_id !== input.customerId) return { ok: false, code: "ORDER_NOT_OWNED" };
 
     // A variant without a warranty (or with the days set to zero) has no claim to open; the owner
     // can still handle the customer through ordinary support.

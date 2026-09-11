@@ -127,7 +127,8 @@ describe("warranty claims", () => {
       correlationId: "t",
       now: new Date(fixture.completedAt.getTime() + 18 * DAY),
     });
-    expect(result).toMatchObject({ ok: false, code: "ORDER_NOT_OWNED" });
+    // A foreign order is indistinguishable from a missing one: no existence oracle.
+    expect(result).toMatchObject({ ok: false, code: "ORDER_NOT_FOUND" });
     const count = await sql<{ n: string }>`select count(*)::text as n from warranty_claim`.execute(
       ctx.handle.db,
     );

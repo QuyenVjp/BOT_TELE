@@ -229,14 +229,23 @@ function buildEditReplyMarkup(replyMarkup: SendReplyMarkup): EditReplyMarkup {
 }
 
 /**
- * Prompt sent immediately before the persistent customer keyboard.
+ * Prompt that carries the persistent customer keyboard.
  *
  * Telegram allows exactly one `reply_markup` per message, so a screen carrying both context
  * inline buttons and `MAIN_REPLY_KEYBOARD` cannot deliver the keyboard on that same message —
- * and the keyboard is the part that survives navigation. It therefore rides a second,
- * deliberately minimal message, and only when a NEW message is created (never on an edit).
+ * and the keyboard is the part that survives navigation. It therefore rides a second message,
+ * and only when a NEW message is created (never on an edit).
+ *
+ * That second message MUST STAY. A reply keyboard is chat-level state owned by the message that
+ * set it; deleting that message retracts the keyboard in the client, so the bottom buttons flash
+ * open and vanish. That was a real production bug: the delivery message used to be deleted right
+ * after dispatch to keep the transcript clean, and the keyboard went with it. Do not reintroduce
+ * the delete — if the bubble needs to be unobtrusive, keep the copy to one short line instead.
+ *
+ * The line earns its place: clients collapse the reply keyboard when the customer sends a
+ * message, so a one-line pointer is what tells them the keyboard is available again.
  */
-const PERSISTENT_KEYBOARD_PROMPT = ".";
+const PERSISTENT_KEYBOARD_PROMPT = "⌨️ Bàn phím nhanh ở dưới 👇";
 
 /** Markup for the follow-up keyboard message, or null when this screen needs none. */
 function pendingReplyKeyboardMarkup(message: PresentedMessage): ReplyKeyboardMarkup | null {
@@ -245,7 +254,12 @@ function pendingReplyKeyboardMarkup(message: PresentedMessage): ReplyKeyboardMar
   return buildReplyKeyboard(message.replyKeyboard);
 }
 
-/** Deliver the persistent customer keyboard on its own message after a new screen is created. */
+/**
+ * Deliver the persistent customer keyboard on its own message after a new screen is created.
+ *
+ * Sent once per new message and deliberately never removed: this message is what holds the
+ * keyboard open for the rest of the session.
+ */
 async function sendPersistentKeyboard(
   input: { chatId: string; messageThreadId?: number | null },
   markup: ReplyKeyboardMarkup,
@@ -258,17 +272,6 @@ async function sendPersistentKeyboard(
       ...(input.messageThreadId ? { message_thread_id: input.messageThreadId } : {}),
     }),
   );
-  if (
-    result &&
-    typeof result === "object" &&
-    "message_id" in result &&
-    typeof (result as { message_id: unknown }).message_id === "number" &&
-    typeof api.deleteMessage === "function"
-  ) {
-    await callTelegram("deleteMessage", () =>
-      api.deleteMessage(input.chatId, (result as { message_id: number }).message_id),
-    ).catch(() => undefined);
-  }
   traceTelegram(trace, {
     method: "sendMessage",
     persistent_keyboard: true,

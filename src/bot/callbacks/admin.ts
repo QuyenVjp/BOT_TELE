@@ -11,6 +11,14 @@ import {
 import type { IdentityTelemetry } from "../../modules/identity/telemetry.js";
 import type { RootActor, RootAdminConfig } from "../../modules/identity/root-admin.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
+import {
+  authorizeSensitiveAdminAction,
+  isSensitiveActionKey,
+  type SensitiveActionDeps,
+  type SensitiveActionKey,
+  type SensitiveAuthorizationRefusal,
+} from "../../modules/identity/sensitive-action.js";
+import { SENSITIVE_REFUSAL_TEXT } from "../presenters/admin.js";
 import { guardRootAction } from "../middleware/root-admin.js";
 import { refundWalletCredit } from "../../modules/wallet/refund.js";
 import { completeManualFulfillmentTaskInTransaction } from "../../modules/digital-goods/manual-fulfillment.js";
@@ -73,6 +81,14 @@ export interface AdminCallbackDeps {
     correlationId: string;
   }) => Promise<{ ok: boolean }>;
   telemetry?: IdentityTelemetry;
+  /**
+   * Step-up gating posture. Omitted means the development/test posture (no
+   * second factor), which the production config forbids: `ADMIN_STEP_UP_REQUIRED`
+   * is forced true in production whenever an admin is configured.
+   */
+  stepUpEnabled?: boolean;
+  /** TOTP grant TTL, lockout window and attempt budget; env defaults when omitted. */
+  stepUpOptions?: { ttlSeconds: number; lockoutMinutes: number; maxAttempts: number };
 }
 
 export interface HandleInput {
@@ -105,7 +121,8 @@ export type HandleResult =
         | "UNKNOWN_COMMAND"
         | "INVALID_REASON"
         | "NOT_FOUND"
-        | "DIGITAL_FILE_ARTIFACT_REQUIRED";
+        | "DIGITAL_FILE_ARTIFACT_REQUIRED"
+        | SensitiveAuthorizationRefusal;
       message: string;
     };
 
@@ -120,7 +137,12 @@ export type ConfirmActionResult =
   | { ok: true }
   | {
       ok: false;
-      code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "CONFIRM_FAILED" | "NOT_FOUND";
+      code:
+        | "NOT_ROOT_ADMIN"
+        | "WRONG_CONTEXT"
+        | "CONFIRM_FAILED"
+        | "NOT_FOUND"
+        | SensitiveAuthorizationRefusal;
       message: string;
     };
 
@@ -133,6 +155,16 @@ interface PendingAction {
 }
 
 class InvalidDurableAdminActionError extends Error {}
+
+/** Raised inside the atomic execute so a refused step-up can never reach the mutation. */
+class SensitiveAuthorizationRefusedError extends Error {
+  readonly code: SensitiveAuthorizationRefusal;
+
+  constructor(code: SensitiveAuthorizationRefusal) {
+    super(`sensitive admin action refused: ${code}`);
+    this.code = code;
+  }
+}
 
 export interface AdminCallbacks {
   handle(input: HandleInput): Promise<HandleResult>;
@@ -196,6 +228,18 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
 
 export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
   const { db, rootConfig, rootChannelIdentityId, confirmation, telemetry } = deps;
+
+  // Composed once: every sensitive verb below asks this one layer to authorise.
+  const sensitiveDeps: SensitiveActionDeps = {
+    db,
+    rootConfig,
+    vault: deps.vault,
+    stepUpEnabled: deps.stepUpEnabled === true,
+    // env.ts defaults, used only when a caller omits them (development/tests,
+    // where step-up is off).
+    stepUpOptions: deps.stepUpOptions ?? { ttlSeconds: 300, lockoutMinutes: 15, maxAttempts: 5 },
+    ...(telemetry ? { telemetry } : {}),
+  };
 
   const mapSupplierError = (result: {
     ok: false;
@@ -456,6 +500,33 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         return { ok: false, code: gate.reason, message: "Không được phép." };
       }
 
+      const actionKey: SensitiveActionKey | null = isDurableAdminCommandRef(input.command)
+        ? input.command
+        : isSensitiveActionKey(input.command)
+          ? input.command
+          : null;
+      if (actionKey !== null) {
+        // Before ANY mutation, and before a confirmation is even issued. A durable
+        // command only PREVIEWS the grant (consumeGrant: false) so confirm() can
+        // still spend it; an immediate verb spends it right here, because here is
+        // where it mutates.
+        const authorization = await authorizeSensitiveAdminAction(sensitiveDeps, {
+          actor: input.actor,
+          actionKey,
+          resourceType: targetTypeFor(input.command),
+          resourceId: input.targetId,
+          correlationId: input.correlationId,
+          consumeGrant: !isDurableAdminCommandRef(input.command),
+        });
+        if (!authorization.ok) {
+          return {
+            ok: false,
+            code: authorization.code,
+            message: SENSITIVE_REFUSAL_TEXT[authorization.code],
+          };
+        }
+      }
+
       if (isDurableAdminCommandRef(input.command)) {
         const fingerprint = fingerprintFor(input.command, input.targetId, input.resolutionCode);
         const payloadRedacted: Record<string, unknown> = {
@@ -520,6 +591,27 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             ) {
               throw new InvalidDurableAdminActionError("durable admin action binding is invalid");
             }
+            // The grant is spent inside the atomic confirmation, immediately
+            // before the mutation, so a refused step-up can never reach
+            // `executeHighRisk` and a replayed confirmation cannot spend twice.
+            //
+            // Semantics when the mutation itself then fails: the step-up service
+            // owns its own transaction, so the grant stays consumed while this
+            // one rolls back — consumed-but-not-mutated. That is the fail-closed
+            // direction (the admin re-verifies and retries); the reverse, a
+            // mutation with an unspent grant, is impossible because this call is
+            // a precondition of the mutation.
+            const authorization = await authorizeSensitiveAdminAction(sensitiveDeps, {
+              actor: input.actor,
+              actionKey: action.command,
+              resourceType: targetTypeFor(action.command),
+              resourceId: action.targetId,
+              correlationId: durableAction.correlationId,
+              consumeGrant: true,
+            });
+            if (!authorization.ok) {
+              throw new SensitiveAuthorizationRefusedError(authorization.code);
+            }
             return executeHighRisk(trx, action, durableAction.correlationId);
           },
         });
@@ -530,6 +622,13 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             actionFingerprint: input.confirmationId,
           });
           return { ok: false, code: "CONFIRM_FAILED", message: "Xác nhận thất bại." };
+        }
+        if (error instanceof SensitiveAuthorizationRefusedError) {
+          return {
+            ok: false,
+            code: error.code,
+            message: SENSITIVE_REFUSAL_TEXT[error.code],
+          };
         }
         throw error;
       }

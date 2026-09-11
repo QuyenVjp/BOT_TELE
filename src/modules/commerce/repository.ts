@@ -119,13 +119,81 @@ export async function findOrderByIdForUpdate(
   return row ? mapRow(row) : null;
 }
 
-/** Resolve an order by its public order number (used by callback tokens). */
-export async function findOrderByNumber(
+/**
+ * @internal Privileged internal resolution only (callback sealing/system jobs).
+ * NEVER call from customer-facing handlers — use {@link findOrderByNumberForOwner}.
+ */
+export async function findOrderByNumberInternal(
   exec: Executor,
   orderNumber: string,
 ): Promise<Order | null> {
   const result = await sql<Parameters<typeof mapRow>[0]>`
     select * from "order" where order_number = ${orderNumber} limit 1
+  `.execute(exec);
+  const row = result.rows[0];
+  return row ? mapRow(row) : null;
+}
+
+/*
+ * Owner-scoped reads (BOLA/IDOR).
+ *
+ * The un-scoped lookups above exist for workers, admin tooling, and cases where
+ * the caller re-checks ownership itself. A customer-facing channel handler must
+ * NOT use them: ownership belongs in the predicate, not in a follow-up `if`.
+ *
+ * Failure shape: a row owned by somebody else is INDISTINGUISHABLE from a
+ * missing row — both return `null` and neither throws, so a guessed or
+ * enumerated id yields no existence oracle.
+ */
+
+/** Owner-scoped order read: returns null when the id is missing OR not this customer's. */
+export async function findOrderByIdForOwner(
+  exec: Executor,
+  orderId: string,
+  customerId: string,
+): Promise<Order | null> {
+  const result = await sql<Parameters<typeof mapRow>[0]>`
+    select * from "order"
+    where id = ${orderId} and customer_id = ${customerId}
+    limit 1
+  `.execute(exec);
+  const row = result.rows[0];
+  return row ? mapRow(row) : null;
+}
+
+/**
+ * Owner-scoped lock-and-read for customer-initiated money transitions. The
+ * owner predicate is part of the locking read, so a foreign order is never
+ * locked and never observed.
+ */
+export async function findOrderByIdForOwnerForUpdate(
+  exec: Executor,
+  orderId: string,
+  customerId: string,
+): Promise<Order | null> {
+  const result = await sql<Parameters<typeof mapRow>[0]>`
+    select * from "order"
+    where id = ${orderId} and customer_id = ${customerId}
+    limit 1
+    for update
+  `.execute(exec);
+  const row = result.rows[0];
+  return row ? mapRow(row) : null;
+}
+
+/**
+ * Owner-scoped resolve by public order number. Callback payloads carry the
+ * order number, so the number alone must never be treated as authorization.
+ */
+export async function findOrderByNumberForOwner(
+  exec: Executor,
+  orderNumber: string,
+  customerId: string,
+): Promise<Order | null> {
+  const result = await sql<Parameters<typeof mapRow>[0]>`
+    select * from "order"
+    where order_number = ${orderNumber} and customer_id = ${customerId}
+    limit 1
   `.execute(exec);
   const row = result.rows[0];
   return row ? mapRow(row) : null;

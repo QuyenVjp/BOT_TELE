@@ -346,7 +346,8 @@ describe("replacement / refund-request (T078 / FR-020)", () => {
       correlationId: "rep-x",
     });
     expect(other.ok).toBe(false);
-    if (!other.ok) expect(other.code).toBe("ORDER_NOT_OWNED");
+    // A foreign order is indistinguishable from a missing one: no existence oracle.
+    if (!other.ok) expect(other.code).toBe("NOT_FOUND");
 
     // Force paid_at far in the past.
     await sql`update "order" set paid_at = now() - interval '30 days' where id = ${f.orderId}`.execute(

@@ -12,6 +12,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
+import { createGuardedFetch } from "../../infrastructure/net/outbound-policy.js";
 import {
   isValidFileArtifactRegistrationMetadata,
   type FileArtifactMetadata,
@@ -172,10 +173,17 @@ async function verifyPrivateFile(input: {
 }
 
 export function createTelegramFileDownloader(botToken: string): TelegramFileDownloader {
+  // Telegram's host is hardcoded, but these are the only outbound requests that carry a
+  // credential in the URL path. The shared policy re-checks the RESOLVED address and
+  // forces `redirect: "error"`, so a poisoned DNS answer or an off-host redirect cannot
+  // make us hand the bot token to somewhere else.
+  const guardedFetch = createGuardedFetch({
+    allowedHosts: ["api.telegram.org"],
+  });
   return {
     async download(input) {
       try {
-        const metaResponse = await fetch(`https://api.telegram.org/bot${botToken}/getFile`, {
+        const metaResponse = await guardedFetch(`https://api.telegram.org/bot${botToken}/getFile`, {
           method: "POST",
           redirect: "error",
           signal: AbortSignal.timeout(30_000),
@@ -206,10 +214,10 @@ export function createTelegramFileDownloader(botToken: string): TelegramFileDown
         const root = await ensureRoot(input.root);
         const storageReference = resolve(root, `${randomUUID()}-${basename(filePath)}`);
         if (!isInsideRoot(storageReference, root)) throw new Error("TELEGRAM_FILE_UNAVAILABLE");
-        const response = await fetch(`https://api.telegram.org/file/bot${botToken}/${filePath}`, {
-          redirect: "error",
-          signal: AbortSignal.timeout(30_000),
-        });
+        const response = await guardedFetch(
+          `https://api.telegram.org/file/bot${botToken}/${filePath}`,
+          { signal: AbortSignal.timeout(30_000) },
+        );
         if (!response.ok || !response.body) throw new Error("TELEGRAM_FILE_UNAVAILABLE");
 
         const hash = createHash("sha256");

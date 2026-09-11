@@ -44,6 +44,17 @@ import type {
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
 import type { AdminCallbacks } from "./bot/callbacks/admin.js";
+import type {
+  SensitiveActionDeps,
+  SensitiveActionKey,
+  SensitiveAuthorizationRefusal,
+} from "./modules/identity/sensitive-action.js";
+import {
+  authorizeSensitiveAdminAction,
+  isStepUpActionCategory,
+  SENSITIVE_ACTION_POLICY,
+} from "./modules/identity/sensitive-action.js";
+import { createStepUpService } from "./modules/identity/step-up.js";
 import type { AdminProductView } from "./bot/presenters/admin.js";
 import type { PresentedMessage } from "./bot/presenters/catalog.js";
 import {
@@ -120,8 +131,8 @@ import {
 import {
   cancelBroadcast,
   claimNotificationDeliveries,
+  confirmBroadcast,
   createBroadcast,
-  enqueueBroadcastRecipients,
   getBroadcastStatus,
   getNotificationPreferences,
   handleNotificationOutboxEvent,
@@ -131,6 +142,7 @@ import {
   processNotificationDeliveryClaim,
   setNotificationPreferences,
   type BroadcastAudience,
+  type BroadcastRefusal,
   type NotificationResponder,
 } from "./modules/notification/service.js";
 import type { AdminCustomerFilter } from "./modules/admin/customer-operations.js";
@@ -1023,6 +1035,67 @@ async function requireRootAdmin(
   return gate.ok ? null : gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN";
 }
 
+/**
+ * The broadcast send gate, in one place: the audited root identity, then a live
+ * BROADCAST step-up grant, and only then the enqueue. The campaign's frozen
+ * audience/content/revision check stays inside `enqueueBroadcastRecipients` /
+ * `confirmBroadcast` — a stale preview is refused there, so BOTH a stale
+ * confirmation and a stale signed callback fail.
+ *
+ * Exported because the integration suite drives this exact path; the Telegram route
+ * reaches it through the admin surface in `bootstrap`.
+ */
+export type BroadcastSendOutcome =
+  | { ok: true; queued: number }
+  | { ok: false; stage: "IDENTITY"; code: SensitiveAuthorizationRefusal | "WRONG_CONTEXT" }
+  | { ok: false; stage: "CAMPAIGN"; reason: BroadcastRefusal };
+
+export async function enqueueBroadcastFromOwner(input: {
+  db: Db;
+  adminCallbacks: AdminCallbacks | null;
+  sensitiveDeps: SensitiveActionDeps;
+  telegramUserId: string;
+  chatType: string;
+  campaignId: string;
+  correlationId: string;
+  /** Large-audience cooldown knobs; the production defaults come from the env config. */
+  largeAudienceThreshold: number;
+  cooldownSeconds: number;
+}): Promise<BroadcastSendOutcome> {
+  const denied = await requireRootAdmin(
+    input.adminCallbacks,
+    input,
+    input.campaignId,
+    "Admin broadcast",
+  );
+  if (denied) return { ok: false, stage: "IDENTITY", code: denied };
+  const authorization = await authorizeSensitiveAdminAction(input.sensitiveDeps, {
+    actor: {
+      numericUserId: Number(input.telegramUserId),
+      // The caller checked the private context; any other type maps to a non-private one so an
+      // unexpected chat type can never authorize.
+      chatType: input.chatType === "private" ? "private" : "channel",
+    },
+    actionKey: "broadcast.confirm",
+    resourceType: "NotificationCampaign",
+    resourceId: input.campaignId,
+    correlationId: input.correlationId,
+    consumeGrant: true,
+  });
+  if (!authorization.ok) return { ok: false, stage: "IDENTITY", code: authorization.code };
+  const confirmed = await confirmBroadcast(input.db, {
+    campaignId: input.campaignId,
+    createdBy: input.telegramUserId,
+    rootTelegramUserId: String(input.sensitiveDeps.rootConfig.adminTelegramUserId),
+    correlationId: input.correlationId,
+    largeAudienceThreshold: input.largeAudienceThreshold,
+    cooldownSeconds: input.cooldownSeconds,
+  });
+  return confirmed.ok
+    ? { ok: true, queued: confirmed.queued }
+    : { ok: false, stage: "CAMPAIGN", reason: confirmed.reason };
+}
+
 const ADMIN_PRODUCT_VIEWS: readonly AdminProductView[] = [
   "all",
   "featured",
@@ -1261,11 +1334,16 @@ async function bootstrap(): Promise<void> {
     await import("dotenv/config");
   }
 
-  const { loadConfig } = await import("./config/index.js");
+  const { loadConfig, SECRET_ENV_KEYS } = await import("./config/index.js");
   const config = loadConfig(process.env);
 
   const { createLogger } = await import("./infrastructure/observability/logger.js");
   const logger = createLogger(config);
+
+  // Value-scanning redaction: path censoring only covers known keys, so the resolved
+  // secret values are registered once here and scrubbed everywhere after.
+  const { registerConfigSecrets } = await import("./infrastructure/observability/redact.js");
+  registerConfigSecrets(config, SECRET_ENV_KEYS);
 
   const { createDb } = await import("./infrastructure/db/client.js");
   const { createVault } = await import("./infrastructure/vault/adapter.js");
@@ -1317,7 +1395,8 @@ async function bootstrap(): Promise<void> {
   const { createGrammyDocumentSender, createGrammyResponder, ensureTelegramCommandMenu } =
     await import("./bot/grammy-responder.js");
   const { createSearchParser } = await import("./modules/catalog/search-parser-adapter.js");
-  const { findOrderById, findOrderByNumber } = await import("./modules/commerce/repository.js");
+  const { findOrderByIdForOwner, findOrderByNumberForOwner, findOrderByNumberInternal } =
+    await import("./modules/commerce/repository.js");
   const { bootstrapRootTelegramIdentity, ensureTelegramIdentity, resolveTelegramCustomerId } =
     await import("./modules/identity/channel-identity.js");
   const { upsertTelegramCustomerProfileSnapshot } =
@@ -1409,6 +1488,8 @@ async function bootstrap(): Promise<void> {
     presentAdminCategoryPrompt,
     presentHighRiskChallenge,
     presentHighRiskDone,
+    presentSensitiveRefusal,
+    presentAdminBroadcastRefused,
     presentInventoryImportPreview,
     presentInventoryImportPrompt,
     presentInventoryImportTemplate,
@@ -1802,6 +1883,7 @@ async function bootstrap(): Promise<void> {
 
     const presented = await presentPreorderPayment(dbHandle.db, {
       reservationId: input.reservationId,
+      customerId: input.customerId,
       leg,
       ...merchant,
       correlationId: input.correlationId,
@@ -1937,16 +2019,60 @@ async function bootstrap(): Promise<void> {
           telegramUserId: String(config.ADMIN_TELEGRAM_USER_ID),
         })
       : null;
+  const rootConfig = {
+    adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+    expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+  };
+  const stepUpOptions = {
+    ttlSeconds: config.ADMIN_STEP_UP_TTL_SECONDS,
+    lockoutMinutes: config.ADMIN_STEP_UP_LOCKOUT_MINUTES,
+    maxAttempts: config.ADMIN_STEP_UP_MAX_ATTEMPTS,
+  };
+  const stepUp = createStepUpService(dbHandle.db, vault, stepUpOptions);
+  // The worker's half of the sensitive surface (warranty refunds, the TOTP
+  // enrolment/verification commands) asks the same one layer the admin callbacks
+  // do, so neither path can drift from the policy table.
+  const sensitiveDeps: SensitiveActionDeps = {
+    db: dbHandle.db,
+    rootConfig,
+    vault,
+    stepUpEnabled: config.ADMIN_STEP_UP_REQUIRED,
+    stepUpOptions,
+  };
+  /**
+   * The worker's call sites hold a dispatcher input (telegram id, chat type,
+   * correlation id) rather than a RootActor, so this adapts the two shapes in one
+   * place and every worker-side sensitive action then reads exactly like the
+   * callbacks-side one.
+   */
+  const authorizeSensitiveFor = (
+    input: { telegramUserId: string; chatType: string; correlationId: string },
+    action: {
+      actionKey: SensitiveActionKey;
+      resourceType: string;
+      resourceId: string;
+      consumeGrant: boolean;
+    },
+  ) =>
+    authorizeSensitiveAdminAction(sensitiveDeps, {
+      actor: {
+        numericUserId: Number(input.telegramUserId),
+        // Every call site checks the private context first; any other context maps to a
+        // non-private one so an unexpected chat type can never authorize.
+        chatType: input.chatType === "private" ? "private" : "channel",
+      },
+      correlationId: input.correlationId,
+      ...action,
+    });
   const adminCallbacks = rootIdentity
     ? createAdminCallbacks({
         db: dbHandle.db,
         vault,
-        rootConfig: {
-          adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-          expectedUsername: config.ADMIN_EXPECTED_USERNAME,
-        },
+        rootConfig,
         rootChannelIdentityId: rootIdentity.channelIdentityId,
         confirmation: createAdminConfirmation(dbHandle.db),
+        stepUpEnabled: config.ADMIN_STEP_UP_REQUIRED,
+        stepUpOptions,
         inventoryImport: async (input) => {
           const result = await importDigitalInventory({
             ...input,
@@ -2087,9 +2213,10 @@ async function bootstrap(): Promise<void> {
     checkout,
     history,
     support,
-    resolveOrderById: (orderId) => findOrderById(dbHandle.db, orderId),
+    resolveOrderByIdForOwner: (orderId, customerId) =>
+      findOrderByIdForOwner(dbHandle.db, orderId, customerId),
     resolveOrderIdByNumber: async (orderNumber) =>
-      (await findOrderByNumber(dbHandle.db, orderNumber))?.id ?? null,
+      (await findOrderByNumberInternal(dbHandle.db, orderNumber))?.id ?? null,
     resolveCatalogPage: async (cursorVariantId) => {
       const result = await sql<{ category_id: string; sort_order: number }>`
         select p.category_id, v.sort_order
@@ -2443,7 +2570,7 @@ async function bootstrap(): Promise<void> {
           text: "Không xác minh được khách hàng.",
           buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]],
         };
-      const orderId = (await findOrderByNumber(dbHandle.db, orderNumber))?.id;
+      const orderId = (await findOrderByNumberForOwner(dbHandle.db, orderNumber, customerId))?.id;
       if (!orderId)
         return {
           text: "Không tìm thấy đơn hàng.",
@@ -4400,6 +4527,20 @@ async function bootstrap(): Promise<void> {
           "Admin warranty",
         );
         if (denied) return presentAdminDenied(denied);
+        // The refund screen is where the owner learns a second factor is needed, so the grant is
+        // only previewed here (consumeGrant: false) and spent by warrantyRefundConfirm.
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "warranty.refund.approve",
+          resourceType: "WarrantyClaim",
+          resourceId: input.claimId,
+          consumeGrant: false,
+        });
+        if (!authorization.ok)
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "warranty.refund.approve",
+            category: "REFUND",
+          });
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         return presentAdminRefundConfirm({
@@ -4422,6 +4563,18 @@ async function bootstrap(): Promise<void> {
           "Admin warranty",
         );
         if (denied) return presentAdminDenied(denied);
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "warranty.refund.approve",
+          resourceType: "WarrantyClaim",
+          resourceId: input.claimId,
+          consumeGrant: true,
+        });
+        if (!authorization.ok)
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "warranty.refund.approve",
+            category: "REFUND",
+          });
         const result = await approveClaimRefund({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -4450,6 +4603,18 @@ async function bootstrap(): Promise<void> {
           "Admin warranty",
         );
         if (denied) return presentAdminDenied(denied);
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "warranty.refund.adjust",
+          resourceType: "WarrantyClaim",
+          resourceId: input.claimId,
+          consumeGrant: false,
+        });
+        if (!authorization.ok)
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "warranty.refund.adjust",
+            category: "REFUND",
+          });
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         // One pending prompt at a time: an older unexpired row would otherwise claim the next
@@ -5684,17 +5849,29 @@ async function bootstrap(): Promise<void> {
         });
       },
       async broadcastConfirm(input) {
-        if (
-          Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
-          input.chatType !== "private"
-        )
-          return presentAdminDenied("NOT_ROOT_ADMIN");
-        await enqueueBroadcastRecipients(
-          dbHandle.db,
-          input.campaignId,
-          String(config.ADMIN_TELEGRAM_USER_ID),
-          String(input.telegramUserId),
-        );
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        // Sending to the whole audience is the highest-blast-radius owner action, so it takes the
+        // same audited root gate as its siblings PLUS a live BROADCAST step-up grant.
+        const sent = await enqueueBroadcastFromOwner({
+          db: dbHandle.db,
+          adminCallbacks,
+          sensitiveDeps,
+          telegramUserId: input.telegramUserId,
+          chatType: input.chatType,
+          campaignId: input.campaignId,
+          correlationId: input.correlationId,
+          largeAudienceThreshold: config.BROADCAST_LARGE_AUDIENCE_THRESHOLD,
+          cooldownSeconds: config.BROADCAST_COOLDOWN_SECONDS,
+        });
+        if (!sent.ok) {
+          if (sent.stage === "CAMPAIGN") return presentAdminBroadcastRefused(sent.reason);
+          if (sent.code === "WRONG_CONTEXT") return presentAdminDenied("WRONG_CONTEXT");
+          return presentSensitiveRefusal({
+            code: sent.code,
+            action: "broadcast.confirm",
+            category: SENSITIVE_ACTION_POLICY["broadcast.confirm"],
+          });
+        }
         const status = await getBroadcastStatus(dbHandle.db, input.campaignId);
         return status
           ? presentAdminBroadcastStatus(status)
@@ -5704,11 +5881,15 @@ async function bootstrap(): Promise<void> {
             };
       },
       async broadcastCancel(input) {
-        if (
-          Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
-          input.chatType !== "private"
-        )
-          return presentAdminDenied("NOT_ROOT_ADMIN");
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        // Cancelling is not destructive, so identity alone is enough: it needs no second factor.
+        const cancelDenied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          input.campaignId ?? "admin-broadcast",
+          "Admin broadcast",
+        );
+        if (cancelDenied) return presentAdminDenied(cancelDenied);
         const campaignId =
           input.campaignId ??
           (
@@ -5819,6 +6000,116 @@ async function bootstrap(): Promise<void> {
           )
             return null;
           if (input.text === "/cancel") return this.cancel(input);
+
+          // Step-up factor commands (THREAT_MODEL SEC-002). Handled before every pending text state
+          // so a live prompt cannot swallow the factor submission, and behind the same audited root
+          // gate as every other owner entry point.
+          if (input.text.startsWith("/verify") || input.text.startsWith("/enroll_2fa")) {
+            const gated = await requireRootAdmin(
+              adminCallbacks,
+              input,
+              "admin-step-up",
+              "Admin step-up command",
+            );
+            if (gated) return presentAdminDenied(gated);
+            const menu = { buttons: [[{ text: "⚙️ Quản trị", callbackData: "admin:menu" }]] };
+
+            if (input.text.startsWith("/enroll_2fa")) {
+              // A seed is revealed exactly once, at enrolment. Re-running must never print it again.
+              if (await stepUp.isEnrolled(input.telegramUserId)) {
+                return {
+                  ...menu,
+                  text: "Yếu tố bảo mật đã được thiết lập. Gửi /verify <mã 6 số> khi cần xác minh.",
+                };
+              }
+              const { otpauthUri } = await stepUp.enroll({
+                adminTelegramUserId: input.telegramUserId,
+                issuer: "TIER20 SHOP",
+                accountLabel: input.telegramUserId,
+              });
+              return {
+                ...menu,
+                text: [
+                  "🔐 Thiết lập xác minh bảo mật",
+                  "",
+                  "Thêm khoá dưới đây vào ứng dụng Authenticator (Google Authenticator, Authy…):",
+                  otpauthUri,
+                  "",
+                  "Hãy lưu lại ngay — bot không hiển thị lại khoá này.",
+                ].join("\n"),
+              };
+            }
+
+            const code = input.text.replace(/^\/verify\s*/u, "").trim();
+            if (!/^\d{6}$/u.test(code)) {
+              return { ...menu, text: "Gửi đúng định dạng: /verify <mã 6 số>." };
+            }
+            // The category comes from the most recent step-up refusal this layer audited, so a
+            // grant can only be minted for the action the owner actually tried to take — never for
+            // every category at once. The window is the lockout window: an older attempt is stale.
+            const requested = await sql<{ category: string | null }>`
+              select metadata_redacted->>'category' as category
+              from audit_event
+              where actor_id = ${input.telegramUserId}
+                and action = 'admin.sensitive.denied'
+                and metadata_redacted->>'code' = 'STEP_UP_REQUIRED'
+                and occurred_at > now() - (${config.ADMIN_STEP_UP_LOCKOUT_MINUTES} * interval '1 minute')
+              order by occurred_at desc, id desc
+              limit 1
+            `.execute(dbHandle.db);
+            const category = requested.rows[0]?.category;
+            if (!category || !isStepUpActionCategory(category)) {
+              return {
+                ...menu,
+                text: "Chưa có thao tác nào đang chờ xác minh. Hãy mở lại hành động cần làm.",
+              };
+            }
+            const verified = await stepUp.verify({
+              adminTelegramUserId: input.telegramUserId,
+              category,
+              code,
+            });
+            if (!verified.ok) {
+              // Never echo the submitted code, and never say which digit was wrong.
+              if (verified.code === "LOCKED_OUT") {
+                const oldest = await sql<{ oldest: Date | string | null }>`
+                  select min(attempted_at) as oldest from admin_step_up_attempt
+                  where admin_telegram_user_id = ${input.telegramUserId}
+                    and succeeded = false
+                    and attempted_at > now() - (${config.ADMIN_STEP_UP_LOCKOUT_MINUTES} * interval '1 minute')
+                `.execute(dbHandle.db);
+                const since = oldest.rows[0]?.oldest;
+                const remainingMinutes =
+                  since == null
+                    ? config.ADMIN_STEP_UP_LOCKOUT_MINUTES
+                    : Math.max(
+                        0,
+                        Math.ceil(
+                          (new Date(since).getTime() +
+                            config.ADMIN_STEP_UP_LOCKOUT_MINUTES * 60_000 -
+                            Date.now()) /
+                            60_000,
+                        ),
+                      );
+                return {
+                  ...menu,
+                  text: `🔐 Xác minh bảo mật đang tạm khoá. Thử lại sau khoảng ${remainingMinutes} phút.`,
+                };
+              }
+              if (verified.code === "NOT_ENROLLED") {
+                return { ...menu, text: "Chưa thiết lập xác minh bảo mật. Gửi /enroll_2fa." };
+              }
+              return { ...menu, text: "❌ Mã xác minh không đúng. Vui lòng thử lại." };
+            }
+            return {
+              ...menu,
+              text: [
+                `✅ Đã xác minh. Quyền có hiệu lực ${config.ADMIN_STEP_UP_TTL_SECONDS} giây.`,
+                "",
+                "Mở lại hành động vừa rồi và xác nhận để hoàn tất.",
+              ].join("\n"),
+            };
+          }
           // Variant field edit (goal §78/§172). The prompt no longer carries a state id in the text
           // the owner types, so this is resolved by kind; only a state a real field prompt wrote has
           // `field`, and the menu's own state must not vouch for anything.
@@ -5956,6 +6247,18 @@ async function bootstrap(): Promise<void> {
               where admin_telegram_user_id = ${input.telegramUserId}
                 and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
             `.execute(dbHandle.db);
+            const authorization = await authorizeSensitiveFor(input, {
+              actionKey: "warranty.refund.adjust",
+              resourceType: "WarrantyClaim",
+              resourceId: claimId,
+              consumeGrant: true,
+            });
+            if (!authorization.ok)
+              return presentSensitiveRefusal({
+                code: authorization.code,
+                action: "warranty.refund.adjust",
+                category: "REFUND",
+              });
             const result = await approveClaimRefund({
               db: dbHandle.db,
               actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
@@ -7162,7 +7465,7 @@ async function bootstrap(): Promise<void> {
         responder: telegramResponder,
         codec: callbackCodec,
         resolveOrderId: async (orderNumber) =>
-          (await findOrderByNumber(dbHandle.db, orderNumber))?.id ?? null,
+          (await findOrderByNumberInternal(dbHandle.db, orderNumber))?.id ?? null,
       }),
       ratePerSecond: notificationRate,
       maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
