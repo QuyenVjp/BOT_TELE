@@ -106,17 +106,18 @@ deferrable initially deferred
 for each row execute function notification_campaign_assert_confirmed_audience();
 
 -- Reconcile the hash columns back onto any already-queued campaign so the
--- operator view never shows a confirmed send with no evidence.
+-- operator view never shows a confirmed send with no evidence. Internal
+-- notifications without a preview remain unconfirmed.
 update notification_campaign c
 set confirmed_at = coalesce(c.confirmed_at, c.previewed_at, c.created_at),
     confirmed_by = coalesce(c.confirmed_by, c.created_by),
     audience_hash = coalesce(c.audience_hash, md5(c.id || ':' || c.audience))
 where c.status in ('QUEUED', 'COMPLETED')
-  and c.confirmed_at is null;
-
+  and c.previewed_at is not null;
 insert into notification_campaign_audience (campaign_id, stage, customer_id, chat_id)
 select distinct d.campaign_id, 'CONFIRMED', d.customer_id, d.chat_id
 from notification_delivery d
 join notification_campaign c on c.id = d.campaign_id
 where c.status in ('QUEUED', 'COMPLETED')
+  and c.confirmed_at is not null
 on conflict (campaign_id, stage, customer_id) do nothing;
