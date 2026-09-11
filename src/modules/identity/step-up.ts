@@ -10,9 +10,9 @@ import { appendAuditEvent } from "./audit.js";
  *
  * Step-up is an ADDITIONAL gate on top of the numeric-id root identity in
  * `root-admin.ts` — it never replaces it and never introduces another way to
- * become admin. A high-risk action demands a live grant bound to
- * (admin numeric id, action category); a grant is short-lived, single-use, and
- * authorises exactly one category.
+ * become admin. A high-risk action demands a live grant bound to the admin,
+ * action, resource identity, resource version, and canonical payload hash; a
+ * grant is short-lived, single-use, and authorises exactly one mutation shape.
  *
  * Secret handling (SR-001):
  *  - the TOTP seed is 20 random bytes, base32-encoded, and lives ONLY behind the
@@ -45,6 +45,12 @@ export type StepUpFailureCode =
 export interface StepUpGrant {
   adminTelegramUserId: string;
   category: StepUpActionCategory;
+  actionKey: string;
+  resourceType: string;
+  resourceId: string;
+  resourceVersion: string;
+  payloadHash: string;
+  authorizationVersion: 2;
   expiresAt: Date;
 }
 
@@ -55,32 +61,36 @@ export interface StepUpService {
     issuer: string;
     accountLabel: string;
   }): Promise<{ otpauthUri: string }>;
+  /** Replace an enrolled factor only after proving the current factor. */
+  replace(input: {
+    adminTelegramUserId: string;
+    issuer: string;
+    accountLabel: string;
+    currentCode: string;
+    now?: Date;
+  }): Promise<{ otpauthUri: string }>;
   isEnrolled(adminTelegramUserId: string): Promise<boolean>;
-  /**
-   * Verifies the code, enforces lockout, and returns a grant on success.
-   *
-   * `resourceType`/`resourceId` bind the grant to the exact object the owner looked at.
-   * They are optional so the development/test posture (step-up off) is unchanged, but when
-   * supplied the grant can only be consumed for that same object — a category check alone
-   * would let one approval authorise a change to a different variant.
-   */
+  /** Verify a code and bind the resulting grant to one exact authorization payload. */
   verify(input: {
     adminTelegramUserId: string;
     category: StepUpActionCategory;
     code: string;
-    resourceType?: string;
-    resourceId?: string;
+    actionKey: string;
+    resourceType: string;
+    resourceId: string;
+    resourceVersion: string;
+    payloadHash: string;
     now?: Date;
   }): Promise<{ ok: true; grant: StepUpGrant } | { ok: false; code: StepUpFailureCode }>;
-  /**
-   * Consumes a live grant for EXACTLY this admin + category, and for this object when the
-   * grant carries a binding.
-   */
+  /** Consume only a current v2 grant with an exact action, resource, version, and payload hash. */
   consume(input: {
     adminTelegramUserId: string;
     category: StepUpActionCategory;
-    resourceType?: string;
-    resourceId?: string;
+    actionKey: string;
+    resourceType: string;
+    resourceId: string;
+    resourceVersion: string;
+    payloadHash: string;
     now?: Date;
   }): Promise<{ ok: true } | { ok: false; code: StepUpFailureCode }>;
 }
@@ -105,7 +115,9 @@ const SECRET_KEY_PREFIX = "admin-totp";
 const BASE32_SHAPE = /^[A-Z2-7]+$/u;
 const CODE_SHAPE = /^\d{6}$/u;
 const TELEGRAM_ID_SHAPE = /^\d{1,19}$/u;
-/** The nine high-risk categories a grant can be bound to (mirrors the DB CHECK). */
+const ACTION_KEY_SHAPE = /^[a-z][a-z0-9_.]{1,127}$/u;
+const AUTHORIZATION_VERSION = 2 as const;
+/** The high-risk categories a grant can be bound to (mirrors the DB CHECK). */
 const STEP_UP_CATEGORY: Record<string, true> = {
   WALLET_ADJUSTMENT: true,
   PAYMENT_OVERRIDE: true,
@@ -242,37 +254,68 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
   const lockoutMinutes = options.lockoutMinutes;
   const maxAttempts = options.maxAttempts;
 
+  async function issueEnrollment(
+    input: { adminTelegramUserId: string; issuer: string; accountLabel: string },
+    action: "enrolled" | "replaced",
+  ): Promise<{ otpauthUri: string }> {
+    const adminId = input.adminTelegramUserId.trim();
+    if (!TELEGRAM_ID_SHAPE.test(adminId)) {
+      throw new Error("step-up enrollment requires a numeric Telegram user id");
+    }
+    const seed = encodeBase32(randomBytes(SEED_BYTES));
+    const vaultRef = await vault.write(seed, {
+      namespace: "asset",
+      idempotencyKey: `${SECRET_KEY_PREFIX}-${adminId}`,
+    });
+    await sql`
+      insert into admin_step_up_secret (admin_telegram_user_id, vault_ref)
+      values (${adminId}, ${vaultRef})
+      on conflict (admin_telegram_user_id) do update
+        set vault_ref = excluded.vault_ref, rotated_at = now()
+    `.execute(db);
+    await appendStepUpAudit(db, {
+      adminTelegramUserId: adminId,
+      action: `admin.step_up.${action}`,
+      reason: action === "enrolled" ? "TOTP factor enrolled" : "TOTP factor replaced",
+    });
+    const label = `${encodeURIComponent(input.issuer)}:${encodeURIComponent(input.accountLabel)}`;
+    const params = new URLSearchParams({
+      secret: seed,
+      issuer: input.issuer,
+      algorithm: "SHA1",
+      digits: String(TOTP_DIGITS),
+      period: String(TOTP_PERIOD_SECONDS),
+    });
+    return { otpauthUri: `otpauth://totp/${label}?${params.toString()}` };
+  }
+
   return {
     async enroll(input) {
+      return issueEnrollment(input, "enrolled");
+    },
+
+    async replace(input) {
       const adminId = input.adminTelegramUserId.trim();
-      if (!TELEGRAM_ID_SHAPE.test(adminId)) {
-        throw new Error("step-up enrollment requires a numeric Telegram user id");
-      }
-      const seed = encodeBase32(randomBytes(SEED_BYTES));
-      const vaultRef = await vault.write(seed, {
-        namespace: "asset",
-        idempotencyKey: `${SECRET_KEY_PREFIX}-${adminId}`,
-      });
-      await sql`
-        insert into admin_step_up_secret (admin_telegram_user_id, vault_ref)
-        values (${adminId}, ${vaultRef})
-        on conflict (admin_telegram_user_id) do update
-          set vault_ref = excluded.vault_ref, rotated_at = now()
+      if (!TELEGRAM_ID_SHAPE.test(adminId)) throw new Error("invalid step-up identity");
+      const row = await sql<{ vault_ref: string }>`
+        select vault_ref from admin_step_up_secret
+        where admin_telegram_user_id = ${adminId}
+        limit 1
       `.execute(db);
-      await appendStepUpAudit(db, {
-        adminTelegramUserId: adminId,
-        action: "admin.step_up.enrolled",
-        reason: "TOTP factor enrolled",
-      });
-      const label = `${encodeURIComponent(input.issuer)}:${encodeURIComponent(input.accountLabel)}`;
-      const params = new URLSearchParams({
-        secret: seed,
-        issuer: input.issuer,
-        algorithm: "SHA1",
-        digits: String(TOTP_DIGITS),
-        period: String(TOTP_PERIOD_SECONDS),
-      });
-      return { otpauthUri: `otpauth://totp/${label}?${params.toString()}` };
+      const vaultRef = row.rows[0]?.vault_ref;
+      const currentSeed =
+        vaultRef === undefined ? null : await vault.reveal(vaultRef).catch(() => null);
+      if (
+        currentSeed === null ||
+        verifyTotpCode({
+          secretBase32: currentSeed,
+          code: input.currentCode,
+          unixSeconds: Math.floor((input.now ?? new Date()).getTime() / 1000),
+        })
+      ) {
+        throw new Error("current step-up code is required to replace the factor");
+      }
+      return issueEnrollment(input, "replaced");
     },
 
     async isEnrolled(adminTelegramUserId) {
@@ -289,6 +332,32 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
     async verify(input) {
       const now = input.now ?? new Date();
       const adminId = input.adminTelegramUserId.trim();
+      const validBinding =
+        ACTION_KEY_SHAPE.test(input.actionKey) &&
+        input.resourceType.trim().length > 0 &&
+        input.resourceId.trim().length > 0 &&
+        input.resourceVersion.trim().length > 0;
+      if (!validBinding) {
+        await appendStepUpAudit(db, {
+          adminTelegramUserId: adminId,
+          action: "admin.step_up.denied",
+          reason: "denied: NOT_GRANTED",
+          category: input.category,
+          code: "NOT_GRANTED",
+        });
+        return { ok: false, code: "NOT_GRANTED" };
+      }
+      const payloadHash = input.payloadHash;
+      if (!/^[0-9a-f]{64}$/u.test(payloadHash)) {
+        await appendStepUpAudit(db, {
+          adminTelegramUserId: adminId,
+          action: "admin.step_up.denied",
+          reason: "denied: NOT_GRANTED",
+          category: input.category,
+          code: "NOT_GRANTED",
+        });
+        return { ok: false, code: "NOT_GRANTED" };
+      }
       if (!TELEGRAM_ID_SHAPE.test(adminId) || STEP_UP_CATEGORY[input.category] !== true) {
         await appendStepUpAudit(db, {
           adminTelegramUserId: adminId,
@@ -370,11 +439,12 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
         await sql`
           insert into admin_step_up_grant
             (id, admin_telegram_user_id, category, issued_at, expires_at,
-             resource_type, resource_id)
+             authorization_version, action_key, resource_type, resource_id,
+             resource_version, payload_hash)
           values
             (${newId()}, ${adminId}, ${input.category}, ${now.toISOString()},
-             ${expiresAt.toISOString()}, ${input.resourceType ?? null},
-             ${input.resourceId ?? null})
+             ${expiresAt.toISOString()}, ${AUTHORIZATION_VERSION}, ${input.actionKey},
+             ${input.resourceType}, ${input.resourceId}, ${input.resourceVersion}, ${payloadHash})
         `.execute(trx);
         await appendStepUpAudit(trx, {
           adminTelegramUserId: adminId,
@@ -384,7 +454,17 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
         });
         return {
           ok: true as const,
-          grant: { adminTelegramUserId: adminId, category: input.category, expiresAt },
+          grant: {
+            adminTelegramUserId: adminId,
+            category: input.category,
+            actionKey: input.actionKey,
+            resourceType: input.resourceType,
+            resourceId: input.resourceId,
+            resourceVersion: input.resourceVersion,
+            payloadHash,
+            authorizationVersion: AUTHORIZATION_VERSION,
+            expiresAt,
+          },
         };
       });
     },
@@ -392,8 +472,27 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
     async consume(input) {
       const now = input.now ?? new Date();
       const adminId = input.adminTelegramUserId.trim();
-      // A malformed actor or an unknown category can never match a grant.
-      if (!TELEGRAM_ID_SHAPE.test(adminId) || STEP_UP_CATEGORY[input.category] !== true) {
+      const validBinding =
+        ACTION_KEY_SHAPE.test(input.actionKey) &&
+        input.resourceType.trim().length > 0 &&
+        input.resourceId.trim().length > 0 &&
+        input.resourceVersion.trim().length > 0;
+      if (
+        !TELEGRAM_ID_SHAPE.test(adminId) ||
+        STEP_UP_CATEGORY[input.category] !== true ||
+        !validBinding
+      ) {
+        await appendStepUpAudit(db, {
+          adminTelegramUserId: adminId,
+          action: "admin.step_up.denied",
+          reason: "denied: NOT_GRANTED",
+          category: input.category,
+          code: "NOT_GRANTED",
+        });
+        return { ok: false, code: "NOT_GRANTED" };
+      }
+      const payloadHash = input.payloadHash;
+      if (!/^[0-9a-f]{64}$/u.test(payloadHash)) {
         await appendStepUpAudit(db, {
           adminTelegramUserId: adminId,
           action: "admin.step_up.denied",
@@ -407,21 +506,19 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
       return withTransaction(db, async (trx) => {
         // `for update` makes the single-use rule race-proof: a concurrent
         // consumer blocks here until the row is already marked consumed.
-        // A grant minted for an object can only be spent on that object. The predicate is
-        // written so an UNBOUND grant (resource_id null, the dev/test posture) still
-        // matches: the owner's approval of "a price change" is narrower when the grant says
-        // which variant, never wider.
-        const boundToCaller =
-          input.resourceType !== undefined && input.resourceId !== undefined
-            ? sql`(resource_id is null or (resource_type = ${input.resourceType} and resource_id = ${input.resourceId}))`
-            : sql`resource_id is null`;
         const live = await sql<{ id: string }>`
           select id from admin_step_up_grant
           where admin_telegram_user_id = ${adminId}
             and category = ${input.category}
+            and authorization_version = ${AUTHORIZATION_VERSION}
+            and action_key = ${input.actionKey}
+            and resource_type = ${input.resourceType}
+            and resource_id = ${input.resourceId}
+            and resource_version = ${input.resourceVersion}
+            and payload_hash = ${payloadHash}
             and consumed_at is null
+            and revoked_at is null
             and expires_at > ${now.toISOString()}
-            and ${boundToCaller}
           order by expires_at desc
           limit 1
           for update
@@ -432,7 +529,14 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
             select id from admin_step_up_grant
             where admin_telegram_user_id = ${adminId}
               and category = ${input.category}
+              and authorization_version = ${AUTHORIZATION_VERSION}
+              and action_key = ${input.actionKey}
+              and resource_type = ${input.resourceType}
+              and resource_id = ${input.resourceId}
+              and resource_version = ${input.resourceVersion}
+              and payload_hash = ${payloadHash}
               and consumed_at is null
+              and revoked_at is null
               and expires_at <= ${now.toISOString()}
             order by expires_at desc
             limit 1

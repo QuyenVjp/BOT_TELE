@@ -346,35 +346,37 @@ describe("file artifact import session", () => {
     const root = await mkdtemp(join(storageRoot, "real-downloader-"));
     const maxBytes = TELEGRAM_FILE_IMPORT_MAX_BYTES;
     const filePath = "documents/oversized.zip";
-    vi.stubGlobal(
-      "fetch",
-      vi.fn(async (url: string) => {
-        if (url.includes("/getFile")) {
-          return new Response(
-            JSON.stringify({
-              ok: true,
-              result: { file_path: filePath, file_size: Number(maxBytes) },
-            }),
-            { status: 200, headers: { "content-type": "application/json" } },
-          );
-        }
+    const fetchImpl: typeof fetch = async (input) => {
+      const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+      if (url.includes("/getFile")) {
         return new Response(
-          new ReadableStream({
-            start(controller) {
-              controller.enqueue(new Uint8Array(Number(maxBytes) + 1));
-              controller.close();
-            },
+          JSON.stringify({
+            ok: true,
+            result: { file_path: filePath, file_size: Number(maxBytes) },
           }),
-          { status: 200 },
+          { status: 200, headers: { "content-type": "application/json" } },
         );
-      }),
-    );
+      }
+      return new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(new Uint8Array(Number(maxBytes) + 1));
+            controller.close();
+          },
+        }),
+        { status: 200 },
+      );
+    };
+    const downloader = createTelegramFileDownloader(token, {
+      fetchImpl,
+      resolve: async () => ["93.184.216.34"],
+    });
 
+    await expect(downloader.download({ fileId: DOCUMENT.fileId, root, maxBytes })).rejects.toThrow(
+      "TELEGRAM_FILE_UNAVAILABLE",
+    );
     await expect(
-      createTelegramFileDownloader(token).download({ fileId: DOCUMENT.fileId, root, maxBytes }),
-    ).rejects.toThrow("TELEGRAM_FILE_UNAVAILABLE");
-    await expect(
-      createTelegramFileDownloader(token).download({ fileId: DOCUMENT.fileId, root, maxBytes }),
+      downloader.download({ fileId: DOCUMENT.fileId, root, maxBytes }),
     ).rejects.not.toThrow(token);
     expect(await readdir(root)).toEqual([]);
   });

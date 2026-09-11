@@ -71,16 +71,19 @@ opens: loopback, RFC1918, link-local, multicast, unspecified, cloud metadata
 and IPv4-mapped IPv6 are all refused. `https:` only, no credentials in the URL,
 port allowlist, `redirect: "error"`, re-resolution per attempt.
 
-Wired into the supplier HTTP adapter and the external vault adapter (preserving
-its existing host/port/CIDR allowlist, on the same single DNS resolution).
+Wired into every configurable outbound target: Telegram file downloads,
+SePay API, supplier HTTP, and external vault. The transport supplies the exact
+approved A/AAAA address to the real Node socket lookup, preserves TLS SNI and
+hostname verification, rejects redirects, and re-resolves/revalidates each
+retry.
 
-Tests: `tests/security/outbound-ssrf.test.ts` (86) — every named bypass class
+Tests: `tests/security/outbound-ssrf.test.ts` (81) + `tests/security/outbound-pinning.test.ts` (8) — every named bypass class
 including DNS rebinding, mixed public+private answers, alternate IP encodings,
 and the loopback test-mode escape hatch.
 
 ### SEC-007 / SEC-016 — Admin step-up (TOTP)
 
-`src/modules/identity/step-up.ts`, `064_admin_step_up.sql`.
+`src/modules/identity/step-up.ts`, `064_admin_step_up.sql`, `069_step_up_authorization_binding.sql`.
 
 RFC 6238 TOTP (HMAC-SHA1, 6 digits, 30 s, ±1 step drift) via `node:crypto`
 only. The seed is written through the **existing vault boundary** under
@@ -90,16 +93,21 @@ is no read path that returns the seed.
 - Verification is server-side. Failed attempts are recorded in an append-only
   `admin_step_up_attempt` table, counted over a rolling window, so a restart
   cannot reset the counter; exceeding the limit locks the admin out.
-- A successful verification issues a short-lived grant bound to
-  (admin numeric id, action category, expiry). `consume` marks it used under
-  `for update`, so one grant authorises exactly one action, once.
+- A successful verification issues a short-lived v2 grant bound to the admin
+  numeric id, action key, resource type/id, current resource version, canonical
+  requested-data SHA-256, category, and expiry. Migration `069` revokes every
+  legacy v1 category-only grant; preview and consume query only live v2 rows.
+- `consume` marks the exact grant used under `for update`, so one grant
+  authorises exactly one matching mutation, once. The grant is consumed before
+  the business transaction and is intentionally not restored if that mutation
+  later fails.
 - Root admin identity is unchanged: the configured **numeric** Telegram user id
   in a private context. Step-up is additional, never a replacement, and adds no
   new way to become admin.
 
 Tests: `tests/security/admin-step-up.test.ts` (11, incl. all six RFC 6238
 Appendix B vectors and a "no exported result contains the seed" sweep) and
-`tests/integration/admin-step-up.test.ts` (9) — lockout across service
+`tests/integration/admin-step-up.test.ts` (10) — lockout across service
 instances, single-use grant, category binding, expiry, append-only attempts.
 
 Production rule: `ADMIN_STEP_UP_REQUIRED=true` with `VAULT_DRIVER=memory` is a
@@ -121,25 +129,33 @@ There is exactly **one** place a sensitive admin action is authorised:
    nothing);
 2. resolve the step-up category for the action key from the declarative
    `SENSITIVE_ACTION_POLICY` table;
-3. **preview step** (`handle()`): prove a live, unconsumed, unexpired grant exists
-   for this admin *and* this category, without spending it — then, and only then,
+3. re-read the authoritative resource and requested values, then derive the
+   current resource version and canonical payload hash;
+4. **preview step** (`handle()`): prove a live, unconsumed, unexpired v2 grant
+   exists for this exact binding, without spending it — then, and only then,
    mint the durable confirmation;
-4. **mutating step** (`confirm()`): consume the grant **inside the confirmation's
-   transaction**, immediately before `executeHighRisk`. A refusal throws before the
-   mutation, so an unverified mutation is impossible.
+5. **mutating step** (`confirm()`): consume that exact grant immediately before
+   the mutation. A refusal throws before the mutation, so an unverified or stale
+   mutation is impossible. Consumption is fail-closed and is not rolled back
+   with the business write.
 
 The policy table covers `wallet.refund`, `manual_fulfillment.complete`,
 `support.replacement.approve`, `warranty.refund.approve`,
-`warranty.refund.adjust` (→ `REFUND`), `discrepancy.resolve`
+`warranty.refund.adjust` (→ `REFUND`), `warranty.replacement.approve`
+(→ `DELIVERY_REISSUE`), `discrepancy.resolve`
 (→ `PAYMENT_OVERRIDE`), `store.open`, `store.close`, `catalog.activate`,
-`catalog.deactivate` (→ `PERMISSION_CHANGE`), the three
-`supplier.mapping.*` verbs (→ `SUPPLIER_CONFIG`), `broadcast.confirm`
-(→ `BROADCAST`).
+`catalog.deactivate` (→ `PERMISSION_CHANGE`), the price/deposit/commercial
+variant changes (→ `BULK_PRICE_CHANGE`), inventory stock adjustment
+(→ `STOCK_ADJUSTMENT`), the three `supplier.mapping.*` verbs
+(→ `SUPPLIER_CONFIG`), `preorder.cancel` (→ `REFUND`), and
+`broadcast.confirm` (→ `BROADCAST`).
 
-Telegram side: `/enroll_2fa` reveals the `otpauth://` URI exactly once (a second
-call refuses), and `/verify <6 digits>` mints a category-bound grant for the
-pending action. Both routes pass the audited root gate first, and neither ever
-echoes a code.
+Telegram is not an MFA channel: production `/enroll_2fa` and `/verify` are
+refused without revealing a seed, URI, or OTP. The separate `npm run
+admin:step-up` operator CLI reads the TOTP only from a hidden TTY prompt and
+prints the enrollment URI only to that terminal. The CLI verifies a grant
+against the latest audited challenge; Telegram can only display the action and
+confirm after the server has derived its state.
 
 Tests: `tests/security/sensitive-action-authorization.test.ts` (6) and
 `tests/integration/admin-step-up-gating.test.ts` (14). The load-bearing assertion

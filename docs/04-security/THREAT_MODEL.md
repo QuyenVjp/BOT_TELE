@@ -61,8 +61,8 @@ control spans several, the named ones are the load-bearing evidence.
 | SEC-003 | `src/modules/risk/service.ts`                                                                                       | `tests/security/rate-limit-coverage.test.ts` (6)                                                                                                                                                          |
 | SEC-004 | `…ForOwner` reads in `src/modules/{commerce,payments,digital-goods}/repository.ts`                                  | `tests/security/bola-ownership.test.ts` (14)                                                                                                                                                              |
 | SEC-005 | `src/infrastructure/inbox/sepay.ts`, `src/infrastructure/outbox/`                                                   | `tests/integration/sepay-missed-webhook-reconciliation.test.ts`, `tests/property/payment-idempotency.test.ts`                                                                                             |
-| SEC-006 | `src/infrastructure/net/outbound-policy.ts`                                                                         | `tests/security/outbound-ssrf.test.ts` (86)                                                                                                                                                               |
-| SEC-007 | `src/modules/identity/step-up.ts`, `src/bot/callback-codec.ts`, `src/modules/notification/service.ts`               | `tests/security/admin-step-up.test.ts` (11), `tests/integration/admin-step-up.test.ts` (9), `tests/security/sensitive-action-authorization.test.ts` (6), `tests/integration/admin-step-up-gating.test.ts` (14), `tests/security/privileged-verb-gating.test.ts` (8), `tests/integration/broadcast-confirmation.test.ts` (12) |
+| SEC-006 | `src/infrastructure/net/outbound-policy.ts`                                                                         | `tests/security/outbound-ssrf.test.ts` (81) + `tests/security/outbound-pinning.test.ts` (8)                                                                                                                                                               |
+| SEC-007 | `src/modules/identity/step-up.ts`, `src/bot/callback-codec.ts`, `src/modules/notification/service.ts`               | `tests/security/admin-step-up.test.ts` (11), `tests/integration/admin-step-up.test.ts` (10), `tests/security/sensitive-action-authorization.test.ts` (6), `tests/integration/admin-step-up-gating.test.ts` (14), `tests/security/privileged-verb-gating.test.ts` (8), `tests/integration/broadcast-confirmation.test.ts` (12) |
 | SEC-008 | `src/infrastructure/observability/redact.ts`, `src/infrastructure/observability/logger.ts`                          | `tests/security/secret-redaction.test.ts` (20)                                                                                                                                                            |
 | SEC-009 | `src/modules/risk/service.ts`, `src/modules/notification/rate-limit.ts`                                             | `tests/security/rate-limit-coverage.test.ts` (6)                                                                                                                                                          |
 | SEC-010 | `src/modules/catalog/search-parser-port.ts`                                                                         | `tests/contract/search-parser-adapter.test.ts`                                                                                                                                                            |
@@ -76,9 +76,11 @@ control spans several, the named ones are the load-bearing evidence.
 All three rows above are enforced on the live path, not merely present:
 
 - **SEC-007 / SEC-016**: `authorizeSensitiveAdminAction` is called by `handle()`
-  (it proves a usable grant before a confirmation is minted) and by `confirm()`
-  (it spends the grant inside the confirmation transaction, immediately before
-  the mutation, so a refused step-up can never reach the business change).
+  (it proves a usable v2 grant for the exact action/resource/version/payload
+  binding before a confirmation is minted) and by `confirm()` (it consumes the
+  exact single-use grant immediately before the mutation, so a refused or stale
+  step-up can never reach the business change). The consumption is intentionally
+  not rolled back if the later business transaction fails.
   Broadcast confirmation runs the same gate with a `BROADCAST` grant, and
   production refuses to start when an admin id is configured with step-up
   disabled.
@@ -87,10 +89,11 @@ All three rows above are enforced on the live path, not merely present:
   resolves ownership inside the query, so a foreign object and a missing one are
   the same refusal.
 - A redundant `adm:` signed-callback codec was **removed** after an audit showed
-  it had no production caller: Telegram already guarantees
-  `callback_query.from.id` is authentic and the actor id is never read from the
-  payload, so the live callbacks are gated by root identity, the durable
-  confirmation and step-up instead.
+  it had no production caller. Callback data remains untrusted routing input:
+  sensitive handlers resolve the resource and requested values from durable
+  server-side callback state/authoritative rows, while the actor id comes only
+  from Telegram's authenticated `callback_query.from.id`. The live callbacks
+  are then gated by root identity, durable confirmation, and exact v2 step-up.
 
 Implemented controls, trust assumptions, remaining risk and operational
 procedures: [`SECURITY_HARDENING.md`](./SECURITY_HARDENING.md).

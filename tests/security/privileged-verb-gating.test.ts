@@ -22,17 +22,13 @@ import {
  * mutating path, so the mutation can never precede authorisation.
  */
 
-/** Verbs that deliberately need no second factor: inspection and reversible toggles. */
+/** Verbs that deliberately need no second factor: inspection and ordinary imports. */
 const LOW_RISK_OWNER_COMMANDS = new Set([
   "catalog.activate",
   "catalog.deactivate",
   "discrepancy.list",
   "order.inspect",
   "inventory.import",
-  "supplier.mapping.select",
-  "supplier.mapping.clear",
-  "supplier.mapping.verify",
-  "store.close",
 ]);
 
 const ROOT = resolve(import.meta.dirname, "../..");
@@ -72,8 +68,8 @@ describe("privileged owner verbs are gated or explicitly low-risk", () => {
   });
 
   it("enforces the catalogue kill-switch and supplier routing through the same layer", () => {
-    // These are reversible, but they still change what customers can buy, so they are
-    // gated through the layer as PERMISSION_CHANGE / SUPPLIER_CONFIG rather than left bare.
+    // These change what customers can buy, so they remain in the policy table rather than
+    // being mistaken for ordinary reversible owner controls.
     expect(SENSITIVE_ACTION_POLICY["catalog.activate"]).toBe("PERMISSION_CHANGE");
     expect(SENSITIVE_ACTION_POLICY["catalog.deactivate"]).toBe("PERMISSION_CHANGE");
     expect(SENSITIVE_ACTION_POLICY["supplier.mapping.select"]).toBe("SUPPLIER_CONFIG");

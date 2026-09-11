@@ -27,6 +27,14 @@ import {
 const RFC_VECTOR_ASCII = "12345678901234567890";
 const RFC_TOTP_VECTOR_BASE32 = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
 const ADMIN_ID = "123456789";
+
+const TEST_BINDING = {
+  actionKey: "wallet.refund",
+  resourceType: "Order",
+  resourceId: "order-test",
+  resourceVersion: "1",
+  payloadHash: "a".repeat(64),
+};
 const SECRET_REF = `vault:memory:asset:admin-totp-${ADMIN_ID}`;
 
 /** RFC 6238 Appendix B vectors, truncated to the 6 digits this factor uses. */
@@ -202,13 +210,21 @@ describe("step-up service keeps the seed inside the vault (SR-001)", () => {
       verifyTotpCode({ secretBase32: seed, code, unixSeconds: 59 }),
     ];
     const verified = await service.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: ADMIN_ID,
       category: "REFUND",
       code,
       now,
     });
     results.push(verified);
-    results.push(await service.consume({ adminTelegramUserId: ADMIN_ID, category: "REFUND", now }));
+    results.push(
+      await service.consume({
+        ...TEST_BINDING,
+        adminTelegramUserId: ADMIN_ID,
+        category: "REFUND",
+        now,
+      }),
+    );
     for (const value of results) {
       expect(JSON.stringify(value ?? null)).not.toContain(seed);
       expect(JSON.stringify(value ?? null)).not.toContain(code);
@@ -218,6 +234,12 @@ describe("step-up service keeps the seed inside the vault (SR-001)", () => {
       grant: {
         adminTelegramUserId: ADMIN_ID,
         category: "REFUND",
+        actionKey: TEST_BINDING.actionKey,
+        resourceType: TEST_BINDING.resourceType,
+        resourceId: TEST_BINDING.resourceId,
+        resourceVersion: TEST_BINDING.resourceVersion,
+        payloadHash: TEST_BINDING.payloadHash,
+        authorizationVersion: 2,
         expiresAt: new Date("2026-01-01T00:05:59.000Z"),
       },
     });
@@ -247,6 +269,7 @@ describe("step-up service keeps the seed inside the vault (SR-001)", () => {
     const seed = await vault.reveal(SECRET_REF);
 
     const result = await service.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: ADMIN_ID,
       category: "REFUND",
       code: generateTotp(seed, 1_700_000_000),

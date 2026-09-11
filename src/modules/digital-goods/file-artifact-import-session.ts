@@ -13,6 +13,7 @@ import { newId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { createPinnedFetch } from "../../infrastructure/net/pinned-fetch.js";
+import type { PinnedFetchOptions } from "../../infrastructure/net/pinned-fetch.js";
 import {
   isValidFileArtifactRegistrationMetadata,
   type FileArtifactMetadata,
@@ -172,12 +173,16 @@ async function verifyPrivateFile(input: {
   }
 }
 
-export function createTelegramFileDownloader(botToken: string): TelegramFileDownloader {
+export function createTelegramFileDownloader(
+  botToken: string,
+  options: Pick<PinnedFetchOptions, "fetchImpl" | "resolve" | "timeoutMs"> = {},
+): TelegramFileDownloader {
   // Telegram's host is hardcoded, but these are the only outbound requests that carry a
   // credential in the URL path. The pinned client re-checks the RESOLVED address AND binds
   // the socket to it, so neither a poisoned DNS answer (rebinding) nor an off-host redirect
   // can make us hand the bot token to somewhere else.
   const guardedFetch = createPinnedFetch({
+    ...options,
     allowedHosts: ["api.telegram.org"],
   });
   return {

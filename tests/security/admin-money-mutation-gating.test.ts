@@ -7,6 +7,8 @@ import {
   type StepUpActionCategory,
 } from "../../src/modules/identity/step-up.js";
 import type { SensitiveActionDeps } from "../../src/modules/identity/sensitive-action.js";
+import { loadSensitiveAuthorizationBinding } from "../../src/modules/identity/authorization-binding.js";
+import type { AuthorizationJsonValue } from "../../src/modules/identity/authorization-payload.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
 import { newId } from "../../src/shared/ids/index.js";
 import {
@@ -28,6 +30,7 @@ import { createTotpCode } from "../helpers/totp.js";
 
 const hasDocker = await dockerAvailable();
 const ROOT_ID = 123456789;
+
 const ROOT_CONFIG = { adminTelegramUserId: ROOT_ID, expectedUsername: "Quyenvjp" };
 const STEP_UP_OPTIONS = { ttlSeconds: 60, lockoutMinutes: 15, maxAttempts: 5 };
 const ROOT_ACTOR = { numericUserId: ROOT_ID, chatType: "private" as const };
@@ -97,7 +100,12 @@ function deps(seeded: Seeded): SensitiveActionDeps {
 async function grant(
   seeded: Seeded,
   category: StepUpActionCategory,
-  binding?: { resourceType: string; resourceId: string },
+  binding: {
+    actionKey: string;
+    resourceType: string;
+    resourceId: string;
+    requestedData: AuthorizationJsonValue;
+  },
 ): Promise<void> {
   const stepUp = createStepUpService(ctx.db, seeded.vault, STEP_UP_OPTIONS);
   await stepUp.enroll({
@@ -106,11 +114,16 @@ async function grant(
     accountLabel: String(ROOT_ID),
   });
   const code = await createTotpCode(seeded.vault, String(ROOT_ID), ctx.db);
+  const exact = await loadSensitiveAuthorizationBinding(ctx.db, binding);
   const verified = await stepUp.verify({
     adminTelegramUserId: String(ROOT_ID),
     category,
     code,
-    ...(binding ?? {}),
+    actionKey: binding.actionKey,
+    resourceType: binding.resourceType,
+    resourceId: binding.resourceId,
+    resourceVersion: exact.resourceVersion,
+    payloadHash: exact.payloadHash,
   });
   if (!verified.ok) throw new Error(`grant failed: ${verified.code}`);
 }
@@ -181,7 +194,17 @@ describe.skipIf(!hasDocker)("price and deposit changes require a second factor",
 
   it("applies a price change exactly once with a live BULK_PRICE_CHANGE grant", async () => {
     const seeded = await seedVariant();
-    await grant(seeded, "BULK_PRICE_CHANGE");
+    await grant(seeded, "BULK_PRICE_CHANGE", {
+      actionKey: "catalog.variant.price.change",
+      resourceType: "ProductVariant",
+      resourceId: seeded.variantId,
+      requestedData: {
+        productId: seeded.productId,
+        variantId: seeded.variantId,
+        expectedVersion: 1,
+        priceVnd: "123456",
+      },
+    });
 
     await expect(
       updateAdminVariant({ ...base(seeded), priceVnd: 123_456n, sensitiveDeps: deps(seeded) }),
@@ -208,7 +231,18 @@ describe.skipIf(!hasDocker)("price and deposit changes require a second factor",
   });
   it("applies a combined price and deposit change with ONE grant", async () => {
     const seeded = await seedVariant();
-    await grant(seeded, "BULK_PRICE_CHANGE");
+    await grant(seeded, "BULK_PRICE_CHANGE", {
+      actionKey: "catalog.variant.commercial.change",
+      resourceType: "ProductVariant",
+      resourceId: seeded.variantId,
+      requestedData: {
+        productId: seeded.productId,
+        variantId: seeded.variantId,
+        expectedVersion: 1,
+        priceVnd: "321000",
+        depositAmountVnd: 99000,
+      },
+    });
 
     // Both money keys share BULK_PRICE_CHANGE, and the owner approves a kind of change, not
     // a pair of keys. Consuming per key would demand two grants for one approval, so this
@@ -231,7 +265,17 @@ describe.skipIf(!hasDocker)("price and deposit changes require a second factor",
 
   it("treats an explicit null compare-at price as a price change", async () => {
     const seeded = await seedVariant();
-    await grant(seeded, "BULK_PRICE_CHANGE");
+    await grant(seeded, "BULK_PRICE_CHANGE", {
+      actionKey: "catalog.variant.price.change",
+      resourceType: "ProductVariant",
+      resourceId: seeded.variantId,
+      requestedData: {
+        productId: seeded.productId,
+        variantId: seeded.variantId,
+        expectedVersion: 1,
+        compareAtPriceVnd: null,
+      },
+    });
 
     // Clearing the strikethrough price changes what the customer sees beside the price, so
     // it must not slip past the detector as "no price fields present".
@@ -288,7 +332,17 @@ describe.skipIf(!hasDocker)("stock adjustment requires a second factor", () => {
 
   it("applies the adjustment once with a live STOCK_ADJUSTMENT grant", async () => {
     const seeded = await seedVariant();
-    await grant(seeded, "STOCK_ADJUSTMENT");
+    await grant(seeded, "STOCK_ADJUSTMENT", {
+      actionKey: "inventory.stock.adjust",
+      resourceType: "ProductVariant",
+      resourceId: seeded.variantId,
+      requestedData: {
+        variantId: seeded.variantId,
+        delta: -30,
+        expectedStockVersion: 1,
+        idempotencyKey: "adjust-1",
+      },
+    });
 
     const result = await adjustQuantityStock({
       ...base(seeded),
@@ -313,7 +367,17 @@ describe.skipIf(!hasDocker)("stock adjustment requires a second factor", () => {
 
   it("refuses a grant minted for a different category", async () => {
     const seeded = await seedVariant();
-    await grant(seeded, "BROADCAST");
+    await grant(seeded, "BROADCAST", {
+      actionKey: "inventory.stock.adjust",
+      resourceType: "ProductVariant",
+      resourceId: seeded.variantId,
+      requestedData: {
+        variantId: seeded.variantId,
+        delta: -10,
+        expectedStockVersion: 1,
+        idempotencyKey: "adjust-1",
+      },
+    });
     const before = await stockOf(seeded.variantId);
 
     await expect(
@@ -326,10 +390,17 @@ describe.skipIf(!hasDocker)("stock adjustment requires a second factor", () => {
   it("refuses to spend a grant that is bound to a different variant", async () => {
     const mine = await seedVariant();
     const other = await seedVariant();
-    // Bound to `mine`, exactly as `/verify` mints it from the refusal it read back.
+    // Bound to `mine`, exactly as the operator CLI mints it from the refusal it reads back.
     await grant(mine, "BULK_PRICE_CHANGE", {
+      actionKey: "catalog.variant.price.change",
       resourceType: "ProductVariant",
       resourceId: mine.variantId,
+      requestedData: {
+        productId: mine.productId,
+        variantId: mine.variantId,
+        expectedVersion: 1,
+        priceVnd: "777000",
+      },
     });
 
     // Spending it on a DIFFERENT variant must fail: a category check alone would let one

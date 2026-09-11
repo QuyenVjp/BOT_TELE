@@ -27,6 +27,14 @@ import {
 
 const hasDocker = await dockerAvailable();
 const ADMIN_ID = "123456789";
+
+const TEST_BINDING = {
+  actionKey: "wallet.refund",
+  resourceType: "Order",
+  resourceId: "order-test",
+  resourceVersion: "1",
+  payloadHash: "a".repeat(64),
+};
 const TTL_SECONDS = 60;
 const MIGRATION_FILE = "064_admin_step_up.sql";
 let ctx: PgTestContext;
@@ -113,6 +121,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
     const code = codeAt(seed, NOW_SECONDS);
 
     const verified = await service.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: ADMIN_ID,
       category: "REFUND",
       code,
@@ -125,10 +134,20 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
     expect(verified.grant.expiresAt).toEqual(new Date(NOW.getTime() + TTL_SECONDS * 1000));
 
     expect(
-      await service.consume({ adminTelegramUserId: ADMIN_ID, category: "REFUND", now: NOW }),
+      await service.consume({
+        ...TEST_BINDING,
+        adminTelegramUserId: ADMIN_ID,
+        category: "REFUND",
+        now: NOW,
+      }),
     ).toEqual({ ok: true });
     expect(
-      await service.consume({ adminTelegramUserId: ADMIN_ID, category: "REFUND", now: NOW }),
+      await service.consume({
+        ...TEST_BINDING,
+        adminTelegramUserId: ADMIN_ID,
+        category: "REFUND",
+        now: NOW,
+      }),
     ).toEqual({ ok: false, code: "NOT_GRANTED" });
 
     const consumed = await sql<{ consumed_at: string | null }>`
@@ -141,6 +160,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
   it("binds a grant to exactly one category", async () => {
     const { seed } = await enroll();
     const granted = await service.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: ADMIN_ID,
       category: "REFUND",
       code: codeAt(seed, NOW_SECONDS),
@@ -149,17 +169,28 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
     expect(granted.ok).toBe(true);
 
     expect(
-      await service.consume({ adminTelegramUserId: ADMIN_ID, category: "BROADCAST", now: NOW }),
+      await service.consume({
+        ...TEST_BINDING,
+        adminTelegramUserId: ADMIN_ID,
+        category: "BROADCAST",
+        now: NOW,
+      }),
     ).toEqual({ ok: false, code: "NOT_GRANTED" });
     // The REFUND grant survived the cross-category attempt.
     expect(
-      await service.consume({ adminTelegramUserId: ADMIN_ID, category: "REFUND", now: NOW }),
+      await service.consume({
+        ...TEST_BINDING,
+        adminTelegramUserId: ADMIN_ID,
+        category: "REFUND",
+        now: NOW,
+      }),
     ).toEqual({ ok: true });
   });
 
   it("refuses a grant once its TTL has elapsed", async () => {
     const { seed } = await enroll();
     const issued = await service.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: ADMIN_ID,
       category: "WALLET_ADJUSTMENT",
       code: codeAt(seed, NOW_SECONDS),
@@ -170,6 +201,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
     const afterExpiry = new Date(NOW.getTime() + TTL_SECONDS * 1000 + 1);
     expect(
       await service.consume({
+        ...TEST_BINDING,
         adminTelegramUserId: ADMIN_ID,
         category: "WALLET_ADJUSTMENT",
         now: afterExpiry,
@@ -190,6 +222,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
 
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       const result = await service.verify({
+        ...TEST_BINDING,
         adminTelegramUserId: ADMIN_ID,
         category: "REFUND",
         code: wrong,
@@ -200,6 +233,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
 
     expect(
       await service.verify({
+        ...TEST_BINDING,
         adminTelegramUserId: ADMIN_ID,
         category: "REFUND",
         code: correct,
@@ -207,7 +241,12 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
       }),
     ).toEqual({ ok: false, code: "LOCKED_OUT" });
     expect(
-      await service.consume({ adminTelegramUserId: ADMIN_ID, category: "REFUND", now: NOW }),
+      await service.consume({
+        ...TEST_BINDING,
+        adminTelegramUserId: ADMIN_ID,
+        category: "REFUND",
+        now: NOW,
+      }),
     ).toEqual({ ok: false, code: "NOT_GRANTED" });
 
     // The counter is durable: a brand-new service instance sees the same lockout.
@@ -218,6 +257,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
     });
     expect(
       await restarted.verify({
+        ...TEST_BINDING,
         adminTelegramUserId: ADMIN_ID,
         category: "REFUND",
         code: correct,
@@ -230,6 +270,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
     expect(
       await restarted
         .verify({
+          ...TEST_BINDING,
           adminTelegramUserId: ADMIN_ID,
           category: "REFUND",
           code: codeAt(seed, Math.floor(afterWindow.getTime() / 1000)),
@@ -243,6 +284,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
     const { seed } = await enroll();
     expect(
       await service.verify({
+        ...TEST_BINDING,
         adminTelegramUserId: "987654321",
         category: "BROADCAST",
         code: codeAt(seed, NOW_SECONDS),
@@ -252,23 +294,71 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
     expect(await service.isEnrolled("987654321")).toBe(false);
   });
 
+  it("never spends a legacy category-only grant after the v2 cutover", async () => {
+    const legacyCategories = [
+      "REFUND",
+      "BULK_PRICE_CHANGE",
+      "STOCK_ADJUSTMENT",
+      "SUPPLIER_CONFIG",
+      "BROADCAST",
+    ] as const;
+    for (const [index, category] of legacyCategories.entries()) {
+      await sql`
+        insert into admin_step_up_grant
+          (id, admin_telegram_user_id, category, issued_at, expires_at)
+        values
+          (${`legacy-${index}`}, ${ADMIN_ID}, ${category}, ${NOW.toISOString()}, ${new Date(NOW.getTime() + 60_000).toISOString()})
+      `.execute(ctx.db);
+    }
+    const actionByCategory = {
+      REFUND: "wallet.refund",
+      BULK_PRICE_CHANGE: "catalog.variant.price.change",
+      STOCK_ADJUSTMENT: "inventory.stock.adjust",
+      SUPPLIER_CONFIG: "supplier.mapping.select",
+      BROADCAST: "broadcast.confirm",
+    } as const;
+    for (const category of legacyCategories) {
+      await expect(
+        service.consume({
+          ...TEST_BINDING,
+          adminTelegramUserId: ADMIN_ID,
+          category,
+          actionKey: actionByCategory[category],
+          now: NOW,
+        }),
+      ).resolves.toEqual({ ok: false, code: "NOT_GRANTED" });
+    }
+  });
+
   it("audits every attempt with only the category and the outcome", async () => {
     const { seed } = await enroll();
     const code = codeAt(seed, NOW_SECONDS);
     await service.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: ADMIN_ID,
       category: "REFUND",
       code: wrongCodeAt(seed, NOW_SECONDS),
       now: NOW,
     });
     await service.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: ADMIN_ID,
       category: "REFUND",
       code,
       now: NOW,
     });
-    await service.consume({ adminTelegramUserId: ADMIN_ID, category: "BROADCAST", now: NOW });
-    await service.consume({ adminTelegramUserId: ADMIN_ID, category: "REFUND", now: NOW });
+    await service.consume({
+      ...TEST_BINDING,
+      adminTelegramUserId: ADMIN_ID,
+      category: "BROADCAST",
+      now: NOW,
+    });
+    await service.consume({
+      ...TEST_BINDING,
+      adminTelegramUserId: ADMIN_ID,
+      category: "REFUND",
+      now: NOW,
+    });
 
     const events = await sql<{
       action: string;
@@ -311,6 +401,7 @@ describe.skipIf(!hasDocker)("admin step-up service", () => {
   it("keeps the attempt log append-only", async () => {
     const { seed } = await enroll();
     await service.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: ADMIN_ID,
       category: "REFUND",
       code: wrongCodeAt(seed, NOW_SECONDS),

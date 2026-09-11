@@ -2,7 +2,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { createAdminCallbacks, type AdminCallbacks } from "../../src/bot/callbacks/admin.js";
 import { createAdminConfirmation } from "../../src/modules/identity/admin-confirmation.js";
-import { createStepUpService } from "../../src/modules/identity/step-up.js";
+import type { AuthorizationJsonValue } from "../../src/modules/identity/authorization-payload.js";
+import {
+  createStepUpService,
+  type StepUpActionCategory,
+} from "../../src/modules/identity/step-up.js";
+import { loadSensitiveAuthorizationBinding } from "../../src/modules/identity/authorization-binding.js";
 import {
   authorizeSensitiveAdminAction,
   type SensitiveActionDeps,
@@ -34,6 +39,13 @@ const ROOT_CONFIG = { adminTelegramUserId: ROOT_ID, expectedUsername: "Quyenvjp"
 const TTL_SECONDS = 60;
 const STEP_UP_OPTIONS = { ttlSeconds: TTL_SECONDS, lockoutMinutes: 15, maxAttempts: 5 };
 const ROOT_ACTOR = { numericUserId: ROOT_ID, chatType: "private" as const };
+const TEST_BINDING = {
+  actionKey: "wallet.refund",
+  resourceType: "Order",
+  resourceId: "order-test",
+  resourceVersion: "1",
+  payloadHash: "a".repeat(64),
+};
 
 let ctx: PgTestContext;
 
@@ -173,8 +185,14 @@ function build(
 /** Enroll the root admin and mint a live grant for `category` with a real TOTP code. */
 async function grantCategory(
   seeded: Seeded,
-  category: Parameters<typeof authorizeSensitiveAdminAction>[1] extends never ? never : string,
+  category: StepUpActionCategory,
   adminId = String(ROOT_ID),
+  override?: {
+    actionKey: string;
+    resourceType: string;
+    resourceId: string;
+    requestedData?: AuthorizationJsonValue;
+  },
 ): Promise<void> {
   const { createTotpCode } = await import("../helpers/totp.js");
   const stepUp = createStepUpService(ctx.db, seeded.vault, STEP_UP_OPTIONS);
@@ -185,12 +203,42 @@ async function grantCategory(
       accountLabel: adminId,
     });
   }
+  let selected = override;
+  if (selected === undefined && category === "BROADCAST") {
+    const campaign = (
+      await sql<{ id: string }>`
+        select id from notification_campaign
+        where created_by = ${String(ROOT_ID)} and status = 'DRAFT'
+        order by created_at desc limit 1
+      `.execute(ctx.db)
+    ).rows[0];
+    if (!campaign) throw new Error("missing broadcast campaign");
+    selected = {
+      actionKey: "broadcast.confirm",
+      resourceType: "NotificationCampaign",
+      resourceId: campaign.id,
+      requestedData: { campaignId: campaign.id },
+    };
+  }
+  if (selected === undefined) {
+    selected = {
+      actionKey: "wallet.refund",
+      resourceType: "Order",
+      resourceId: seeded.orderId,
+      requestedData: { targetId: seeded.orderId },
+    };
+  }
+  const binding = await loadSensitiveAuthorizationBinding(ctx.db, selected);
   const code = await createTotpCode(seeded.vault, adminId, ctx.db);
   const verified = await stepUp.verify({
     adminTelegramUserId: adminId,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    category: category as any,
+    category: category as StepUpActionCategory,
     code,
+    actionKey: selected.actionKey,
+    resourceType: selected.resourceType,
+    resourceId: selected.resourceId,
+    resourceVersion: binding.resourceVersion,
+    payloadHash: binding.payloadHash,
   });
   if (!verified.ok) throw new Error(`grant failed: ${verified.code}`);
 }
@@ -248,7 +296,7 @@ describe.skipIf(!hasDocker)("sensitive admin actions are step-up gated", () => {
     // the copy points at enrollment rather than at a code prompt that could not succeed.
     expect(requested).toMatchObject({ ok: false, code: "STEP_UP_NOT_ENROLLED" });
     if (requested.ok) return;
-    expect(requested.message).toContain("/enroll_2fa");
+    expect(requested.message).toContain("admin:step-up enroll");
     expect(await state(seeded)).toEqual(before);
     // No confirmation was minted either: the gate runs before issuing.
     const confirmations = await sql<{ count: number }>`
@@ -260,16 +308,19 @@ describe.skipIf(!hasDocker)("sensitive admin actions are step-up gated", () => {
       select action, metadata_redacted from audit_event where action = 'admin.sensitive.denied'
     `.execute(ctx.db);
     expect(denied.rows).toHaveLength(1);
-    // `resourceType`/`resourceId` are recorded so `/verify` can bind the grant it mints to the
+    // `resourceType`/`resourceId` are recorded so the operator CLI can bind the grant it mints to the
     // object the owner was actually refused on — a category alone would authorise any object in
     // that category. They are opaque ids, so they carry no secret.
-    expect(denied.rows[0]?.metadata_redacted).toEqual({
+    expect(denied.rows[0]?.metadata_redacted).toMatchObject({
       actionKey: "wallet.refund",
       category: "REFUND",
       code: "STEP_UP_NOT_ENROLLED",
       resourceType: "Order",
       resourceId: seeded.orderId,
+      authorizationVersion: 2,
+      resourceVersion: "1",
     });
+    expect(denied.rows[0]?.metadata_redacted.payloadHash).toMatch(/^[0-9a-f]{64}$/u);
   });
 
   it("issues no grant for a wrong TOTP code, so the action stays refused", async () => {
@@ -282,6 +333,7 @@ describe.skipIf(!hasDocker)("sensitive admin actions are step-up gated", () => {
     });
 
     const wrong = await stepUp.verify({
+      ...TEST_BINDING,
       adminTelegramUserId: String(ROOT_ID),
       category: "REFUND",
       code: "000001",
@@ -344,7 +396,12 @@ describe.skipIf(!hasDocker)("sensitive admin actions are step-up gated", () => {
     const { callbacks } = build(seeded);
     const before = await state(seeded);
 
-    await grantCategory(seeded, "BROADCAST");
+    await grantCategory(seeded, "BROADCAST", String(ROOT_ID), {
+      actionKey: "broadcast.confirm",
+      resourceType: "NotificationCampaign",
+      resourceId: "missing-campaign",
+      requestedData: { campaignId: "missing-campaign" },
+    });
     const requested = await callbacks.handle({
       command: "wallet.refund",
       actor: ROOT_ACTOR,
@@ -534,7 +591,12 @@ describe.skipIf(!hasDocker)("sensitive admin actions are step-up gated", () => {
         throw new Error("mutation exploded after authorization");
       },
     });
-    await grantCategory(seeded, "REFUND");
+    await grantCategory(seeded, "REFUND", String(ROOT_ID), {
+      actionKey: "support.replacement.approve",
+      resourceType: "ReplacementCase",
+      resourceId: "replacement-case-1",
+      requestedData: { targetId: "replacement-case-1" },
+    });
 
     const requested = await callbacks.handle({
       command: "support.replacement.approve",
@@ -686,7 +748,7 @@ describe.skipIf(!hasDocker)("broadcast execution is step-up gated", () => {
       largeAudienceThreshold: 500,
       cooldownSeconds: 300,
     });
-    expect(sent).toEqual({ ok: false, stage: "CAMPAIGN", reason: "STALE_PREVIEW" });
+    expect(sent).toEqual({ ok: false, stage: "IDENTITY", code: "STEP_UP_GRANT_MISSING" });
 
     const deliveries = await sql<{ count: number }>`
       select count(*)::int as count from notification_delivery where campaign_id = ${campaignId}

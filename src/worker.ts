@@ -36,6 +36,7 @@ import { sql } from "kysely";
 import { isId, newId } from "./shared/ids/index.js";
 import { formatVnd as formatMoneyVnd, makeVnd } from "./shared/money/index.js";
 import { sealPresentedMessageCallbacks } from "./bot/callback-sealer.js";
+import { createPinnedFetch } from "./infrastructure/net/pinned-fetch.js";
 import type { CallbackTokenCodec } from "./bot/callback-codec.js";
 import type { Db } from "./infrastructure/db/transaction.js";
 import type { FulfillmentType, InventoryField } from "./modules/catalog/fulfillment-type.js";
@@ -44,6 +45,7 @@ import type {
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
 import type { AdminCallbacks } from "./bot/callbacks/admin.js";
+import type { AuthorizationJsonValue } from "./modules/identity/authorization-payload.js";
 import type {
   SensitiveActionDeps,
   SensitiveActionKey,
@@ -51,6 +53,7 @@ import type {
 } from "./modules/identity/sensitive-action.js";
 import {
   authorizeSensitiveAdminAction,
+  isSensitiveActionKey,
   isStepUpActionCategory,
   SENSITIVE_ACTION_POLICY,
   SensitiveAuthorizationRefusedError,
@@ -1081,6 +1084,7 @@ export async function enqueueBroadcastFromOwner(input: {
     resourceType: "NotificationCampaign",
     resourceId: input.campaignId,
     correlationId: input.correlationId,
+    requestedData: { campaignId: input.campaignId },
     consumeGrant: true,
   });
   if (!authorization.ok) return { ok: false, stage: "IDENTITY", code: authorization.code };
@@ -1914,16 +1918,23 @@ async function bootstrap(): Promise<void> {
    * partial or edge-broken deploy still reports the API's real commit instead of "unreachable".
    */
   async function readApiBuildCommit(): Promise<string> {
+    const publicBase = new URL(config.APP_BASE_URL);
+    const guardedFetch = createPinnedFetch({
+      allowedHosts: [publicBase.hostname, "127.0.0.1"],
+      allowedPorts: [
+        config.HTTP_PORT,
+        publicBase.port ? Number(publicBase.port) : publicBase.protocol === "https:" ? 443 : 80,
+      ],
+      allowInsecureLoopback: true,
+      timeoutMs: 2_000,
+    });
     const targets = [
-      { url: `http://${config.HTTP_HOST}:${config.HTTP_PORT}/health`, via: "local" },
+      { url: `http://127.0.0.1:${config.HTTP_PORT}/health`, via: "local" },
       { url: `${config.APP_BASE_URL}/health`, via: "public" },
     ];
     for (const target of targets) {
       try {
-        const controller = new AbortController();
-        const timer = setTimeout(() => controller.abort(), 2_000);
-        const response = await fetch(target.url, { signal: controller.signal });
-        clearTimeout(timer);
+        const response = await guardedFetch(target.url);
         if (!response.ok) continue;
         const body = (await response.json()) as { commit?: unknown };
         if (typeof body.commit === "string")
@@ -2067,6 +2078,7 @@ async function bootstrap(): Promise<void> {
       actionKey: SensitiveActionKey;
       resourceType: string;
       resourceId: string;
+      requestedData?: AuthorizationJsonValue;
       consumeGrant: boolean;
     },
   ) =>
@@ -2079,6 +2091,7 @@ async function bootstrap(): Promise<void> {
       },
       correlationId: input.correlationId,
       ...action,
+      requestedData: action.requestedData ?? { targetId: action.resourceId },
     });
   const adminCallbacks = rootIdentity
     ? createAdminCallbacks({
@@ -3939,6 +3952,19 @@ async function bootstrap(): Promise<void> {
             text: "Mapping nhà cung cấp không còn hợp lệ.",
             buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
           };
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "supplier.mapping.select",
+          resourceType: "SupplierSku",
+          resourceId: input.supplierSkuId,
+          requestedData: { variantId, supplierSkuId: input.supplierSkuId },
+          consumeGrant: true,
+        });
+        if (!authorization.ok)
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "supplier.mapping.select",
+            category: "SUPPLIER_CONFIG",
+          });
         const result = await selectVariantSupplierMapping({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
@@ -3959,6 +3985,19 @@ async function bootstrap(): Promise<void> {
       },
       async supplierClear(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "supplier.mapping.clear",
+          resourceType: "ProductVariant",
+          resourceId: input.variantId,
+          requestedData: { variantId: input.variantId },
+          consumeGrant: true,
+        });
+        if (!authorization.ok)
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "supplier.mapping.clear",
+            category: "SUPPLIER_CONFIG",
+          });
         const result = await clearVariantSupplierMapping({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
@@ -3989,6 +4028,19 @@ async function bootstrap(): Promise<void> {
             text: "Mapping nhà cung cấp không còn hợp lệ.",
             buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
           };
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "supplier.mapping.verify",
+          resourceType: "SupplierSku",
+          resourceId: input.supplierSkuId,
+          requestedData: { variantId, supplierSkuId: input.supplierSkuId },
+          consumeGrant: true,
+        });
+        if (!authorization.ok)
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "supplier.mapping.verify",
+            category: "SUPPLIER_CONFIG",
+          });
         const result = await markSupplierSkuManuallyVerified({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
@@ -4527,6 +4579,18 @@ async function bootstrap(): Promise<void> {
           "Admin warranty",
         );
         if (denied) return presentAdminDenied(denied);
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "warranty.replacement.approve",
+          resourceType: "WarrantyClaim",
+          resourceId: input.claimId,
+          consumeGrant: true,
+        });
+        if (!authorization.ok)
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "warranty.replacement.approve",
+            category: "DELIVERY_REISSUE",
+          });
         const result = await approveClaimReplacement({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -4633,18 +4697,6 @@ async function bootstrap(): Promise<void> {
           "Admin warranty",
         );
         if (denied) return presentAdminDenied(denied);
-        const authorization = await authorizeSensitiveFor(input, {
-          actionKey: "warranty.refund.adjust",
-          resourceType: "WarrantyClaim",
-          resourceId: input.claimId,
-          consumeGrant: false,
-        });
-        if (!authorization.ok)
-          return presentSensitiveRefusal({
-            code: authorization.code,
-            action: "warranty.refund.adjust",
-            category: "REFUND",
-          });
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
         // One pending prompt at a time: an older unexpired row would otherwise claim the next
@@ -6110,6 +6162,12 @@ async function bootstrap(): Promise<void> {
           // so a live prompt cannot swallow the factor submission, and behind the same audited root
           // gate as every other owner entry point.
           if (input.text.startsWith("/verify") || input.text.startsWith("/enroll_2fa")) {
+            if (config.NODE_ENV === "production") {
+              return {
+                buttons: [[{ text: "⚙️ Quản trị", callbackData: "admin:menu" }]],
+                text: "Xác minh bảo mật phải thực hiện trên operator CLI, không qua Telegram.",
+              };
+            }
             const gated = await requireRootAdmin(
               adminCallbacks,
               input,
@@ -6153,13 +6211,19 @@ async function bootstrap(): Promise<void> {
             // grant can only be minted for the action the owner actually tried to take — never for
             // every category at once. The window is the lockout window: an older attempt is stale.
             const requested = await sql<{
+              action_key: string | null;
               category: string | null;
               resource_type: string | null;
               resource_id: string | null;
+              resource_version: string | null;
+              payload_hash: string | null;
             }>`
-              select metadata_redacted->>'category' as category,
+              select metadata_redacted->>'actionKey' as action_key,
+                     metadata_redacted->>'category' as category,
                      metadata_redacted->>'resourceType' as resource_type,
-                     metadata_redacted->>'resourceId' as resource_id
+                     metadata_redacted->>'resourceId' as resource_id,
+                     metadata_redacted->>'resourceVersion' as resource_version,
+                     metadata_redacted->>'payloadHash' as payload_hash
               from audit_event
               where actor_id = ${input.telegramUserId}
                 and action = 'admin.sensitive.denied'
@@ -6168,8 +6232,18 @@ async function bootstrap(): Promise<void> {
               order by occurred_at desc, id desc
               limit 1
             `.execute(dbHandle.db);
-            const category = requested.rows[0]?.category;
-            if (!category || !isStepUpActionCategory(category)) {
+            const requestedRow = requested.rows[0];
+            const category = requestedRow?.category;
+            if (
+              !category ||
+              !isStepUpActionCategory(category) ||
+              !requestedRow?.action_key ||
+              !isSensitiveActionKey(requestedRow.action_key) ||
+              !requestedRow.resource_type ||
+              !requestedRow.resource_id ||
+              !requestedRow.resource_version ||
+              !requestedRow.payload_hash
+            ) {
               return {
                 ...menu,
                 text: "Chưa có thao tác nào đang chờ xác minh. Hãy mở lại hành động cần làm.",
@@ -6179,16 +6253,11 @@ async function bootstrap(): Promise<void> {
               adminTelegramUserId: input.telegramUserId,
               category,
               code,
-              // Bind the grant to the object the owner was actually refused on, taken from
-              // the audit row the layer wrote. Without this a category grant would authorise
-              // a change to ANY object in that category, which is a category check rather
-              // than a transaction authorization.
-              ...(requested.rows[0]?.resource_type != null && requested.rows[0]?.resource_id != null
-                ? {
-                    resourceType: requested.rows[0].resource_type,
-                    resourceId: requested.rows[0].resource_id,
-                  }
-                : {}),
+              actionKey: requestedRow.action_key,
+              resourceType: requestedRow.resource_type,
+              resourceId: requestedRow.resource_id,
+              resourceVersion: requestedRow.resource_version,
+              payloadHash: requestedRow.payload_hash,
             });
             if (!verified.ok) {
               // Never echo the submitted code, and never say which digit was wrong.
@@ -6218,7 +6287,10 @@ async function bootstrap(): Promise<void> {
                 };
               }
               if (verified.code === "NOT_ENROLLED") {
-                return { ...menu, text: "Chưa thiết lập xác minh bảo mật. Gửi /enroll_2fa." };
+                return {
+                  ...menu,
+                  text: "Chưa thiết lập xác minh bảo mật. Chạy npm run admin:step-up enroll trên operator host.",
+                };
               }
               return { ...menu, text: "❌ Mã xác minh không đúng. Vui lòng thử lại." };
             }
@@ -6362,16 +6434,14 @@ async function bootstrap(): Promise<void> {
                 buttons: [[{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }]],
               };
             }
-            // Only now is the prompt spent.
-            await sql`
-              delete from admin_callback_state
-              where admin_telegram_user_id = ${input.telegramUserId}
-                and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
-            `.execute(dbHandle.db);
             const authorization = await authorizeSensitiveFor(input, {
               actionKey: "warranty.refund.adjust",
               resourceType: "WarrantyClaim",
               resourceId: claimId,
+              requestedData: {
+                amountVnd: adjusted.amountVnd.toString(),
+                reason: adjusted.reason,
+              },
               consumeGrant: true,
             });
             if (!authorization.ok)
@@ -6380,6 +6450,11 @@ async function bootstrap(): Promise<void> {
                 action: "warranty.refund.adjust",
                 category: "REFUND",
               });
+            await sql`
+              delete from admin_callback_state
+              where admin_telegram_user_id = ${input.telegramUserId}
+                and kind = 'WARRANTY_REFUND_ADJUST_PROMPT'
+            `.execute(dbHandle.db);
             const result = await approveClaimRefund({
               db: dbHandle.db,
               actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },

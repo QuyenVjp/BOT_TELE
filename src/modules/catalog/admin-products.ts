@@ -6,12 +6,10 @@ import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { guardRootAction } from "../../bot/middleware/root-admin.js";
 import {
   authorizeSensitiveAdminAction,
-  SENSITIVE_ACTION_POLICY,
   SensitiveAuthorizationRefusedError,
   type SensitiveActionDeps,
   type SensitiveActionKey,
 } from "../identity/sensitive-action.js";
-import type { StepUpActionCategory } from "../identity/step-up.js";
 import { newId } from "../../shared/ids/index.js";
 import { isValidFileArtifactRegistrationMetadata } from "../digital-goods/file-artifacts.js";
 import type { FulfillmentType, InventoryField } from "./fulfillment-type.js";
@@ -423,46 +421,6 @@ export async function createAdminProduct(input: AdminProductInput): Promise<Admi
   });
 }
 
-export async function updateAdminVariantPrice(
-  db: Db,
-  actor: RootActor,
-  config: RootAdminConfig,
-  variantId: string,
-  priceVnd: bigint,
-  reason: string,
-  correlationId: string,
-): Promise<boolean> {
-  if (priceVnd < 0n || !reason.trim() || reason.length > 500) throw new Error("INVALID_INPUT");
-  const gate = await guardRootAction(db, {
-    actor,
-    config,
-    correlationId,
-    action: "product.price_changed",
-    targetType: "ProductVariant",
-    targetId: variantId,
-  });
-  if (!gate.ok) throw new Error(gate.reason);
-  return withTransaction(db, async (trx) => {
-    const result = await sql<{
-      id: string;
-    }>`update product_variant set price_vnd = ${priceVnd.toString()}, updated_at = now(), version = version + 1 where id = ${variantId} returning id`.execute(
-      trx,
-    );
-    if (!result.rows[0]) return false;
-    await appendAuditEvent(trx, {
-      actorType: "ROOT_ADMIN",
-      actorId: String(actor.numericUserId),
-      action: "product.price_changed",
-      targetType: "ProductVariant",
-      targetId: variantId,
-      reason: reason.trim(),
-      correlationId,
-      metadataRedacted: { priceVnd: priceVnd.toString() },
-    });
-    return true;
-  });
-}
-
 function validateVariantCreate(input: AdminVariantCreateInput): void {
   if (!input.productId.trim()) throw new Error("INVALID_PRODUCT");
   if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(input.sku)) throw new Error("INVALID_SKU");
@@ -534,32 +492,33 @@ async function authorizeVariantMoneyFields(input: AdminVariantUpdateInput): Prom
   if (!changesPrice && !changesDeposit) return;
   if (!input.sensitiveDeps) throw new Error("STEP_UP_DEPS_MISSING");
 
-  // One grant per CATEGORY, not per action key. Both money keys share
-  // BULK_PRICE_CHANGE, and a single edit can legitimately touch a price and a deposit at
-  // once (the wizard submits them together). Consuming per key would demand two grants
-  // for one owner approval — an operation that would always fail, since a grant is
-  // single-use. Deduping by category keeps the gate strict about what kind of change is
-  // being approved without inventing a second factor the owner cannot supply.
-  const actionKeys: SensitiveActionKey[] = [
-    ...(changesPrice ? (["catalog.variant.price.change"] as const) : []),
-    ...(changesDeposit ? (["catalog.variant.deposit.change"] as const) : []),
-  ];
-  const consumedCategories = new Set<StepUpActionCategory>();
-
-  for (const actionKey of actionKeys) {
-    const category = SENSITIVE_ACTION_POLICY[actionKey]!;
-    if (consumedCategories.has(category)) continue;
-    consumedCategories.add(category);
-    const authorization = await authorizeSensitiveAdminAction(input.sensitiveDeps, {
-      actor: input.actor,
-      actionKey,
-      resourceType: "ProductVariant",
-      resourceId: input.variantId,
-      correlationId: input.correlationId,
-      consumeGrant: true,
-    });
-    if (!authorization.ok) throw new SensitiveAuthorizationRefusedError(authorization.code);
-  }
+  const actionKey: SensitiveActionKey =
+    changesPrice && changesDeposit
+      ? "catalog.variant.commercial.change"
+      : changesPrice
+        ? "catalog.variant.price.change"
+        : "catalog.variant.deposit.change";
+  const requestedData = {
+    productId: input.productId,
+    variantId: input.variantId,
+    expectedVersion: input.expectedVersion,
+    ...(input.priceVnd === undefined ? {} : { priceVnd: input.priceVnd.toString() }),
+    ...(input.compareAtPriceVnd === undefined
+      ? {}
+      : { compareAtPriceVnd: input.compareAtPriceVnd?.toString() ?? null }),
+    ...(input.depositAmountVnd === undefined ? {} : { depositAmountVnd: input.depositAmountVnd }),
+    ...(input.preorderEnabled === undefined ? {} : { preorderEnabled: input.preorderEnabled }),
+  } as const;
+  const authorization = await authorizeSensitiveAdminAction(input.sensitiveDeps, {
+    actor: input.actor,
+    actionKey,
+    resourceType: "ProductVariant",
+    resourceId: input.variantId,
+    correlationId: input.correlationId,
+    requestedData,
+    consumeGrant: true,
+  });
+  if (!authorization.ok) throw new SensitiveAuthorizationRefusedError(authorization.code);
 }
 
 async function authorizeVariant(input: AdminVariantMutationInput, action: string): Promise<void> {

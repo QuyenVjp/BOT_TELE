@@ -1958,10 +1958,10 @@ export function presentAdminDenied(reason: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT"): 
 /** Deterministic step-up challenge copy, shared with the callback refusal message. */
 export const STEP_UP_CHALLENGE_TEXT = "🔐 Thao tác nhạy cảm cần xác minh bảo mật.";
 export const STEP_UP_CHALLENGE_INSTRUCTION =
-  "Gửi /verify <mã 6 số> để lấy quyền, sau đó mở lại và xác nhận hành động.";
+  "Chạy npm run admin:step-up verify trên operator host, sau đó mở lại và xác nhận hành động.";
 
 export const STEP_UP_ENROLL_INSTRUCTION =
-  "Gửi /enroll_2fa để thiết lập, sau đó thực hiện lại hành động.";
+  "Chạy npm run admin:step-up enroll trên operator host, sau đó thực hiện lại hành động.";
 export const STEP_UP_LOCKED_OUT_TEXT =
   "Xác minh bảo mật đang tạm khoá sau nhiều lần nhập sai. Vui lòng thử lại sau.";
 

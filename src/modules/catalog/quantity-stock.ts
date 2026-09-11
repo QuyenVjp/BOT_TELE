@@ -188,6 +188,12 @@ export async function adjustQuantityStock(input: {
 }): Promise<QuantityStockAdjustmentResult> {
   const auth = authorizeRootAction(input.actor, input.config);
   if (!auth.ok) return { ok: false, code: auth.reason };
+  if (!Number.isInteger(input.delta) || input.delta === 0 || Math.abs(input.delta) > 1_000_000)
+    return { ok: false, code: "INVALID_DELTA" };
+  if (!Number.isInteger(input.expectedStockVersion) || input.expectedStockVersion < 1)
+    return { ok: false, code: "WRONG_VERSION" };
+  const reason = input.reason.trim().slice(0, 200);
+  if (!reason) return { ok: false, code: "INVALID_DELTA" };
   // Second factor for inventory value. A missing deps object is a programming error, and a
   // refused grant throws before the UPDATE runs, so neither can silently downgrade this.
   if (!input.sensitiveDeps) throw new Error("STEP_UP_DEPS_MISSING");
@@ -197,15 +203,15 @@ export async function adjustQuantityStock(input: {
     resourceType: "ProductVariant",
     resourceId: input.variantId,
     correlationId: input.correlationId,
+    requestedData: {
+      variantId: input.variantId,
+      delta: input.delta,
+      expectedStockVersion: input.expectedStockVersion,
+      idempotencyKey: input.idempotencyKey,
+    },
     consumeGrant: true,
   });
   if (!authorized.ok) throw new SensitiveAuthorizationRefusedError(authorized.code);
-  if (!Number.isInteger(input.delta) || input.delta === 0 || Math.abs(input.delta) > 1_000_000)
-    return { ok: false, code: "INVALID_DELTA" };
-  if (!Number.isInteger(input.expectedStockVersion) || input.expectedStockVersion < 1)
-    return { ok: false, code: "WRONG_VERSION" };
-  const reason = input.reason.trim().slice(0, 200);
-  if (!reason) return { ok: false, code: "INVALID_DELTA" };
 
   return withTransaction(input.db, async (trx) => {
     const priorLedger = await sql<{
