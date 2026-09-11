@@ -236,8 +236,7 @@ function buildEditReplyMarkup(replyMarkup: SendReplyMarkup): EditReplyMarkup {
  * and the keyboard is the part that survives navigation. It therefore rides a second,
  * deliberately minimal message, and only when a NEW message is created (never on an edit).
  */
-const PERSISTENT_KEYBOARD_PROMPT =
-  "⌨️ Bàn phím nhanh ở dưới: Mua hàng · Đơn hàng · Tài khoản · Nạp ví · Bảo hành · Hỗ trợ";
+const PERSISTENT_KEYBOARD_PROMPT = ".";
 
 /** Markup for the follow-up keyboard message, or null when this screen needs none. */
 function pendingReplyKeyboardMarkup(message: PresentedMessage): ReplyKeyboardMarkup | null {
@@ -259,6 +258,17 @@ async function sendPersistentKeyboard(
       ...(input.messageThreadId ? { message_thread_id: input.messageThreadId } : {}),
     }),
   );
+  if (
+    result &&
+    typeof result === "object" &&
+    "message_id" in result &&
+    typeof (result as { message_id: unknown }).message_id === "number" &&
+    typeof api.deleteMessage === "function"
+  ) {
+    await callTelegram("deleteMessage", () =>
+      api.deleteMessage(input.chatId, (result as { message_id: number }).message_id),
+    ).catch(() => undefined);
+  }
   traceTelegram(trace, {
     method: "sendMessage",
     persistent_keyboard: true,

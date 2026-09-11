@@ -147,6 +147,7 @@ describe("createGrammyResponder admin keyboards", () => {
       }),
       sendPhoto: vi.fn(),
       editMessageMedia: vi.fn(),
+      deleteMessage: vi.fn(async () => true),
     };
     const responder = createGrammyResponder(BOT_TOKEN, api as never);
     const message = presentStorefront({ actorName: "An", isRootAdmin: false });
@@ -154,6 +155,7 @@ describe("createGrammyResponder admin keyboards", () => {
     await responder.send({ chatId: "customer-chat", messageId: null, message });
 
     expect(sendCalls).toHaveLength(2);
+    expect(api.deleteMessage).toHaveBeenCalledWith("customer-chat", 4);
     const keyboardOptions = sendCalls[1]?.at(-1) as {
       reply_markup?: {
         keyboard?: Array<Array<{ text: string }>>;
