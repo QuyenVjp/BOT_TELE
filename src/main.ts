@@ -34,7 +34,10 @@ async function main(): Promise<void> {
   const { createPostgresSePayInbox } = await import("./infrastructure/inbox/sepay.js");
   const { createSePayIngressHandler } = await import("./modules/payments/sepay-ingress.js");
 
-  const dbHandle = createDb({ connectionString: config.DATABASE_URL });
+  const dbHandle = createDb({
+    connectionString: config.DATABASE_URL,
+    onPoolError: (error) => logger.error({ err: error.message }, "database pool error"),
+  });
   const vault = createVault({
     driver: config.VAULT_DRIVER,
     endpoint: config.VAULT_ENDPOINT,

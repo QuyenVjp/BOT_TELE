@@ -1564,7 +1564,10 @@ async function bootstrap(): Promise<void> {
   const { presentAdminManualTaskDetail, presentAdminManualTasks } =
     await import("./bot/presenters/manual-fulfillment.js");
 
-  const dbHandle = createDb({ connectionString: config.DATABASE_URL });
+  const dbHandle = createDb({
+    connectionString: config.DATABASE_URL,
+    onPoolError: (error) => logger.error({ err: error.message }, "database pool error"),
+  });
   const vault = createVault({
     driver: config.VAULT_DRIVER,
     endpoint: config.VAULT_ENDPOINT,
