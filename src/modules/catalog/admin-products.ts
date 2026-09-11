@@ -4,6 +4,14 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { guardRootAction } from "../../bot/middleware/root-admin.js";
+import {
+  authorizeSensitiveAdminAction,
+  SENSITIVE_ACTION_POLICY,
+  SensitiveAuthorizationRefusedError,
+  type SensitiveActionDeps,
+  type SensitiveActionKey,
+} from "../identity/sensitive-action.js";
+import type { StepUpActionCategory } from "../identity/step-up.js";
 import { newId } from "../../shared/ids/index.js";
 import { isValidFileArtifactRegistrationMetadata } from "../digital-goods/file-artifacts.js";
 import type { FulfillmentType, InventoryField } from "./fulfillment-type.js";
@@ -114,6 +122,13 @@ export interface AdminVariantCreateInput extends AdminVariantMutationInput {
 }
 
 export interface AdminVariantUpdateInput extends AdminVariantMutationInput {
+  /**
+   * Step-up deps for the money-bearing fields. Optional so the content-only callers
+   * (a name or a warranty length) keep working — but when a price, a compare-at price,
+   * a deposit or the preorder switch is present, a missing `sensitiveDeps` is a refusal,
+   * never a silent downgrade to single-factor.
+   */
+  sensitiveDeps?: SensitiveActionDeps;
   expectedVersion: number;
   productId: string;
   name?: string;
@@ -501,6 +516,52 @@ function validateVariantUpdate(input: AdminVariantUpdateInput): void {
   if (!input.reason.trim() || input.reason.length > 500) throw new Error("INVALID_REASON");
 }
 
+/**
+ * Second factor for the fields that decide what a customer pays.
+ *
+ * `authorizeVariant` above proves the actor is the owner; that is one factor. A price or a
+ * deposit is the number the shop charges, so it takes a step-up grant bound to THIS kind of
+ * change. Which key applies is derived from the fields actually present, so renaming a
+ * variant stays a single-factor edit while repricing it does not.
+ *
+ * Fail-closed in every direction: a money field with no deps is refused, and a refused
+ * grant throws before the UPDATE runs.
+ */
+async function authorizeVariantMoneyFields(input: AdminVariantUpdateInput): Promise<void> {
+  const changesPrice = input.priceVnd !== undefined || input.compareAtPriceVnd !== undefined;
+  const changesDeposit =
+    input.depositAmountVnd !== undefined || input.preorderEnabled !== undefined;
+  if (!changesPrice && !changesDeposit) return;
+  if (!input.sensitiveDeps) throw new Error("STEP_UP_DEPS_MISSING");
+
+  // One grant per CATEGORY, not per action key. Both money keys share
+  // BULK_PRICE_CHANGE, and a single edit can legitimately touch a price and a deposit at
+  // once (the wizard submits them together). Consuming per key would demand two grants
+  // for one owner approval — an operation that would always fail, since a grant is
+  // single-use. Deduping by category keeps the gate strict about what kind of change is
+  // being approved without inventing a second factor the owner cannot supply.
+  const actionKeys: SensitiveActionKey[] = [
+    ...(changesPrice ? (["catalog.variant.price.change"] as const) : []),
+    ...(changesDeposit ? (["catalog.variant.deposit.change"] as const) : []),
+  ];
+  const consumedCategories = new Set<StepUpActionCategory>();
+
+  for (const actionKey of actionKeys) {
+    const category = SENSITIVE_ACTION_POLICY[actionKey]!;
+    if (consumedCategories.has(category)) continue;
+    consumedCategories.add(category);
+    const authorization = await authorizeSensitiveAdminAction(input.sensitiveDeps, {
+      actor: input.actor,
+      actionKey,
+      resourceType: "ProductVariant",
+      resourceId: input.variantId,
+      correlationId: input.correlationId,
+      consumeGrant: true,
+    });
+    if (!authorization.ok) throw new SensitiveAuthorizationRefusedError(authorization.code);
+  }
+}
+
 async function authorizeVariant(input: AdminVariantMutationInput, action: string): Promise<void> {
   const gate = await guardRootAction(input.db, {
     actor: input.actor,
@@ -598,6 +659,7 @@ export async function createAdminVariant(
 export async function updateAdminVariant(input: AdminVariantUpdateInput): Promise<boolean> {
   validateVariantUpdate(input);
   await authorizeVariant(input, "product.variant_updated");
+  await authorizeVariantMoneyFields(input);
   return withTransaction(input.db, async (trx) => {
     const result = await sql<{ id: string }>`
       update product_variant

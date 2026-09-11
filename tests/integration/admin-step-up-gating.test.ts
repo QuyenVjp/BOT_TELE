@@ -260,10 +260,15 @@ describe.skipIf(!hasDocker)("sensitive admin actions are step-up gated", () => {
       select action, metadata_redacted from audit_event where action = 'admin.sensitive.denied'
     `.execute(ctx.db);
     expect(denied.rows).toHaveLength(1);
+    // `resourceType`/`resourceId` are recorded so `/verify` can bind the grant it mints to the
+    // object the owner was actually refused on — a category alone would authorise any object in
+    // that category. They are opaque ids, so they carry no secret.
     expect(denied.rows[0]?.metadata_redacted).toEqual({
       actionKey: "wallet.refund",
       category: "REFUND",
       code: "STEP_UP_NOT_ENROLLED",
+      resourceType: "Order",
+      resourceId: seeded.orderId,
     });
   });
 

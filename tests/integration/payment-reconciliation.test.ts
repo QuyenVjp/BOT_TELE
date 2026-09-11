@@ -100,6 +100,17 @@ function providerTxn(f: Fixture, over: Partial<PaymentEvidence> = {}): VerifiedS
   });
 }
 
+let webhookSequence = 92_700;
+
+/**
+ * Webhook surface fixture: SePay's webhook identifies a transaction with an
+ * INTEGER id, which is what the alias table records as `webhook_legacy_id`.
+ */
+function webhookTxn(f: Fixture, over: Partial<PaymentEvidence> = {}): VerifiedSePayEvidence {
+  webhookSequence += 1;
+  return providerTxn(f, { providerTransactionId: String(webhookSequence), ...over });
+}
+
 /** A port whose backing list is fixed for the test. */
 function portOf(txns: VerifiedSePayEvidence[]): SePayReconciliationPort {
   return {
@@ -107,6 +118,20 @@ function portOf(txns: VerifiedSePayEvidence[]): SePayReconciliationPort {
       return Promise.resolve(txns);
     },
   };
+}
+
+async function bankTransactionCount(): Promise<number> {
+  const r = await sql<{
+    count: string;
+  }>`select count(*)::text as count from bank_transaction`.execute(ctx.db);
+  return Number(r.rows[0]?.count);
+}
+
+async function discrepancyCount(): Promise<number> {
+  const r = await sql<{
+    count: string;
+  }>`select count(*)::text as count from discrepancy`.execute(ctx.db);
+  return Number(r.rows[0]?.count);
 }
 
 async function orderStatus(orderId: string): Promise<string | undefined> {
@@ -173,20 +198,55 @@ describe("SePay reconciliation (FR-012)", () => {
 
   it("is a no-op when the webhook already settled the transaction", async () => {
     const f = await seedPayableOrder();
-    const txn = providerTxn(f);
-    // Webhook path settled it first.
-    await applyPaymentEvidence(ctx.db, txn);
+    const at = new Date();
+    const reference = "FT-" + newId().slice(-6);
+    // ONE physical transfer, two surfaces: the webhook identifies it by integer
+    // id, reconciliation reads the same transfer from API v2 (a UUID). Passing
+    // one shared object to both paths — as this test used to — proved nothing.
+    const webhook = webhookTxn(f, { reference, transactedAt: at });
+    const api = providerTxn(f, { reference, transactedAt: new Date(at.getTime() + 1_000) });
+
+    await applyPaymentEvidence(ctx.db, webhook);
     expect(await settledCount()).toBe(1);
 
-    // Reconciliation sees the same provider txn id → already present, no double effect.
+    // Reconciliation sees the same transfer on the other surface → already
+    // present, no second canonical row, no double effect.
     const summary = await reconcileSePay(ctx.db, {
-      port: portOf([txn]),
+      port: portOf([api]),
       windowFromSec: 0,
       windowToSec: Math.floor(Date.now() / 1000),
     });
     expect(summary.alreadyPresent).toBe(1);
     expect(summary.recovered).toBe(0);
+    expect(summary.ambiguousCorrelations).toBe(0);
     expect(await settledCount()).toBe(1);
+    expect(await bankTransactionCount()).toBe(1);
+    expect(await discrepancyCount()).toBe(0);
+  });
+
+  it("is a no-op when API v2 already settled the transaction (reverse order)", async () => {
+    const f = await seedPayableOrder();
+    const at = new Date();
+    const reference = "FT-" + newId().slice(-6);
+    const api = providerTxn(f, { reference, transactedAt: at });
+    const webhook = webhookTxn(f, { reference, transactedAt: new Date(at.getTime() + 1_000) });
+
+    // Reconciliation recovered it first, then the delayed webhook arrives.
+    const first = await reconcileSePay(ctx.db, {
+      port: portOf([api]),
+      windowFromSec: 0,
+      windowToSec: Math.floor(Date.now() / 1000),
+    });
+    expect(first.recovered).toBe(1);
+    expect(await applyPaymentEvidence(ctx.db, webhook)).toMatchObject({
+      ok: true,
+      kind: "ALREADY_APPLIED",
+    });
+
+    expect(await bankTransactionCount()).toBe(1);
+    expect(await settledCount()).toBe(1);
+    expect(await discrepancyCount()).toBe(0);
+    expect(await orderStatus(f.orderId)).toBe("PAID");
   });
 
   it("cannot bypass verification — a mismatched provider row becomes a discrepancy", async () => {

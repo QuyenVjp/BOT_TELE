@@ -13,7 +13,11 @@ import { applyPaymentEvidence, type ApplyEvidenceResult } from "./service.js";
  * NEVER bypass those rules or silently mark an order paid. Because the settlement
  * service dedupes by provider transaction id and enforces exactly-once effects,
  * re-running reconciliation is safe: a transaction the webhook already recorded
- * comes back as `ALREADY_APPLIED`, and a mismatch becomes a Discrepancy.
+ * comes back as `ALREADY_APPLIED`, and a mismatch becomes a Discrepancy. The
+ * webhook integer and the API v2 UUID for one transfer resolve to the same
+ * canonical row, so a transfer first seen on either surface is already present
+ * on the other. A transfer that matches several rows is counted in
+ * `ambiguousCorrelations` and left for a human.
  *
  * SePay API v2 documents page/per_page transaction lists. It also documents
  * `since_id` as a created-after UUID cursor, which is not compatible with our
@@ -206,6 +210,13 @@ export interface ReconcileSummary {
   scanned: number;
   recovered: number;
   alreadyPresent: number;
+  /**
+   * Arrivals that could not be attributed to one canonical bank_transaction:
+   * two rows already shared the transfer's cross-source correlation key. Counted
+   * separately from `discrepancies` (nothing is unmatched) and from
+   * `alreadyPresent` (a human must resolve it).
+   */
+  ambiguousCorrelations: number;
   discrepancies: number;
   throttled: number;
   errors: number;
@@ -243,6 +254,7 @@ export async function reconcileSePay(db: Db, options: ReconcileOptions): Promise
     scanned: 0,
     recovered: 0,
     alreadyPresent: 0,
+    ambiguousCorrelations: 0,
     discrepancies: 0,
     throttled: Math.max(0, fetched.length - txns.length),
     errors: 0,
@@ -276,6 +288,9 @@ export async function reconcileSePay(db: Db, options: ReconcileOptions): Promise
         break;
       case "ALREADY_APPLIED":
         summary.alreadyPresent += 1;
+        break;
+      case "AMBIGUOUS_CORRELATION":
+        summary.ambiguousCorrelations += 1;
         break;
       case "DISCREPANCY":
         summary.discrepancies += 1;

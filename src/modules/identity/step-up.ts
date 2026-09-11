@@ -34,6 +34,7 @@ export type StepUpActionCategory =
   | "SUPPLIER_CONFIG"
   | "DELIVERY_REISSUE"
   | "BULK_PRICE_CHANGE"
+  | "STOCK_ADJUSTMENT"
   | "PERMISSION_CHANGE"
   | "SECURITY_CONFIG"
   | "BROADCAST";
@@ -55,17 +56,31 @@ export interface StepUpService {
     accountLabel: string;
   }): Promise<{ otpauthUri: string }>;
   isEnrolled(adminTelegramUserId: string): Promise<boolean>;
-  /** Verifies the code, enforces lockout, and returns a grant on success. */
+  /**
+   * Verifies the code, enforces lockout, and returns a grant on success.
+   *
+   * `resourceType`/`resourceId` bind the grant to the exact object the owner looked at.
+   * They are optional so the development/test posture (step-up off) is unchanged, but when
+   * supplied the grant can only be consumed for that same object — a category check alone
+   * would let one approval authorise a change to a different variant.
+   */
   verify(input: {
     adminTelegramUserId: string;
     category: StepUpActionCategory;
     code: string;
+    resourceType?: string;
+    resourceId?: string;
     now?: Date;
   }): Promise<{ ok: true; grant: StepUpGrant } | { ok: false; code: StepUpFailureCode }>;
-  /** Consumes a live grant for EXACTLY this admin + category, or refuses. */
+  /**
+   * Consumes a live grant for EXACTLY this admin + category, and for this object when the
+   * grant carries a binding.
+   */
   consume(input: {
     adminTelegramUserId: string;
     category: StepUpActionCategory;
+    resourceType?: string;
+    resourceId?: string;
     now?: Date;
   }): Promise<{ ok: true } | { ok: false; code: StepUpFailureCode }>;
 }
@@ -98,6 +113,7 @@ const STEP_UP_CATEGORY: Record<string, true> = {
   SUPPLIER_CONFIG: true,
   DELIVERY_REISSUE: true,
   BULK_PRICE_CHANGE: true,
+  STOCK_ADJUSTMENT: true,
   PERMISSION_CHANGE: true,
   SECURITY_CONFIG: true,
   BROADCAST: true,
@@ -353,10 +369,12 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
         const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
         await sql`
           insert into admin_step_up_grant
-            (id, admin_telegram_user_id, category, issued_at, expires_at)
+            (id, admin_telegram_user_id, category, issued_at, expires_at,
+             resource_type, resource_id)
           values
             (${newId()}, ${adminId}, ${input.category}, ${now.toISOString()},
-             ${expiresAt.toISOString()})
+             ${expiresAt.toISOString()}, ${input.resourceType ?? null},
+             ${input.resourceId ?? null})
         `.execute(trx);
         await appendStepUpAudit(trx, {
           adminTelegramUserId: adminId,
@@ -389,12 +407,21 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
       return withTransaction(db, async (trx) => {
         // `for update` makes the single-use rule race-proof: a concurrent
         // consumer blocks here until the row is already marked consumed.
+        // A grant minted for an object can only be spent on that object. The predicate is
+        // written so an UNBOUND grant (resource_id null, the dev/test posture) still
+        // matches: the owner's approval of "a price change" is narrower when the grant says
+        // which variant, never wider.
+        const boundToCaller =
+          input.resourceType !== undefined && input.resourceId !== undefined
+            ? sql`(resource_id is null or (resource_type = ${input.resourceType} and resource_id = ${input.resourceId}))`
+            : sql`resource_id is null`;
         const live = await sql<{ id: string }>`
           select id from admin_step_up_grant
           where admin_telegram_user_id = ${adminId}
             and category = ${input.category}
             and consumed_at is null
             and expires_at > ${now.toISOString()}
+            and ${boundToCaller}
           order by expires_at desc
           limit 1
           for update

@@ -41,8 +41,10 @@ import { generateOrderPaymentCode, generatePreorderPaymentCode } from "./payment
  *    Refuses to mint a QR for an order under PAYMENT_NEEDS_REVIEW.
  *  - `applyPaymentEvidence` is the single write path for verified SePay (or
  *    reconciliation) evidence. Safe under at-least-once delivery:
- *      1. insert bank_transaction with ON CONFLICT DO NOTHING on the provider txn id;
- *      2. on conflict (replay) short-circuit as already-applied;
+ *      1. resolve the evidence to ONE canonical bank_transaction row (provider
+ *         alias → same provider id → cross-source correlation key);
+ *      2. a replay short-circuits as already-applied; an ambiguous cross-source
+ *         correlation is stored and recorded for review, never merged;
  *      3. match the evidence against the live intent;
  *      4. on SETTLE: consult `projectSettlement` — only emit OrderPaid when the
  *         Order is still payable; money for a cancelled/expired Order becomes a
@@ -64,6 +66,17 @@ export type ApplyEvidenceResult =
       bankTransactionId: string;
     }
   | { ok: true; kind: "ALREADY_APPLIED" }
+  | {
+      /**
+       * Two canonical rows already share this transfer's cross-source
+       * correlation key, so the arrival could not be attributed to either one.
+       * It is stored and recorded for review — never merged, never guessed.
+       */
+      ok: true;
+      kind: "AMBIGUOUS_CORRELATION";
+      discrepancyId: string;
+      candidateIds: string[];
+    }
   | { ok: true; kind: "DISCREPANCY"; type: string; discrepancyId: string }
   | { ok: false; error: string };
 
@@ -550,6 +563,28 @@ export async function applyPaymentEvidence(
         kind: "DISCREPANCY",
         type: "REFERENCE_COLLISION",
         discrepancyId,
+      };
+    }
+    if (bankTxn.kind === "AMBIGUOUS") {
+      // Two canonical rows already share this physical transfer's correlation
+      // key, so this arrival cannot be attributed to one of them without
+      // guessing. It is stored (no evidence is dropped) and recorded for a human.
+      // The matcher MUST NOT run: a sibling row already settled the intent, so
+      // matching would report a false `UNMATCHED` / "intent not settleable" and
+      // turn settled revenue into an operator incident.
+      const discrepancyId = await insertDiscrepancy(trx, {
+        type: "AMBIGUOUS_CORRELATION",
+        bankTransactionId: bankTxn.id,
+        paymentIntentId: null,
+        orderId: null,
+        reason: `ambiguous cross-source correlation; candidates ${bankTxn.candidateIds.join(", ")}`,
+        owner: "payments",
+      });
+      return {
+        ok: true,
+        kind: "AMBIGUOUS_CORRELATION",
+        discrepancyId,
+        candidateIds: bankTxn.candidateIds,
       };
     }
     const bankTxnId = bankTxn.id;

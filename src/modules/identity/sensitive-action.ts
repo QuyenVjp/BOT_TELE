@@ -41,6 +41,10 @@ export type SensitiveActionKey =
   | "store.close"
   | "catalog.activate"
   | "catalog.deactivate"
+  | "catalog.variant.price.change"
+  | "catalog.variant.deposit.change"
+  | "inventory.stock.adjust"
+  | "preorder.cancel"
   | "supplier.mapping.select"
   | "supplier.mapping.clear"
   | "supplier.mapping.verify"
@@ -60,6 +64,17 @@ export const SENSITIVE_ACTION_POLICY: Record<SensitiveActionKey, StepUpActionCat
   "store.close": "PERMISSION_CHANGE",
   "catalog.activate": "PERMISSION_CHANGE",
   "catalog.deactivate": "PERMISSION_CHANGE",
+  // A price or a deposit is the number the shop charges, so it takes a second
+  // factor. The fields are separated because they fail differently: a wrong price
+  // overcharges, a wrong deposit mis-collects a preorder.
+  "catalog.variant.price.change": "BULK_PRICE_CHANGE",
+  "catalog.variant.deposit.change": "BULK_PRICE_CHANGE",
+  // Stock is inventory value: a wrong adjustment either sells what does not exist
+  // or hides what does.
+  "inventory.stock.adjust": "STOCK_ADJUSTMENT",
+  // Cancelling a reservation releases the held asset and creates a refund obligation for
+  // money the customer already paid, so it is a financial action.
+  "preorder.cancel": "REFUND",
   "supplier.mapping.select": "SUPPLIER_CONFIG",
   "supplier.mapping.clear": "SUPPLIER_CONFIG",
   "supplier.mapping.verify": "SUPPLIER_CONFIG",
@@ -93,6 +108,22 @@ export type SensitiveAuthorizationRefusal =
 
 export type SensitiveAuthorization =
   { ok: true; stepUpConsumed: boolean } | { ok: false; code: SensitiveAuthorizationRefusal };
+
+/**
+ * Thrown by a module that must refuse before it writes, when its own signature has no
+ * room to return the refusal. Throwing is the fail-closed choice: the caller cannot
+ * accidentally proceed past a refused authorization, and the code carries which refusal
+ * it was so the surface can render the challenge instead of a generic error.
+ */
+export class SensitiveAuthorizationRefusedError extends Error {
+  readonly code: SensitiveAuthorizationRefusal;
+
+  constructor(code: SensitiveAuthorizationRefusal) {
+    super(`sensitive action refused: ${code}`);
+    this.name = "SensitiveAuthorizationRefusedError";
+    this.code = code;
+  }
+}
 
 export interface SensitiveActionDeps {
   db: Db;
@@ -128,13 +159,20 @@ async function hasLiveStepUpGrant(
   db: Db,
   adminTelegramUserId: string,
   category: StepUpActionCategory,
+  resourceType: string,
+  resourceId: string,
 ): Promise<boolean> {
+  // Mirrors `consume` exactly, binding included: a grant minted for one object must not
+  // read as "live" for another, or the preview step would pass and the spend would then
+  // fail — a confusing refusal at the worst moment.
   const row = await sql`
     select 1 as live from admin_step_up_grant
     where admin_telegram_user_id = ${adminTelegramUserId}
       and category = ${category}
       and consumed_at is null
       and expires_at > now()
+      and (resource_id is null
+           or (resource_type = ${resourceType} and resource_id = ${resourceId}))
     limit 1
   `.execute(db);
   return row.rows.length > 0;
@@ -181,6 +219,10 @@ async function appendSensitiveAudit(
       actionKey: input.actionKey,
       ...(category === null ? {} : { category }),
       ...(code === null ? {} : { code }),
+      // The object the owner was refused on. `/verify` reads this back so the grant it
+      // mints is bound to exactly that object; the fields are opaque ids, never secrets.
+      resourceType: input.resourceType,
+      resourceId: input.resourceId,
     },
   });
 }
@@ -246,7 +288,9 @@ export async function authorizeSensitiveAdminAction(
     ) {
       return refuse("STEP_UP_LOCKED_OUT", category);
     }
-    if (!(await hasLiveStepUpGrant(deps.db, actorId, category))) {
+    if (
+      !(await hasLiveStepUpGrant(deps.db, actorId, category, input.resourceType, input.resourceId))
+    ) {
       return refuse("STEP_UP_REQUIRED", category);
     }
     await appendSensitiveAudit(deps.db, input, actorId, category, null);
@@ -255,7 +299,13 @@ export async function authorizeSensitiveAdminAction(
 
   // 3b. Mutation: spend the grant. `consume` claims the row with `for update`,
   // so two concurrent mutating steps cannot both win the same grant.
-  const consumed = await stepUp.consume({ adminTelegramUserId: actorId, category });
+  const consumed = await stepUp.consume({
+    adminTelegramUserId: actorId,
+    category,
+    // The binding: this grant may only be spent on THIS object.
+    resourceType: input.resourceType,
+    resourceId: input.resourceId,
+  });
   if (!consumed.ok) {
     return refuse(
       consumed.code === "NOT_ENROLLED" ? "STEP_UP_NOT_ENROLLED" : "STEP_UP_GRANT_MISSING",

@@ -89,8 +89,19 @@ describe("sensitive action policy table", () => {
         "broadcast.confirm",
         "warranty.refund.approve",
         "warranty.refund.adjust",
+        "catalog.variant.price.change",
+        "catalog.variant.deposit.change",
+        "inventory.stock.adjust",
+        "preorder.cancel",
       ].sort(),
     );
+    // The money-bearing catalog and stock verbs must be gated: an ungated price, deposit
+    // or stock edit is the "admin can move money with one factor" hole this table exists
+    // to close.
+    expect(SENSITIVE_ACTION_POLICY["catalog.variant.price.change"]).toBe("BULK_PRICE_CHANGE");
+    expect(SENSITIVE_ACTION_POLICY["catalog.variant.deposit.change"]).toBe("BULK_PRICE_CHANGE");
+    expect(SENSITIVE_ACTION_POLICY["inventory.stock.adjust"]).toBe("STOCK_ADJUSTMENT");
+
     expect(SENSITIVE_ACTION_POLICY).toEqual({
       "wallet.refund": "REFUND",
       "manual_fulfillment.complete": "REFUND",
@@ -106,6 +117,10 @@ describe("sensitive action policy table", () => {
       "supplier.mapping.clear": "SUPPLIER_CONFIG",
       "supplier.mapping.verify": "SUPPLIER_CONFIG",
       "broadcast.confirm": "BROADCAST",
+      "catalog.variant.price.change": "BULK_PRICE_CHANGE",
+      "catalog.variant.deposit.change": "BULK_PRICE_CHANGE",
+      "inventory.stock.adjust": "STOCK_ADJUSTMENT",
+      "preorder.cancel": "REFUND",
     });
   });
 

@@ -53,6 +53,7 @@ import {
   authorizeSensitiveAdminAction,
   isStepUpActionCategory,
   SENSITIVE_ACTION_POLICY,
+  SensitiveAuthorizationRefusedError,
 } from "./modules/identity/sensitive-action.js";
 import { createStepUpService } from "./modules/identity/step-up.js";
 import type { AdminProductView } from "./bot/presenters/admin.js";
@@ -2045,6 +2046,21 @@ async function bootstrap(): Promise<void> {
    * place and every worker-side sensitive action then reads exactly like the
    * callbacks-side one.
    */
+  /**
+   * The money-bearing catalog and stock mutations refuse by THROWING (their signatures have
+   * no room for a refusal code), so this turns that into the same step-up challenge screen
+   * the warranty surfaces render. Without it a refused grant would dead-letter the inbox row
+   * instead of telling the owner to verify. A non-refusal error is rethrown untouched.
+   */
+  const renderSensitiveRefusal = (
+    error: unknown,
+    action: string,
+    category: string | null,
+  ): PresentedMessage | null =>
+    error instanceof SensitiveAuthorizationRefusedError
+      ? presentSensitiveRefusal({ code: error.code, action, category })
+      : null;
+
   const authorizeSensitiveFor = (
     input: { telegramUserId: string; chatType: string; correlationId: string },
     action: {
@@ -3626,20 +3642,34 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const ok = await updateAdminVariant({
-          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
-          config: {
-            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
-          },
-          db: dbHandle.db,
-          productId,
-          variantId,
-          expectedVersion,
-          ...patch,
-          reason: "Admin variant toggle",
-          correlationId: input.correlationId,
-        });
+        let ok: boolean;
+        try {
+          ok = await updateAdminVariant({
+            actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+            config: {
+              adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+              expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+            },
+            db: dbHandle.db,
+            // A toggle can flip `preorder_enabled`, which is a monetary rule, so the
+            // money-field gate needs the step-up deps even on this path.
+            sensitiveDeps,
+            productId,
+            variantId,
+            expectedVersion,
+            ...patch,
+            reason: "Admin variant toggle",
+            correlationId: input.correlationId,
+          });
+        } catch (error) {
+          const refusal = renderSensitiveRefusal(
+            error,
+            "catalog.variant.price.change",
+            "BULK_PRICE_CHANGE",
+          );
+          if (refusal) return refusal;
+          throw error;
+        }
         if (!ok) return back("Biến thể đã thay đổi ở nơi khác, mở lại để sửa.");
         await sql`
           delete from admin_callback_state
@@ -4955,6 +4985,17 @@ async function bootstrap(): Promise<void> {
       },
       async testCustomerText(input) {
         if (input.chatType !== "private") return null;
+        // Explicit actor gate. These text interceptors used to rely on the pending
+        // `admin_callback_state` row being admin-scoped, which does work (only the owner can
+        // create one) but makes the authorization implicit: a reader has to reason about who
+        // could have written that row. Stating it here keeps the rule local and checkable.
+        const textDenied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          "admin-text",
+          "Admin text input",
+        );
+        if (textDenied) return null;
         const state = await sql<{ id: string }>`
           select id from admin_callback_state
           where admin_telegram_user_id = ${input.telegramUserId}
@@ -5056,6 +5097,17 @@ async function bootstrap(): Promise<void> {
       },
       async categoryText(input) {
         if (input.chatType !== "private") return null;
+        // Explicit actor gate. These text interceptors used to rely on the pending
+        // `admin_callback_state` row being admin-scoped, which does work (only the owner can
+        // create one) but makes the authorization implicit: a reader has to reason about who
+        // could have written that row. Stating it here keeps the rule local and checkable.
+        const textDenied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          "admin-text",
+          "Admin text input",
+        );
+        if (textDenied) return null;
         const state = await sql<{
           id: string;
           kind: string;
@@ -5133,6 +5185,22 @@ async function bootstrap(): Promise<void> {
         if (route?.startsWith("preorders:cancel:")) {
           const preorderId = route.slice("preorders:cancel:".length);
           if (isId(preorderId)) {
+            // Cancelling releases a held asset and creates a refund obligation, so it takes
+            // the second factor as well as the root gate above. Fail closed: a refused grant
+            // returns the challenge before anything is cancelled.
+            const authorization = await authorizeSensitiveFor(input, {
+              actionKey: "preorder.cancel",
+              resourceType: "PreorderReservation",
+              resourceId: preorderId,
+              consumeGrant: true,
+            });
+            if (!authorization.ok) {
+              return presentSensitiveRefusal({
+                code: authorization.code,
+                action: "preorder.cancel",
+                category: SENSITIVE_ACTION_POLICY["preorder.cancel"],
+              });
+            }
             await shopCancelPreorder(dbHandle.db, {
               preorderId,
               actorTelegramUserId: input.telegramUserId,
@@ -5372,20 +5440,32 @@ async function bootstrap(): Promise<void> {
             text: "Phiên điều chỉnh tồn kho không hợp lệ.",
             buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
           };
-        const adjusted = await adjustQuantityStock({
-          db: dbHandle.db,
-          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
-          config: {
-            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
-          },
-          variantId,
-          delta,
-          expectedStockVersion,
-          idempotencyKey,
-          reason,
-          correlationId: input.correlationId,
-        });
+        let adjusted: Awaited<ReturnType<typeof adjustQuantityStock>>;
+        try {
+          adjusted = await adjustQuantityStock({
+            db: dbHandle.db,
+            sensitiveDeps,
+            actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+            config: {
+              adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+              expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+            },
+            variantId,
+            delta,
+            expectedStockVersion,
+            idempotencyKey,
+            reason,
+            correlationId: input.correlationId,
+          });
+        } catch (error) {
+          const refusal = renderSensitiveRefusal(
+            error,
+            "inventory.stock.adjust",
+            "STOCK_ADJUSTMENT",
+          );
+          if (refusal) return refusal;
+          throw error;
+        }
         return adjusted.ok
           ? presentQuantityStockAdjustDone(adjusted)
           : {
@@ -5400,6 +5480,17 @@ async function bootstrap(): Promise<void> {
       },
       async quantityAdjustText(input) {
         if (input.chatType !== "private") return null;
+        // Explicit actor gate. These text interceptors used to rely on the pending
+        // `admin_callback_state` row being admin-scoped, which does work (only the owner can
+        // create one) but makes the authorization implicit: a reader has to reason about who
+        // could have written that row. Stating it here keeps the rule local and checkable.
+        const textDenied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          "admin-text",
+          "Admin text input",
+        );
+        if (textDenied) return null;
         const state = await sql<{ id: string; payload_redacted: Record<string, unknown> }>`
           select id, payload_redacted
           from admin_callback_state
@@ -6061,8 +6152,14 @@ async function bootstrap(): Promise<void> {
             // The category comes from the most recent step-up refusal this layer audited, so a
             // grant can only be minted for the action the owner actually tried to take — never for
             // every category at once. The window is the lockout window: an older attempt is stale.
-            const requested = await sql<{ category: string | null }>`
-              select metadata_redacted->>'category' as category
+            const requested = await sql<{
+              category: string | null;
+              resource_type: string | null;
+              resource_id: string | null;
+            }>`
+              select metadata_redacted->>'category' as category,
+                     metadata_redacted->>'resourceType' as resource_type,
+                     metadata_redacted->>'resourceId' as resource_id
               from audit_event
               where actor_id = ${input.telegramUserId}
                 and action = 'admin.sensitive.denied'
@@ -6082,6 +6179,16 @@ async function bootstrap(): Promise<void> {
               adminTelegramUserId: input.telegramUserId,
               category,
               code,
+              // Bind the grant to the object the owner was actually refused on, taken from
+              // the audit row the layer wrote. Without this a category grant would authorise
+              // a change to ANY object in that category, which is a category check rather
+              // than a transaction authorization.
+              ...(requested.rows[0]?.resource_type != null && requested.rows[0]?.resource_id != null
+                ? {
+                    resourceType: requested.rows[0].resource_type,
+                    resourceId: requested.rows[0].resource_id,
+                  }
+                : {}),
             });
             if (!verified.ok) {
               // Never echo the submitted code, and never say which digit was wrong.
@@ -6593,20 +6700,32 @@ async function bootstrap(): Promise<void> {
             default:
               return null;
           }
-          const ok = await updateAdminVariant({
-            actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
-            config: {
-              adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-              expectedUsername: config.ADMIN_EXPECTED_USERNAME,
-            },
-            db: dbHandle.db,
-            productId,
-            variantId,
-            expectedVersion,
-            ...patch,
-            reason: "Admin variant update",
-            correlationId: input.correlationId,
-          });
+          let ok: boolean;
+          try {
+            ok = await updateAdminVariant({
+              actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+              config: {
+                adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+                expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+              },
+              db: dbHandle.db,
+              sensitiveDeps,
+              productId,
+              variantId,
+              expectedVersion,
+              ...patch,
+              reason: "Admin variant update",
+              correlationId: input.correlationId,
+            });
+          } catch (error) {
+            const refusal = renderSensitiveRefusal(
+              error,
+              "catalog.variant.price.change",
+              "BULK_PRICE_CHANGE",
+            );
+            if (refusal) return refusal;
+            throw error;
+          }
           if (!ok) return back("Biến thể đã thay đổi ở nơi khác, mở lại để sửa.");
           // One-shot consume: remove the field state so subsequent typed texts are not swallowed.
           await sql`
