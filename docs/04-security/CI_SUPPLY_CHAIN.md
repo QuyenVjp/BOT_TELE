@@ -151,6 +151,65 @@ repository, where the full scanner set runs with write permissions.
 
 ## Merge gate
 
-Branch protection must require the `ci.yml` jobs and each `security.yml` job as required status
-checks (repository setting, not stored in the tree). Dependabot pull requests are validated by the
-same workflows and must never be merged with red or skipped checks.
+Every workflow in this directory is **active on the remote** (`gh api repos/<owner>/<repo>/actions/workflows`
+reports `ci` and `security` as `active`), but the checks only become a gate once branch protection
+requires them. That setting lives in repository configuration, not in the tree, and it needs
+`admin` permission on the repository — a collaborator with only `push` gets HTTP 404 from the
+protection endpoint, so it cannot be applied from this branch and is listed as an external
+operational condition.
+
+Run these as the repository owner (`markprovjp`), replacing the owner/repo if it is ever forked:
+
+```bash
+REPO=markprovjp/BOT_TELE
+
+# Require the pull-request path and both workflows for main and release branches.
+for BRANCH in main 'release/**'; do
+  gh api -X PUT "repos/$REPO/branches/$BRANCH/protection" \
+    -H "Accept: application/vnd.github+json" --input - <<'JSON'
+{
+  "required_status_checks": {
+    "strict": true,
+    "contexts": [
+      "verify",
+      "CodeQL (javascript-typescript)",
+      "Dependency scan (OSV-Scanner)",
+      "Secret scan (gitleaks)",
+      "SBOM (CycloneDX)",
+      "Filesystem scan (Trivy)",
+      "OpenSSF Scorecard"
+    ]
+  },
+  "enforce_admins": true,
+  "required_pull_request_reviews": {
+    "required_approving_review_count": 1,
+    "dismiss_stale_reviews": true,
+    "require_code_owner_reviews": false
+  },
+  "restrictions": null,
+  "allow_force_pushes": false,
+  "allow_deletions": false,
+  "required_conversation_resolution": true,
+  "required_linear_history": true
+}
+JSON
+done
+
+# Least-privilege default token for every workflow, and no Actions-created PRs.
+gh api -X PUT "repos/$REPO/actions/permissions/workflow" \
+  -f default_workflow_permissions=read -F can_approve_pull_request_reviews=false
+
+# Secret scanning + push protection, where the plan provides them.
+gh api -X PATCH "repos/$REPO" -F security_and_analysis[secret_scanning][status]=enabled 2>/dev/null || \
+  echo "secret scanning is not available on this plan — enable it in Settings > Code security"
+```
+
+Two of these are worth spelling out because they are easy to misread:
+
+- `required_status_checks.contexts` must name the **job** names exactly as the workflows declare
+  them, so renaming a job silently removes it from the gate; re-run the command after any rename.
+- `enforce_admins: true` is deliberate: the sole owner is exactly the actor most able to bypass a
+  gate by accident.
+
+Dependabot pull requests are validated by the same workflows and must never be merged with red or
+skipped checks.
