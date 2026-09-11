@@ -42,13 +42,13 @@ async function snapshot(db: typeof source.db) {
 try {
   await runMigrations(source.db);
   await sql`insert into customer (id) values ('restore-synthetic-customer')`.execute(source.db);
-  await sql`insert into wallet_account(id, customer_id, balance_vnd) values ('restore-wallet', 'restore-synthetic-customer', 100000)`.execute(
-    source.db,
-  );
-  await sql`insert into wallet_ledger(id, wallet_account_id, entry_type, amount_vnd, balance_before_vnd, balance_after_vnd, idempotency_key, correlation_id, reason)
-    values ('restore-credit', 'restore-wallet', 'CREDIT', 100000, 0, 100000, 'restore-credit', 'restore-drill', 'Synthetic restore fixture')`.execute(
-    source.db,
-  );
+  await source.db.transaction().execute(async (trx) => {
+    await sql`insert into wallet_account(id, customer_id, balance_vnd) values ('restore-wallet', 'restore-synthetic-customer', 0)`.execute(
+      trx,
+    );
+    await sql`select ledger_record_opening_balance('restore-wallet', 100000)`.execute(trx);
+    await sql`update wallet_account set balance_vnd=100000 where id='restore-wallet'`.execute(trx);
+  });
   await sql`insert into category(id,name_vi,slug) values ('restore-category','Synthetic','restore-category')`.execute(
     source.db,
   );
@@ -91,10 +91,12 @@ try {
   assert.deepEqual(await snapshot(restored.db), before);
   const balance = await sql<{
     valid: boolean;
-  }>`select wa.balance_vnd = sum(case when wl.entry_type='CREDIT' then wl.amount_vnd else -wl.amount_vnd end) as valid
-    from wallet_account wa join wallet_ledger wl on wl.wallet_account_id=wa.id group by wa.id`.execute(
-    restored.db,
-  );
+  }>`select wa.balance_vnd = coalesce(sum(case when p.side='CREDIT' then p.amount_minor else -p.amount_minor end), 0) as valid
+    from wallet_account wa
+    join ledger_account a on a.wallet_account_id=wa.id
+    left join ledger_posting p on p.account_id=a.id
+    where wa.id='restore-wallet'
+    group by wa.id, wa.balance_vnd`.execute(restored.db);
   assert.equal(balance.rows.length, 1);
   assert.equal(balance.rows[0]?.valid, true);
   const linked = await sql<{ count: number }>`select count(*)::int as count from "order" o
