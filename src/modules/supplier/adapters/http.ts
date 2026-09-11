@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { assertOutboundTargetAllowed } from "../../../infrastructure/net/outbound-policy.js";
+import { createPinnedFetch } from "../../../infrastructure/net/pinned-fetch.js";
+import { OutboundPolicyError } from "../../../infrastructure/net/outbound-policy.js";
 import type { Vault } from "../../../infrastructure/vault/port.js";
 import {
   AssetEnvelopeSchema,
@@ -143,12 +144,22 @@ async function readBounded(response: Response, signal: AbortSignal): Promise<unk
 
 export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPort {
   const base = validateOptions(options);
-  const fetchImpl = options.testTransport?.fetch ?? fetch;
-  const policyOptions = {
+  const resolve = options.testTransport?.resolve;
+  /**
+   * ONE guarded client for this port, and it PINS the socket to the address it just
+   * validated. Validating with `assertOutboundTargetAllowed` and then calling a plain
+   * `fetch` would leave a rebinding window: fetch resolves the hostname again when it
+   * opens the socket, so an answer that changes in between reaches an unchecked
+   * address. `createPinnedFetch` re-resolves and re-validates on EVERY call, so each
+   * retry gets a fresh decision, and the socket can only dial what that decision approved.
+   */
+  const guardedFetch = createPinnedFetch({
     allowInsecureLoopback: options.testTransport?.allowInsecureLoopback === true,
     allowedPorts: [base.port ? Number(base.port) : base.protocol === "https:" ? 443 : 80],
-  };
-  const resolve = options.testTransport?.resolve;
+    timeoutMs: options.timeoutMs,
+    ...(resolve ? { resolve } : {}),
+    ...(options.testTransport?.fetch ? { fetchImpl: options.testTransport.fetch } : {}),
+  });
 
   const request = async <T>(input: {
     method: "GET" | "POST";
@@ -163,26 +174,17 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
       throw new SupplierPortError("REQUEST_TOO_LARGE", "supplier request is invalid");
     }
     const attempts = input.attempts ?? options.maxAttempts;
-    const origin = base.toString();
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
-      // Re-resolve and re-classify before EVERY attempt: DNS may change between
-      // attempts (rebinding), so a validated base URL string is not sufficient.
-      try {
-        await assertOutboundTargetAllowed(origin, policyOptions, resolve ? { resolve } : undefined);
-      } catch {
-        throw new SupplierPortError("CONFIG_INVALID", "supplier endpoint is not allowed");
-      }
       const controller = new AbortController();
       const timer = setTimeout(
         () => controller.abort(new Error("SUPPLIER_TIMEOUT")),
         options.timeoutMs,
       );
       try {
-        const response = await fetchImpl(
+        const response = await guardedFetch(
           new URL(input.path, `${base.toString().replace(/\/$/, "")}/`),
           {
             method: input.method,
-            redirect: "error",
             signal: controller.signal,
             headers: {
               authorization: `Bearer ${options.token}`,
@@ -197,6 +199,11 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
         if (!response.ok) throw new SupplierPortError("HTTP_ERROR", "supplier response is invalid");
         return input.parse(value);
       } catch (error) {
+        // A refused destination is a configuration fault, not a transient one: surface it
+        // as CONFIG_INVALID so it is never retried, and never leak the internal error type.
+        if (error instanceof OutboundPolicyError) {
+          throw new SupplierPortError("CONFIG_INVALID", "supplier endpoint is not allowed");
+        }
         if (attempt === attempts || error instanceof SupplierPortError) throw error;
       } finally {
         clearTimeout(timer);

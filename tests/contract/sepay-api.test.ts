@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createSePayApiPort, SePayApiError } from "../../src/modules/payments/sepay-api.js";
 import { isVerifiedSePayEvidence } from "../../src/modules/payments/sepay-ingress.js";
-import { OutboundPolicyError } from "../../src/infrastructure/net/outbound-policy.js";
 
 const API_CREDENTIAL_FIXTURE = "test-only-sepay-api-credential";
 
@@ -165,8 +164,10 @@ describe("official SePay API v2 reconciliation adapter", () => {
     });
 
     const error = await port.listTransactions(1, 2, 10).catch((value: unknown) => value);
-    expect(error).toBeInstanceOf(OutboundPolicyError);
-    expect(error).toMatchObject({ code: "ADDRESS_NOT_ALLOWED" });
+    // A blocked destination must be distinguishable from provider downtime, so the refusal
+    // is INVALID_CONFIG and never retried as HTTP_ERROR.
+    expect(error).toBeInstanceOf(SePayApiError);
+    expect(error).toMatchObject({ code: "INVALID_CONFIG" });
     // Nothing was sent, so the bearer token never left the process.
     expect(fetchImpl).not.toHaveBeenCalled();
   });

@@ -5115,7 +5115,21 @@ async function bootstrap(): Promise<void> {
       },
       async preorders(input, route) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        // The root gate, not just "is the feature configured". `adminCallbacks` is built once
+        // from config, so a non-null value is true for EVERY caller - it proves the feature
+        // exists, never that the actor is the owner. Without this call any Telegram user in a
+        // private chat could send `admin:preorders:cancel:<id>` and cancel a reservation,
+        // creating a real refund obligation. `requireRootAdmin` runs the numeric-id check and
+        // audits the denial.
+        const denied = await requireRootAdmin(
+          adminCallbacks,
+          input,
+          route?.startsWith("preorders:cancel:")
+            ? route.slice("preorders:cancel:".length)
+            : "admin-preorders",
+          "Admin preorders",
+        );
+        if (denied) return presentAdminDenied(denied);
         if (route?.startsWith("preorders:cancel:")) {
           const preorderId = route.slice("preorders:cancel:".length);
           if (isId(preorderId)) {

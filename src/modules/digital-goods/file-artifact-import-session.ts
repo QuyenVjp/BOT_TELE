@@ -12,7 +12,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
-import { createGuardedFetch } from "../../infrastructure/net/outbound-policy.js";
+import { createPinnedFetch } from "../../infrastructure/net/pinned-fetch.js";
 import {
   isValidFileArtifactRegistrationMetadata,
   type FileArtifactMetadata,
@@ -174,10 +174,10 @@ async function verifyPrivateFile(input: {
 
 export function createTelegramFileDownloader(botToken: string): TelegramFileDownloader {
   // Telegram's host is hardcoded, but these are the only outbound requests that carry a
-  // credential in the URL path. The shared policy re-checks the RESOLVED address and
-  // forces `redirect: "error"`, so a poisoned DNS answer or an off-host redirect cannot
-  // make us hand the bot token to somewhere else.
-  const guardedFetch = createGuardedFetch({
+  // credential in the URL path. The pinned client re-checks the RESOLVED address AND binds
+  // the socket to it, so neither a poisoned DNS answer (rebinding) nor an off-host redirect
+  // can make us hand the bot token to somewhere else.
+  const guardedFetch = createPinnedFetch({
     allowedHosts: ["api.telegram.org"],
   });
   return {
