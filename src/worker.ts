@@ -1591,12 +1591,15 @@ async function bootstrap(): Promise<void> {
       ? createSePayApiPort({
           baseUrl: config.SEPAY_API_BASE_URL,
           token: config.SEPAY_API_TOKEN,
+          allowSandbox: config.NODE_ENV !== "production",
         })
       : null;
+  const telegramClient = { environment: config.TELEGRAM_API_ENVIRONMENT } as const;
   const telegramDocumentSender = createGrammyDocumentSender(
     config.TELEGRAM_BOT_TOKEN,
     undefined,
     config.NODE_ENV !== "production" ? logger : undefined,
+    telegramClient,
   );
 
   const handler = createFulfillmentOutboxHandler({
@@ -2225,11 +2228,13 @@ async function bootstrap(): Promise<void> {
     config.TELEGRAM_BOT_TOKEN,
     undefined,
     config.NODE_ENV !== "production" ? logger : undefined,
+    telegramClient,
   );
   try {
     await ensureTelegramCommandMenu({
       botToken: config.TELEGRAM_BOT_TOKEN,
       adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+      client: telegramClient,
     });
   } catch (err) {
     logger.error(
@@ -5789,7 +5794,9 @@ async function bootstrap(): Promise<void> {
             },
             correlationId: input.correlationId,
             document: input.document,
-            downloader: createTelegramTextFileDownloader(config.TELEGRAM_BOT_TOKEN),
+            downloader: createTelegramTextFileDownloader(config.TELEGRAM_BOT_TOKEN, {
+              telegramEnvironment: config.TELEGRAM_API_ENVIRONMENT,
+            }),
           });
           if (!result.ok)
             return {
@@ -5823,7 +5830,9 @@ async function bootstrap(): Promise<void> {
           sessionId: session.sessionId,
           generation: session.generation,
           document: input.document,
-          downloader: createTelegramFileDownloader(config.TELEGRAM_BOT_TOKEN),
+          downloader: createTelegramFileDownloader(config.TELEGRAM_BOT_TOKEN, {
+            telegramEnvironment: config.TELEGRAM_API_ENVIRONMENT,
+          }),
           privateArtifactRoot: config.PRIVATE_ARTIFACT_ROOT,
           correlationId: input.correlationId,
         });

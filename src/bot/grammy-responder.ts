@@ -7,6 +7,7 @@ import {
   InputMediaBuilder,
   Keyboard,
 } from "grammy";
+import type { ApiClientOptions } from "grammy";
 import type {
   ForceReply,
   InlineKeyboardMarkup,
@@ -342,11 +343,12 @@ export const TELEGRAM_GROUP_BOT_COMMANDS: ReadonlyArray<{ command: string; descr
 export async function ensureTelegramCommandMenu(input: {
   botToken: string;
   adminTelegramUserId?: number;
+  client?: ApiClientOptions;
 }): Promise<void> {
   if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(input.botToken)) {
     throw new Error("Invalid Telegram bot token");
   }
-  const api = new Api(input.botToken);
+  const api = new Api(input.botToken, input.client);
   await api.setChatMenuButton({ menu_button: { type: "commands" } });
   await api.setMyCommands([...TELEGRAM_CUSTOMER_BOT_COMMANDS], {
     scope: { type: "all_private_chats" },
@@ -365,11 +367,12 @@ export function createGrammyDocumentSender(
   botToken: string,
   api?: Pick<Api, "sendDocument">,
   trace?: TelegramResponderTrace,
+  client?: ApiClientOptions,
 ): TelegramDocumentSender {
   if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(botToken)) {
     throw new Error("Invalid Telegram bot token");
   }
-  const telegramApi = api ?? new Api(botToken);
+  const telegramApi = api ?? new Api(botToken, client);
   return {
     async sendDocument(input) {
       const source =
@@ -397,11 +400,12 @@ export function createGrammyResponder(
   botToken: string,
   api?: TelegramApi,
   trace?: TelegramResponderTrace,
+  client?: ApiClientOptions,
 ): TelegramResponder {
   if (!/^\d+:[A-Za-z0-9_-]{20,}$/.test(botToken)) {
     throw new Error("Invalid Telegram bot token");
   }
-  const telegramApi = api ?? new Api(botToken);
+  const telegramApi = api ?? new Api(botToken, client);
   const answered = new Set<string>();
   const ack = async (callbackQueryId: string) => {
     if (answered.has(callbackQueryId)) return;

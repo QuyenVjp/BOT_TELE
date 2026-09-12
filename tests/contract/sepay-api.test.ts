@@ -77,6 +77,23 @@ describe("official SePay API v2 reconciliation adapter", () => {
     );
   });
 
+  it("allows the official sandbox only when explicitly enabled", () => {
+    expect(() =>
+      createSePayApiPort({
+        baseUrl: "https://userapi-sandbox.sepay.vn/v2",
+        token: API_CREDENTIAL_FIXTURE,
+      }),
+    ).toThrow(/official HTTPS host/i);
+
+    expect(() =>
+      createSePayApiPort({
+        baseUrl: "https://userapi-sandbox.sepay.vn/v2",
+        token: API_CREDENTIAL_FIXTURE,
+        allowSandbox: true,
+      }),
+    ).not.toThrow();
+  });
+
   it("fails closed on malformed responses and reports 429 without echoing the token", async () => {
     const malformed = createSePayApiPort({
       baseUrl: "https://userapi.sepay.vn/v2",

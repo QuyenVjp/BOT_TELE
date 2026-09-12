@@ -33,6 +33,7 @@ export interface ProductionPreflightResult {
     redis: { host: string; port: string } | null;
     redisStatus: "CONFIGURED" | "MISSING";
     redisHealth: "REACHABLE" | "UNREACHABLE" | "NOT_CHECKED";
+    telegramEnvironment: "prod" | "test" | null;
     telegramToken: "CONFIGURED" | "MISSING";
     telegramWebhook: "CONFIGURED" | "MISSING";
     telegramApi: "REACHABLE" | "UNREACHABLE" | "NOT_CHECKED";
@@ -63,6 +64,7 @@ function emptyFingerprint(): ProductionPreflightResult["fingerprint"] {
     redis: null,
     redisStatus: "MISSING",
     redisHealth: "NOT_CHECKED",
+    telegramEnvironment: null,
     telegramToken: "MISSING",
     telegramWebhook: "MISSING",
     telegramApi: "NOT_CHECKED",
@@ -89,6 +91,8 @@ function fillSafeFingerprint(
   fingerprint.appBaseUrl = env.APP_BASE_URL?.trim() || null;
   fingerprint.httpHost = env.HTTP_HOST?.trim() || null;
   fingerprint.httpPort = env.HTTP_PORT?.trim() || null;
+  fingerprint.telegramEnvironment =
+    env.TELEGRAM_API_ENVIRONMENT?.trim() === "test" ? "test" : "prod";
   fingerprint.telegramToken = secretStatus(env.TELEGRAM_BOT_TOKEN);
   fingerprint.telegramWebhook = secretStatus(env.TELEGRAM_WEBHOOK_SECRET);
   fingerprint.sepayBaseHost = parseEndpointHost(env.SEPAY_API_BASE_URL ?? "");
@@ -221,6 +225,7 @@ export async function runProductionPreflight(
   fillSafeFingerprint(env, fingerprint);
   const issues: string[] = [];
   let config: ReturnType<typeof loadConfig> | undefined;
+  let supplierRequired = false;
   try {
     config = loadConfig(env);
   } catch (error) {
@@ -236,6 +241,9 @@ export async function runProductionPreflight(
   if (!env.HTTP_PORT?.trim()) issues.push("HTTP_PORT must be set");
   if (!fingerprint.database) issues.push("DATABASE_URL fingerprint is invalid");
   if (!fingerprint.redis) issues.push("REDIS_URL is missing or invalid");
+  if (fingerprint.telegramEnvironment === "test") {
+    issues.push("TELEGRAM_API_ENVIRONMENT must be prod in production");
+  }
   if (fingerprint.telegramToken === "MISSING") issues.push("TELEGRAM_BOT_TOKEN is missing");
   if (fingerprint.telegramWebhook === "MISSING") issues.push("TELEGRAM_WEBHOOK_SECRET is missing");
   if (fingerprint.merchantMatch === "NO") {
@@ -243,12 +251,6 @@ export async function runProductionPreflight(
   }
   if (fingerprint.vaultDriver === "external" && !fingerprint.vaultEndpointHost) {
     issues.push("VAULT_ENDPOINT host is required for external vault");
-  }
-  if (
-    (env.SUPPLIER_DRIVER ?? "").trim() === "http" &&
-    (!fingerprint.supplierBaseHost || fingerprint.supplierToken === "MISSING")
-  ) {
-    issues.push("SUPPLIER_DRIVER=http requires base URL and token");
   }
   const expected = env.BOT_TELE_EXPECTED_DB?.trim();
   if (expected && fingerprint.databaseTarget && expected !== fingerprint.databaseTarget) {
@@ -275,9 +277,9 @@ export async function runProductionPreflight(
     }
 
     if (fingerprint.telegramToken === "CONFIGURED") {
-      const telegramOk = await probeHttp(
-        `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/getMe`,
-      );
+      const telegramApiRoot = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+      const telegramApiUrl = `${telegramApiRoot}/${fingerprint.telegramEnvironment === "test" ? "test/" : ""}getMe`;
+      const telegramOk = await probeHttp(telegramApiUrl);
       fingerprint.telegramApi = telegramOk ? "REACHABLE" : "UNREACHABLE";
       if (!telegramOk) issues.push("Telegram Bot API probe failed");
     }
@@ -306,12 +308,6 @@ export async function runProductionPreflight(
       const vaultOk = await probeVaultHealth(config);
       fingerprint.vaultHealth = vaultOk ? "REACHABLE" : "UNREACHABLE";
       if (!vaultOk) issues.push("external vault health probe failed");
-    }
-
-    if ((env.SUPPLIER_DRIVER ?? "").trim() === "http") {
-      const supplierOk = await probeSupplierDns(fingerprint.supplierBaseHost);
-      fingerprint.supplierDns = supplierOk ? "RESOLVED" : "UNRESOLVED";
-      if (!supplierOk) issues.push("supplier API host DNS probe failed");
     }
   }
 
@@ -351,11 +347,37 @@ export async function runProductionPreflight(
           issues.push("database migration head/count does not match source migrations");
         }
       }
+      const supplierRows = await pool.query<{ required: boolean }>(`
+        select exists (
+          select 1
+          from product_variant v
+          join product p on p.id = v.product_id
+          where v.fulfillment_type = 'SUPPLIER_API'
+            and v.is_active
+            and p.is_active
+            and not p.is_archived
+            and not p.is_test
+        ) as required
+      `);
+      supplierRequired = supplierRows.rows[0]?.required === true;
     } catch {
       fingerprint.databaseHealth = options.probeLiveDependencies ? "UNREACHABLE" : "NOT_CHECKED";
       if (options.probeLiveDependencies) issues.push("database connectivity probe failed");
     } finally {
       await pool.end();
+    }
+  }
+  if (options.probeLiveDependencies && supplierRequired) {
+    if (
+      (env.SUPPLIER_DRIVER ?? "").trim() === "http" &&
+      (!fingerprint.supplierBaseHost || fingerprint.supplierToken === "MISSING")
+    ) {
+      issues.push("SUPPLIER_DRIVER=http requires base URL and token");
+    }
+    if ((env.SUPPLIER_DRIVER ?? "").trim() === "http") {
+      const supplierOk = await probeSupplierDns(fingerprint.supplierBaseHost);
+      fingerprint.supplierDns = supplierOk ? "RESOLVED" : "UNRESOLVED";
+      if (!supplierOk) issues.push("supplier API host DNS probe failed");
     }
   }
 

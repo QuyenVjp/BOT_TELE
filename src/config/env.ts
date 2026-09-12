@@ -47,6 +47,7 @@ export const envSchema = z.object({
   TELEGRAM_BOT_TOKEN: z.string().min(1),
   TELEGRAM_WEBHOOK_SECRET: z.string().min(8),
   TELEGRAM_WEBHOOK_PATH: z.string().startsWith("/").default("/telegram/webhook"),
+  TELEGRAM_API_ENVIRONMENT: z.enum(["prod", "test"]).default("prod"),
   BUY_NOW_CALLBACK_HMAC_KEY: z.string().min(32),
   BUY_NOW_CALLBACK_KEY_VERSION: z.coerce.number().int().min(0).max(15).default(1),
   BUY_NOW_CALLBACK_TTL_SECONDS: z.coerce.number().int().positive().max(86400).default(900),
