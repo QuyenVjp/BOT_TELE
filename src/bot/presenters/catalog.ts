@@ -100,14 +100,6 @@ function homeButton(callbackData: string): InlineButton {
   return { text: CATALOG_COPY.mainMenu, callbackData };
 }
 
-/** Legacy compact menu. Live customer home is presentStorefront. */
-export function presentMainMenu(): PresentedMessage {
-  return {
-    text: CATALOG_COPY.mainMenuTitle,
-    buttons: [[{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }], [homeButton("shop:home")]],
-  };
-}
-
 export function presentSearchPrompt(): PresentedMessage {
   return {
     text: [

@@ -230,7 +230,7 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
 
     await sql`
       insert into audit_event (id, actor_type, actor_id, action, target_type, target_id, reason, correlation_id, metadata_redacted)
-      select '01AUD0' || lpad(gs::text, 20, '0'), 'system', 'rc-seed', 'ORDER_COMPLETED', 'order',
+      select '01AUD0' || lpad(gs::text, 20, '0'), 'SYSTEM', 'rc-seed', 'ORDER_COMPLETED', 'order',
         '01ARD0' || lpad(gs::text, 20, '0'), 'RC synthetic seed', 'rc-order-' || gs, jsonb_build_object('synthetic', true)
       from generate_series(1, ${COUNTS.orders}) gs
     `.execute(trx);

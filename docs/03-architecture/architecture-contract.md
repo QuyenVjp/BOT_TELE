@@ -48,6 +48,8 @@ The active scope is the complete admin product → variant → inventory → cus
   - Own the current retail one-variant purchase path and order persistence.
 - `modules/payments/service.ts` and `modules/payments/sepay-ingress.ts`
   - Own the verified-payment path and SePay trust boundary.
+- `modules/payments/sepay-api.ts`
+  - Owns bounded read-only SePay API v2 bank-account and transaction reads; official host allowlists and production sandbox refusal run before every bearer request.
 - `bot/webhook.ts`, `bot/callbacks/telegram-dispatch.ts`, `bot/grammy-responder.ts`
   - Own Telegram ingress normalization and outgoing Telegram rendering.
 - `bot/presenters/admin.ts`, `bot/callbacks/admin.ts`

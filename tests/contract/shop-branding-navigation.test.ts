@@ -3,7 +3,7 @@ import { createCallbackTokenCodec } from "../../src/bot/callback-codec.js";
 import { createTelegramDomainDispatcher } from "../../src/bot/callbacks/telegram-dispatch.js";
 import { presentStorefront } from "../../src/bot/presenters/customer.js";
 import { presentSupportReasonMenu } from "../../src/bot/presenters/support.js";
-import { presentCategoryPage, presentMainMenu } from "../../src/bot/presenters/catalog.js";
+import { presentCategoryPage } from "../../src/bot/presenters/catalog.js";
 import {
   ADMIN_CONTACT_URL,
   COMMUNITY_BUTTON_LABEL,
@@ -91,12 +91,7 @@ describe("customer branding presenters", () => {
     expect(page.text).toContain("Chọn thương hiệu:");
     expect(page.buttons.flat().some((b) => b.url === ADMIN_CONTACT_URL)).toBe(false);
     expect(page.buttons.flat().some((b) => b.text === "🏠 Trang chủ")).toBe(true);
-    expect(presentMainMenu().text).toContain(SHOP_NAME);
-    expect(
-      presentMainMenu()
-        .buttons.flat()
-        .map((button) => button.text),
-    ).not.toContain("🛍 Danh sách sản phẩm");
+    expect(page.buttons.flat().map((button) => button.text)).not.toContain("🛍 Danh sách sản phẩm");
   });
 
   it("renders the family screen with offer rows, page control and recovery labels", () => {
@@ -198,7 +193,7 @@ describe("catalog callback ACK", () => {
       resolveOrderIdByNumber: vi.fn().mockResolvedValue(null),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {
-        mainMenu: vi.fn(async () => presentMainMenu()),
+        mainMenu: vi.fn(async () => ({ text: `🛒 ${SHOP_NAME}`, buttons: [] })),
         categoryList: vi.fn(async () => ({ text: "cats", buttons: [] })),
         categoryView: vi.fn(async () => ({ text: "cat", buttons: [] })),
         variantDetail: vi.fn(),
@@ -259,7 +254,7 @@ describe("bot-only catalog navigation", () => {
       resolveOrderIdByNumber: vi.fn().mockResolvedValue(null),
       resolveCatalogPage: vi.fn().mockResolvedValue(null),
       catalog: {
-        mainMenu: vi.fn(async () => presentMainMenu()),
+        mainMenu: vi.fn(async () => ({ text: `🛒 ${SHOP_NAME}`, buttons: [] })),
         categoryList: vi.fn(async () => ({ text: "cats", buttons: [] })),
         categoryView: vi.fn(async () => ({ text: "cat", buttons: [] })),
         variantDetail: vi.fn(),
