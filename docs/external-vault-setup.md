@@ -75,7 +75,7 @@ PUT /v1/secrets/{namespace}/{kind}/{key}
 Success must be `200` or `201` with strict JSON containing only:
 
 ```json
-{"ref":"vault:{namespace}:{kind}:{key}"}
+{ "ref": "vault:{namespace}:{kind}:{key}" }
 ```
 
 Read:
@@ -87,7 +87,7 @@ GET /v1/secrets/{namespace}/{kind}/{key}
 Success must be `200` with strict JSON containing only:
 
 ```json
-{"material":"<secret-material>"}
+{ "material": "<secret-material>" }
 ```
 
 Delete:
@@ -101,7 +101,7 @@ DELETE /v1/secrets/{namespace}/{kind}/{key}
 Provider errors must be JSON with `Content-Type: application/json` and exactly one field:
 
 ```json
-{"error":"<non-empty provider error>"}
+{ "error": "<non-empty provider error>" }
 ```
 
 Provider error details are not propagated to callers.
@@ -124,11 +124,23 @@ Production configuration rejects `VAULT_DRIVER=memory`. External mode also rejec
 
 Before switching an existing process from the in-memory driver, protect any in-memory canary credential. The current Vault port exposes only `write`, `reveal`, `delete`, and optional `health`; there is no cross-driver migration operation. Do not dump an in-memory secret to a file, log, shell output, database field, or chat to migrate it. If the canary is disposable, obtain explicit owner authorization to discard and re-import it before any API/worker restart.
 
-## Local acceptance helper
+## Local acceptance helper and single-host production profile
 
-The repository includes a loopback-only persistent HTTPS store for release acceptance. It is not a production deployment target. Keep its token, AES-256-GCM master key, and TLS private key outside the repository. The server rejects group/world-readable token, master-key, or TLS-key files, keeps its state directory at `0700`, and persists the encrypted store at `0600`.
+The repository includes a loopback-only persistent HTTPS store. It is used for
+release acceptance and, in the current BOT_TELE deployment, as the single-host
+production Vault behind the existing `com.bot-tele.vault` LaunchAgent. It is not
+an HA or multi-host Vault service. Keep its token, AES-256-GCM master key, and TLS
+private key outside the repository. The server rejects group/world-readable token,
+master-key, or TLS-key files, keeps its state directory at `0700`, and persists
+the encrypted store at `0600`.
 
-The default local paths used by the helper are under `~/.config/bot-tele-external-vault` for credentials/CA and `~/.local/state/bot-tele-external-vault` for encrypted state. Start the server by passing only file paths, never secret values:
+The production profile binds to `127.0.0.1:8443` and uses the encrypted state at
+`~/.local/state/bot-tele-external-vault/store.json`; credentials and CA remain
+under `~/.config/bot-tele-external-vault`. API and worker must point to the same
+endpoint and explicit host/port/CIDR egress allowlists.
+
+The default local paths used by the helper are under `~/.config/bot-tele-external-vault`
+for credentials/CA and `~/.local/state/bot-tele-external-vault` for encrypted state.
 
 ```bash
 BT_VAULT_DATA_FILE="$HOME/.local/state/bot-tele-external-vault/store.json" \

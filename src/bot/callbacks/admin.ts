@@ -11,6 +11,7 @@ import {
 import type { IdentityTelemetry } from "../../modules/identity/telemetry.js";
 import type { RootActor, RootAdminConfig } from "../../modules/identity/root-admin.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
+import type { AuthorizationJsonValue } from "../../modules/identity/authorization-payload.js";
 import {
   authorizeSensitiveAdminAction,
   isSensitiveActionKey,
@@ -193,6 +194,30 @@ function targetTypeFor(
   if (command === "manual_fulfillment.complete") return "ManualFulfillmentTask";
   if (command === "support.replacement.approve") return "ReplacementCase";
   return "Order";
+}
+
+function sensitiveResourceId(input: HandleInput): string {
+  return input.command === "supplier.mapping.select" || input.command === "supplier.mapping.verify"
+    ? (input.input ?? input.targetId)
+    : input.targetId;
+}
+
+function sensitiveRequestedData(input: {
+  command: string;
+  targetId: string;
+  value: string | undefined;
+  resolutionCode: string | undefined;
+}): AuthorizationJsonValue {
+  if (input.command === "supplier.mapping.select" || input.command === "supplier.mapping.verify") {
+    return {
+      variantId: input.targetId,
+      supplierSkuId: input.value ?? input.targetId,
+    };
+  }
+  return {
+    targetId: input.targetId,
+    ...(input.resolutionCode === undefined ? {} : { resolutionCode: input.resolutionCode }),
+  };
 }
 
 function pendingActionFrom(action: DurableAdminAction): PendingAction {
@@ -514,8 +539,14 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           actor: input.actor,
           actionKey,
           resourceType: targetTypeFor(input.command),
-          resourceId: input.targetId,
+          resourceId: sensitiveResourceId(input),
           correlationId: input.correlationId,
+          requestedData: sensitiveRequestedData({
+            command: input.command,
+            targetId: input.targetId,
+            value: input.input,
+            resolutionCode: input.resolutionCode,
+          }),
           consumeGrant: !isDurableAdminCommandRef(input.command),
         });
         if (!authorization.ok) {
@@ -607,6 +638,12 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
               resourceType: targetTypeFor(action.command),
               resourceId: action.targetId,
               correlationId: durableAction.correlationId,
+              requestedData: sensitiveRequestedData({
+                command: action.command,
+                targetId: action.targetId,
+                value: undefined,
+                resolutionCode: action.resolutionCode,
+              }),
               consumeGrant: true,
             });
             if (!authorization.ok) {

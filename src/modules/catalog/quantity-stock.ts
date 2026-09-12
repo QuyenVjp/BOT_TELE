@@ -3,6 +3,11 @@ import { withTransaction, type Db } from "../../infrastructure/db/transaction.js
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import {
+  authorizeSensitiveAdminAction,
+  SensitiveAuthorizationRefusedError,
+  type SensitiveActionDeps,
+} from "../identity/sensitive-action.js";
+import {
   authorizeRootAction,
   type RootActor,
   type RootAdminConfig,
@@ -172,6 +177,8 @@ export async function adjustQuantityStock(input: {
   db: Db;
   actor: RootActor;
   config: RootAdminConfig;
+  /** Step-up deps for an inventory-value change. Required; see the refusal below. */
+  sensitiveDeps?: SensitiveActionDeps;
   variantId: string;
   delta: number;
   expectedStockVersion: number;
@@ -187,6 +194,24 @@ export async function adjustQuantityStock(input: {
     return { ok: false, code: "WRONG_VERSION" };
   const reason = input.reason.trim().slice(0, 200);
   if (!reason) return { ok: false, code: "INVALID_DELTA" };
+  // Second factor for inventory value. A missing deps object is a programming error, and a
+  // refused grant throws before the UPDATE runs, so neither can silently downgrade this.
+  if (!input.sensitiveDeps) throw new Error("STEP_UP_DEPS_MISSING");
+  const authorized = await authorizeSensitiveAdminAction(input.sensitiveDeps, {
+    actor: input.actor,
+    actionKey: "inventory.stock.adjust",
+    resourceType: "ProductVariant",
+    resourceId: input.variantId,
+    correlationId: input.correlationId,
+    requestedData: {
+      variantId: input.variantId,
+      delta: input.delta,
+      expectedStockVersion: input.expectedStockVersion,
+      idempotencyKey: input.idempotencyKey,
+    },
+    consumeGrant: true,
+  });
+  if (!authorized.ok) throw new SensitiveAuthorizationRefusedError(authorized.code);
 
   return withTransaction(input.db, async (trx) => {
     const priorLedger = await sql<{

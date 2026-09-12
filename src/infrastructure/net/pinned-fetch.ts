@@ -98,15 +98,14 @@ async function pinnedExchange(
 
   return await new Promise<Response>((resolve, reject) => {
     let settled = false;
-    // Declared before `finish` so the cleanup cannot reference a binding that is
-    // still in its temporal dead zone.
-    let deadline: NodeJS.Timeout | undefined;
-    let onAbort: (() => void) | undefined;
+    // The timer is armed below; cleanup reads it through this box so `finish` can be
+    // defined first and still be the single place that releases everything.
+    const timers: { deadline?: NodeJS.Timeout; onAbort?: () => void } = {};
     const finish = (error: Error | null, value?: Response): void => {
       if (settled) return;
       settled = true;
-      if (deadline) clearTimeout(deadline);
-      if (onAbort && init?.signal) init.signal.removeEventListener("abort", onAbort);
+      if (timers.deadline) clearTimeout(timers.deadline);
+      if (timers.onAbort && init?.signal) init.signal.removeEventListener("abort", timers.onAbort);
       if (error) reject(error);
       else resolve(value!);
     };
@@ -131,21 +130,22 @@ async function pinnedExchange(
     // once a socket exists, so a CONNECT that never completes — a blackholed address,
     // which is exactly what a pinned non-listening address looks like — would hang
     // forever. The timer below fires regardless of transport progress.
-    deadline = setTimeout(() => {
+    timers.deadline = setTimeout(() => {
       req.destroy(new Error("OUTBOUND_TIMEOUT"));
       finish(new Error("OUTBOUND_TIMEOUT"));
     }, timeoutMs);
-    deadline.unref?.();
+    timers.deadline.unref?.();
 
-    onAbort = (): void => {
+    timers.onAbort = (): void => {
       req.destroy(new Error("OUTBOUND_ABORTED"));
       finish(new Error("OUTBOUND_ABORTED"));
     };
 
     req.on("error", (error) => finish(error));
     if (init?.signal) {
-      if (init.signal.aborted) onAbort();
-      else init.signal.addEventListener("abort", onAbort, { once: true });
+      const abort = timers.onAbort;
+      if (init.signal.aborted) abort();
+      else init.signal.addEventListener("abort", abort, { once: true });
     }
     const body = init?.body;
     if (typeof body === "string") req.write(body);

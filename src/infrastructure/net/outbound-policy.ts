@@ -329,27 +329,3 @@ export async function assertOutboundTargetAllowed(
   }
   return { url, addresses };
 }
-
-/**
- * A `fetch` wrapper that re-validates the target, resolves DNS, verifies EVERY
- * resolved address, then delegates to the supplied/global fetch. Redirects must
- * stay disabled (`redirect: "error"`) — this wrapper forces it.
- */
-export function createGuardedFetch(
-  options: OutboundPolicyOptions & {
-    fetchImpl?: typeof fetch;
-    resolve?: (hostname: string) => Promise<readonly string[]>;
-  },
-): typeof fetch {
-  const { fetchImpl, resolve, ...policy } = options;
-  const delegate = fetchImpl ?? fetch;
-  const guarded = async (
-    input: Parameters<typeof fetch>[0],
-    init?: Parameters<typeof fetch>[1],
-  ): Promise<Response> => {
-    const raw = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    await assertOutboundTargetAllowed(raw, policy, resolve ? { resolve } : undefined);
-    return delegate(input, { ...init, redirect: "error" });
-  };
-  return guarded as typeof fetch;
-}

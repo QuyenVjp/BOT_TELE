@@ -379,4 +379,21 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(api.sendDocument).toHaveBeenCalledTimes(1);
     expect(calls[0]?.[1]).toBe("file_id_cached_release");
   });
+
+  it("routes implicit grammY calls through Telegram test environment", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(JSON.stringify({ ok: true, result: { id: 1, type: "private" } }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const responder = createGrammyResponder(BOT_TOKEN, undefined, undefined, {
+      environment: "test",
+      fetch: fetchImpl,
+    });
+
+    await responder.getChat!("1");
+
+    expect(String(fetchImpl.mock.calls[0]?.[0])).toContain(`/bot${BOT_TOKEN}/test/getChat`);
+  });
 });

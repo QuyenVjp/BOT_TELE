@@ -23,6 +23,14 @@ parent application config. Node does not override pre-existing variables, so
 the wrapper must not inherit `DATABASE_URL` / `REDIS_URL` / `TELEGRAM_*` /
 `SEPAY_*` / `VAULT_*` / `VIETQR_*` / `STORE_*` / `SUPPLIER_*`.
 
+`TELEGRAM_API_ENVIRONMENT` defaults to `prod`. Only isolated staging/test
+config may set it to `test`; grammY then uses Telegram's official
+`/bot<token>/test/METHOD_NAME` path. Production rejects `test`.
+
+`SEPAY_API_BASE_URL` must be `https://userapi.sepay.vn/v2` in production.
+The official Sandbox host `https://userapi-sandbox.sepay.vn/v2` is accepted
+only outside production and must use a separate Sandbox token.
+
 ## Do not
 
 ```bash

@@ -76,6 +76,87 @@ describe("official SePay API v2 reconciliation adapter", () => {
       `Bearer ${API_CREDENTIAL_FIXTURE}`,
     );
   });
+  it("lists official bank accounts through the same client and parses the envelope", async () => {
+    const fetchImpl = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: "success",
+          data: [
+            {
+              id: "00000000-0000-4000-8000-000000000002",
+              account_holder_name: "TEST ACCOUNT",
+              account_number: "0123456789",
+              accumulated: 1000000,
+              last_transaction: null,
+              label: "sandbox",
+              active: "1",
+              bank_short_name: "ACB",
+              bank_full_name: "ACB",
+              bank_code: "ACB",
+            },
+          ],
+          meta: {
+            pagination: {
+              total: 1,
+              per_page: 1,
+              current_page: 1,
+              last_page: 1,
+              has_more: false,
+            },
+          },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      ),
+    );
+    const port = createSePayApiPort({
+      baseUrl: "https://userapi.sepay.vn/v2",
+      token: API_CREDENTIAL_FIXTURE,
+      fetchImpl,
+      resolveHost: PUBLIC_RESOLVER,
+    });
+
+    const rows = await port.listBankAccounts(1, { page: 1 });
+
+    expect(rows).toEqual([
+      {
+        id: "00000000-0000-4000-8000-000000000002",
+        accountHolderName: "TEST ACCOUNT",
+        accountNumber: "0123456789",
+        accumulated: 1000000,
+        lastTransaction: null,
+        label: "sandbox",
+        active: true,
+        bankShortName: "ACB",
+        bankFullName: "ACB",
+        bankCode: "ACB",
+      },
+    ]);
+    const [request, init] = fetchImpl.mock.calls[0]!;
+    const url = new URL(String(request));
+    expect(url.origin + url.pathname).toBe("https://userapi.sepay.vn/v2/bank-accounts");
+    expect(url.searchParams.get("page")).toBe("1");
+    expect(url.searchParams.get("per_page")).toBe("1");
+    expect(new Headers(init?.headers).get("authorization")).toBe(
+      `Bearer ${API_CREDENTIAL_FIXTURE}`,
+    );
+  });
+
+  it("allows the official sandbox only when explicitly enabled", () => {
+    expect(() =>
+      createSePayApiPort({
+        baseUrl: "https://userapi-sandbox.sepay.vn/v2",
+        token: API_CREDENTIAL_FIXTURE,
+      }),
+    ).toThrow(/official HTTPS host/i);
+
+    expect(() =>
+      createSePayApiPort({
+        baseUrl: "https://userapi-sandbox.sepay.vn/v2",
+        token: API_CREDENTIAL_FIXTURE,
+        allowSandbox: true,
+      }),
+    ).not.toThrow();
+  });
 
   it("fails closed on malformed responses and reports 429 without echoing the token", async () => {
     const malformed = createSePayApiPort({

@@ -40,6 +40,32 @@ const ResponseSchema = z.object({
     }),
   }),
 });
+const BankAccountSchema = z.object({
+  id: z.string().uuid(),
+  account_holder_name: z.string().min(1).max(256),
+  account_number: z.string().min(1).max(64),
+  accumulated: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  last_transaction: z.string().nullable().optional(),
+  label: z.string().nullable().optional(),
+  active: z.union([z.literal(0), z.literal(1), z.literal("0"), z.literal("1")]),
+  bank_short_name: z.string().min(1).max(64),
+  bank_full_name: z.string().min(1).max(256),
+  bank_code: z.string().min(1).max(64),
+});
+
+const BankAccountsResponseSchema = z.object({
+  status: z.literal("success"),
+  data: z.array(BankAccountSchema).max(100),
+  meta: z.object({
+    pagination: z.object({
+      total: z.number().int().nonnegative(),
+      per_page: z.number().int().min(1).max(100),
+      current_page: z.number().int().positive(),
+      last_page: z.number().int().nonnegative(),
+      has_more: z.boolean(),
+    }),
+  }),
+});
 
 export class SePayApiError extends Error {
   readonly code: "INVALID_CONFIG" | "RATE_LIMITED" | "HTTP_ERROR" | "SCHEMA_INVALID";
@@ -56,6 +82,22 @@ export class SePayApiError extends Error {
     this.retryAfterSeconds = retryAfterSeconds;
   }
 }
+export interface SePayBankAccount {
+  id: string;
+  accountHolderName: string;
+  accountNumber: string;
+  accumulated: number;
+  lastTransaction: string | null;
+  label: string | null;
+  active: boolean;
+  bankShortName: string;
+  bankFullName: string;
+  bankCode: string;
+}
+
+export interface SePayApiPort extends SePayReconciliationPort {
+  listBankAccounts(limit?: number, options?: { page?: number }): Promise<SePayBankAccount[]>;
+}
 
 function retryAfter(headers: Headers): number | null {
   const value = headers.get("retry-after");
@@ -69,25 +111,36 @@ export function createSePayApiPort(options: {
   token: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  allowSandbox?: boolean;
   /**
    * Test seam for the outbound-policy DNS lookup. Production omits it and the policy
    * resolves through `node:dns`. It cannot disable the policy: the resolved addresses
    * are still classified, so an injected resolver returning a private address is refused.
    */
   resolveHost?: (hostname: string) => Promise<readonly string[]>;
-}): SePayReconciliationPort {
-  const baseUrl = new URL(options.baseUrl);
-  if (baseUrl.protocol !== "https:" || baseUrl.hostname !== "userapi.sepay.vn") {
+}): SePayApiPort {
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(options.baseUrl);
+  } catch {
+    throw new SePayApiError("INVALID_CONFIG", "SePay API base URL is invalid");
+  }
+  const allowedHosts = ["userapi.sepay.vn", "userapi-sandbox.sepay.vn"] as const;
+  if (
+    baseUrl.protocol !== "https:" ||
+    !allowedHosts.includes(baseUrl.hostname as (typeof allowedHosts)[number]) ||
+    (baseUrl.hostname === "userapi-sandbox.sepay.vn" && options.allowSandbox !== true)
+  ) {
     throw new SePayApiError(
       "INVALID_CONFIG",
-      "SePay API base URL must use the official HTTPS host",
+      "SePay API base URL must use an allowed official HTTPS host",
     );
   }
   // Same outbound policy as every other egress, and it BINDS the socket to the address it
   // approves — so a DNS answer pointing at loopback/metadata is refused, and an answer that
   // changes between validation and connect cannot reroute a request that carries our token.
   const guardedFetch = createPinnedFetch({
-    allowedHosts: ["userapi.sepay.vn"],
+    allowedHosts: [baseUrl.hostname],
     timeoutMs: options.timeoutMs ?? 8_000,
     ...(options.resolveHost ? { resolve: options.resolveHost } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),
@@ -109,6 +162,48 @@ export function createSePayApiPort(options: {
       return waitForOfficialRate();
     }
     requestTimes.push(Date.now());
+  };
+  const getJson = async (url: URL): Promise<unknown> => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    let response: Response;
+    try {
+      await waitForOfficialRate();
+      response = await guardedFetch(url, {
+        method: "GET",
+        headers: { authorization: `Bearer ${options.token}`, accept: "application/json" },
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new SePayApiError("HTTP_ERROR", "SePay API request timed out");
+      }
+      if (error instanceof OutboundPolicyError) {
+        throw new SePayApiError("INVALID_CONFIG", "SePay API destination is not allowed");
+      }
+      throw new SePayApiError("HTTP_ERROR", "SePay API request failed");
+    } finally {
+      clearTimeout(timeout);
+    }
+    if (response.status === 429) {
+      throw new SePayApiError(
+        "RATE_LIMITED",
+        "SePay API rate limited request",
+        retryAfter(response.headers),
+      );
+    }
+    if (!response.ok) {
+      throw new SePayApiError("HTTP_ERROR", `SePay API returned HTTP ${response.status}`);
+    }
+    const raw = await response.text();
+    if (Buffer.byteLength(raw, "utf8") > MAX_RESPONSE_BYTES) {
+      throw new SePayApiError("SCHEMA_INVALID", "SePay API response exceeded the size bound");
+    }
+    try {
+      return JSON.parse(raw);
+    } catch {
+      throw new SePayApiError("SCHEMA_INVALID", "SePay API response schema was invalid");
+    }
   };
 
   return {
@@ -136,55 +231,7 @@ export function createSePayApiPort(options: {
         url.searchParams.set("since_id", listOptions.sinceId);
       }
 
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), timeoutMs);
-      let response: Response;
-      try {
-        await waitForOfficialRate();
-        // The pinned client validates the ORIGIN and binds the socket to the address it
-        // approved, so a DNS answer that changes between validation and connect cannot
-        // redirect this request — which carries a bearer token — to somewhere unchecked.
-        // It also refuses redirects, so a `Location` cannot move the token either.
-        response = await guardedFetch(url, {
-          method: "GET",
-          headers: { authorization: `Bearer ${options.token}`, accept: "application/json" },
-          signal: controller.signal,
-        });
-      } catch (error) {
-        if (error instanceof Error && error.name === "AbortError") {
-          throw new SePayApiError("HTTP_ERROR", "SePay API request timed out");
-        }
-        // A refused destination is a security decision, not a flaky request: reporting it
-        // as HTTP_ERROR would make a blocked SSRF attempt look like provider downtime and
-        // invite a retry against whatever the DNS answer points at next time.
-        if (error instanceof OutboundPolicyError) {
-          throw new SePayApiError("INVALID_CONFIG", "SePay API destination is not allowed");
-        }
-        throw new SePayApiError("HTTP_ERROR", "SePay API request failed");
-      } finally {
-        clearTimeout(timeout);
-      }
-      if (response.status === 429) {
-        throw new SePayApiError(
-          "RATE_LIMITED",
-          "SePay API rate limited reconciliation",
-          retryAfter(response.headers),
-        );
-      }
-      if (!response.ok) {
-        throw new SePayApiError("HTTP_ERROR", `SePay API returned HTTP ${response.status}`);
-      }
-      const raw = await response.text();
-      if (Buffer.byteLength(raw, "utf8") > MAX_RESPONSE_BYTES) {
-        throw new SePayApiError("SCHEMA_INVALID", "SePay API response exceeded the size bound");
-      }
-      let decoded: unknown;
-      try {
-        decoded = JSON.parse(raw);
-      } catch {
-        throw new SePayApiError("SCHEMA_INVALID", "SePay API response schema was invalid");
-      }
-      const parsed = ResponseSchema.safeParse(decoded);
+      const parsed = ResponseSchema.safeParse(await getJson(url));
       if (!parsed.success) {
         throw new SePayApiError("SCHEMA_INVALID", "SePay API response schema was invalid");
       }
@@ -205,6 +252,35 @@ export function createSePayApiPort(options: {
         };
         return brandVerifiedSePayApiEvidence(evidence);
       });
+    },
+    async listBankAccounts(limit = 100, listOptions = {}) {
+      if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+        throw new RangeError("SePay API per_page must be between 1 and 100");
+      }
+      const page = listOptions.page ?? 1;
+      if (!Number.isInteger(page) || page < 1) {
+        throw new RangeError("SePay API page must be positive");
+      }
+      const url = new URL(baseUrl.toString().replace(/\/$/, "") + "/bank-accounts");
+      url.searchParams.set("page", String(page));
+      url.searchParams.set("per_page", String(limit));
+
+      const parsed = BankAccountsResponseSchema.safeParse(await getJson(url));
+      if (!parsed.success) {
+        throw new SePayApiError("SCHEMA_INVALID", "SePay API response schema was invalid");
+      }
+      return parsed.data.data.map((row) => ({
+        id: row.id,
+        accountHolderName: row.account_holder_name,
+        accountNumber: row.account_number,
+        accumulated: row.accumulated,
+        lastTransaction: row.last_transaction ?? null,
+        label: row.label ?? null,
+        active: row.active === 1 || row.active === "1",
+        bankShortName: row.bank_short_name,
+        bankFullName: row.bank_full_name,
+        bankCode: row.bank_code,
+      }));
     },
   };
 }

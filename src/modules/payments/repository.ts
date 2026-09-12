@@ -16,62 +16,304 @@ import type {
  * transaction row, the allocation, the intent state change, and any outbox
  * event commit together. The unique keys carry the exactly-once guarantee:
  *   - bank_transaction (provider, provider_transaction_id) → evidence dedupe
+ *   - bank_transaction_alias (provider, alias_type, alias_value) → cross-source identity
  *   - payment_allocation (bank_transaction_id) where SETTLED → one settlement
+ *   - payment_allocation (payment_intent_id) where SETTLED → one settlement per intent
  *   - payment_intent (transfer_content) where live → one live intent per content
  */
 
 /**
- * Insert verified evidence as a bank transaction, deduplicating on the provider
- * transaction id. Returns the new row id, or `null` when the evidence was
- * already recorded (a replay) — the caller then short-circuits without
- * re-settling.
+ * Cross-source SePay identity: one physical bank transfer, one canonical row.
+ *
+ * The two provider surfaces carry DIFFERENT ids for the same money — the webhook
+ * an integer (`92704`), the API v2 list a UUID (`api:…`) — and SePay documents
+ * no translation between them. Identity is therefore resolved in three layers,
+ * strongest first, and never guessed:
+ *
+ *   1. an alias we have already mapped to a canonical row
+ *      (`bank_transaction_alias`, unique per (provider, alias_type, alias_value));
+ *   2. the same provider transaction id (same surface re-delivering), compared
+ *      field-by-field so a mutated body stays a REFERENCE_COLLISION;
+ *   3. the account-scoped correlation key, which only merges when the bank
+ *      reference is present and EXACTLY ONE candidate sits inside the window.
+ *      More than one candidate is `AMBIGUOUS`: the arrival is stored and the
+ *      caller records a review signal instead of merging.
+ */
+export type BankTransactionAliasType = "webhook_legacy_id" | "api_v2_uuid" | "provider_reference";
+
+export interface BankTransactionAlias {
+  aliasType: BankTransactionAliasType;
+  aliasValue: string;
+}
+
+export type BankTransactionIdentity =
+  | { kind: "INSERTED"; id: string }
+  | { kind: "DUPLICATE"; id: string }
+  | { kind: "MUTATION"; id: string }
+  | { kind: "AMBIGUOUS"; id: string; candidateIds: string[] };
+
+/**
+ * The provider aliases one piece of evidence carries. `provider_reference` is
+ * deliberately never derived: a bank reference code is not globally unique (some
+ * banks send none, formats differ per bank), so it may only be used inside the
+ * account-scoped correlation key below.
+ */
+export function deriveBankTransactionAliases(
+  providerTransactionId: string,
+): BankTransactionAlias[] {
+  // `api:` marks the v2 surface. EVERYTHING else came from the webhook surface, so a
+  // non-v2 id is labelled as such rather than dropped: an unlabelled id is invisible to
+  // step 1 of ingestion, which is where cross-surface linking begins. The SQL backfill in
+  // migration 066 applies exactly this rule, and the agreement is asserted by
+  // tests/integration/sepay-cross-source-identity.test.ts.
+  if (providerTransactionId.startsWith("api:") && providerTransactionId.length > 4) {
+    return [{ aliasType: "api_v2_uuid", aliasValue: providerTransactionId.slice(4) }];
+  }
+  if (providerTransactionId.length === 0) return [];
+  return [{ aliasType: "webhook_legacy_id", aliasValue: providerTransactionId }];
+}
+
+/**
+ * The correlation key, in the ONE definition the SQL backfill must agree with
+ * (`bank_transaction_correlation_key` in
+ * src/infrastructure/db/migrations/066_sepay_transaction_alias.sql; the equality
+ * is asserted by tests/integration/sepay-cross-source-identity.test.ts).
+ *
+ *   sepay | merchant_account_id | direction | amount_vnd | normalize(reference)
+ *
+ * normalize = trim → collapse internal whitespace → uppercase. A null or
+ * whitespace-only reference yields NULL and NOTHING correlates on it: without a
+ * bank reference there is no per-account-unique field, and amount+time alone
+ * could join two legitimate transfers. The time window is not part of the key —
+ * a bucket boundary would break matching across it — the query applies it.
+ */
+export function bankTransactionCorrelationKey(input: {
+  merchantAccountId: string;
+  direction: string;
+  amountVnd: number;
+  reference: string | null;
+}): string | null {
+  const reference = (input.reference ?? "")
+    .trim()
+    .replace(/[ \t\n\r\f\v]+/g, " ")
+    .toUpperCase();
+  if (reference === "") return null;
+  return `sepay|${input.merchantAccountId}|${input.direction}|${input.amountVnd}|${reference}`;
+}
+
+/**
+ * Tolerance for the cross-source `transacted_at` window. SePay timestamps have
+ * second-level resolution and the surfaces format them differently (webhook
+ * `YYYY-MM-DD HH:mm:ss` in GMT+7, API v2 ISO-8601), so one transfer can be
+ * stamped a couple of seconds apart across surfaces. ±120s absorbs that skew and
+ * stays far narrower than the gap between two real transfers that happen to
+ * share an account, amount, and bank reference.
+ */
+const CORRELATION_WINDOW_SECONDS = 120;
+
+/** Columns shared by every identity lookup; `bt` is the alias in each query. */
+const BANK_TRANSACTION_ROW_COLUMNS = sql`
+  bt.id, bt.provider_transaction_id, bt.direction, bt.merchant_account_id,
+  bt.amount_vnd, bt.content, bt.raw_hash
+`;
+
+interface BankTransactionRow {
+  id: string;
+  provider_transaction_id: string;
+  direction: string;
+  merchant_account_id: string;
+  amount_vnd: string;
+  content: string | null;
+  raw_hash: string;
+}
+
+/** The canonical row for one provider id on one provider, if it exists. */
+async function findBankTransactionRow(
+  exec: Executor,
+  provider: string,
+  providerTransactionId: string,
+): Promise<BankTransactionRow | null> {
+  const result = await sql<BankTransactionRow>`
+    select ${BANK_TRANSACTION_ROW_COLUMNS}
+    from bank_transaction bt
+    where bt.provider = ${provider}
+      and bt.provider_transaction_id = ${providerTransactionId}
+  `.execute(exec);
+  return result.rows[0] ?? null;
+}
+
+/**
+ * Record every alias this evidence carries on the canonical row. The conflict
+ * clause is the point: an alias already mapped keeps the row it points at, so
+ * concurrent deliveries of one provider id converge instead of racing to
+ * re-point the mapping (the unique index is what makes it one row, not two).
+ */
+export async function attachBankTransactionAliases(
+  exec: Executor,
+  bankTransactionId: string,
+  provider: string,
+  aliases: BankTransactionAlias[],
+): Promise<void> {
+  for (const alias of aliases) {
+    await sql`
+      insert into bank_transaction_alias
+        (id, bank_transaction_id, provider, alias_type, alias_value)
+      values
+        (${newId()}, ${bankTransactionId}, ${provider}, ${alias.aliasType}, ${alias.aliasValue})
+      on conflict (provider, alias_type, alias_value) do nothing
+    `.execute(exec);
+  }
+}
+
+/**
+ * Resolve evidence against a row we already hold. Same provider id → the
+ * verified payload fingerprint decides replay versus collision (unchanged from
+ * the original dedupe). Different surface → only the business facts can be
+ * compared, because the payload fingerprint belongs to the other surface.
+ */
+async function resolveAgainstExisting(
+  exec: Executor,
+  row: BankTransactionRow,
+  evidence: PaymentEvidence,
+  aliases: BankTransactionAlias[],
+): Promise<BankTransactionIdentity> {
+  await attachBankTransactionAliases(exec, row.id, evidence.provider, aliases);
+  const same =
+    row.provider_transaction_id !== evidence.providerTransactionId
+      ? row.direction === evidence.direction &&
+        row.merchant_account_id === evidence.merchantAccountId &&
+        Number(row.amount_vnd) === evidence.amountVnd
+      : row.direction === evidence.direction &&
+        row.merchant_account_id === evidence.merchantAccountId &&
+        Number(row.amount_vnd) === evidence.amountVnd &&
+        row.content === evidence.content &&
+        row.raw_hash === evidence.rawHash;
+  return same ? { kind: "DUPLICATE", id: row.id } : { kind: "MUTATION", id: row.id };
+}
+
+/**
+ * Insert verified evidence as a canonical bank transaction.
+ *
+ * Order matters and is never reordered: alias → same provider id → correlation
+ * key. `AMBIGUOUS` means two rows already share this transfer's correlation key,
+ * so the new evidence is stored (nothing is lost) but attributed to neither.
+ *
+ * Concurrency: Read Committed plus the provider-id unique index is enough for
+ * two deliveries of the SAME surface — the loser's insert conflicts, re-reads
+ * the winner, and reports DUPLICATE/MUTATION. It is NOT enough for the two
+ * surfaces arriving at once: they carry different provider ids and different
+ * alias types, so neither unique index collides and both would insert. The
+ * transaction-scoped advisory lock on the correlation key serializes that
+ * decision, so the second arrival's candidate query runs after the first
+ * commits and sees it.
  */
 export async function insertBankTransactionIfNew(
   exec: Executor,
   evidence: PaymentEvidence,
   signatureStatus: string,
   schemaVersion: string,
-): Promise<
-  | { kind: "INSERTED"; id: string }
-  | { kind: "DUPLICATE"; id: string }
-  | { kind: "MUTATION"; id: string }
-> {
+): Promise<BankTransactionIdentity> {
+  const aliases = deriveBankTransactionAliases(evidence.providerTransactionId);
+
+  // 1. A provider id we have already mapped. Strong and deterministic.
+  for (const alias of aliases) {
+    const hit = await sql<BankTransactionRow>`
+      select ${BANK_TRANSACTION_ROW_COLUMNS}
+      from bank_transaction bt
+      join bank_transaction_alias a on a.bank_transaction_id = bt.id
+      where a.provider = ${evidence.provider}
+        and a.alias_type = ${alias.aliasType}
+        and a.alias_value = ${alias.aliasValue}
+    `.execute(exec);
+    if (hit.rows[0]) return resolveAgainstExisting(exec, hit.rows[0], evidence, aliases);
+  }
+
+  // 2. Same surface, same provider id — the row may predate the alias table.
+  const sameSurface = await findBankTransactionRow(
+    exec,
+    evidence.provider,
+    evidence.providerTransactionId,
+  );
+  if (sameSurface) return resolveAgainstExisting(exec, sameSurface, evidence, aliases);
+
+  // 3. Cross-source: find the canonical row by the account-scoped key.
+  const correlationKey = bankTransactionCorrelationKey(evidence);
+  let candidateIds: string[] = [];
+  if (correlationKey !== null) {
+    await sql`
+      select pg_advisory_xact_lock(
+        hashtext('bank_transaction_correlation'), hashtext(${correlationKey})
+      )
+    `.execute(exec);
+    const halfWindowMs = CORRELATION_WINDOW_SECONDS * 1000;
+    const candidates = await sql<BankTransactionRow>`
+      select ${BANK_TRANSACTION_ROW_COLUMNS}
+      from bank_transaction bt
+      where bt.provider = ${evidence.provider}
+        and bt.correlation_key = ${correlationKey}
+        and bt.transacted_at between
+          ${new Date(evidence.transactedAt.getTime() - halfWindowMs).toISOString()}::timestamptz
+          and ${new Date(evidence.transactedAt.getTime() + halfWindowMs).toISOString()}::timestamptz
+      order by bt.id
+    `.execute(exec);
+    // A candidate from the SAME surface cannot be this transfer: one surface never reports the
+    // same transfer twice (a repeat carries the same provider id and is caught in step 2). So a
+    // same-surface candidate is a DIFFERENT physical transfer that merely shares the key, and
+    // its presence makes the match ambiguous — merging would have to pick one of two transfers.
+    //
+    // Only the other surface can be the same transfer, and only when it is the sole candidate:
+    //  - no same-surface candidate and exactly one cross-surface candidate → merge.
+    //  - anything else → store the arrival (nothing is lost) and report AMBIGUOUS.
+    const candidateIdsInWindow = candidates.rows.map((row) => row.id);
+    const sameSurfaceIds = new Set<string>();
+    if (candidateIdsInWindow.length > 0) {
+      const existing = await sql<{ bank_transaction_id: string }>`
+        select distinct bank_transaction_id
+        from bank_transaction_alias
+        where provider = ${evidence.provider}
+          and alias_type in (${sql.join(aliases.map((alias) => sql`${alias.aliasType}`))})
+          and bank_transaction_id in (${sql.join(candidateIdsInWindow.map((id) => sql`${id}`))})
+      `.execute(exec);
+      for (const row of existing.rows) sameSurfaceIds.add(row.bank_transaction_id);
+    }
+    const crossSurface = candidates.rows.filter((row) => !sameSurfaceIds.has(row.id));
+    const unambiguousCrossSource = sameSurfaceIds.size === 0 && crossSurface.length === 1;
+    if (unambiguousCrossSource) {
+      return resolveAgainstExisting(exec, crossSurface[0]!, evidence, aliases);
+    }
+    // Ambiguous only when there is something to be ambiguous ABOUT: a second transfer on this
+    // surface, or several candidates on the other.
+    candidateIds = sameSurfaceIds.size > 0 || crossSurface.length > 1 ? candidateIdsInWindow : [];
+  }
+
   const id = newId();
-  const result = await sql<{ id: string }>`
+  const inserted = await sql<{ id: string }>`
     insert into bank_transaction
       (id, provider, provider_transaction_id, direction, merchant_account_id,
-       amount_vnd, content, reference, transacted_at, raw_hash, signature_status, schema_version)
+       amount_vnd, content, reference, transacted_at, raw_hash, signature_status, schema_version,
+       correlation_key)
     values
       (${id}, ${evidence.provider}, ${evidence.providerTransactionId}, ${evidence.direction},
        ${evidence.merchantAccountId}, ${evidence.amountVnd}, ${evidence.content},
        ${evidence.reference}, ${evidence.transactedAt.toISOString()}, ${evidence.rawHash},
-       ${signatureStatus}, ${schemaVersion})
+       ${signatureStatus}, ${schemaVersion}, ${correlationKey})
     on conflict (provider, provider_transaction_id) do nothing
     returning id
   `.execute(exec);
-  if (result.rows[0]) return { kind: "INSERTED", id: result.rows[0].id };
-  const winner = await sql<{
-    id: string;
-    direction: string;
-    merchant_account_id: string;
-    amount_vnd: string;
-    content: string | null;
-    raw_hash: string;
-  }>`
-    select id, direction, merchant_account_id, amount_vnd, content, raw_hash
-    from bank_transaction
-    where provider = ${evidence.provider}
-      and provider_transaction_id = ${evidence.providerTransactionId}
-  `.execute(exec);
-  const row = winner.rows[0];
-  if (!row) throw new Error("Bank transaction conflict winner was not found");
-  const same =
-    row.direction === evidence.direction &&
-    row.merchant_account_id === evidence.merchantAccountId &&
-    Number(row.amount_vnd) === evidence.amountVnd &&
-    row.content === evidence.content &&
-    row.raw_hash === evidence.rawHash;
-  return same ? { kind: "DUPLICATE", id: row.id } : { kind: "MUTATION", id: row.id };
+  if (!inserted.rows[0]) {
+    // A concurrent delivery of the same provider id won the insert.
+    const winner = await findBankTransactionRow(
+      exec,
+      evidence.provider,
+      evidence.providerTransactionId,
+    );
+    if (!winner) throw new Error("Bank transaction conflict winner was not found");
+    return resolveAgainstExisting(exec, winner, evidence, aliases);
+  }
+  await attachBankTransactionAliases(exec, id, evidence.provider, aliases);
+  return candidateIds.length > 0
+    ? { kind: "AMBIGUOUS", id, candidateIds }
+    : { kind: "INSERTED", id };
 }
 
 interface IntentRow {
@@ -418,11 +660,20 @@ export async function expireIntent(
   return newVer;
 }
 
+/**
+ * Discrepancy types this writer can persist. `AMBIGUOUS_CORRELATION` is the
+ * cross-source identity signal: two canonical rows matched one physical
+ * transfer, so a human decides. It is intentionally NOT part of the matcher's
+ * vocabulary in domain.ts — `decideMatch` never returns it, because the arrival
+ * is neither an unmatched payment (nothing is unsettled) nor a replay.
+ */
+export type PersistedDiscrepancyType = DiscrepancyType | "AMBIGUOUS_CORRELATION";
+
 /** Record a typed discrepancy for manual/automated review. */
 export async function insertDiscrepancy(
   exec: Executor,
   input: {
-    type: DiscrepancyType;
+    type: PersistedDiscrepancyType;
     bankTransactionId: string | null;
     paymentIntentId: string | null;
     orderId: string | null;

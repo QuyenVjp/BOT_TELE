@@ -2,7 +2,6 @@ import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { createCallbackTokenCodec } from "../../src/bot/callback-codec.js";
 import { createTelegramDomainDispatcher } from "../../src/bot/callbacks/telegram-dispatch.js";
 import { createPostgresUiSurfaceRegistry } from "../../src/bot/ui-surface.js";
-import { presentMainMenu } from "../../src/bot/presenters/catalog.js";
 import { presentSupportReasonMenu } from "../../src/bot/presenters/support.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 import { sql } from "kysely";
@@ -40,7 +39,7 @@ function dispatcherFor(uiSurface?: {
     resolveOrderIdByNumber: vi.fn().mockResolvedValue(null),
     resolveCatalogPage: vi.fn().mockResolvedValue(null),
     catalog: {
-      mainMenu: vi.fn(async () => presentMainMenu()),
+      mainMenu: vi.fn(async () => ({ text: "🛒 TIER20 SHOP", buttons: [] })),
       categoryList: vi.fn(async () => ({ text: "cats", buttons: [] })),
       categoryView: vi.fn(async () => ({ text: "cat", buttons: [] })),
       variantDetail: vi.fn(),

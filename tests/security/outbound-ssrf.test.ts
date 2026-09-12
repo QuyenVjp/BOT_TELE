@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vitest";
 import {
   assertOutboundTargetAllowed,
   classifyAddress,
-  createGuardedFetch,
   OutboundPolicyError,
   parseOutboundUrl,
   type AddressClass,
@@ -341,59 +340,6 @@ describe("loopback test-mode escape hatch", () => {
         assertOutboundTargetAllowed("http://127.0.0.1:9090/", { allowInsecureLoopback: true }),
       ),
     ).toBe("PORT_NOT_ALLOWED");
-  });
-});
-
-describe("createGuardedFetch", () => {
-  it('forces redirect: "error" and resolves DNS before delegating', async () => {
-    const fetchImpl = vi.fn(
-      async (_input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) =>
-        new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
-    );
-    const resolve = vi.fn(resolveTo(PUBLIC_IP));
-    const guarded = createGuardedFetch({ fetchImpl, resolve });
-
-    await guarded(new URL("https://example.com/orders"), { redirect: "follow" });
-
-    expect(resolve).toHaveBeenCalledWith("example.com");
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-    expect(fetchImpl.mock.calls[0]?.[1]?.redirect).toBe("error");
-  });
-
-  it("accepts string and Request inputs", async () => {
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
-    const guarded = createGuardedFetch({ fetchImpl, resolve: resolveTo(PUBLIC_IP) });
-    await guarded("https://example.com/");
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it("blocks a private target before any fetch is issued", async () => {
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
-    const guarded = createGuardedFetch({ fetchImpl });
-    expect(
-      await rejectionCode(() => guarded(new URL("https://169.254.169.254/latest/meta-data/"))),
-    ).toBe("ADDRESS_NOT_ALLOWED");
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("blocks a rebinding hostname with an injected resolver", async () => {
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
-    const guarded = createGuardedFetch({ fetchImpl, resolve: resolveTo(METADATA_IP) });
-    expect(await rejectionCode(() => guarded("https://vault.example/healthz"))).toBe(
-      "ADDRESS_NOT_ALLOWED",
-    );
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("honours the loopback test-mode escape hatch", async () => {
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
-    const guarded = createGuardedFetch({
-      fetchImpl,
-      allowInsecureLoopback: true,
-      allowedPorts: [8080],
-    });
-    await guarded("http://127.0.0.1:8080/healthz");
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 });
 

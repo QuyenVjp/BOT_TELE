@@ -13,6 +13,7 @@ import { newId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { createPinnedFetch } from "../../infrastructure/net/pinned-fetch.js";
+import type { PinnedFetchOptions } from "../../infrastructure/net/pinned-fetch.js";
 import {
   isValidFileArtifactRegistrationMetadata,
   type FileArtifactMetadata,
@@ -172,24 +173,35 @@ async function verifyPrivateFile(input: {
   }
 }
 
-export function createTelegramFileDownloader(botToken: string): TelegramFileDownloader {
+export function createTelegramFileDownloader(
+  botToken: string,
+  options: Pick<PinnedFetchOptions, "fetchImpl" | "resolve" | "timeoutMs"> & {
+    telegramEnvironment?: "prod" | "test";
+  } = {},
+): TelegramFileDownloader {
   // Telegram's host is hardcoded, but these are the only outbound requests that carry a
   // credential in the URL path. The pinned client re-checks the RESOLVED address AND binds
   // the socket to it, so neither a poisoned DNS answer (rebinding) nor an off-host redirect
   // can make us hand the bot token to somewhere else.
+  const { telegramEnvironment = "prod", ...fetchOptions } = options;
   const guardedFetch = createPinnedFetch({
+    ...fetchOptions,
     allowedHosts: ["api.telegram.org"],
   });
+  const apiPathPrefix = telegramEnvironment === "test" ? "/test" : "";
   return {
     async download(input) {
       try {
-        const metaResponse = await guardedFetch(`https://api.telegram.org/bot${botToken}/getFile`, {
-          method: "POST",
-          redirect: "error",
-          signal: AbortSignal.timeout(30_000),
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ file_id: input.fileId }),
-        });
+        const metaResponse = await guardedFetch(
+          `https://api.telegram.org/bot${botToken}${apiPathPrefix}/getFile`,
+          {
+            method: "POST",
+            redirect: "error",
+            signal: AbortSignal.timeout(30_000),
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ file_id: input.fileId }),
+          },
+        );
         if (!metaResponse.ok) throw new Error("TELEGRAM_FILE_UNAVAILABLE");
         const meta = (await metaResponse.json()) as {
           ok?: boolean;
@@ -249,10 +261,13 @@ export function createTelegramFileDownloader(botToken: string): TelegramFileDown
     },
   };
 }
-export function createTelegramTextFileDownloader(botToken: string): {
+export function createTelegramTextFileDownloader(
+  botToken: string,
+  options: Parameters<typeof createTelegramFileDownloader>[1] = {},
+): {
   downloadText(fileId: string): Promise<string>;
 } {
-  const downloader = createTelegramFileDownloader(botToken);
+  const downloader = createTelegramFileDownloader(botToken, options);
   return {
     async downloadText(fileId) {
       const file = await downloader.download({ fileId, root: tmpdir(), maxBytes: 64_000n });

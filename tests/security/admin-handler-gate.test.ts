@@ -31,30 +31,73 @@ const REAL_GATES = [
 ] as const;
 
 /**
- * Handlers that contain the `!adminCallbacks` placeholder and no gate call in their own
- * body, because the gate lives inside the module they call. Each entry names where the
- * real check is, so the exemption is a reviewed decision rather than a silent hole.
+ * Handlers whose actor check is INLINE, not the shared helper.
  *
- * Verified by reading the named module:
- *  - `confirmInventoryImportSession` calls `authorizeRootAction` (inventory-import-session.ts)
- *  - `confirmFileArtifactImportSession` calls `authorizeRootAction` (file-artifact-import-session.ts)
- *  - `stageInventoryImportBatch` calls `authorizeRootAction` (inventory-import-session.ts)
- *  - `startInventoryImportSession` calls `authorizeRootAction` (inventory-import-session.ts)
- *  - `cancelInventoryImportSession` calls `authorizeRootAction` (inventory-import-session.ts)
- *  - `createInventoryImportTemplate` calls `authorizeRootAction` (inventory-import-session.ts)
- *  - `createFileArtifactImportSession` calls `authorizeRootAction` (file-artifact-import-session.ts)
+ * `Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID` plus a private-chat test is
+ * a real numeric-id check, so these are not authorization holes. They are listed rather than
+ * silently accepted because they skip the audit trail `requireRootAdmin` writes on a denial,
+ * and pinning them here means a NEW handler cannot quietly join this weaker group: it has to
+ * be added deliberately, in this list, in this file.
  */
-const GATE_DELEGATED_TO_MODULE = new Set([
-  "testLab",
-  "inventoryAdd",
-  "inventoryTemplateSelect",
-  "inventoryPasteSelect",
-  "inventoryPickProduct",
-  "importTemplate",
-  "importText",
+const INLINE_NUMERIC_CHECK: ReadonlySet<string> = new Set([
+  "broadcastAudience",
+  "broadcastStatus",
+  "broadcastText",
+  "categories",
+  "categoryAction",
+  "categoryCreatePrompt",
+  "customerMessagePrompt",
+  "customerSearch",
+  "customerState",
+  "customerText",
+  "customers",
+  "health",
+  "importConfirm",
   "importDocument",
   "importFileConfirm",
-  "importConfirm",
+  "importTemplate",
+  "importText",
+  "notifications",
+  "orderMessagePrompt",
+  "orderSearch",
+  "orderState",
+  "orderText",
+  "orders",
+  "presentAdminCustomerDetail",
+  "quantityAdjustConfirm",
+  "sendAdminCustomerMessage",
+  "storeClose",
+  "storeMode",
+  "storeOpen",
+  "storeOpenConfirm",
+  "storeTest",
+  "supplierClear",
+  "supplierSelect",
+  "supplierVerify",
+  "testCustomerAddPrompt",
+  "testCustomerDelete",
+  "testCustomers",
+]);
+
+/**
+ * Handlers that delegate their actor check to the module they call.
+ *
+ * Each entry names the callee, so a reviewer can verify the claim instead of trusting it.
+ * `broadcastConfirm` is the load-bearing example: it calls `enqueueBroadcastFromOwner`, which
+ * runs `requireRootAdmin` before anything else.
+ */
+const GATE_DELEGATED_TO_MODULE: ReadonlyMap<string, string> = new Map([
+  ["broadcastConfirm", "enqueueBroadcastFromOwner (src/worker.ts) calls requireRootAdmin"],
+  ["testLab", "inventory template reads are gated by the caller's requireRootAdmin"],
+  ["inventoryAdd", "createInventoryImportTemplate calls authorizeRootAction"],
+  ["inventoryTemplateSelect", "createInventoryImportTemplate calls authorizeRootAction"],
+  ["inventoryPasteSelect", "createInventoryImportTemplate calls authorizeRootAction"],
+  ["inventoryPickProduct", "startInventoryImportSession calls authorizeRootAction"],
+  ["importTemplate", "createInventoryImportTemplate calls authorizeRootAction"],
+  ["importText", "stageInventoryImportBatch calls authorizeRootAction"],
+  ["importDocument", "createFileArtifactImportSession calls authorizeRootAction"],
+  ["importFileConfirm", "confirmFileArtifactImportSession calls authorizeRootAction"],
+  ["importConfirm", "confirmInventoryImportSession calls authorizeRootAction"],
 ]);
 
 interface Handler {
@@ -62,19 +105,72 @@ interface Handler {
   body: string;
 }
 
-/** Every `async <name>(input…` at the indentation the admin surface object uses. */
+/**
+ * Every admin handler, found regardless of how it is spelled, INSIDE the admin surface.
+ *
+ * Two earlier versions were unsound in opposite directions, and both holes mattered:
+ *
+ *  - The first keyed on `^ {6}async <name>(input` and then only examined bodies containing
+ *    `!adminCallbacks`. A handler written as a property arrow, or one that simply omitted the
+ *    placeholder, was never examined at all.
+ *  - Widening the pattern to every method-like line made the scan cover unrelated surfaces:
+ *    `catalog` callbacks and plain inner helpers (`back`, `cancel`) live in the same file, and
+ *    demanding a root gate from them is noise that would train a reader to add exemptions.
+ *
+ * So the region is bounded first — the `admin: {` object literal inside the dispatcher deps —
+ * and every method-like member inside that region is checked, in any spelling. Comments are
+ * stripped before the gate is looked for, because a gate named in prose is not a gate.
+ */
+function adminSurfaceRegion(source: string): string {
+  const anchor = source.indexOf("\n    admin: {");
+  if (anchor === -1) throw new Error("admin surface object not found in src/worker.ts");
+  const open = source.indexOf("{", anchor);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    const char = source[index];
+    if (char === "{") depth += 1;
+    else if (char === "}") {
+      depth -= 1;
+      if (depth === 0) return source.slice(open + 1, index);
+    }
+  }
+  throw new Error("admin surface object is not brace-balanced");
+}
+
+function stripComments(body: string): string {
+  return body.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|\s)\/\/[^\n]*/g, "$1");
+}
+
+/** Every method-like member of the admin surface, with comments removed. */
 function adminSurfaceHandlers(): Handler[] {
-  const lines = readFileSync(resolve(ROOT, "src/worker.ts"), "utf8").split("\n");
+  const region = adminSurfaceRegion(readFileSync(resolve(ROOT, "src/worker.ts"), "utf8"));
+  const lines = region.split("\n");
   const starts: Array<{ line: number; name: string }> = [];
-  const pattern = /^ {6}async ([A-Za-z][A-Za-z0-9]*)\(input/;
+  // The region's members sit at one exact indentation (`admin: {` is at 4, its members at
+  // 6). Pinning it is what separates a member from a closure declared INSIDE a handler:
+  // `back` and `applySku` are helpers, not entry points, and demanding a root gate from them
+  // would only teach a reader to widen the exemption list.
+  const patterns = [
+    /^ {6}async ([A-Za-z][A-Za-z0-9]*)\(/,
+    /^ {6}([A-Za-z][A-Za-z0-9]*):\s*async\s*\(/,
+    /^ {6}([A-Za-z][A-Za-z0-9]*):\s*async\s+function\s*\(/,
+  ];
   lines.forEach((line, index) => {
-    const match = pattern.exec(line);
-    if (match) starts.push({ line: index, name: match[1]! });
+    for (const pattern of patterns) {
+      const match = pattern.exec(line);
+      if (match) {
+        starts.push({ line: index, name: match[1]! });
+        return;
+      }
+    }
   });
 
-  return starts.map((start, index) => {
+  return starts.map((entry, index) => {
     const end = starts[index + 1]?.line ?? lines.length;
-    return { name: start.name, body: lines.slice(start.line, end).join("\n") };
+    return {
+      name: entry.name,
+      body: stripComments(lines.slice(entry.line, end).join("\n")),
+    };
   });
 }
 
@@ -89,19 +185,46 @@ describe("admin handlers pass a real root gate", () => {
     expect(handlers.map((h) => h.name)).toContain("confirm");
   });
 
-  it("never authorises on the `!adminCallbacks` placeholder alone", () => {
-    const ungated = handlers
-      .filter((h) => h.body.includes("!adminCallbacks"))
+  it("gives every handler an actor check — shared helper, inline id, or documented delegation", () => {
+    // The property that matters is "this handler decides whether the ACTOR is the owner".
+    // An earlier version only examined handlers containing `!adminCallbacks`, which let a
+    // handler escape by not mentioning it — the two text interceptors that were fixed
+    // alongside this test were found exactly that way.
+    const unchecked = handlers
       .filter((h) => !REAL_GATES.some((gate) => h.body.includes(gate)))
+      .filter((h) => !INLINE_NUMERIC_CHECK.has(h.name))
+      .filter((h) => !GATE_DELEGATED_TO_MODULE.has(h.name))
       .map((h) => h.name)
-      .filter((name) => !GATE_DELEGATED_TO_MODULE.has(name))
       .sort();
 
     expect(
-      ungated,
-      "these handlers trust `!adminCallbacks` (true for EVERY caller) and never check the actor; " +
-        "add a real gate or record the module that performs it in GATE_DELEGATED_TO_MODULE",
+      unchecked,
+      "these handlers never decide whether the actor is the owner; add a gate, or list the " +
+        "inline check / the module that performs it",
     ).toEqual([]);
+  });
+
+  it("keeps every inline-check exemption honest", () => {
+    // An entry in INLINE_NUMERIC_CHECK must actually contain the inline compare, so the list
+    // cannot be used as a place to park an ungated handler.
+    for (const name of INLINE_NUMERIC_CHECK) {
+      const handler = handlers.find((h) => h.name === name);
+      expect(handler, `${name} is exempted but no longer exists`).toBeDefined();
+      expect(handler!.body, `${name} is exempted but has no inline id check`).toContain(
+        "ADMIN_TELEGRAM_USER_ID",
+      );
+    }
+  });
+
+  it("strips comments before looking for a gate", () => {
+    // Tested directly, so the property is exact rather than inferred from the scan output.
+    expect(stripComments("// requireRootAdmin(\nx();")).not.toContain("requireRootAdmin(");
+    expect(stripComments("/* requireRootAdmin( */\nx();")).not.toContain("requireRootAdmin(");
+    // Real code survives, and a URL's `//` is not mistaken for a comment.
+    expect(stripComments('x();\nconst u = "https://example.com/a";')).toContain(
+      "https://example.com/a",
+    );
+    expect(stripComments("requireRootAdmin(x);")).toContain("requireRootAdmin(");
   });
 
   it("gates preorder cancellation, the handler that was missing one", () => {

@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { dirname, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { copyFile, mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { readFileSync } from "node:fs";
 import { createDb } from "../../src/infrastructure/db/client.js";
+import { runMigrationsOnPinnedConnection } from "../../src/infrastructure/db/migrate.js";
 import { dockerAvailable, startPostgres } from "../helpers/pg-container.js";
 
 /**
@@ -46,6 +49,59 @@ describe.skipIf(!hasDocker)("migration CLI against a real database (T117/T120)",
     expect(result.stdout + result.stderr).toMatch(/applied|already|migration/i);
   }, 180_000);
 
+  it("fresh migrations leave commerce baseline empty", async () => {
+    const started = await startPostgres();
+    stop = started.stop;
+    const { sql } = await import("kysely");
+    await sql`drop schema public cascade`.execute(started.handle.db);
+    await sql`create schema public`.execute(started.handle.db);
+    await started.handle.close();
+
+    const result = await runMigrateCli(started.connectionString);
+    expect(result.code, result.stderr).toBe(0);
+
+    const check = createDb({ connectionString: started.connectionString });
+    try {
+      const rows = await sql<{
+        customers: string;
+        products: string;
+        variants: string;
+        orders: string;
+        paymentIntents: string;
+        digitalAssets: string;
+        broadcasts: string;
+        auditEvents: string;
+        storeStatus: string;
+      }>`
+        select
+          (select count(*)::text from customer) as customers,
+          (select count(*)::text from product) as products,
+          (select count(*)::text from product_variant) as variants,
+          (select count(*)::text from "order") as orders,
+          (select count(*)::text from payment_intent) as "paymentIntents",
+          (select count(*)::text from digital_asset) as "digitalAssets",
+          (select count(*)::text from notification_campaign) as broadcasts,
+          (select count(*)::text from audit_event) as "auditEvents",
+          (select status from store_control where id = 'main') as "storeStatus"
+      `.execute(check.db);
+      expect(rows.rows).toEqual([
+        {
+          customers: "0",
+          products: "0",
+          variants: "0",
+          orders: "0",
+          paymentIntents: "0",
+          digitalAssets: "0",
+          broadcasts: "0",
+          auditEvents: "0",
+          storeStatus: "OPEN",
+        },
+      ]);
+    } finally {
+      await check.close();
+    }
+  }, 180_000);
+
   it("two concurrent migrate CLIs serialize and apply each file once", async () => {
     const started = await startPostgres();
     stop = started.stop;
@@ -76,6 +132,42 @@ describe.skipIf(!hasDocker)("migration CLI against a real database (T117/T120)",
       await check.close();
     }
   }, 180_000);
+
+  it("keeps unpreviewed internal campaigns out of confirmed broadcast migration", async () => {
+    const started = await startPostgres();
+    stop = started.stop;
+    const { sql } = await import("kysely");
+    const before065 = await copyMigrationTree(64);
+    const allMigrations = await copyMigrationTree();
+
+    try {
+      await runMigrationsOnPinnedConnection(started.connectionString, before065);
+      await sql`
+        insert into notification_campaign
+          (id, class, content, status, idempotency_key, created_by, audience)
+        values
+          ('legacy-internal', 'SHOP_UPDATE', 'internal', 'QUEUED', 'legacy-internal', 'system', 'all')
+      `.execute(started.handle.db);
+      await started.handle.close();
+
+      await runMigrationsOnPinnedConnection(started.connectionString, allMigrations);
+
+      const check = createDb({ connectionString: started.connectionString });
+      try {
+        const rows = await sql<{ id: string; confirmed: boolean }>`
+          select id, confirmed_at is not null as confirmed
+          from notification_campaign
+          where id = 'legacy-internal'
+        `.execute(check.db);
+        expect(rows.rows).toEqual([{ id: "legacy-internal", confirmed: false }]);
+      } finally {
+        await check.close();
+      }
+    } finally {
+      await rm(before065, { recursive: true, force: true });
+      await rm(allMigrations, { recursive: true, force: true });
+    }
+  }, 180_000);
 });
 
 describe("migration CLI bootstrap is present (no Docker required)", () => {
@@ -102,7 +194,7 @@ async function runMigrateCli(
   return new Promise((resolvePromise) => {
     const child: ChildProcessWithoutNullStreams = spawn(
       process.execPath,
-      ["--import", "tsx", resolve(repoRoot, "src", "infrastructure", "db", "migrate.ts")],
+      ["--import", "tsx", resolve(repoRoot, "src", "infrastructure/db/migrate.ts")],
       {
         cwd: repoRoot,
         env: {
@@ -122,4 +214,15 @@ async function runMigrateCli(
     });
     child.on("close", (code) => resolvePromise({ code, stdout, stderr }));
   });
+}
+
+async function copyMigrationTree(maxNumber?: number): Promise<string> {
+  const source = resolve(repoRoot, "src", "infrastructure", "db", "migrations");
+  const target = await mkdtemp(join(tmpdir(), "bot-tele-migrations-"));
+  const files = (await readdir(source))
+    .filter((file) => file.endsWith(".sql"))
+    .filter((file) => maxNumber === undefined || Number(file.slice(0, 3)) <= maxNumber);
+
+  await Promise.all(files.map((file) => copyFile(resolve(source, file), resolve(target, file))));
+  return target;
 }

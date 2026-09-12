@@ -325,6 +325,7 @@ describe("quantity-stock low-stock alerts", () => {
       db: ctx.db,
       actor: { numericUserId: 42, chatType: "private", observedUsername: "owner" },
       config: { adminTelegramUserId: 42, expectedUsername: "owner" },
+      sensitiveDeps: stockDeps,
       variantId: f.variantId,
       delta: 1,
       expectedStockVersion: 2,
@@ -398,16 +399,33 @@ describe("quantity-stock low-stock alerts", () => {
   });
 });
 
-describe("quantity-stock adjustments", () => {
-  const adminConfig = { adminTelegramUserId: 42, expectedUsername: "owner" };
-  const adminActor = { numericUserId: 42, chatType: "private" as const, observedUsername: "owner" };
+const adminConfig = { adminTelegramUserId: 42, expectedUsername: "owner" };
+const adminActor = { numericUserId: 42, chatType: "private" as const, observedUsername: "owner" };
 
+/**
+ * These cases are about stock accounting, not about authorization, so step-up is
+ * explicitly OFF — the documented development/test posture, where identity and audit still
+ * run but no second factor is demanded. The second factor itself is covered by
+ * tests/security/admin-money-mutation-gating.test.ts with step-up ON.
+ */
+const stockDeps = {
+  get db() {
+    return ctx.db;
+  },
+  rootConfig: adminConfig,
+  vault: createInMemoryVault(),
+  stepUpEnabled: false,
+  stepUpOptions: { ttlSeconds: 300, lockoutMinutes: 15, maxAttempts: 5 },
+};
+
+describe("quantity-stock adjustments", () => {
   it("rejects negative adjustments, keeps stock unchanged, and writes no audit row", async () => {
     const f = await seedQuantityOrder();
     const result = await adjustQuantityStock({
       db: ctx.db,
       actor: adminActor,
       config: adminConfig,
+      sensitiveDeps: stockDeps,
       variantId: f.variantId,
       delta: -2,
       expectedStockVersion: 1,
@@ -447,6 +465,7 @@ describe("quantity-stock adjustments", () => {
       db: ctx.db,
       actor: adminActor,
       config: adminConfig,
+      sensitiveDeps: stockDeps,
       variantId: f.variantId,
       delta: 1,
       expectedStockVersion: 1,
@@ -458,6 +477,7 @@ describe("quantity-stock adjustments", () => {
       db: ctx.db,
       actor: adminActor,
       config: adminConfig,
+      sensitiveDeps: stockDeps,
       variantId: f.variantId,
       delta: 1,
       expectedStockVersion: 1,
@@ -505,6 +525,7 @@ describe("quantity-stock adjustments", () => {
         db: ctx.db,
         actor: adminActor,
         config: adminConfig,
+        sensitiveDeps: stockDeps,
         variantId: f.variantId,
         delta: 1,
         expectedStockVersion: 1,
@@ -516,6 +537,7 @@ describe("quantity-stock adjustments", () => {
         db: ctx.db,
         actor: adminActor,
         config: adminConfig,
+        sensitiveDeps: stockDeps,
         variantId: f.variantId,
         delta: 1,
         expectedStockVersion: 1,
@@ -553,6 +575,7 @@ describe("quantity-stock adjustments", () => {
       db: ctx.db,
       actor: adminActor,
       config: adminConfig,
+      sensitiveDeps: stockDeps,
       variantId: f.variantId,
       delta: 2,
       expectedStockVersion: 2,
@@ -589,6 +612,7 @@ describe("quantity-stock adjustments", () => {
         db: ctx.db,
         actor: { numericUserId: 7, chatType: "private" },
         config: adminConfig,
+        sensitiveDeps: stockDeps,
         variantId: f.variantId,
         delta: 1,
         expectedStockVersion: 1,
@@ -602,6 +626,7 @@ describe("quantity-stock adjustments", () => {
         db: ctx.db,
         actor: { numericUserId: 42, chatType: "group" },
         config: adminConfig,
+        sensitiveDeps: stockDeps,
         variantId: f.variantId,
         delta: 1,
         expectedStockVersion: 1,

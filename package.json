@@ -26,9 +26,11 @@
     "dev": "tsx src/main.ts",
     "dev:worker": "tsx src/worker.ts",
     "migrate": "tsx src/infrastructure/db/migrate.ts",
+    "wallet:reconcile": "tsx scripts/wallet-reconciliation.ts",
     "migrate:prod": "node dist/infrastructure/db/migrate.js",
     "migrate:production": "node scripts/run-production-migrate.mjs",
     "preflight:production": "node scripts/run-production-preflight.mjs",
+    "admin:step-up": "node scripts/admin-step-up.mjs",
     "secret-scan": "node scripts/secret-scan.mjs",
     "verify:gate": "node scripts/verify-gate.mjs",
     "audit": "npm audit --omit=dev --audit-level=high"

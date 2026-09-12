@@ -48,6 +48,8 @@ The active scope is the complete admin product → variant → inventory → cus
   - Own the current retail one-variant purchase path and order persistence.
 - `modules/payments/service.ts` and `modules/payments/sepay-ingress.ts`
   - Own the verified-payment path and SePay trust boundary.
+- `modules/payments/sepay-api.ts`
+  - Owns bounded read-only SePay API v2 bank-account and transaction reads; official host allowlists and production sandbox refusal run before every bearer request.
 - `bot/webhook.ts`, `bot/callbacks/telegram-dispatch.ts`, `bot/grammy-responder.ts`
   - Own Telegram ingress normalization and outgoing Telegram rendering.
 - `bot/presenters/admin.ts`, `bot/callbacks/admin.ts`
@@ -70,6 +72,7 @@ The active scope is the complete admin product → variant → inventory → cus
 Authoritative customer identity remains the Telegram numeric user ID mapped through `channel_identity`.
 
 Persist customer snapshots with at least:
+
 - `telegram_user_id`
 - `chat_id`
 - `username`
@@ -88,11 +91,13 @@ Profile updates are append-safe snapshots from verified Telegram updates; userna
 ### Wallet
 
 Add wallet tables with integer VND only:
+
 - `wallet_account`
 - `wallet_ledger`
 - `wallet_topup_intent`
 
 Invariants:
+
 - balance is derived from ledger or kept as a projection guarded by version/transaction
 - every balance change has exactly one ledger entry
 - no negative balance
@@ -137,10 +142,12 @@ CANCELLED BY OWNER — DO NOT IMPLEMENT. No `initData`, WebApp session, or Mini 
 ### Persistent reply keyboard
 
 Install/show a native `ReplyKeyboardMarkup` with:
+
 - `resize_keyboard: true`
 - `is_persistent: true`
 
 Canonical labels:
+
 - `🛒 Mua hàng`
 - `👤 Tài khoản`
 - `💰 Nạp ví`
@@ -150,6 +157,7 @@ Canonical labels:
 - `💬 Hỗ trợ`
 
 Rules:
+
 - `/start` installs or refreshes it.
 - Do not spam a new keyboard message on every action.
 - Text routing must treat the keyboard labels as first-class commands.
@@ -159,6 +167,7 @@ Rules:
 Expose explicit `request_contact` only in private chat.
 
 Rules:
+
 - Never infer phone automatically.
 - Contact sharing is opt-in and user-approved.
 - Store phone only after explicit share.
@@ -226,3 +235,15 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 - `invariants_preserved`: numeric identity; closed-loop integer VND; nonnegative balance; once-only business effects; stock/expiry validation before debit; transactional outbox; opt-in notifications; no secret disclosure.
 - `intentional_breaks`: none to existing direct checkout or delivery capabilities.
 - `risked_invariants`: concurrent bank settlement versus wallet purchase; reused idempotency keys; refund eligibility; stock-delta dispatch; admin authorization. Integration/security tests must exercise these boundaries, including rollback and replay.
+
+## 11. Commissioning environment contract
+
+- Telegram transport selects grammY `environment: "prod" | "test"` from configuration. Test mode uses Telegram's separate `/test/METHOD_NAME` API path and requires a separate test account and bot; production rejects test mode.
+- SePay transport accepts only the official Live or Sandbox v2 hosts. Sandbox credentials and base URLs are non-production-only; production always uses the Live host.
+- Supplier-backed variants remain unsellable unless an active supplier mapping exists. With no selected supplier, production keeps the catalog empty of supplier-backed variants instead of pointing at a placeholder endpoint.
+
+### Commissioning invariant ledger
+
+- `invariants_preserved`: production tokens never target Telegram test or SePay Sandbox; provider credentials remain environment-scoped; Telegram-bot-only UX; verified SePay evidence; durable fulfillment and secret-safe diagnostics.
+- `intentional_breaks`: none to production transport defaults; non-production gains explicit isolated Telegram and SePay endpoints.
+- `risked_invariants`: staging configuration drift and accidental sandbox credentials in production. Config validation and transport host allowlists must fail closed before any external call.

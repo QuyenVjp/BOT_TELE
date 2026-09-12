@@ -82,3 +82,12 @@ Must **not** require Mini App, WebApp, `shop.tier20.click`, `initData`, Main Min
 Cancelled Mini App work is **not** a release blocker.
 
 `MINI APP: NOT IN PRODUCT SCOPE — OWNER DECISION`
+
+## Production readiness contract
+
+The production preflight is the release gate for the Telegram-only service:
+
+- when a root admin is configured and `ADMIN_STEP_UP_REQUIRED=true`, the admin factor row must exist with an opaque `vault:` reference;
+- the configured external Vault must resolve that reference to a valid 20-byte RFC 4648 Base32 TOTP seed without exposing the seed;
+- `VAULT_DRIVER=memory`, a missing factor, a dangling reference, or plaintext/non-`vault:` data fails production preflight;
+- the store remains `CLOSED` until this gate and the independent payment, Telegram, fulfillment, and deployment gates pass.

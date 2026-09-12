@@ -34,6 +34,22 @@ let ctx: PgTestContext;
 
 const ROOT_ID = 123456789;
 const rootConfig = { adminTelegramUserId: ROOT_ID, expectedUsername: "Quyenvjp" };
+
+/**
+ * These cases exercise the product/inventory plumbing, not authorization, so step-up is
+ * explicitly OFF — the documented development/test posture (identity and audit still run, no
+ * second factor is demanded). The second factor over the money fields is covered by
+ * tests/security/admin-money-mutation-gating.test.ts with step-up ON.
+ */
+const variantStepUpDeps = {
+  get db() {
+    return ctx.db;
+  },
+  rootConfig,
+  vault: createInMemoryVault(),
+  stepUpEnabled: false,
+  stepUpOptions: { ttlSeconds: 300, lockoutMinutes: 15, maxAttempts: 5 },
+};
 const rootActor = {
   numericUserId: ROOT_ID,
   chatType: "private" as const,
@@ -464,6 +480,7 @@ describe("admin product creation and selected-variant inventory import", () => {
         expectedVersion: beforeUpdate.version,
         name: "Extra Plus",
         priceVnd: 109000n,
+        sensitiveDeps: variantStepUpDeps,
         durationCode: "YEARLY",
         warrantyDays: 14,
         lowStockThreshold: null,
@@ -480,6 +497,7 @@ describe("admin product creation and selected-variant inventory import", () => {
         variantId: extraVariant.variantId,
         expectedVersion: beforeUpdate.version,
         priceVnd: 110000n,
+        sensitiveDeps: variantStepUpDeps,
         reason: "stale variant update",
         correlationId: "admin-product-inventory:update-variant-stale",
       }),

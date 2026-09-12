@@ -106,3 +106,33 @@ After rollback, re-drain the outbox and re-check health signals.
 Run `npm exec tsx scripts/backup-restore-drill.ts` with Docker/OrbStack available. The script creates a disposable PostgreSQL container, migrates a source database, inserts synthetic customer/order/payment/inventory/wallet/audit rows, runs `pg_dump -Fc`, and restores into a second database with `pg_restore --exit-on-error`.
 
 It checks row counts, commerce relationships, ledger balance, primary-key enforcement and nonnegative balance constraints, then removes its container. It does not accept a production database URL or export customer data. A successful synthetic drill proves this schema/tool path, not production backup freshness, encryption, retention, external vault recovery or a production RTO/RPO.
+
+## Production external Vault profile and recovery
+
+The current single-host production profile uses the repository's encrypted HTTPS
+provider behind the existing `com.bot-tele.vault` LaunchAgent. It binds only to
+`127.0.0.1:8443`; API and worker use the same endpoint and explicit host/port/CIDR
+egress allowlists. The encrypted state is
+`$HOME/.local/state/bot-tele-external-vault/store.json`; token, master key, TLS key,
+certificate, and CA remain outside the repository under
+`$HOME/.config/bot-tele-external-vault`. This profile is durable for a single host,
+not an HA or multi-host Vault service.
+
+Keep the store `CLOSED` during recovery. Back up only the encrypted state file to a
+mode-`0600` destination; never decrypt, print, or move secret material through a
+shell variable, log, database field, or chat. Restart the existing supervisor after
+backup or restore:
+
+```bash
+uid=$(id -u)
+launchctl kickstart -k "gui/$uid/com.bot-tele.vault"
+NODE_EXTRA_CA_CERTS="$HOME/.config/bot-tele-external-vault/ca.crt" \
+  npm run preflight:production
+```
+
+For restore, stop the LaunchAgent, atomically replace the encrypted state file with
+the verified backup while preserving mode `0600`, bootstrap the same plist again,
+then run the restart and preflight commands above. Verify `/health` and `/ready`,
+the migration head, and the admin step-up factor before any owner activation.
+The release drill must include write/reveal, supervisor restart/reveal, encrypted
+backup, isolated restore/reveal, and deletion of all disposable material.
