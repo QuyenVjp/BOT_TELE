@@ -1,4 +1,4 @@
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 import { constants } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
@@ -20,10 +20,19 @@ for (const file of [envFile, script]) {
   }
 }
 
+const childEnv = operationalChildEnv();
+if (!childEnv.NODE_EXTRA_CA_CERTS) {
+  const caLine = (await readFile(envFile, "utf8"))
+    .split(/\r?\n/u)
+    .find((line) => line.startsWith("NODE_EXTRA_CA_CERTS="));
+  const caFile = caLine?.slice("NODE_EXTRA_CA_CERTS=".length).trim();
+  if (caFile) childEnv.NODE_EXTRA_CA_CERTS = caFile.replace(/^["']|["']$/gu, "");
+}
+
 const child = spawn(process.execPath, [`--env-file=${envFile}`, script], {
   cwd: repoRoot,
   stdio: "inherit",
-  env: operationalChildEnv(),
+  env: childEnv,
 });
 child.on("error", (error) => {
   process.stderr.write(`production preflight failed: ${error.message}\n`);

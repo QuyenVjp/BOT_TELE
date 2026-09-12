@@ -69,6 +69,7 @@ export function createSePayApiPort(options: {
   token: string;
   timeoutMs?: number;
   fetchImpl?: typeof fetch;
+  allowSandbox?: boolean;
   /**
    * Test seam for the outbound-policy DNS lookup. Production omits it and the policy
    * resolves through `node:dns`. It cannot disable the policy: the resolved addresses
@@ -76,18 +77,28 @@ export function createSePayApiPort(options: {
    */
   resolveHost?: (hostname: string) => Promise<readonly string[]>;
 }): SePayReconciliationPort {
-  const baseUrl = new URL(options.baseUrl);
-  if (baseUrl.protocol !== "https:" || baseUrl.hostname !== "userapi.sepay.vn") {
+  let baseUrl: URL;
+  try {
+    baseUrl = new URL(options.baseUrl);
+  } catch {
+    throw new SePayApiError("INVALID_CONFIG", "SePay API base URL is invalid");
+  }
+  const allowedHosts = ["userapi.sepay.vn", "userapi-sandbox.sepay.vn"] as const;
+  if (
+    baseUrl.protocol !== "https:" ||
+    !allowedHosts.includes(baseUrl.hostname as (typeof allowedHosts)[number]) ||
+    (baseUrl.hostname === "userapi-sandbox.sepay.vn" && options.allowSandbox !== true)
+  ) {
     throw new SePayApiError(
       "INVALID_CONFIG",
-      "SePay API base URL must use the official HTTPS host",
+      "SePay API base URL must use an allowed official HTTPS host",
     );
   }
   // Same outbound policy as every other egress, and it BINDS the socket to the address it
   // approves — so a DNS answer pointing at loopback/metadata is refused, and an answer that
   // changes between validation and connect cannot reroute a request that carries our token.
   const guardedFetch = createPinnedFetch({
-    allowedHosts: ["userapi.sepay.vn"],
+    allowedHosts: [baseUrl.hostname],
     timeoutMs: options.timeoutMs ?? 8_000,
     ...(options.resolveHost ? { resolve: options.resolveHost } : {}),
     ...(options.fetchImpl ? { fetchImpl: options.fetchImpl } : {}),

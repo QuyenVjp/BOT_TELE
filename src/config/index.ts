@@ -56,6 +56,18 @@ export function resetConfigCache(): void {
 function productionHardeningIssues(config: AppConfig): string[] {
   if (config.NODE_ENV !== "production") return [];
   const issues: string[] = [];
+  if (config.TELEGRAM_API_ENVIRONMENT === "test") {
+    issues.push("TELEGRAM_API_ENVIRONMENT must be prod in production");
+  }
+  const sepayUrl = new URL(config.SEPAY_API_BASE_URL);
+  if (
+    sepayUrl.protocol !== "https:" ||
+    !["userapi.sepay.vn", "userapi-sandbox.sepay.vn"].includes(sepayUrl.hostname)
+  ) {
+    issues.push("SEPAY_API_BASE_URL must use an official HTTPS SePay host");
+  } else if (sepayUrl.hostname === "userapi-sandbox.sepay.vn") {
+    issues.push("SEPAY_API_BASE_URL must use the Live SePay host in production");
+  }
 
   if (config.VAULT_DRIVER === "memory") {
     issues.push('VAULT_DRIVER must not be "memory" in production');

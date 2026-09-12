@@ -102,6 +102,18 @@ describe("production preflight", () => {
     expect(JSON.stringify(invalid)).not.toContain(DB_PASS);
   });
 
+  it("rejects Telegram test mode and SePay sandbox in production", async () => {
+    const result = await runProductionPreflight(
+      productionEnv({
+        TELEGRAM_API_ENVIRONMENT: "test",
+        SEPAY_API_BASE_URL: "https://userapi-sandbox.sepay.vn/v2",
+      }),
+    );
+    expect(result.ok).toBe(false);
+    expect(result.issues.join("; ")).toMatch(/TELEGRAM_API_ENVIRONMENT/);
+    expect(result.issues.join("; ")).toMatch(/Live SePay host/);
+  });
+
   it("reports merchant mismatch without account numbers", async () => {
     const merchant = "1111111111";
     const vietqr = "2222222222";

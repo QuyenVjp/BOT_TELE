@@ -41,6 +41,8 @@ export interface CreateDbOptions {
   maxConnections?: number;
   /** Statement timeout guards runaway queries (ms). */
   statementTimeoutMs?: number;
+  /** Handles idle-client failures emitted by node-postgres. */
+  onPoolError?: (error: Error) => void;
 }
 
 export function createDb(options: CreateDbOptions): DbHandle {
@@ -50,6 +52,11 @@ export function createDb(options: CreateDbOptions): DbHandle {
     statement_timeout: options.statementTimeoutMs ?? 15_000,
     // Fail fast on a dead connection rather than hanging a request.
     connectionTimeoutMillis: 5_000,
+  });
+  // node-postgres emits idle-client failures on the pool. Without a listener,
+  // an infrastructure disconnect becomes an uncaught exception.
+  pool.on("error", (error) => {
+    options.onPoolError?.(error);
   });
 
   const db = new Kysely<Database>({

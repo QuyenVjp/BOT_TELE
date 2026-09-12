@@ -1,4 +1,7 @@
 import { pathToFileURL } from "node:url";
+import { lookup } from "node:dns/promises";
+import { createConnection, type Socket } from "node:net";
+import { connect as tlsConnect } from "node:tls";
 import pg from "pg";
 import { ConfigError, loadConfig } from "../config/index.js";
 import {
@@ -9,6 +12,12 @@ import {
   secretStatus,
   type DatabaseFingerprint,
 } from "../config/safe-fingerprint.js";
+import { listMigrationFiles } from "../infrastructure/db/migrate.js";
+import { createVault } from "../infrastructure/vault/adapter.js";
+export interface ProductionPreflightOptions {
+  /** Probe live dependencies; disabled for pure config/unit tests. */
+  probeLiveDependencies?: boolean;
+}
 
 export interface ProductionPreflightResult {
   ok: boolean;
@@ -20,17 +29,24 @@ export interface ProductionPreflightResult {
     httpPort: string | null;
     database: DatabaseFingerprint | null;
     databaseTarget: string | null;
+    databaseHealth: "REACHABLE" | "UNREACHABLE" | "NOT_CHECKED";
     redis: { host: string; port: string } | null;
     redisStatus: "CONFIGURED" | "MISSING";
+    redisHealth: "REACHABLE" | "UNREACHABLE" | "NOT_CHECKED";
+    telegramEnvironment: "prod" | "test" | null;
     telegramToken: "CONFIGURED" | "MISSING";
     telegramWebhook: "CONFIGURED" | "MISSING";
+    telegramApi: "REACHABLE" | "UNREACHABLE" | "NOT_CHECKED";
     sepayBaseHost: string | null;
+    sepayApi: "REACHABLE" | "UNREACHABLE" | "NOT_CHECKED";
     merchantMatch: "YES" | "NO";
     vietQrBankAlias: string | null;
     vaultDriver: string | null;
     vaultEndpointHost: string | null;
+    vaultHealth: "REACHABLE" | "UNREACHABLE" | "NOT_CHECKED";
     supplierBaseHost: string | null;
     supplierToken: "CONFIGURED" | "MISSING";
+    supplierDns: "RESOLVED" | "UNRESOLVED" | "NOT_CHECKED";
     storeStatus: string | null;
     migrationHead: { filename: string; count: number } | null;
   };
@@ -44,17 +60,24 @@ function emptyFingerprint(): ProductionPreflightResult["fingerprint"] {
     httpPort: null,
     database: null,
     databaseTarget: null,
+    databaseHealth: "NOT_CHECKED",
     redis: null,
     redisStatus: "MISSING",
+    redisHealth: "NOT_CHECKED",
+    telegramEnvironment: null,
     telegramToken: "MISSING",
     telegramWebhook: "MISSING",
+    telegramApi: "NOT_CHECKED",
     sepayBaseHost: null,
+    sepayApi: "NOT_CHECKED",
     merchantMatch: "NO",
     vietQrBankAlias: null,
     vaultDriver: null,
     vaultEndpointHost: null,
+    vaultHealth: "NOT_CHECKED",
     supplierBaseHost: null,
     supplierToken: "MISSING",
+    supplierDns: "NOT_CHECKED",
     storeStatus: null,
     migrationHead: null,
   };
@@ -68,6 +91,8 @@ function fillSafeFingerprint(
   fingerprint.appBaseUrl = env.APP_BASE_URL?.trim() || null;
   fingerprint.httpHost = env.HTTP_HOST?.trim() || null;
   fingerprint.httpPort = env.HTTP_PORT?.trim() || null;
+  fingerprint.telegramEnvironment =
+    env.TELEGRAM_API_ENVIRONMENT?.trim() === "test" ? "test" : "prod";
   fingerprint.telegramToken = secretStatus(env.TELEGRAM_BOT_TOKEN);
   fingerprint.telegramWebhook = secretStatus(env.TELEGRAM_WEBHOOK_SECRET);
   fingerprint.sepayBaseHost = parseEndpointHost(env.SEPAY_API_BASE_URL ?? "");
@@ -91,14 +116,116 @@ function fillSafeFingerprint(
     fingerprint.databaseTarget = null;
   }
 }
+function redisFrame(parts: readonly string[]): string {
+  return `*${parts.length}\r\n${parts
+    .map((part) => `$${Buffer.byteLength(part, "utf8")}\r\n${part}\r\n`)
+    .join("")}`;
+}
+
+async function probeRedis(url: string): Promise<boolean> {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  if (parsed.protocol !== "redis:" && parsed.protocol !== "rediss:") return false;
+  const password = parsed.password ? decodeURIComponent(parsed.password) : null;
+  const username = parsed.username ? decodeURIComponent(parsed.username) : null;
+  const commands = password
+    ? [username ? ["AUTH", username, password] : ["AUTH", password], ["PING"]]
+    : [["PING"]];
+
+  return new Promise((resolve) => {
+    let settled = false;
+    let response = "";
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    const onData = (chunk: Buffer) => {
+      response += chunk.toString("utf8");
+      if (response.includes("+PONG")) finish(true);
+      else if (response.startsWith("-")) finish(false);
+    };
+    const socket: Socket =
+      parsed.protocol === "rediss:"
+        ? tlsConnect({
+            host: parsed.hostname,
+            port: Number(parsed.port || "6379"),
+            rejectUnauthorized: true,
+          })
+        : createConnection({
+            host: parsed.hostname,
+            port: Number(parsed.port || "6379"),
+          });
+    socket.setTimeout(2_000);
+    socket.once("error", () => finish(false));
+    socket.once("timeout", () => finish(false));
+    socket.on("data", onData);
+    const writeCommands = () => socket.write(commands.map(redisFrame).join(""));
+    socket.once(parsed.protocol === "rediss:" ? "secureConnect" : "connect", writeCommands);
+  });
+}
+
+async function probeHttp(url: string, headers?: Record<string, string>): Promise<boolean> {
+  try {
+    const init: RequestInit = {
+      redirect: "error",
+      signal: AbortSignal.timeout(5_000),
+    };
+    if (headers) init.headers = headers;
+    const response = await fetch(url, init);
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+async function probeSupplierDns(host: string | null): Promise<boolean> {
+  if (!host) return false;
+  try {
+    await lookup(host);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function probeVaultHealth(config: ReturnType<typeof loadConfig>): Promise<boolean> {
+  if (config.VAULT_DRIVER !== "external") return true;
+  try {
+    const vault = createVault({
+      driver: config.VAULT_DRIVER,
+      endpoint: config.VAULT_ENDPOINT,
+      token: config.VAULT_TOKEN,
+      namespace: config.VAULT_NAMESPACE,
+      timeoutMs: config.VAULT_TIMEOUT_MS,
+      maxAttempts: 1,
+      egressPolicy: {
+        allowedHosts: config.VAULT_EGRESS_HOST_ALLOWLIST,
+        allowedPorts: config.VAULT_EGRESS_PORT_ALLOWLIST,
+        allowedCidrs: config.VAULT_EGRESS_CIDR_ALLOWLIST,
+      },
+    });
+    await vault.health?.();
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 export async function runProductionPreflight(
   env: NodeJS.ProcessEnv,
+  options: ProductionPreflightOptions = {},
 ): Promise<ProductionPreflightResult> {
   const fingerprint = emptyFingerprint();
   fillSafeFingerprint(env, fingerprint);
   const issues: string[] = [];
   let config: ReturnType<typeof loadConfig> | undefined;
+  let supplierRequired = false;
   try {
     config = loadConfig(env);
   } catch (error) {
@@ -114,6 +241,9 @@ export async function runProductionPreflight(
   if (!env.HTTP_PORT?.trim()) issues.push("HTTP_PORT must be set");
   if (!fingerprint.database) issues.push("DATABASE_URL fingerprint is invalid");
   if (!fingerprint.redis) issues.push("REDIS_URL is missing or invalid");
+  if (fingerprint.telegramEnvironment === "test") {
+    issues.push("TELEGRAM_API_ENVIRONMENT must be prod in production");
+  }
   if (fingerprint.telegramToken === "MISSING") issues.push("TELEGRAM_BOT_TOKEN is missing");
   if (fingerprint.telegramWebhook === "MISSING") issues.push("TELEGRAM_WEBHOOK_SECRET is missing");
   if (fingerprint.merchantMatch === "NO") {
@@ -121,12 +251,6 @@ export async function runProductionPreflight(
   }
   if (fingerprint.vaultDriver === "external" && !fingerprint.vaultEndpointHost) {
     issues.push("VAULT_ENDPOINT host is required for external vault");
-  }
-  if (
-    (env.SUPPLIER_DRIVER ?? "").trim() === "http" &&
-    (!fingerprint.supplierBaseHost || fingerprint.supplierToken === "MISSING")
-  ) {
-    issues.push("SUPPLIER_DRIVER=http requires base URL and token");
   }
   const expected = env.BOT_TELE_EXPECTED_DB?.trim();
   if (expected && fingerprint.databaseTarget && expected !== fingerprint.databaseTarget) {
@@ -141,20 +265,70 @@ export async function runProductionPreflight(
     fingerprint.httpHost = config.HTTP_HOST;
     fingerprint.httpPort = String(config.HTTP_PORT);
     fingerprint.nodeEnv = config.NODE_ENV;
+
     fingerprint.appBaseUrl = config.APP_BASE_URL;
+  }
+  if (options.probeLiveDependencies) {
+    if (fingerprint.redis && !(await probeRedis(env.REDIS_URL ?? ""))) {
+      fingerprint.redisHealth = "UNREACHABLE";
+      issues.push("REDIS_URL connectivity probe failed");
+    } else if (fingerprint.redis) {
+      fingerprint.redisHealth = "REACHABLE";
+    }
+
+    if (fingerprint.telegramToken === "CONFIGURED") {
+      const telegramApiRoot = `https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}`;
+      const telegramApiUrl = `${telegramApiRoot}/${fingerprint.telegramEnvironment === "test" ? "test/" : ""}getMe`;
+      const telegramOk = await probeHttp(telegramApiUrl);
+      fingerprint.telegramApi = telegramOk ? "REACHABLE" : "UNREACHABLE";
+      if (!telegramOk) issues.push("Telegram Bot API probe failed");
+    }
+
+    if (fingerprint.sepayBaseHost && secretStatus(env.SEPAY_API_TOKEN) === "CONFIGURED") {
+      try {
+        const endpoint = new URL(env.SEPAY_API_BASE_URL ?? "");
+        endpoint.pathname = `${endpoint.pathname.replace(/\/$/u, "")}/transactions`;
+        endpoint.search = "?per_page=1&page=1";
+        const sepayOk = await probeHttp(endpoint.toString(), {
+          authorization: `Bearer ${env.SEPAY_API_TOKEN}`,
+          accept: "application/json",
+        });
+        fingerprint.sepayApi = sepayOk ? "REACHABLE" : "UNREACHABLE";
+        if (!sepayOk) issues.push("SePay API probe failed");
+      } catch {
+        fingerprint.sepayApi = "UNREACHABLE";
+        issues.push("SePay API URL is invalid");
+      }
+    } else {
+      fingerprint.sepayApi = "UNREACHABLE";
+      issues.push("SePay API token or base URL is missing");
+    }
+
+    if (config) {
+      const vaultOk = await probeVaultHealth(config);
+      fingerprint.vaultHealth = vaultOk ? "REACHABLE" : "UNREACHABLE";
+      if (!vaultOk) issues.push("external vault health probe failed");
+    }
   }
 
   if (fingerprint.database && env.DATABASE_URL) {
     const pool = new pg.Pool({
       connectionString: env.DATABASE_URL,
       max: 1,
-      connectionTimeoutMillis: 2000,
+      connectionTimeoutMillis: 2_000,
     });
     try {
       const store = await pool.query<{ status: string }>(
         "select status from store_control where id = 'main' limit 1",
       );
       fingerprint.storeStatus = store.rows[0]?.status ?? null;
+      if (options.probeLiveDependencies) {
+        fingerprint.databaseHealth = "REACHABLE";
+        if (fingerprint.storeStatus !== "CLOSED") {
+          issues.push("store_control must be CLOSED during production commissioning");
+        }
+      }
+
       const head = await pool.query<{ filename: string; count: string }>(
         "select max(filename) as filename, count(*)::text as count from schema_migrations",
       );
@@ -162,10 +336,48 @@ export async function runProductionPreflight(
       if (row?.filename) {
         fingerprint.migrationHead = { filename: row.filename, count: Number(row.count) };
       }
+      if (options.probeLiveDependencies) {
+        const migrationFiles = await listMigrationFiles();
+        const expectedHead = migrationFiles[migrationFiles.length - 1];
+        if (
+          !row?.filename ||
+          Number(row.count) !== migrationFiles.length ||
+          row.filename !== expectedHead
+        ) {
+          issues.push("database migration head/count does not match source migrations");
+        }
+      }
+      const supplierRows = await pool.query<{ required: boolean }>(`
+        select exists (
+          select 1
+          from product_variant v
+          join product p on p.id = v.product_id
+          where v.fulfillment_type = 'SUPPLIER_API'
+            and v.is_active
+            and p.is_active
+            and not p.is_archived
+            and not p.is_test
+        ) as required
+      `);
+      supplierRequired = supplierRows.rows[0]?.required === true;
     } catch {
-      // Database evidence is best-effort; configuration safety remains authoritative.
+      fingerprint.databaseHealth = options.probeLiveDependencies ? "UNREACHABLE" : "NOT_CHECKED";
+      if (options.probeLiveDependencies) issues.push("database connectivity probe failed");
     } finally {
       await pool.end();
+    }
+  }
+  if (options.probeLiveDependencies && supplierRequired) {
+    if (
+      (env.SUPPLIER_DRIVER ?? "").trim() === "http" &&
+      (!fingerprint.supplierBaseHost || fingerprint.supplierToken === "MISSING")
+    ) {
+      issues.push("SUPPLIER_DRIVER=http requires base URL and token");
+    }
+    if ((env.SUPPLIER_DRIVER ?? "").trim() === "http") {
+      const supplierOk = await probeSupplierDns(fingerprint.supplierBaseHost);
+      fingerprint.supplierDns = supplierOk ? "RESOLVED" : "UNRESOLVED";
+      if (!supplierOk) issues.push("supplier API host DNS probe failed");
     }
   }
 
@@ -173,7 +385,7 @@ export async function runProductionPreflight(
 }
 
 async function cliMain(): Promise<void> {
-  const result = await runProductionPreflight(process.env);
+  const result = await runProductionPreflight(process.env, { probeLiveDependencies: true });
   process.stdout.write(`${JSON.stringify(result)}\n`);
   if (!result.ok) process.exitCode = 1;
 }
