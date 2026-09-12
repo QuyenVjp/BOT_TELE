@@ -14,6 +14,7 @@ import {
 } from "../config/safe-fingerprint.js";
 import { listMigrationFiles } from "../infrastructure/db/migrate.js";
 import { createVault } from "../infrastructure/vault/adapter.js";
+import { decodeBase32 } from "../modules/identity/step-up.js";
 export interface ProductionPreflightOptions {
   /** Probe live dependencies; disabled for pure config/unit tests. */
   probeLiveDependencies?: boolean;
@@ -194,24 +195,51 @@ async function probeSupplierDns(host: string | null): Promise<boolean> {
   }
 }
 
+function createConfiguredVault(config: ReturnType<typeof loadConfig>) {
+  return createVault({
+    driver: config.VAULT_DRIVER,
+    endpoint: config.VAULT_ENDPOINT,
+    token: config.VAULT_TOKEN,
+    namespace: config.VAULT_NAMESPACE,
+    timeoutMs: config.VAULT_TIMEOUT_MS,
+    maxAttempts: 1,
+    egressPolicy: {
+      allowedHosts: config.VAULT_EGRESS_HOST_ALLOWLIST,
+      allowedPorts: config.VAULT_EGRESS_PORT_ALLOWLIST,
+      allowedCidrs: config.VAULT_EGRESS_CIDR_ALLOWLIST,
+    },
+  });
+}
+
 async function probeVaultHealth(config: ReturnType<typeof loadConfig>): Promise<boolean> {
   if (config.VAULT_DRIVER !== "external") return true;
   try {
-    const vault = createVault({
-      driver: config.VAULT_DRIVER,
-      endpoint: config.VAULT_ENDPOINT,
-      token: config.VAULT_TOKEN,
-      namespace: config.VAULT_NAMESPACE,
-      timeoutMs: config.VAULT_TIMEOUT_MS,
-      maxAttempts: 1,
-      egressPolicy: {
-        allowedHosts: config.VAULT_EGRESS_HOST_ALLOWLIST,
-        allowedPorts: config.VAULT_EGRESS_PORT_ALLOWLIST,
-        allowedCidrs: config.VAULT_EGRESS_CIDR_ALLOWLIST,
-      },
-    });
-    await vault.health?.();
+    await createConfiguredVault(config).health?.();
     return true;
+  } catch {
+    return false;
+  }
+}
+
+async function probeAdminStepUpFactor(
+  pool: Pick<pg.Pool, "query">,
+  config: ReturnType<typeof loadConfig>,
+): Promise<boolean> {
+  if (config.VAULT_DRIVER !== "external") return false;
+  const result = await pool.query<{ vault_ref: string; created_at: Date | string | null }>(
+    `select vault_ref, created_at
+     from admin_step_up_secret
+     where admin_telegram_user_id = $1
+     limit 1`,
+    [String(config.ADMIN_TELEGRAM_USER_ID)],
+  );
+  const row = result.rows[0];
+  const vaultRef = row?.vault_ref.trim() ?? "";
+  // The primary key identifies the one current factor; rotated_at updates this same row.
+  if (!row?.created_at || !/^vault:\S+$/u.test(vaultRef)) return false;
+  try {
+    const seed = await createConfiguredVault(config).reveal(vaultRef);
+    return decodeBase32(seed)?.byteLength === 20;
   } catch {
     return false;
   }
@@ -318,6 +346,20 @@ export async function runProductionPreflight(
       connectionTimeoutMillis: 2_000,
     });
     try {
+      if (
+        config?.NODE_ENV === "production" &&
+        config.ADMIN_TELEGRAM_USER_ID > 0 &&
+        config.ADMIN_STEP_UP_REQUIRED
+      ) {
+        try {
+          const factorUsable = await probeAdminStepUpFactor(pool, config);
+          if (!factorUsable) {
+            issues.push("production admin step-up factor is missing or unusable");
+          }
+        } catch {
+          issues.push("production admin step-up factor probe failed");
+        }
+      }
       const store = await pool.query<{ status: string }>(
         "select status from store_control where id = 'main' limit 1",
       );

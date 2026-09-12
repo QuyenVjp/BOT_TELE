@@ -1,6 +1,57 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { loadConfig, resetConfigCache } from "../../src/config/index.js";
 import { runProductionPreflight } from "../../src/scripts/production-preflight.js";
+
+const preflightTestState = vi.hoisted(() => ({
+  factor: "valid" as "valid" | "missing" | "dangling" | "plaintext",
+  seed: "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP",
+}));
+
+vi.mock("pg", () => ({
+  default: {
+    Pool: class {
+      async query(sql: string): Promise<{ rows: Record<string, unknown>[] }> {
+        if (sql.includes("admin_step_up_secret")) {
+          if (preflightTestState.factor === "missing") return { rows: [] };
+          return {
+            rows: [
+              {
+                vault_ref:
+                  preflightTestState.factor === "plaintext"
+                    ? preflightTestState.seed
+                    : "vault:admin-step-up",
+                created_at: "2026-01-01T00:00:00.000Z",
+                rotated_at: null,
+              },
+            ],
+          };
+        }
+        if (sql.includes("store_control")) return { rows: [{ status: "CLOSED" }] };
+        if (sql.includes("schema_migrations")) {
+          return { rows: [{ filename: "069_step_up_authorization_binding.sql", count: "68" }] };
+        }
+        if (sql.includes("product_variant")) return { rows: [{ required: false }] };
+        return { rows: [] };
+      }
+
+      async end(): Promise<void> {}
+    },
+  },
+}));
+
+vi.mock("../../src/infrastructure/vault/adapter.js", () => ({
+  createVault: () => ({
+    async reveal(): Promise<string> {
+      if (preflightTestState.factor === "dangling") throw new Error("missing vault ref");
+      return preflightTestState.seed;
+    },
+    async health(): Promise<void> {},
+    async write(): Promise<string> {
+      return "vault:test";
+    },
+    async delete(): Promise<void> {},
+  }),
+}));
 
 const DB_PASS = ["shop", "local", "only"].join("-");
 const SUPPLIER_TOKEN = ["supplier", "token", "with", "spaces"].join(" ");
@@ -44,9 +95,68 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Node
   };
 }
 
-afterEach(() => resetConfigCache());
+afterEach(() => {
+  preflightTestState.factor = "valid";
+  resetConfigCache();
+});
 
 describe("production preflight", () => {
+  it("fails closed when production requires MFA but the admin factor is missing", async () => {
+    preflightTestState.factor = "missing";
+    const result = await runProductionPreflight(productionEnv());
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.join("; ")).toContain("admin step-up factor");
+  });
+
+  it("fails closed when the configured MFA vault reference is dangling", async () => {
+    preflightTestState.factor = "dangling";
+    const result = await runProductionPreflight(productionEnv());
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.join("; ")).toContain("admin step-up factor");
+  });
+  it("rejects plaintext MFA material stored where a vault reference is required", async () => {
+    preflightTestState.factor = "plaintext";
+    const result = await runProductionPreflight(productionEnv());
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.join("; ")).toContain("admin step-up factor");
+    expect(JSON.stringify(result)).not.toContain(preflightTestState.seed);
+  });
+
+  it("fails closed when production selects the memory vault", async () => {
+    const result = await runProductionPreflight(
+      productionEnv({ VAULT_DRIVER: "memory", VAULT_ENDPOINT: "", VAULT_TOKEN: "" }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.join("; ")).toMatch(/VAULT_DRIVER/);
+  });
+
+  it("accepts a current MFA factor whose secret resolves through the vault", async () => {
+    const result = await runProductionPreflight(productionEnv());
+
+    expect(result.ok, result.issues.join("; ")).toBe(true);
+  });
+
+  it("does not add an MFA requirement outside production", async () => {
+    preflightTestState.factor = "missing";
+    const result = await runProductionPreflight(
+      productionEnv({
+        NODE_ENV: "test",
+        ADMIN_STEP_UP_REQUIRED: "false",
+        VAULT_DRIVER: "memory",
+        VAULT_ENDPOINT: "",
+        VAULT_TOKEN: "",
+      }),
+    );
+
+    expect(result.ok).toBe(false);
+    expect(result.issues.join("; ")).toContain("NODE_ENV must be production");
+    expect(result.issues.join("; ")).not.toContain("admin step-up factor");
+  });
+
   it("passes required production config and redacts secrets", async () => {
     const result = await runProductionPreflight(productionEnv());
     expect(result.ok, result.issues.join("; ")).toBe(true);
