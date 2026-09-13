@@ -66,6 +66,7 @@ class BoundedLatency {
     errors: number;
     p50Ms: number | null;
     p95Ms: number | null;
+    p99Ms: number | null;
     maxMs: number | null;
     meanMs: number | null;
   } {
@@ -75,6 +76,7 @@ class BoundedLatency {
         errors: this.errors,
         p50Ms: null,
         p95Ms: null,
+        p99Ms: null,
         maxMs: null,
         meanMs: null,
       };
@@ -87,6 +89,7 @@ class BoundedLatency {
       errors: this.errors,
       p50Ms: percentile(0.5),
       p95Ms: percentile(0.95),
+      p99Ms: percentile(0.99),
       maxMs: Number(this.maxMs.toFixed(3)),
       meanMs: Number((this.totalMs / this.count).toFixed(3)),
     };
