@@ -216,4 +216,101 @@ describe("checkout callbacks (T056)", () => {
     const data = res.buttons.flat().map((b) => b.callbackData);
     expect(data.some((d) => d.startsWith("pay:refresh:"))).toBe(true);
   });
+
+  it("Buy Now copy buttons carry native copy_text values and no internal UUID", async () => {
+    const cat = await seedCatalog();
+    const cb = callbacks(cat);
+    const res = await cb.buyFromSignedCallback("corr-copy");
+    const copies = res.buttons.flat().filter((button) => button.copyText);
+    expect(copies.map((button) => button.copyText)).toEqual(
+      expect.arrayContaining([
+        "9876543210",
+        cb.lastTransferContent(),
+        String(cat.price),
+        cb.lastOrderNumber(),
+      ]),
+    );
+    expect(res.text).not.toMatch(
+      /[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}/i,
+    );
+    expect(res.photo).toBeInstanceOf(Buffer);
+  });
+
+  it("wrong customer cannot refresh another customer's payment", async () => {
+    const cat = await seedCatalog();
+    const cb = callbacks(cat);
+    await cb.buyFromSignedCallback("corr-1");
+    const orderNumber = cb.lastOrderNumber()!;
+    const res = await cb.refresh(orderNumber, "someone-else");
+    expect(res.text).toContain("Không tìm thấy đơn hàng");
+    expect(res.text.toLowerCase()).not.toContain("đã thanh toán");
+  });
+
+  it("expired intent refresh shows the expired screen", async () => {
+    const cat = await seedCatalog();
+    const cb = callbacks(cat);
+    await cb.buyFromSignedCallback("corr-1");
+    const orderNumber = cb.lastOrderNumber()!;
+    await sql`update "order" set status = 'EXPIRED' where order_number = ${orderNumber}`.execute(
+      ctx.db,
+    );
+    const res = await cb.refresh(orderNumber, cat.customerId);
+    expect(res.text.toLowerCase()).toContain("hết hạn");
+    expect(res.buttons.flat().some((button) => button.callbackData.startsWith("pay:reopen:"))).toBe(
+      true,
+    );
+  });
+
+  it("stale Buy Now callback asks the customer to reopen the product", async () => {
+    const cat = await seedCatalog();
+    const callbackCodec = createBuyNowCallbackCodec({
+      key: CALLBACK_KEY,
+      keyVersion: 1,
+      ttlSeconds: 1,
+      clockSkewSeconds: 0,
+    });
+    const adapter = createCheckoutCallbacks({
+      db: ctx.db,
+      merchant: {
+        merchantAccountId: "0123456789",
+        beneficiaryAccountNumber: "9876543210",
+        bankBin: "970422",
+        accountName: "SHOP DIGITAL MVP",
+        bankName: "MB Bank",
+      },
+      callbackCodec,
+      resolveCustomerId: async (telegramUserId) =>
+        telegramUserId === TELEGRAM_USER_ID ? cat.customerId : null,
+    });
+    const stale = callbackCodec.issue({
+      telegramUserId: TELEGRAM_USER_ID,
+      variantId: cat.variantId,
+      expectedPriceVnd: cat.price,
+      now: new Date(Date.now() - 60_000),
+    });
+    const res = await adapter.buyNowFromCallback({
+      callbackData: stale,
+      telegramUserId: TELEGRAM_USER_ID,
+      correlationId: "corr-stale",
+    });
+    expect(res.text.toLowerCase()).toMatch(/hết hạn|mở lại sản phẩm/);
+  });
+
+  it("needs-review refresh shows the order number, not the internal id", async () => {
+    const cat = await seedCatalog();
+    const cb = callbacks(cat);
+    await cb.buyFromSignedCallback("corr-1");
+    const orderNumber = cb.lastOrderNumber()!;
+    const row = await sql<{ id: string }>`
+      select id from "order" where order_number = ${orderNumber}
+    `.execute(ctx.db);
+    const orderId = row.rows[0]!.id;
+    await sql`update "order" set status = 'PAYMENT_NEEDS_REVIEW' where id = ${orderId}`.execute(
+      ctx.db,
+    );
+    const res = await cb.refresh(orderNumber, cat.customerId);
+    expect(res.text).toContain(orderNumber);
+    expect(res.text).not.toContain(orderId);
+    expect(res.text.toLowerCase()).toMatch(/kiểm tra|đối soát/);
+  });
 });
