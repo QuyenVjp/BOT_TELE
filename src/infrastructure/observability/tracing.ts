@@ -71,6 +71,8 @@ export interface LatencyMetrics {
   reset(): void;
 }
 
+const MAX_LATENCY_SAMPLES_PER_METRIC = 256;
+
 export function createLatencyMetrics(): LatencyMetrics {
   const metrics = new Map<string, LatencyMetricSnapshot>();
   return {
@@ -79,6 +81,9 @@ export function createLatencyMetrics(): LatencyMetrics {
       const current = metrics.get(name) ?? { count: 0, totalMs: 0, valuesMs: [], errors: 0 };
       current.count += 1;
       current.totalMs += durationMs;
+      if (current.valuesMs.length >= MAX_LATENCY_SAMPLES_PER_METRIC) {
+        current.valuesMs.shift();
+      }
       current.valuesMs.push(durationMs);
       if (error) current.errors += 1;
       metrics.set(name, current);

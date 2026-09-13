@@ -247,3 +247,9 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 - `invariants_preserved`: production tokens never target Telegram test or SePay Sandbox; provider credentials remain environment-scoped; Telegram-bot-only UX; verified SePay evidence; durable fulfillment and secret-safe diagnostics.
 - `intentional_breaks`: none to production transport defaults; non-production gains explicit isolated Telegram and SePay endpoints.
 - `risked_invariants`: staging configuration drift and accidental sandbox credentials in production. Config validation and transport host allowlists must fail closed before any external call.
+
+## 12. Observability memory contract
+
+- `src/infrastructure/observability/tracing.ts` remains an optional in-process seam; it does not start an exporter or become a source of truth.
+- Latency samples are bounded per metric. Implementations retain at most the latest 256 `valuesMs` entries while `count`, `totalMs`, and `errors` remain aggregate counters.
+- No metric label may contain secrets, raw credentials, customer message text, or unbounded identifiers. PostgreSQL remains authoritative for operational state.
