@@ -17,6 +17,7 @@ import type {
 import { canTicketTransition, type SupportTicketStatus } from "../../modules/support/domain.js";
 import type { AdminSupportTicketRow } from "../../modules/support/service.js";
 import { REASON_LABEL } from "./support.js";
+import { renderAdminProductList, type AdminProductView } from "./admin-product-list.js";
 
 /**
  * Owner-safe Vietnamese admin presenters (T098, FR-021–FR-023).
@@ -951,76 +952,18 @@ export function presentAdminDashboard(data: AdminDashboardSummary): PresentedMes
   };
 }
 
-export type AdminProductView = "all" | "featured" | "inactive" | "archived" | "test";
+export type { AdminProductView } from "./admin-product-list.js";
 
-const PRODUCT_VIEW_LABELS: Record<AdminProductView, string> = {
-  all: "📦 Tất cả",
-  featured: "⭐ Đã ghim",
-  inactive: "🚫 Đang tắt",
-  archived: "🗄 Lưu trữ",
-  test: "🧪 Test",
-};
-
-/**
- * The catalog is long enough that scrolling to a product is not a way to find it, so the list is
- * filtered and paged. "Bản nháp" from the spec is not a state this domain has; the honest split is
- * inactive versus archived, and both are offered.
- */
 export function presentAdminProducts(
   rows: Array<{ id: string; name: string; active: boolean; featured?: boolean; test?: boolean }>,
   options: { view?: AdminProductView; page?: number; hasMore?: boolean; total?: number } = {},
 ): PresentedMessage {
-  const view = options.view ?? "all";
-  const page = options.page ?? 1;
-  const views = Object.keys(PRODUCT_VIEW_LABELS) as AdminProductView[];
-  return {
-    text: [
-      ADMIN_COPY.products,
-      `Đang xem: ${PRODUCT_VIEW_LABELS[view]}${page > 1 ? ` · trang ${page}` : ""}`,
-      ...(rows.length === 0
-        ? ["Không có sản phẩm nào trong mục này."]
-        : rows.map(
-            (row) =>
-              `• ${row.name} (${row.active ? "đang bán" : "tạm dừng"})${
-                row.featured ? " ⭐" : ""
-              }${row.test ? " 🧪" : ""}`,
-          )),
-      ...(options.hasMore ? ["", "Còn nữa — bấm Xem thêm."] : []),
-    ].join("\n"),
-    buttons: [
-      [
-        { text: ADMIN_COPY.overview, callbackData: "admin:dashboard" },
-        { text: ADMIN_COPY.inventory, callbackData: "admin:inventory" },
-      ],
-      [{ text: "➕ Tạo sản phẩm", callbackData: "admin:products:create" }],
-      ...views
-        .filter((candidate) => candidate !== view)
-        .map((candidate) => [
-          {
-            text: PRODUCT_VIEW_LABELS[candidate],
-            callbackData: `admin:products:view:${candidate}`,
-          },
-        ]),
-      ...rows.map((row) => [
-        {
-          text: `${row.featured ? "⭐ " : ""}${row.name} (${row.active ? "đang bán" : "tạm dừng"})`,
-          callbackData: `admin:products:detail:${row.id}`,
-        },
-      ]),
-      ...(options.hasMore
-        ? [
-            [
-              {
-                text: "➡️ Xem thêm",
-                callbackData: `admin:products:view:${view}:${page + 1}`,
-              },
-            ],
-          ]
-        : []),
-      [{ text: "📝 Xem lại nháp", callbackData: "admin:products:review" }],
-      adminNav("admin:menu"),
-    ],
-  };
+  return renderAdminProductList(rows, options, {
+    title: ADMIN_COPY.products,
+    overview: ADMIN_COPY.overview,
+    inventory: ADMIN_COPY.inventory,
+    navigation: adminNav("admin:menu"),
+  });
 }
 
 export interface AdminInventoryProductSummary {

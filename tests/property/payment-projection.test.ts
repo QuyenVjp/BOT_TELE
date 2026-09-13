@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import fc from "fast-check";
 import {
   decideMatch,
   type MatchableIntent,
@@ -8,6 +9,7 @@ import {
   projectSettlement,
   projectDiscrepancyOrderStatus,
 } from "../../src/modules/payments/projection.js";
+import type { OrderStatus } from "../../src/modules/commerce/order.js";
 
 /**
  * T123/T124/T128 — pure money-safety decisions (no Docker).
@@ -45,6 +47,21 @@ const evidence = (over: Partial<PaymentEvidence> = {}): PaymentEvidence => ({
   correlationId: "corr-1",
   ...over,
 });
+
+const ALL_ORDER_STATUSES = [
+  "DRAFT",
+  "PENDING_PAYMENT",
+  "PAID",
+  "PROCESSING",
+  "COMPLETED",
+  "REJECTED",
+  "CANCELLED",
+  "EXPIRED",
+  "PAYMENT_NEEDS_REVIEW",
+  "FULFILLMENT_NEEDS_REVIEW",
+  "REFUND_PENDING",
+  "REFUNDED",
+] as const satisfies readonly OrderStatus[];
 
 describe("projectSettlement (never pay a dead order)", () => {
   it("emits OrderPaid only when the order was payable", () => {
@@ -118,5 +135,34 @@ describe("decideMatch late-payment uses evidence.transactedAt", () => {
       new Date("2026-07-16T10:01:00Z"),
     );
     expect(d.kind).toBe("SETTLE");
+  });
+});
+
+describe("payment projections across the complete order state space", () => {
+  it("never emits a settlement transition for a non-payable status", () => {
+    fc.assert(
+      fc.property(fc.constantFrom(...ALL_ORDER_STATUSES), (status) => {
+        const projection = projectSettlement(status);
+        if (status === "PENDING_PAYMENT") {
+          expect(projection.kind).toBe("SETTLE_AND_PAY");
+        } else if (["PAID", "PROCESSING", "COMPLETED"].includes(status)) {
+          expect(projection.kind).toBe("SETTLE_ALREADY_PAID");
+        } else {
+          expect(projection.kind).toBe("MONEY_FOR_DEAD_ORDER");
+        }
+      }),
+      { numRuns: 128 },
+    );
+  });
+
+  it("freezes only pending payment orders after a discrepancy", () => {
+    fc.assert(
+      fc.property(fc.constantFrom(...ALL_ORDER_STATUSES), (status) => {
+        expect(projectDiscrepancyOrderStatus(status)).toBe(
+          status === "PENDING_PAYMENT" ? "PAYMENT_NEEDS_REVIEW" : null,
+        );
+      }),
+      { numRuns: 128 },
+    );
   });
 });

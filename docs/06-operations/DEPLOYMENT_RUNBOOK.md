@@ -82,6 +82,83 @@ npm run preflight:production
 npm run migrate:production
 ```
 
+## Migration 070 — post-merge production procedure
+
+This procedure is **not executed by the Phase 2 review**. Run it only after the
+migration has merged, the production artifact is built, and the owner has
+scheduled a controlled database window. Keep the store `CLOSED`; do not activate
+sales as part of the migration.
+
+1. **Preflight and backup**
+   - Run `npm ci`, `npm run build`, and `npm run preflight:production` from the
+     exact release checkout. The preflight output must show `storeStatus=CLOSED`,
+     a reachable database, and the expected production target.
+   - Take and verify the normal production PostgreSQL backup/snapshot. Record its
+     provider receipt, timestamp, and retention. Do not print or copy
+     `DATABASE_URL`; the repository's production wrappers load
+     `$HOME/.config/bot-tele-production/production.env` without sourcing it.
+   - Record the pre-migration `schema_migrations` head/count, row counts for
+     `quantity_stock_ledger` and `payment_intent`, and
+     `pg_total_relation_size` for those tables. Save only counts, sizes, and
+     timestamps in the change record.
+
+2. **Quiesce writers**
+   - Stop accepting new commerce/admin writes using the existing supervisor and
+     worker-drain procedure. Let in-flight handlers finish and confirm no
+     handler is mid-transaction.
+   - Keep Telegram/SePay ingress and the store `CLOSED` while the database
+     window is active. Do not delete or cancel business rows to make the window
+     quiet.
+
+3. **Apply 070 and record the operation**
+   - Run `npm run preflight:production` again immediately before the migration.
+   - Measure the command from the terminal and retain its exit status and
+     duration:
+
+     ```bash
+     started_at=$(date +%s)
+     npm run migrate:production
+     status=$?
+     finished_at=$(date +%s)
+     printf 'migration_070_exit=%s duration_seconds=%s\n' \
+       "$status" "$((finished_at - started_at))"
+     test "$status" -eq 0
+     ```
+
+   - The pinned production runner acquires the migration advisory lock and
+     applies `070_phase2_hot_indexes.sql` transactionally. The migration uses
+     regular `CREATE INDEX`, so schedule a quiet window: concurrent writes can
+     wait while each index is built.
+   - If the command fails, stop here. Verify the transaction rolled back, the
+     migration head remains `069_step_up_authorization_binding.sql`, and neither
+     new index is recorded as valid. Do not drop an existing index or restore a
+     backup as a first response; investigate and ship a forward fix.
+
+4. **Verify schema and query plan**
+   - Query `schema_migrations` and require head
+     `070_phase2_hot_indexes.sql` with count `69`.
+   - Require valid indexes
+     `quantity_stock_variant_created_idx` and
+     `payment_intent_order_created_idx`; record their sizes.
+   - Re-run the pre-migration row-count/table-size queries and representative
+     inventory-by-variant and payment-by-order `EXPLAIN (ANALYZE, BUFFERS)`
+     checks. The plans must use the new indexes for the newest-first lookups;
+     record execution time, shared-hit/read blocks, and any lock/wait evidence.
+   - Re-check commerce invariants: order/payment-intent relationships,
+     quantity-stock ledger continuity, wallet double-entry balance, and
+     absence of unexpected `PENDING`/`RETRY` growth. Migration 070 must change
+     indexes only, not business-row counts or statuses.
+
+5. **Resume and close the window**
+   - Restart the existing API/worker supervisors, resume drained lanes, and
+     verify `/health` and `/ready`.
+   - Run `npm run preflight:production` once more; require the same production
+     target, `storeStatus=CLOSED`, migration head 070, reachable dependencies,
+     and a usable admin step-up factor.
+   - Watch webhook, outbox, notification, payment-reconciliation, and
+     fulfillment lag for the pilot window. Opening the store is a separate
+     owner decision and is not part of this procedure.
+
 ## Worker drain
 
 Before a rolling restart or scale-in, stop accepting new outbox work, wait for in-flight handlers

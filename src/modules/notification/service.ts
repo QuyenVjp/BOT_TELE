@@ -704,7 +704,8 @@ export async function claimNotificationDeliveries(
     select d.id from notification_delivery d join notification_campaign c on c.id=d.campaign_id
     where d.status in ('PENDING','RETRY') and d.next_attempt_at<=now() and c.status='QUEUED'
       and (d.claim_expires_at is null or d.claim_expires_at<=now())
-    order by d.next_attempt_at,d.id for update of d skip locked limit ${limit}
+    order by case when c.class='CRITICAL_SERVICE' then 0 else 1 end,d.next_attempt_at,d.id
+    for update of d skip locked limit ${limit}
   ) update notification_delivery d set status='RETRY',attempts=d.attempts+1,
     next_attempt_at=now()+interval '30 seconds',claimed_by='notification-worker',
     claim_expires_at=now()+interval '30 seconds',claim_generation=d.claim_generation+1
