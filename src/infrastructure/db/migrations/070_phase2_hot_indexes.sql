@@ -10,4 +10,3 @@ create index if not exists quantity_stock_variant_created_idx
 
 create index if not exists payment_intent_order_created_idx
   on payment_intent (order_id, created_at desc, id desc);
-
