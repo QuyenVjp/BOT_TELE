@@ -2020,13 +2020,22 @@ async function bootstrap(): Promise<void> {
   }
 
   function walletTopupPaymentScreen(message: PresentedMessage): PresentedMessage {
+    const rest = message.buttons.filter(
+      (row) =>
+        !row.some(
+          (button) =>
+            (button.callbackData ?? "").startsWith("pay:refresh:") ||
+            (button.callbackData ?? "").startsWith("pay:cancel:") ||
+            (button.callbackData ?? "").startsWith("pay:reopen:"),
+        ),
+    );
     return {
       ...message,
       buttons: [
         [{ text: "Kiểm tra nạp ví", callbackData: "wallet:topup:status" }],
         [{ text: "Đổi số tiền", callbackData: "wallet:topup:change" }],
         [{ text: "Huỷ", callbackData: "wallet:topup:cancel" }],
-        ...message.buttons,
+        ...rest,
       ],
     };
   }
@@ -2540,7 +2549,16 @@ async function bootstrap(): Promise<void> {
           ...merchant,
         });
         return result.ok
-          ? walletTopupPaymentScreen(await presentPaymentScreen(result.presentation))
+          ? walletTopupPaymentScreen(
+              await presentPaymentScreen(result.presentation, {
+                status: "PENDING",
+                profilePatch: {
+                  showPaymentCheckButton: false,
+                  showCancelButton: false,
+                  showOrderCodeCopyButton: false,
+                },
+              }),
+            )
           : walletTopupPickerMessage(account);
       }
       if (action.kind === "STATUS") {

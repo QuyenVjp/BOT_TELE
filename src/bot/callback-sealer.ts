@@ -22,7 +22,7 @@ export async function sealPresentedMessageCallbacks(
   for (const row of message.buttons) {
     const sealedRow: PresentedMessage["buttons"][number] = [];
     for (const button of row) {
-      if (!button.callbackData && button.url) {
+      if (!button.callbackData && (button.url || button.copyText)) {
         sealedRow.push(button);
         continue;
       }

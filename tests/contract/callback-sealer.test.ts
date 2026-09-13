@@ -187,4 +187,46 @@ describe("callback sealing", () => {
       value: { action: "PREORDER_LIST" },
     });
   });
+
+  it("keeps native copy_text buttons unsealed", async () => {
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "pay",
+        buttons: [
+          [{ text: "📋 Sao chép STK", callbackData: "", copyText: "0123456789" }],
+          [{ text: "🏠 Menu", callbackData: "menu:main" }],
+        ],
+      },
+      { codec: codec(), telegramUserId: "123456789", resolveOrderId: async () => null },
+    );
+    expect(sealed.buttons[0]![0]).toMatchObject({
+      copyText: "0123456789",
+      callbackData: "",
+    });
+    expect(sealed.buttons[1]![0]!.callbackData).toMatch(/^cb:/);
+  });
+
+  it("seals pay:refresh when resolveOrderId returns an order id", async () => {
+    const tokenCodec = codec();
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "pay",
+        buttons: [[{ text: "check", callbackData: "pay:refresh:ORD-20260716-ABCD1234" }]],
+      },
+      {
+        codec: tokenCodec,
+        telegramUserId: "123456789",
+        resolveOrderId: async () => COMMAND_ID,
+      },
+    );
+    const callbackData = sealed.buttons[0]![0]!.callbackData;
+    expect(callbackData).toMatch(/^cb:/);
+    expect(tokenCodec.verify(callbackData, { telegramUserId: "123456789" })).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        action: "PAYMENT_REFRESH",
+        resourceId: COMMAND_ID,
+      }),
+    });
+  });
 });

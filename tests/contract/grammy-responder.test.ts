@@ -397,3 +397,90 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(String(fetchImpl.mock.calls[0]?.[0])).toContain(`/bot${BOT_TOKEN}/test/getChat`);
   });
 });
+
+describe("createGrammyResponder payment copy_text", () => {
+  it("emits native copy_text markup for payment copy buttons", async () => {
+    const calls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(),
+      editMessageText: vi.fn(),
+      editMessageCaption: vi.fn(),
+      sendPhoto: vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return { message_id: 11 };
+      }),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: {
+        text: "pay",
+        photo: Buffer.from("png"),
+        buttons: [
+          [{ text: "📋 Sao chép STK", callbackData: "", copyText: "0123456789" }],
+          [{ text: "✅ Kiểm tra thanh toán", callbackData: "pay:refresh:ORD-1" }],
+        ],
+      },
+    });
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    const options = calls[0]?.at(-1) as {
+      caption?: string;
+      reply_markup?: {
+        inline_keyboard?: Array<
+          Array<{ text: string; copy_text?: { text: string }; callback_data?: string }>
+        >;
+      };
+    };
+    expect(options.caption).toBe("pay");
+    const buttons = options.reply_markup?.inline_keyboard?.flat() ?? [];
+    const copy = buttons.find((button) => button.copy_text);
+    expect(copy).toMatchObject({
+      text: "📋 Sao chép STK",
+      copy_text: { text: "0123456789" },
+    });
+    expect(copy).not.toHaveProperty("callback_data");
+    expect(buttons).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          text: "✅ Kiểm tra thanh toán",
+          callback_data: "pay:refresh:ORD-1",
+        }),
+      ]),
+    );
+  });
+
+  it("edits a photo caption when editMessageText is rejected", async () => {
+    const api = {
+      sendMessage: vi.fn(),
+      editMessageText: vi.fn(async () => {
+        throw new GrammyError(
+          "Call to 'editMessageText' failed!",
+          {
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: there is no text in the message to edit",
+          },
+          "editMessageText",
+          {},
+        );
+      }),
+      editMessageCaption: vi.fn(async () => true),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const result = await responder.send({
+      chatId: "customer-chat",
+      messageId: "88",
+      message: {
+        text: "fallback caption",
+        buttons: [[{ text: "📋 Sao chép STK", callbackData: "", copyText: "0123456789" }]],
+      },
+    });
+    expect(api.editMessageCaption).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(result).toEqual({ chatId: "customer-chat", messageId: "88" });
+  });
+});

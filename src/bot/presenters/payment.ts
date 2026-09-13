@@ -1,7 +1,14 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import { toBuffer } from "qrcode";
+import type { FulfillmentType } from "../../modules/catalog/fulfillment-type.js";
 import type { PaymentPresentation } from "../../modules/payments/vietqr.js";
 import type { InlineButton, PresentedMessage } from "./catalog.js";
+import {
+  TELEGRAM_PHOTO_CAPTION_LIMIT,
+  resolvePaymentPresentationProfile,
+  sanitizeCopyText,
+  type PaymentPresentationProfile,
+} from "./payment-presentation-profile.js";
 
 /**
  * Vietnamese payment/expiry/review presenters (T055, FR-008, telegram-ux.md).
@@ -21,12 +28,20 @@ export const PAYMENT_COPY = {
   contentLabel: "Nội dung CK",
   expiresLabel: "Hết hạn",
   noScreenshot: "Không cần gửi ảnh biên lai. Hệ thống tự nhận diện giao dịch chuyển khoản.",
-  instruction: "Quét mã VietQR hoặc chuyển khoản đúng số tiền + nội dung trên.",
-  refresh: "🔄 Kiểm tra trạng thái",
-  cancel: "Huỷ đơn",
+  instruction: "Quét QR, hoặc sao chép STK / số tiền / nội dung để chuyển trên điện thoại này.",
+  qrFallback:
+    "Không hiển thị được QR. Dùng nút sao chép STK / số tiền / nội dung bên dưới để chuyển trên điện thoại này.",
+  refresh: "✅ Kiểm tra thanh toán",
+  cancel: "❌ Huỷ đơn",
   reopen: "🛒 Tạo lại thanh toán",
   support: "💬 Hỗ trợ",
-  mainMenu: "Menu chính",
+  mainMenu: "🏠 Menu",
+  copyAccount: "📋 Sao chép STK",
+  copyContent: "📋 Nội dung CK",
+  copyAmount: "📋 Số tiền",
+  copyOrder: "📋 Mã đơn",
+  checkPending: "⏳ Chưa nhận được thanh toán.",
+  checkPendingHint: "Hệ thống sẽ tự cập nhật ngay khi ngân hàng xác nhận.",
   expiredTitle: "⌛ Yêu cầu thanh toán đã hết hạn.",
   expiredBody:
     "Đơn hàng đã quá thời gian chờ thanh toán. Bạn có thể tạo lại thanh toán hoặc xem đơn.",
@@ -35,12 +50,52 @@ export const PAYMENT_COPY = {
   reviewTitle: "🔎 Đang kiểm tra giao dịch",
   reviewBody:
     "Giao dịch cần đối soát thủ công. Vui lòng chờ hoặc liên hệ hỗ trợ với mã tham chiếu bên dưới. Không gửi ảnh biên lai.",
+  cancelledTitle: "❌ Đơn đã huỷ.",
 } as const;
+
+export type PaymentScreenStatus = "PENDING" | "CHECK_PENDING" | "PAID" | "EXPIRED" | "CANCELLED";
+
+export interface PaymentScreenContext {
+  status?: PaymentScreenStatus;
+  productName?: string;
+  variantName?: string;
+  quantity?: number;
+  fulfillmentType?: FulfillmentType;
+  /** Untrusted product metadata; sanitized by the profile schema. */
+  profileOverride?: unknown;
+  /** Trusted caller patch (wallet / checkout). May hide check/cancel. */
+  profilePatch?: Partial<PaymentPresentationProfile>;
+  /** Injectable QR renderer for tests. */
+  qrRenderer?: (payload: string) => Promise<Buffer>;
+}
+
+export interface PaymentCopyPayloads {
+  account: string;
+  transferContent: string;
+  amountDigits: string;
+  orderNumber: string;
+}
+
+export { TELEGRAM_PHOTO_CAPTION_LIMIT };
+export const QR_RENDER_TIMEOUT_MS = 1_500;
+export const QR_RENDER_WIDTH_PX = 512;
+
+function styledButton(
+  text: string,
+  callbackData: string,
+  style?: InlineButton["style"],
+): InlineButton {
+  return style ? { text, callbackData, style } : { text, callbackData };
+}
+
+function copyButton(text: string, value: string): InlineButton {
+  return { text, callbackData: "", copyText: value, style: "primary" };
+}
 
 function navButtons(orderNumber: string): InlineButton[][] {
   return [
-    [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
-    [{ text: PAYMENT_COPY.support, callbackData: `sup:open:${orderNumber}` }],
+    [styledButton(PAYMENT_COPY.mainMenu, "menu:main")],
+    [styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`)],
   ];
 }
 
@@ -71,6 +126,165 @@ export function formatExpiryVietnam(iso: string): string {
   return `${formatVietnamDateTime(d)} (GMT+7)`;
 }
 
+export function paymentCopyPayloads(presentation: PaymentPresentation): PaymentCopyPayloads {
+  return {
+    account: sanitizeCopyText(presentation.accountNumber),
+    transferContent: sanitizeCopyText(presentation.transferContent),
+    amountDigits: sanitizeCopyText(String(presentation.amountVnd)),
+    orderNumber: sanitizeCopyText(presentation.orderNumber),
+  };
+}
+
+function pairRows(buttons: InlineButton[]): InlineButton[][] {
+  const rows: InlineButton[][] = [];
+  for (let i = 0; i < buttons.length; i += 2) {
+    rows.push(buttons.slice(i, i + 2));
+  }
+  return rows;
+}
+
+export function buildMobilePaymentKeyboard(input: {
+  presentation: PaymentPresentation;
+  profile: PaymentPresentationProfile;
+  refreshCallbackData?: string;
+  cancelCallbackData?: string;
+  extraRows?: InlineButton[][];
+}): InlineButton[][] {
+  const payloads = paymentCopyPayloads(input.presentation);
+  const copies: InlineButton[] = [];
+  if (input.profile.showAccountCopyButton && payloads.account) {
+    copies.push(copyButton(PAYMENT_COPY.copyAccount, payloads.account));
+  }
+  if (input.profile.showTransferContentCopyButton && payloads.transferContent) {
+    copies.push(copyButton(PAYMENT_COPY.copyContent, payloads.transferContent));
+  }
+  if (input.profile.showAmountCopyButton && payloads.amountDigits) {
+    copies.push(copyButton(PAYMENT_COPY.copyAmount, payloads.amountDigits));
+  }
+  if (
+    input.profile.showOrderCode &&
+    input.profile.showOrderCodeCopyButton &&
+    payloads.orderNumber
+  ) {
+    copies.push(copyButton(PAYMENT_COPY.copyOrder, payloads.orderNumber));
+  }
+  const rows = pairRows(copies);
+  if (input.profile.showPaymentCheckButton && input.refreshCallbackData) {
+    rows.push([styledButton(PAYMENT_COPY.refresh, input.refreshCallbackData, "success")]);
+  }
+  const actionRow: InlineButton[] = [];
+  if (input.profile.showCancelButton && input.cancelCallbackData) {
+    actionRow.push(styledButton(PAYMENT_COPY.cancel, input.cancelCallbackData, "danger"));
+  }
+  actionRow.push(styledButton(PAYMENT_COPY.mainMenu, "menu:main"));
+  if (actionRow.length > 0) rows.push(actionRow);
+  if (input.extraRows) rows.push(...input.extraRows);
+  return rows;
+}
+
+function productLine(
+  context: PaymentScreenContext,
+  profile: PaymentPresentationProfile,
+): string | null {
+  if (!profile.showProductDetails) return null;
+  const product = context.productName?.trim();
+  const variant = context.variantName?.trim();
+  if (!product && !variant) return null;
+  const name = [product, variant].filter(Boolean).join(" · ");
+  if (profile.showQuantity && context.quantity && context.quantity > 1) {
+    return `📦 ${name} × ${context.quantity}`;
+  }
+  return `📦 ${name}`;
+}
+
+function trimCaption(lines: string[], droppable: ReadonlySet<string>): string {
+  let next = lines.filter((line) => line !== undefined);
+  let text = next.join("\n");
+  while (text.length > TELEGRAM_PHOTO_CAPTION_LIMIT) {
+    const idx = next.findIndex((line) => droppable.has(line) && line.length > 0);
+    if (idx < 0) break;
+    next = next.filter((_, i) => i !== idx);
+    text = next.join("\n");
+  }
+  if (text.length > TELEGRAM_PHOTO_CAPTION_LIMIT) {
+    text = [...text].slice(0, TELEGRAM_PHOTO_CAPTION_LIMIT).join("");
+  }
+  return text;
+}
+
+export function buildPaymentCaption(
+  presentation: PaymentPresentation,
+  context: PaymentScreenContext,
+  profile: PaymentPresentationProfile,
+): string {
+  const amount = formatVnd(makeVnd(presentation.amountVnd));
+  const headline = profile.headline ?? `💳 Thanh toán đơn #${presentation.orderNumber}`;
+  const product = productLine(context, profile);
+  const extra = profile.extraNotice;
+  const fulfillment = profile.fulfillmentNotice;
+  const lines: string[] = [];
+  if (context.status === "CHECK_PENDING") {
+    lines.push(PAYMENT_COPY.checkPending, PAYMENT_COPY.checkPendingHint, "");
+  }
+  lines.push(headline);
+  if (product) lines.push(product);
+  lines.push(`💰 Tổng: ${amount}`);
+  if (presentation.bankName) lines.push(`🏦 Ngân hàng: ${presentation.bankName}`);
+  if (profile.showBankHolder) lines.push(`👤 Thụ hưởng: ${presentation.accountName}`);
+  lines.push(`💳 STK: ${presentation.accountNumber}`);
+  lines.push(`📝 ${PAYMENT_COPY.contentLabel}: ${presentation.transferContent}`);
+  lines.push(`⏱️ ${PAYMENT_COPY.expiresLabel}: ${formatExpiryVietnam(presentation.expiresAt)}`);
+  lines.push("", PAYMENT_COPY.instruction, PAYMENT_COPY.noScreenshot);
+  if (fulfillment) lines.push("", fulfillment);
+  if (extra) lines.push(extra);
+
+  const droppable = new Set<string>([extra ?? "", fulfillment ?? "", product ?? ""]);
+  return trimCaption(lines, droppable);
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("QR_TIMEOUT")), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function renderPaymentQrPng(
+  payload: string,
+  renderer?: (payload: string) => Promise<Buffer>,
+): Promise<Buffer | undefined> {
+  try {
+    const rendered = renderer
+      ? renderer(payload)
+      : toBuffer(payload, {
+          type: "png",
+          errorCorrectionLevel: "M",
+          margin: 4,
+          width: QR_RENDER_WIDTH_PX,
+          color: { dark: "#000000", light: "#ffffff" },
+        });
+    const buffer = await withTimeout(rendered, QR_RENDER_TIMEOUT_MS);
+    return buffer.length > 0 ? buffer : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveProfile(context: PaymentScreenContext): PaymentPresentationProfile {
+  return resolvePaymentPresentationProfile({
+    ...(context.fulfillmentType ? { fulfillmentType: context.fulfillmentType } : {}),
+    ...(context.profileOverride !== undefined ? { override: context.profileOverride } : {}),
+    ...(context.profilePatch ? { patch: context.profilePatch } : {}),
+  });
+}
+
 /**
  * Payment screen after Buy Now / reopen. Shows exact amount/content/expiry +
  * the no-screenshot line. Callbacks bind to the order number so the checkout
@@ -78,33 +292,38 @@ export function formatExpiryVietnam(iso: string): string {
  */
 export async function presentPaymentScreen(
   presentation: PaymentPresentation,
+  context: PaymentScreenContext = {},
 ): Promise<PresentedMessage> {
-  const amount = formatVnd(makeVnd(presentation.amountVnd));
-  const bankLine = presentation.bankName
-    ? `${PAYMENT_COPY.accountLabel}: ${presentation.accountNumber} — ${presentation.bankName} (${presentation.accountName})`
-    : `${PAYMENT_COPY.accountLabel}: ${presentation.accountNumber} (${presentation.accountName})`;
-  const text = [
-    PAYMENT_COPY.title,
-    "",
-    `Đơn: ${presentation.orderNumber}`,
-    `${PAYMENT_COPY.amountLabel}: ${amount}`,
-    bankLine,
-    `${PAYMENT_COPY.contentLabel}: ${presentation.transferContent}`,
-    `${PAYMENT_COPY.expiresLabel}: ${formatExpiryVietnam(presentation.expiresAt)}`,
-    "",
-    PAYMENT_COPY.instruction,
-    PAYMENT_COPY.noScreenshot,
-  ].join("\n");
+  const status = context.status ?? "PENDING";
+  if (status === "PAID") return presentPaymentSettled(presentation.orderNumber);
+  if (status === "EXPIRED") return presentPaymentExpired(presentation.orderNumber);
+  if (status === "CANCELLED") return presentPaymentCancelled(presentation.orderNumber);
 
-  return {
+  const profile = resolveProfile(context);
+  const photo = await renderPaymentQrPng(presentation.payload, context.qrRenderer);
+  let text = buildPaymentCaption(presentation, { ...context, status }, profile);
+  if (!photo) {
+    const fallbackLine = PAYMENT_COPY.qrFallback;
+    const withFallback = `${text}\n\n${fallbackLine}`;
+    text =
+      withFallback.length <= TELEGRAM_PHOTO_CAPTION_LIMIT
+        ? withFallback
+        : trimCaption(
+            [...text.split("\n"), "", fallbackLine],
+            new Set([PAYMENT_COPY.instruction, productLine(context, profile) ?? ""]),
+          );
+  }
+  const message: PresentedMessage = {
     text,
-    photo: await toBuffer(presentation.payload, { type: "png", errorCorrectionLevel: "M" }),
-    buttons: [
-      [{ text: PAYMENT_COPY.refresh, callbackData: `pay:refresh:${presentation.orderNumber}` }],
-      [{ text: PAYMENT_COPY.cancel, callbackData: `pay:cancel:${presentation.orderNumber}` }],
-      ...navButtons(presentation.orderNumber),
-    ],
+    buttons: buildMobilePaymentKeyboard({
+      presentation,
+      profile,
+      refreshCallbackData: `pay:refresh:${presentation.orderNumber}`,
+      cancelCallbackData: `pay:cancel:${presentation.orderNumber}`,
+    }),
   };
+  if (photo) message.photo = photo;
+  return message;
 }
 
 /**
@@ -122,6 +341,7 @@ export interface PreorderPaymentScreenInput {
   presentation: PaymentPresentation;
   /** Reservation id the refresh/back callbacks resolve against. */
   reservationId: string;
+  qrRenderer?: (payload: string) => Promise<Buffer>;
 }
 
 export async function presentPreorderPaymentScreen(
@@ -161,34 +381,41 @@ export async function presentPreorderPaymentScreen(
           "Hàng đang được giữ riêng cho bạn. Vui lòng thanh toán trước hạn trên.",
           PAYMENT_COPY.noScreenshot,
         ];
-  return {
-    text: lines.join("\n"),
-    photo: await toBuffer(input.presentation.payload, { type: "png", errorCorrectionLevel: "M" }),
-    buttons: [
-      [
-        {
-          text: PAYMENT_COPY.refresh,
-          callbackData: `preorder:pay:${input.reservationId}`,
-        },
+  const profile = resolvePaymentPresentationProfile({
+    patch: { showPaymentCheckButton: true, showCancelButton: false },
+  });
+  const photo = await renderPaymentQrPng(input.presentation.payload, input.qrRenderer);
+  let caption = lines.join("\n");
+  if (!photo) {
+    const withFallback = `${caption}\n\n${PAYMENT_COPY.qrFallback}`;
+    caption = withFallback.length <= TELEGRAM_PHOTO_CAPTION_LIMIT ? withFallback : caption;
+  }
+  const message: PresentedMessage = {
+    text: caption,
+    buttons: buildMobilePaymentKeyboard({
+      presentation: input.presentation,
+      profile,
+      refreshCallbackData: `preorder:pay:${input.reservationId}`,
+      extraRows: [
+        [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
+        [{ text: PAYMENT_COPY.support, callbackData: "supp:open" }],
       ],
-      [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
-      [{ text: PAYMENT_COPY.support, callbackData: "supp:open" }],
-      [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
-    ],
+    }),
   };
+  if (photo) message.photo = photo;
+  return message;
 }
 
-/** Expired intent / order (goal §37): re-mint, view the order, or get support. */ export function presentPaymentExpired(
-  orderNumber: string,
-): PresentedMessage {
+/** Expired intent / order (goal §37): re-mint, view the order, or get support. */
+export function presentPaymentExpired(orderNumber: string): PresentedMessage {
   return {
     text: [PAYMENT_COPY.expiredTitle, "", `Đơn: ${orderNumber}`, PAYMENT_COPY.expiredBody].join(
       "\n",
     ),
     buttons: [
-      [{ text: PAYMENT_COPY.reopen, callbackData: `pay:reopen:${orderNumber}` }],
+      [styledButton(PAYMENT_COPY.reopen, `pay:reopen:${orderNumber}`)],
       [{ text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` }],
-      [{ text: PAYMENT_COPY.support, callbackData: `sup:open:${orderNumber}` }],
+      [styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`)],
     ],
   };
 }
@@ -223,9 +450,20 @@ export function presentPaymentNeedsReview(
       `Mã tham chiếu: ${correlationId}`,
     ].join("\n"),
     buttons: [
-      [{ text: PAYMENT_COPY.support, callbackData: `sup:open:${orderNumber}` }],
-      [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+      [styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`)],
+      [styledButton(PAYMENT_COPY.mainMenu, "menu:main")],
     ],
+  };
+}
+
+export function presentPaymentCancelled(orderNumber: string): PresentedMessage {
+  return {
+    text: [
+      `❌ Đơn ${orderNumber} đã huỷ.`,
+      "",
+      "Các nút thanh toán trên tin nhắn cũ không còn hiệu lực.",
+    ].join("\n"),
+    buttons: [[styledButton(PAYMENT_COPY.mainMenu, "menu:main")]],
   };
 }
 

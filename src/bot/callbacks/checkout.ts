@@ -13,6 +13,7 @@ import {
   presentPaymentScreen,
   presentPaymentExpired,
   presentPaymentNeedsReview,
+  presentPaymentCancelled,
   presentCheckoutPreview,
   presentInsufficientBalance,
   PAYMENT_COPY,
@@ -163,7 +164,12 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     if (!presented.ok) return errorMessage("Không tạo được mã thanh toán. Vui lòng thử lại.");
     lastOrderNumber = presented.presentation.orderNumber;
     lastTransferContent = presented.presentation.transferContent;
-    return await presentPaymentScreen(presented.presentation);
+    return await presentPaymentScreen(presented.presentation, {
+      status: "PENDING",
+      productName: result.order.productNameVi,
+      variantName: result.order.variantNameVi,
+      fulfillmentType: result.order.fulfillmentType,
+    });
   };
 
   const isAdmin = (telegramUserId: string): boolean =>
@@ -437,7 +443,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
         return presentPaymentExpired(order.orderNumber);
       }
       if (order.status === "PAYMENT_NEEDS_REVIEW") {
-        return presentPaymentNeedsReview(order.orderNumber, order.id);
+        return presentPaymentNeedsReview(order.orderNumber, order.orderNumber);
       }
       if (order.status === "CANCELLED" || order.status === "REJECTED") {
         return errorMessage(`Đơn ${order.orderNumber} đã huỷ.`);
@@ -452,16 +458,18 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       if (!presented.ok) {
         // Intent may already be non-live (e.g. NEEDS_REVIEW on the intent).
         const live = await findLiveIntentByOrderForOwner(deps.db, order.id, customerId);
-        if (!live) return presentPaymentNeedsReview(order.orderNumber, order.id);
+        if (!live) return presentPaymentNeedsReview(order.orderNumber, order.orderNumber);
         return errorMessage("Không tải được mã thanh toán. Vui lòng thử lại.");
       }
       lastOrderNumber = presented.presentation.orderNumber;
       lastTransferContent = presented.presentation.transferContent;
-      const screen = await presentPaymentScreen(presented.presentation);
-      return {
-        ...screen,
-        text: `⏳ Chưa nhận được thanh toán.\nHệ thống sẽ tự cập nhật ngay khi ngân hàng xác nhận.\n\n${screen.text}`,
-      };
+      const screen = await presentPaymentScreen(presented.presentation, {
+        status: "CHECK_PENDING",
+        productName: order.productNameVi,
+        variantName: order.variantNameVi,
+        fulfillmentType: order.fulfillmentType,
+      });
+      return screen;
     },
 
     async reopen(orderNumber, customerId) {
@@ -478,10 +486,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
         correlationId,
       });
       if (!result.ok) return errorMessage(result.message);
-      return {
-        text: `Đơn ${order.orderNumber} đã huỷ.`,
-        buttons: [[{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }]],
-      };
+      return presentPaymentCancelled(order.orderNumber);
     },
   };
 }

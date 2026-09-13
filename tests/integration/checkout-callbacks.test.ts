@@ -183,6 +183,9 @@ describe("checkout callbacks (T056)", () => {
     const orderNumber = cb.lastOrderNumber()!;
     const res = await cb.cancel(orderNumber, cat.customerId, "corr-cancel");
     expect(res.text.toLowerCase()).toMatch(/đã hu|hu[ỷy]/);
+    const cancelledCallbacks = res.buttons.flat().map((b) => b.callbackData);
+    expect(cancelledCallbacks.some((d) => d.startsWith("pay:refresh:"))).toBe(false);
+    expect(cancelledCallbacks.some((d) => d.startsWith("pay:cancel:"))).toBe(false);
     const status = await sql<{ status: string }>`
       select status from "order" where order_number = ${orderNumber}
     `.execute(ctx.db);

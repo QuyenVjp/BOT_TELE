@@ -49,4 +49,15 @@ describe("presentPaymentScreen", () => {
     const lower = msg.text.toLowerCase();
     expect(lower).not.toContain("đã thanh toán");
   });
+
+  it("omits the photo and keeps copy buttons when QR rendering fails", async () => {
+    const msg = await presentPaymentScreen(presentation, {
+      qrRenderer: async () => {
+        throw new Error("qr failed");
+      },
+    });
+    expect(msg.photo).toBeUndefined();
+    expect(msg.text).toContain("0123456789");
+    expect(msg.buttons.flat().some((button) => button.copyText === "0123456789")).toBe(true);
+  });
 });
