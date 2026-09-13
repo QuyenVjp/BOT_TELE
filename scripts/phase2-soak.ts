@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { performance } from "node:perf_hooks";
 import { sql } from "kysely";
 import type { FastifyInstance } from "fastify";
@@ -26,7 +27,7 @@ import { seedRcDataset } from "../tests/helpers/rc-dataset.js";
 
 const CATEGORY_ID = "01CAT0000000000000000001";
 const CUSTOMER_ID = "01CST0" + "1".padStart(20, "0");
-const TELEGRAM_SECRET = "phase2-soak-local-secret";
+const TELEGRAM_SECRET = randomBytes(24).toString("hex");
 const TICK_MS = 1_000;
 const SAMPLE_MS = 5_000;
 const LATENCY_SAMPLE_LIMIT = 2_048;
