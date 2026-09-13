@@ -3,6 +3,7 @@ import fc from "fast-check";
 import {
   CALLBACK_ACTION_CODES,
   createCallbackTokenCodec,
+  MAX_CALLBACK_PRICE_VND,
   type CallbackAction,
 } from "../../src/bot/callback-codec.js";
 
@@ -41,6 +42,14 @@ const RESOURCE_ACTIONS = [
   "PREORDER_PAY",
   "CUSTOMER_NOTIFICATION_TOGGLE",
   "CHECKOUT_PREVIEW",
+] as const satisfies readonly CallbackAction[];
+
+const COMPLEX_ACTIONS = [
+  "CATEGORY_VIEW",
+  "CATALOG_PAGE",
+  "SUPPORT_MENU",
+  "SUPPORT_REASON",
+  "ADMIN_COMMAND",
 ] as const satisfies readonly CallbackAction[];
 
 function codec() {
@@ -106,6 +115,77 @@ describe("callback codec generative invariants", () => {
 
         expect(codec().verify(tampered, { telegramUserId, now: NOW }).ok).toBe(false);
       }),
+      { numRuns: 128 },
+    );
+  });
+  it("round-trips variable-width callback payload schemas", () => {
+    fc.assert(
+      fc.property(
+        fc.constantFrom(...COMPLEX_ACTIONS),
+        userIds(),
+        fc.integer({ min: 0, max: 255 }),
+        fc.boolean(),
+        (action, telegramUserId, option, includeResource) => {
+          const resourceId =
+            includeResource ||
+            action === "CATEGORY_VIEW" ||
+            action === "CATALOG_PAGE" ||
+            action === "ADMIN_COMMAND"
+              ? RESOURCE_ID
+              : undefined;
+          const secondaryResourceId =
+            action === "CATALOG_PAGE" && includeResource ? SECONDARY_RESOURCE_ID : undefined;
+          const encodedOption =
+            action === "CATEGORY_VIEW" || action === "SUPPORT_REASON" || action === "ADMIN_COMMAND"
+              ? option
+              : undefined;
+          const token = codec().issue({
+            action,
+            telegramUserId,
+            now: NOW,
+            ...(resourceId === undefined ? {} : { resourceId }),
+            ...(secondaryResourceId === undefined ? {} : { secondaryResourceId }),
+            ...(encodedOption === undefined ? {} : { option: encodedOption }),
+          });
+          const verified = codec().verify(token, { telegramUserId, now: NOW });
+
+          expect(verified).toMatchObject({ ok: true, value: { action } });
+          if (verified.ok) {
+            expect(verified.value.resourceId).toBe(resourceId);
+            expect(verified.value.secondaryResourceId).toBe(secondaryResourceId);
+            expect(verified.value.option).toBe(encodedOption);
+          }
+        },
+      ),
+      { numRuns: 128 },
+    );
+  });
+
+  it("round-trips wallet price bounds and the optional purchase attempt", () => {
+    fc.assert(
+      fc.property(
+        userIds(),
+        fc.integer({ min: 1, max: MAX_CALLBACK_PRICE_VND }),
+        fc.boolean(),
+        (telegramUserId, amountVnd, includeAttempt) => {
+          const secondaryResourceId = includeAttempt ? "AQIDBAUG" : undefined;
+          const token = codec().issue({
+            action: "CHECKOUT_WALLET",
+            telegramUserId,
+            resourceId: RESOURCE_ID,
+            amountVnd,
+            now: NOW,
+            ...(secondaryResourceId === undefined ? {} : { secondaryResourceId }),
+          });
+          const verified = codec().verify(token, { telegramUserId, now: NOW });
+
+          expect(verified).toMatchObject({
+            ok: true,
+            value: { action: "CHECKOUT_WALLET", resourceId: RESOURCE_ID, amountVnd },
+          });
+          if (verified.ok) expect(verified.value.secondaryResourceId).toBe(secondaryResourceId);
+        },
+      ),
       { numRuns: 128 },
     );
   });

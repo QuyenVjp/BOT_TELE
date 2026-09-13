@@ -1,5 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { performance } from "node:perf_hooks";
+import {
+  constants,
+  monitorEventLoopDelay,
+  PerformanceObserver,
+  performance,
+} from "node:perf_hooks";
 import { sql } from "kysely";
 import type { FastifyInstance } from "fastify";
 import { createApp } from "../src/app.js";
@@ -53,7 +58,7 @@ class BoundedLatency {
     if (this.samples.length < LATENCY_SAMPLE_LIMIT) {
       this.samples.push(valueMs);
     } else {
-      this.samples[this.count % LATENCY_SAMPLE_LIMIT] = valueMs;
+      this.samples[(this.count - 1) % LATENCY_SAMPLE_LIMIT] = valueMs;
     }
   }
 
@@ -137,6 +142,29 @@ interface EventLoopMetrics {
   maxLagMs: number;
   totalLagMs: number;
   lagsMs: number[];
+}
+interface EventLoopProbeReport {
+  monitorEventLoopDelay: {
+    available: boolean;
+    resolutionMs: number;
+    p50Ms: number | null;
+    p95Ms: number | null;
+    p99Ms: number | null;
+    meanMs: number | null;
+    maxMs: number | null;
+  };
+  eventLoopUtilization: { activeMs: number; idleMs: number; utilization: number } | null;
+  cpu: { userMicros: number; systemMicros: number; percent: number } | null;
+  gc: {
+    available: boolean;
+    count: number;
+    durationMs: number;
+    byKind: Record<string, { count: number; durationMs: number }>;
+  };
+}
+
+interface EventLoopProbe {
+  stop: () => EventLoopProbeReport;
 }
 
 interface SoakMetrics {
@@ -223,6 +251,7 @@ function poolSample(ctx: PgTestContext, metrics: SoakMetrics): void {
   state.maxTotal = Math.max(state.maxTotal, pool.totalCount);
   state.minIdle = state.minIdle === null ? pool.idleCount : Math.min(state.minIdle, pool.idleCount);
   state.lastWaiting = pool.waitingCount;
+
   state.lastTotal = pool.totalCount;
   state.lastIdle = pool.idleCount;
 }
@@ -245,6 +274,108 @@ function eventLoopPercentile(eventLoop: EventLoopMetrics, percentile: number): n
   const sorted = [...eventLoop.lagsMs].sort((a, b) => a - b);
   const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * percentile) - 1);
   return Number(sorted[index]!.toFixed(3));
+}
+function toMilliseconds(nanoseconds: number): number | null {
+  return Number.isFinite(nanoseconds) ? Number((nanoseconds / 1_000_000).toFixed(3)) : null;
+}
+
+function startEventLoopProbe(): EventLoopProbe {
+  const startedAt = performance.now();
+  const cpuStart = process.cpuUsage();
+  const eluStart = performance.eventLoopUtilization();
+  let histogram: ReturnType<typeof monitorEventLoopDelay> | null = null;
+  try {
+    histogram = monitorEventLoopDelay({ resolution: 20 });
+    histogram.enable();
+  } catch {
+    histogram = null;
+  }
+
+  const gc = {
+    available: false,
+    count: 0,
+    durationMs: 0,
+    byKind: {} as Record<string, { count: number; durationMs: number }>,
+  };
+  let observer: PerformanceObserver | null = null;
+  try {
+    observer = new PerformanceObserver((list) => {
+      for (const entry of list.getEntries()) {
+        const details = entry as PerformanceEntry & {
+          detail?: { kind?: number };
+        };
+        const gcKind = details.detail?.kind ?? 0;
+        const kind =
+          gcKind & constants.NODE_PERFORMANCE_GC_MAJOR
+            ? "major"
+            : gcKind & 2
+              ? "minor-mark-sweep"
+              : gcKind & constants.NODE_PERFORMANCE_GC_MINOR
+                ? "minor"
+                : gcKind & constants.NODE_PERFORMANCE_GC_INCREMENTAL
+                  ? "incremental"
+                  : gcKind & constants.NODE_PERFORMANCE_GC_WEAKCB
+                    ? "weakcb"
+                    : "unknown";
+        const durationMs = details.duration;
+        const current = gc.byKind[kind] ?? { count: 0, durationMs: 0 };
+        current.count += 1;
+        current.durationMs += durationMs;
+        gc.byKind[kind] = current;
+        gc.available = true;
+        gc.count += 1;
+        gc.durationMs += durationMs;
+      }
+    });
+    observer.observe({ entryTypes: ["gc"] });
+  } catch {
+    observer = null;
+  }
+
+  let report: EventLoopProbeReport | undefined;
+  return {
+    stop: () => {
+      if (report) return report;
+      histogram?.disable();
+      observer?.disconnect();
+      const elapsedMs = Math.max(1, performance.now() - startedAt);
+      const cpu = process.cpuUsage(cpuStart);
+      const elu = performance.eventLoopUtilization(eluStart);
+      report = {
+        monitorEventLoopDelay: {
+          available: histogram !== null,
+          resolutionMs: 20,
+          p50Ms: histogram ? toMilliseconds(histogram.percentile(50)) : null,
+          p95Ms: histogram ? toMilliseconds(histogram.percentile(95)) : null,
+          p99Ms: histogram ? toMilliseconds(histogram.percentile(99)) : null,
+          meanMs: histogram ? toMilliseconds(histogram.mean) : null,
+          maxMs: histogram ? toMilliseconds(histogram.max) : null,
+        },
+        eventLoopUtilization: {
+          activeMs: Number(elu.active.toFixed(3)),
+          idleMs: Number(elu.idle.toFixed(3)),
+          utilization: Number(elu.utilization.toFixed(6)),
+        },
+        cpu: {
+          userMicros: cpu.user,
+          systemMicros: cpu.system,
+          percent: Number((((cpu.user + cpu.system) / (elapsedMs * 1_000)) * 100).toFixed(3)),
+        },
+        gc: {
+          available: gc.available,
+          count: gc.count,
+          durationMs: Number(gc.durationMs.toFixed(3)),
+          byKind: Object.fromEntries(
+            Object.entries(gc.byKind).map(([kind, value]) => [
+              kind,
+              { count: value.count, durationMs: Number(value.durationMs.toFixed(3)) },
+            ]),
+          ),
+        },
+      };
+      return report;
+    },
+  };
 }
 
 async function queueSnapshot(ctx: PgTestContext): Promise<QueueSnapshot> {
@@ -406,7 +537,11 @@ async function runTick(
   ]);
 }
 
-function summarize(metrics: SoakMetrics, durationSeconds: number): Record<string, unknown> {
+function summarize(
+  metrics: SoakMetrics,
+  durationSeconds: number,
+  probe: EventLoopProbeReport | null,
+): Record<string, unknown> {
   const latencySummary: Record<string, unknown> = {};
   for (const [operation, metric] of metrics.latencies) latencySummary[operation] = metric.summary();
   const runtime = metrics.runtime;
@@ -446,6 +581,10 @@ function summarize(metrics: SoakMetrics, durationSeconds: number): Record<string
       p50LagMs: eventLoopPercentile(metrics.eventLoop, 0.5),
       p95LagMs: eventLoopPercentile(metrics.eventLoop, 0.95),
       p99LagMs: eventLoopPercentile(metrics.eventLoop, 0.99),
+      monitorEventLoopDelay: probe?.monitorEventLoopDelay ?? null,
+      eventLoopUtilization: probe?.eventLoopUtilization ?? null,
+      cpu: probe?.cpu ?? null,
+      gc: probe?.gc ?? null,
     },
     startedAt: metrics.startedAt,
   };
@@ -455,6 +594,7 @@ async function main(): Promise<Record<string, unknown>> {
   const durationSeconds = requiredPositiveSeconds(process.env.SOAK_DURATION_SECONDS);
   let ctx: PgTestContext | undefined;
   let app: FastifyInstance | undefined;
+  let eventLoopProbe: EventLoopProbe | undefined;
   const metrics: SoakMetrics = {
     startedAt: new Date().toISOString(),
     ticks: 0,
@@ -516,6 +656,7 @@ async function main(): Promise<Record<string, unknown>> {
       bodyLimitBytes: 65_536,
       logger: false,
     });
+    eventLoopProbe = startEventLoopProbe();
 
     const deadline = performance.now() + durationSeconds * 1_000;
     let nextTick = performance.now();
@@ -545,10 +686,11 @@ async function main(): Promise<Record<string, unknown>> {
     poolSample(ctx, metrics);
     const finalSnapshot = await queueSnapshot(ctx);
     queueSample(metrics, finalSnapshot);
-    return summarize(metrics, durationSeconds);
+    const probeReport = eventLoopProbe?.stop() ?? null;
+    return summarize(metrics, durationSeconds, probeReport);
   } finally {
+    eventLoopProbe?.stop();
     await app?.close();
-    await ctx?.teardown();
   }
 }
 

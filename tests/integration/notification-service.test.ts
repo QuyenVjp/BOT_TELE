@@ -185,6 +185,35 @@ describe("notification service", () => {
     expect(ids).toHaveLength(2);
     expect(ids[0]).not.toBe(ids[1]);
   });
+  it("claims critical service before older marketing work", async () => {
+    const marketingCustomer = await seedCustomer("marketing");
+    const criticalCustomer = await seedCustomer("critical");
+    const marketingCampaign = await createBroadcast(ctx.db, {
+      class: "SHOP_UPDATE",
+      queued: true,
+      content: "marketing",
+      createdBy: "admin",
+      idempotencyKey: "priority-marketing",
+    });
+    const criticalCampaign = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "critical",
+      createdBy: "admin",
+      idempotencyKey: "priority-critical",
+    });
+    await sql`
+      insert into notification_delivery(id,campaign_id,customer_id,chat_id,next_attempt_at)
+      values
+        (${newId()},${marketingCampaign},${marketingCustomer},'marketing',now()-interval '1 minute'),
+        (${newId()},${criticalCampaign},${criticalCustomer},'critical',now())
+    `.execute(ctx.db);
+
+    const [critical] = await claimNotificationDeliveries(ctx.db, 1);
+    const [marketing] = await claimNotificationDeliveries(ctx.db, 1);
+    expect(critical?.class).toBe("CRITICAL_SERVICE");
+    expect(marketing?.class).toBe("SHOP_UPDATE");
+  });
 
   it("fans out a previewed draft once and ignores repeated confirmation", async () => {
     const first = await seedCustomer("111111");
