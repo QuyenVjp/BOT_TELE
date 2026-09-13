@@ -31,7 +31,7 @@ const TELEGRAM_SECRET = randomBytes(24).toString("hex");
 const TICK_MS = 1_000;
 const SAMPLE_MS = 5_000;
 const LATENCY_SAMPLE_LIMIT = 2_048;
-
+const EVENT_LOOP_SAMPLE_LIMIT = 2_048;
 interface ErrorRecord {
   operation: string;
   message: string;
@@ -133,6 +133,7 @@ interface EventLoopMetrics {
   samples: number;
   maxLagMs: number;
   totalLagMs: number;
+  lagsMs: number[];
 }
 
 interface SoakMetrics {
@@ -225,9 +226,22 @@ function poolSample(ctx: PgTestContext, metrics: SoakMetrics): void {
 
 function eventLoopSample(metrics: SoakMetrics, expectedAt: number): void {
   const lagMs = Math.max(0, performance.now() - expectedAt);
-  metrics.eventLoop.samples += 1;
-  metrics.eventLoop.maxLagMs = Math.max(metrics.eventLoop.maxLagMs, lagMs);
-  metrics.eventLoop.totalLagMs += lagMs;
+  const eventLoop = metrics.eventLoop;
+  eventLoop.samples += 1;
+  eventLoop.maxLagMs = Math.max(eventLoop.maxLagMs, lagMs);
+  eventLoop.totalLagMs += lagMs;
+  if (eventLoop.lagsMs.length < EVENT_LOOP_SAMPLE_LIMIT) {
+    eventLoop.lagsMs.push(lagMs);
+  } else {
+    eventLoop.lagsMs[eventLoop.samples % EVENT_LOOP_SAMPLE_LIMIT] = lagMs;
+  }
+}
+
+function eventLoopPercentile(eventLoop: EventLoopMetrics, percentile: number): number | null {
+  if (eventLoop.lagsMs.length === 0) return null;
+  const sorted = [...eventLoop.lagsMs].sort((a, b) => a - b);
+  const index = Math.min(sorted.length - 1, Math.ceil(sorted.length * percentile) - 1);
+  return Number(sorted[index]!.toFixed(3));
 }
 
 async function queueSnapshot(ctx: PgTestContext): Promise<QueueSnapshot> {
@@ -419,11 +433,16 @@ function summarize(metrics: SoakMetrics, durationSeconds: number): Record<string
     pool: metrics.pool,
     queues: metrics.queues,
     eventLoop: {
-      ...metrics.eventLoop,
+      samples: metrics.eventLoop.samples,
+      maxLagMs: Number(metrics.eventLoop.maxLagMs.toFixed(3)),
+      totalLagMs: Number(metrics.eventLoop.totalLagMs.toFixed(3)),
       meanLagMs:
         metrics.eventLoop.samples === 0
           ? null
           : Number((metrics.eventLoop.totalLagMs / metrics.eventLoop.samples).toFixed(3)),
+      p50LagMs: eventLoopPercentile(metrics.eventLoop, 0.5),
+      p95LagMs: eventLoopPercentile(metrics.eventLoop, 0.95),
+      p99LagMs: eventLoopPercentile(metrics.eventLoop, 0.99),
     },
     startedAt: metrics.startedAt,
   };
@@ -471,7 +490,7 @@ async function main(): Promise<Record<string, unknown>> {
       maxOutboxOldestAgeMs: 0,
       maxNotificationOldestAgeMs: 0,
     },
-    eventLoop: { samples: 0, maxLagMs: 0, totalLagMs: 0 },
+    eventLoop: { samples: 0, maxLagMs: 0, totalLagMs: 0, lagsMs: [] },
   };
   try {
     ctx = await startPostgresContainer();
