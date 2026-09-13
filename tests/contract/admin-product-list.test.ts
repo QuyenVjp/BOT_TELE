@@ -67,4 +67,14 @@ describe("presentAdminProducts", () => {
       expect(presentAdminProducts([row()], { view }).text).toContain("Đang xem:");
     }
   });
+
+  it("keeps the product identity in the detail callback, not only in display text", () => {
+    const message = presentAdminProducts([row({ id: "prod-42", name: "ChatGPT Plus" })]);
+
+    expect(message.text).toContain("ChatGPT Plus");
+    expect(message.buttons.flat()).toContainEqual({
+      text: "ChatGPT Plus (đang bán)",
+      callbackData: "admin:products:detail:prod-42",
+    });
+  });
 });
