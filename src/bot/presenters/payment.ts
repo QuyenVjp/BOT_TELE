@@ -5,8 +5,8 @@ import type { PaymentPresentation } from "../../modules/payments/vietqr.js";
 import type { InlineButton, PresentedMessage } from "./catalog.js";
 import {
   TELEGRAM_PHOTO_CAPTION_LIMIT,
+  exactCopyText,
   resolvePaymentPresentationProfile,
-  sanitizeCopyText,
   type PaymentPresentationProfile,
 } from "./payment-presentation-profile.js";
 
@@ -70,10 +70,10 @@ export interface PaymentScreenContext {
 }
 
 export interface PaymentCopyPayloads {
-  account: string;
-  transferContent: string;
-  amountDigits: string;
-  orderNumber: string;
+  account: string | undefined;
+  transferContent: string | undefined;
+  amountDigits: string | undefined;
+  orderNumber: string | undefined;
 }
 
 export { TELEGRAM_PHOTO_CAPTION_LIMIT };
@@ -128,10 +128,10 @@ export function formatExpiryVietnam(iso: string): string {
 
 export function paymentCopyPayloads(presentation: PaymentPresentation): PaymentCopyPayloads {
   return {
-    account: sanitizeCopyText(presentation.accountNumber),
-    transferContent: sanitizeCopyText(presentation.transferContent),
-    amountDigits: sanitizeCopyText(String(presentation.amountVnd)),
-    orderNumber: sanitizeCopyText(presentation.orderNumber),
+    account: exactCopyText(presentation.accountNumber),
+    transferContent: exactCopyText(presentation.transferContent),
+    amountDigits: exactCopyText(String(presentation.amountVnd)),
+    orderNumber: exactCopyText(presentation.orderNumber),
   };
 }
 

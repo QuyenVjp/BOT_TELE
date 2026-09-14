@@ -3,7 +3,7 @@ import {
   DEFAULT_MOBILE_BANK_TRANSFER,
   parsePaymentPresentationOverride,
   resolvePaymentPresentationProfile,
-  sanitizeCopyText,
+  exactCopyText,
   TELEGRAM_COPY_TEXT_LIMIT,
 } from "../../src/bot/presenters/payment-presentation-profile.js";
 import { FULFILLMENT_TYPES } from "../../src/modules/catalog/fulfillment-type.js";
@@ -110,21 +110,19 @@ describe("payment presentation profile", () => {
     expect(profile.showCancelButton).toBe(true);
   });
 
-  it("truncates copy_text payloads without splitting a code point", () => {
-    const ok = sanitizeCopyText("ORD-20260716-ABCD1234");
-    expect(ok).toBe("ORD-20260716-ABCD1234");
+  it("returns exact copy_text payloads and omits over-limit values", () => {
+    expect(exactCopyText("ORD-20260716-ABCD1234")).toBe("ORD-20260716-ABCD1234");
+    const atLimit = "A".repeat(TELEGRAM_COPY_TEXT_LIMIT);
+    expect(exactCopyText(atLimit)).toBe(atLimit);
     const long = "A".repeat(TELEGRAM_COPY_TEXT_LIMIT + 8) + "🎉";
-    const sliced = sanitizeCopyText(long);
-    expect([...sliced].length).toBe(TELEGRAM_COPY_TEXT_LIMIT);
+    expect(exactCopyText(long)).toBeUndefined();
   });
 
-  it("keeps short copy payloads and trims only surrounding whitespace", () => {
-    expect(sanitizeCopyText("a")).toBe("a");
-    expect(sanitizeCopyText(`  ${"b".repeat(TELEGRAM_COPY_TEXT_LIMIT)}  `)).toBe(
-      "b".repeat(TELEGRAM_COPY_TEXT_LIMIT),
-    );
-    const over = sanitizeCopyText("c".repeat(TELEGRAM_COPY_TEXT_LIMIT + 1));
-    expect(over).toBe("c".repeat(TELEGRAM_COPY_TEXT_LIMIT));
-    expect(sanitizeCopyText("")).toBe("");
+  it("never truncates, trims, or ellipsizes an authoritative copy value", () => {
+    expect(exactCopyText("a")).toBe("a");
+    const padded = `  ${"b".repeat(TELEGRAM_COPY_TEXT_LIMIT - 4)}  `;
+    expect(exactCopyText(padded)).toBe(padded);
+    expect(exactCopyText("c".repeat(TELEGRAM_COPY_TEXT_LIMIT + 1))).toBeUndefined();
+    expect(exactCopyText("")).toBeUndefined();
   });
 });

@@ -82,6 +82,85 @@ npm run preflight:production
 npm run migrate:production
 ```
 
+## Current production migration head
+
+After PR #7, the source tree contains **70** SQL files under
+`src/infrastructure/db/migrations/`. The expected production
+`schema_migrations` head is:
+
+- **filename:** `071_variant_presentation_profile.sql`
+- **count:** `70`
+
+Migration 071 adds `product_variant.presentation_profile` (jsonb, object-or-null
+check `product_variant_presentation_profile_object_chk`). It is presentation-only;
+no product override needs to be populated at deploy time. Keep the store
+`CLOSED` during migration and deploy. Do not edit older migration files.
+
+The procedure below for 070 is historical (already applied). For this release,
+run the 071 procedure.
+
+## Migration 071 — post-merge production procedure
+
+This procedure is **not executed by review**. Run it only after PR #7 has
+merged, the production artifact is built from that merge, and the owner has
+scheduled a controlled database window. Keep the store `CLOSED`; do not
+activate sales as part of the migration.
+
+1. **Preflight and backup**
+   - Run `npm ci`, `npm run build`, and `npm run preflight:production` from the
+     exact release checkout. The preflight output must show `storeStatus=CLOSED`,
+     a reachable database on `localhost:5432/shop`, and the expected production
+     target.
+   - Take and verify a fresh production PostgreSQL backup. Record size and
+     SHA-256. Do not print or copy `DATABASE_URL`.
+   - Record the pre-migration `schema_migrations` head/count. Expected before
+     071: head `070_phase2_hot_indexes.sql`, count `69`.
+
+2. **Quiesce writers**
+   - Keep Telegram/SePay ingress and the store `CLOSED` while the database
+     window is active. Do not delete or cancel business rows to make the window
+     quiet.
+
+3. **Apply 071 and record the operation**
+   - Run `npm run preflight:production` again immediately before the migration.
+   - Measure the command and retain its exit status:
+
+     ```bash
+     started_at=$(date +%s)
+     npm run migrate:production
+     status=$?
+     finished_at=$(date +%s)
+     printf 'migration_071_exit=%s duration_seconds=%s\n' \
+       "$status" "$((finished_at - started_at))"
+     test "$status" -eq 0
+     ```
+
+   - The pinned production runner acquires the migration advisory lock and
+     applies `071_variant_presentation_profile.sql` transactionally. The change
+     is an additive nullable jsonb column plus a check constraint.
+   - If the command fails, stop here. Verify the transaction rolled back and
+     the migration head remains `070_phase2_hot_indexes.sql`. Investigate and
+     ship a forward fix.
+
+4. **Verify schema**
+   - Query `schema_migrations` and require head
+     `071_variant_presentation_profile.sql` with count `70`.
+   - Require column `product_variant.presentation_profile` of type `jsonb`
+     and constraint `product_variant_presentation_profile_object_chk`.
+   - Existing rows must remain valid (`presentation_profile` null is allowed).
+     Do not populate product overrides as part of this migration.
+   - Re-check commerce invariants: order/payment-intent relationships,
+     quantity-stock ledger continuity, wallet double-entry balance.
+
+5. **Resume and close the window**
+   - Restart the existing API/worker supervisors from the merged main
+     artifact, then verify `/health` (`dirty=false`, merged SHA) and `/ready`.
+   - Run `npm run preflight:production` once more; require the same production
+     target, `storeStatus=CLOSED`, migration head 071, reachable dependencies,
+     and a usable admin step-up factor.
+   - Opening the store is a separate owner decision and is not part of this
+     procedure.
+
 ## Migration 070 — post-merge production procedure
 
 This procedure is **not executed by the Phase 2 review**. Run it only after the

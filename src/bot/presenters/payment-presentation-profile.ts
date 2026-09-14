@@ -158,9 +158,13 @@ export function resolvePaymentPresentationProfile(input: {
   };
 }
 
-/** Truncate to Telegram copy_text limit without splitting a code point. */
-export function sanitizeCopyText(value: string): string {
-  const trimmed = value.trim();
-  if (trimmed.length <= TELEGRAM_COPY_TEXT_LIMIT) return trimmed;
-  return [...trimmed].slice(0, TELEGRAM_COPY_TEXT_LIMIT).join("");
+/**
+ * Telegram `copy_text` accepts 1–256 Unicode code points.
+ * Authoritative payment values are never truncated, normalized, or trimmed.
+ * Over-limit or empty values are omitted so a copy button cannot lie.
+ */
+export function exactCopyText(value: string): string | undefined {
+  if (value.length === 0) return undefined;
+  if ([...value].length > TELEGRAM_COPY_TEXT_LIMIT) return undefined;
+  return value;
 }

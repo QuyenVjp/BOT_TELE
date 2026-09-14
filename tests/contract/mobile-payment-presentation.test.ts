@@ -17,7 +17,7 @@ import {
   TELEGRAM_COPY_TEXT_LIMIT,
   parsePaymentPresentationOverride,
   resolvePaymentPresentationProfile,
-  sanitizeCopyText,
+  exactCopyText,
 } from "../../src/bot/presenters/payment-presentation-profile.js";
 import { buildVietQrPayload, presentPayment } from "../../src/modules/payments/vietqr.js";
 import type { PaymentPresentation } from "../../src/modules/payments/vietqr.js";
@@ -445,42 +445,66 @@ describe("copy contract (owner §7)", () => {
     ]);
   });
 
-  it("handles one-character, limit-length, and over-limit copy payloads", async () => {
-    const single = await presentPaymentScreen(
-      { ...PRESENTATION, accountNumber: "1", transferContent: "A" },
-      silentQr,
-    );
-    const singleCopies = copyValues(single);
-    expect(singleCopies).toEqual(
-      expect.arrayContaining([
-        { text: PAYMENT_COPY.copyAccount, copyText: "1" },
-        { text: PAYMENT_COPY.copyContent, copyText: "A" },
-      ]),
-    );
+  it("copies 255 and 256 chars exactly and omits 257 without truncating", async () => {
+    const chars255 = "D".repeat(255);
+    const chars256 = "E".repeat(256);
+    const chars257 = "F".repeat(257);
 
-    const atLimit = "B".repeat(TELEGRAM_COPY_TEXT_LIMIT);
-    const limitMsg = await presentPaymentScreen(
-      { ...PRESENTATION, transferContent: atLimit },
+    const msg255 = await presentPaymentScreen(
+      { ...PRESENTATION, transferContent: chars255 },
       silentQr,
     );
-    expect(copyValues(limitMsg)).toEqual(
-      expect.arrayContaining([{ text: PAYMENT_COPY.copyContent, copyText: atLimit }]),
-    );
+    const copy255 = copyValues(msg255).find((button) => button.text === PAYMENT_COPY.copyContent);
+    expect(copy255?.copyText).toBe(chars255);
+    expect(msg255.text).toContain(chars255);
 
-    const overLimit = "C".repeat(TELEGRAM_COPY_TEXT_LIMIT + 40);
-    const overMsg = await presentPaymentScreen(
-      { ...PRESENTATION, transferContent: overLimit },
+    const msg256 = await presentPaymentScreen(
+      { ...PRESENTATION, transferContent: chars256 },
       silentQr,
     );
-    const copy = copyValues(overMsg).find((button) => button.text === PAYMENT_COPY.copyContent);
-    expect(copy?.copyText).toBe("C".repeat(TELEGRAM_COPY_TEXT_LIMIT));
-    expect([...(copy?.copyText ?? "")].length).toBe(TELEGRAM_COPY_TEXT_LIMIT);
+    const copy256 = copyValues(msg256).find((button) => button.text === PAYMENT_COPY.copyContent);
+    expect(copy256?.copyText).toBe(chars256);
+    expect(msg256.text).toContain(`📝 ${PAYMENT_COPY.contentLabel}: ${chars256}`);
+
+    const msg257 = await presentPaymentScreen(
+      { ...PRESENTATION, transferContent: chars257 },
+      silentQr,
+    );
+    const copy257 = copyValues(msg257).find((button) => button.text === PAYMENT_COPY.copyContent);
+    expect(copy257).toBeUndefined();
+    expect(msg257.text).toContain(chars257);
+    expect(msg257.text).not.toContain("F".repeat(256) + "…");
+    expect(msg257.text).not.toContain("F".repeat(256) + "...");
+    expect(copyValues(msg257).map((button) => button.copyText)).toEqual([
+      PRESENTATION.accountNumber,
+      String(PRESENTATION.amountVnd),
+      PRESENTATION.orderNumber,
+    ]);
+  });
+
+  it("copiedText equals the authoritative account, amount, memo, and order code", async () => {
+    const presentation = {
+      ...PRESENTATION,
+      accountNumber: "1".repeat(255),
+      transferContent: "Nội dung CK " + "X".repeat(20),
+      amountVnd: 1_999_000,
+      orderNumber: "ORD-20260914-EXACT01",
+    };
+    const msg = await presentPaymentScreen(presentation, silentQr);
+    const copies = Object.fromEntries(
+      copyValues(msg).map((button) => [button.text, button.copyText]),
+    );
+    expect(copies[PAYMENT_COPY.copyAccount]).toBe(presentation.accountNumber);
+    expect(copies[PAYMENT_COPY.copyContent]).toBe(presentation.transferContent);
+    expect(copies[PAYMENT_COPY.copyAmount]).toBe(String(presentation.amountVnd));
+    expect(copies[PAYMENT_COPY.copyOrder]).toBe(presentation.orderNumber);
+    expect(msg.text).toContain(presentation.transferContent);
   });
 
   it("does not render a copy button for an empty payload", () => {
     const profile = resolvePaymentPresentationProfile({});
     const keyboard = buildMobilePaymentKeyboard({
-      presentation: { ...PRESENTATION, accountNumber: "  ", transferContent: "" },
+      presentation: { ...PRESENTATION, accountNumber: "", transferContent: "" },
       profile,
       refreshCallbackData: "pay:refresh:ORD",
       cancelCallbackData: "pay:cancel:ORD",
@@ -503,7 +527,7 @@ describe("copy contract (owner §7)", () => {
       expect(value).not.toMatch(SECRETISH_RE);
       expect(value).not.toMatch(/^pay:|^sup:/);
     }
-    expect(sanitizeCopyText(PRESENTATION.transferContent)).toBe("ORDABC123456");
+    expect(exactCopyText(PRESENTATION.transferContent)).toBe("ORDABC123456");
   });
 });
 
@@ -624,12 +648,12 @@ describe("fulfillment/override matrix", () => {
   });
 });
 
-describe("copy_text sanitization", () => {
-  it("truncates to Telegram copy_text limit without splitting a code point", () => {
+describe("copy_text exactness", () => {
+  it("does not silently truncate a copy payload that exceeds 256 code points", () => {
     const value = `${"A".repeat(255)}😀 extra`;
-    const sanitized = sanitizeCopyText(value);
-    expect([...sanitized].length).toBeLessThanOrEqual(TELEGRAM_COPY_TEXT_LIMIT);
-    expect(sanitized.includes("\uFFFD")).toBe(false);
+    expect(exactCopyText(value)).toBeUndefined();
+    expect(exactCopyText("A".repeat(255))).toBe("A".repeat(255));
+    expect(exactCopyText("A".repeat(256))).toBe("A".repeat(256));
   });
 
   it("never splits an emoji when the caption is truncated", () => {
