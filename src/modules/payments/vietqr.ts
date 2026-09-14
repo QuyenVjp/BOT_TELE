@@ -12,10 +12,14 @@ import { MoneyError } from "../../shared/money/index.js";
  *  - TLV length is the UTF-8 BYTE length, not the JS character count. Vietnamese
  *    accented account names otherwise produce an unscannable QR.
  *  - The NAPAS service code (sub-tag 02 of merchant account info) is
- *    QRIBFTTA / QRIBFTTC. The image render template is a separate
- *    presentation concern and MUST NEVER enter the EMVCo payload.
+ *    QRIBFTTA / QRIBFTTC, and is the only service hint in the payload.
  *  - CRC-16/CCITT (poly 0x1021, init 0xFFFF) over the UTF-8 bytes of the body
  *    including the CRC tag+length placeholder ("6304").
+ *
+ * The QR IMAGE is rendered locally by the presenter (`qrcode.toBuffer(payload)`
+ * in bot/presenters/payment.ts) from the payload below; the copyable
+ * account/amount/content come from {@link presentPayment}. No external image
+ * endpoint is involved.
  */
 
 export interface VietQrInput {
@@ -27,15 +31,10 @@ export interface VietQrInput {
   transferContent: string;
   /**
    * NAPAS service code. Defaults to QRIBFTTA (account-number transfer).
-   * Must be one of the NAPAS codes — NOT a render template like `compact2`.
+   * Must be one of the NAPAS codes.
    */
   serviceCode?: "QRIBFTTA" | "QRIBFTTC";
-  /**
-   * @deprecated Use {@link serviceCode}. Kept only so older callers that passed
-   * a render template do not crash — the value is IGNORED for the EMVCo payload.
-   */
-  template?: string;
-  /** SePay/VietQR public bank alias used by the image endpoint (e.g. MB). */
+  /** Public bank alias (e.g. MB) from config; not part of the payload or output. */
   bankAlias?: string;
 }
 
@@ -89,8 +88,7 @@ export function buildVietQrPayload(input: VietQrInput): string {
     throw new MoneyError("VietQR account number must be 4–19 characters");
   }
 
-  // Service code is a NAPAS code only. A legacy `template: "compact2"` is
-  // deliberately ignored so a render template can never enter the payload.
+  // Service code is a NAPAS code only; nothing else may influence it.
   const serviceCode = input.serviceCode ?? DEFAULT_SERVICE_CODE;
   if (!ALLOWED_SERVICE_CODES.has(serviceCode)) {
     throw new MoneyError(`VietQR service code must be QRIBFTTA or QRIBFTTC, got ${serviceCode}`);
@@ -188,8 +186,6 @@ export interface PaymentPresentation {
   orderNumber: string;
   /** ISO-8601 UTC. Presenters format this to Asia/Ho_Chi_Minh for display. */
   expiresAt: string;
-  /** Official VietQR image URL; presentation only, never settlement evidence. */
-  imageUrl?: string;
   /** Optional bank display name (never affects the QR payload). */
   bankName?: string;
 }
@@ -197,8 +193,8 @@ export interface PaymentPresentation {
 /**
  * Presentation view for the payment screen: QR payload + copyable fields + expiry.
  * Deliberately carries NO settlement flag — VietQR initiates, SePay settles.
- * The image render template is a presentation concern and is never part of the
- * EMVCo payload (see {@link buildVietQrPayload}).
+ * The QR image is rendered locally by the presenter from `payload`; this function
+ * returns no image URL.
  */
 export function presentPayment(input: PresentPaymentInput): PaymentPresentation {
   const payload = buildVietQrPayload(input);
@@ -212,17 +208,6 @@ export function presentPayment(input: PresentPaymentInput): PaymentPresentation 
     orderNumber: input.orderNumber,
     expiresAt: input.expiresAt.toISOString(),
   };
-  const template = input.template ?? "compact";
-  if (!new Set(["", "compact", "qronly", "standee"]).has(template)) {
-    throw new MoneyError("VietQR image template is not allowlisted");
-  }
-  const image = new URL("https://vietqr.app/img");
-  image.searchParams.set("acc", input.accountNumber);
-  image.searchParams.set("bank", input.bankAlias ?? input.bankBin);
-  image.searchParams.set("amount", String(input.amountVnd));
-  image.searchParams.set("des", input.transferContent);
-  if (template) image.searchParams.set("template", template);
-  presentation.imageUrl = image.toString();
   if (input.bankName !== undefined) presentation.bankName = input.bankName;
   return presentation;
 }

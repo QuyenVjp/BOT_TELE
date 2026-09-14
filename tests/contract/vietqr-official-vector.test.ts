@@ -8,8 +8,7 @@ import { buildVietQrPayload, crc16Ccitt, parseEmvTlv } from "../../src/modules/p
  *   - TLV length must be UTF-8 BYTE length, not JS char count. Vietnamese
  *     accented account names otherwise produce a wrong length → unscannable QR.
  *   - The NAPAS service code (sub-tag 02 of the merchant account info) is
- *     QRIBFTTA/QRIBFTTC, NOT the image render template `compact2`. The render
- *     template must never leak into the EMVCo payload.
+ *     QRIBFTTA/QRIBFTTC and is the only service hint in the payload.
  *   - CRC-16/CCITT over the UTF-8 bytes including the "6304" tag+length.
  */
 
@@ -47,23 +46,14 @@ describe("EMVCo TLV byte-length correctness", () => {
   });
 });
 
-describe("NAPAS service code vs render template", () => {
-  it("uses a valid NAPAS service code (QRIBFTTA), never a render template", () => {
+describe("NAPAS service code", () => {
+  it("uses a valid NAPAS service code (QRIBFTTA)", () => {
     const payload = buildVietQrPayload(BASE);
     const fields = parseEmvTlv(payload);
     const merchant = fields.find((f) => f.id === "38");
     expect(merchant).toBeDefined();
     const sub = parseEmvTlv(merchant!.value);
     const serviceCode = sub.find((f) => f.id === "02")?.value;
-    expect(["QRIBFTTA", "QRIBFTTC"]).toContain(serviceCode);
-  });
-
-  it("does NOT allow the image render template (compact2) to enter the payload", () => {
-    // Passing a render template must not corrupt the service code.
-    const payload = buildVietQrPayload({ ...BASE, template: "compact2" });
-    expect(payload).not.toContain("compact2");
-    const merchant = parseEmvTlv(payload).find((f) => f.id === "38");
-    const serviceCode = parseEmvTlv(merchant!.value).find((f) => f.id === "02")?.value;
     expect(["QRIBFTTA", "QRIBFTTC"]).toContain(serviceCode);
   });
 });

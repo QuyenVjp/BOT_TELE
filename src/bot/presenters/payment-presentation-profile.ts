@@ -6,17 +6,11 @@ export const TELEGRAM_PHOTO_CAPTION_LIMIT = 1024;
 /** Telegram Bot API `copy_text` payload limit. */
 export const TELEGRAM_COPY_TEXT_LIMIT = 256;
 
-export type VietQrTemplate = "compact" | "qronly" | "standee";
-
-export type PaymentPresentationIcon = "card" | "box" | "key" | "file" | "manual" | "service";
-
 /**
  * Presentation-only policy for the mobile bank-transfer card.
  * Never carries amount, account, transfer content, HTML, URLs, or callbacks.
  */
 export interface PaymentPresentationProfile {
-  readonly profileId: string;
-  readonly qrTemplate: VietQrTemplate;
   readonly showProductDetails: boolean;
   readonly showQuantity: boolean;
   readonly showBankHolder: boolean;
@@ -30,12 +24,9 @@ export interface PaymentPresentationProfile {
   readonly headline: string | null;
   readonly extraNotice: string | null;
   readonly fulfillmentNotice: string | null;
-  readonly icon: PaymentPresentationIcon;
 }
 
 export const DEFAULT_MOBILE_BANK_TRANSFER: PaymentPresentationProfile = {
-  profileId: "DEFAULT_MOBILE_BANK_TRANSFER",
-  qrTemplate: "compact",
   showProductDetails: true,
   showQuantity: false,
   showBankHolder: true,
@@ -49,7 +40,6 @@ export const DEFAULT_MOBILE_BANK_TRANSFER: PaymentPresentationProfile = {
   headline: null,
   extraNotice: null,
   fulfillmentNotice: null,
-  icon: "card",
 };
 
 const UNSAFE_COPY = /[<>]|https?:\/\/|tg:\/\/|callback|javascript:|data:/i;
@@ -72,8 +62,6 @@ export const PAYMENT_PRESENTATION_OVERRIDE_SCHEMA = z
     headline: safeCopyString(80).optional(),
     extraNotice: safeCopyString(160).optional(),
     fulfillmentNotice: safeCopyString(160).optional(),
-    qrTemplate: z.enum(["compact", "qronly", "standee"]).optional(),
-    icon: z.enum(["card", "box", "key", "file", "manual", "service"]).optional(),
     showProductDetails: z.boolean().optional(),
     showQuantity: z.boolean().optional(),
     showBankHolder: z.boolean().optional(),
@@ -90,39 +78,25 @@ export type PaymentPresentationOverride = z.infer<typeof PAYMENT_PRESENTATION_OV
 const FULFILLMENT_OVERLAYS: Partial<Record<FulfillmentType, Partial<PaymentPresentationProfile>>> =
   {
     STOCK_CODE: {
-      profileId: "STOCK_CODE",
-      icon: "key",
       fulfillmentNotice: "Thanh toán thành công → mã hàng được giao tự động.",
     },
     STOCK_ACCOUNT: {
-      profileId: "STOCK_ACCOUNT",
-      icon: "box",
       fulfillmentNotice: "Thanh toán thành công → tài khoản được giao tự động.",
     },
     DIGITAL_FILE: {
-      profileId: "DIGITAL_FILE",
-      icon: "file",
       fulfillmentNotice: "Thanh toán thành công → tệp được gửi trong Telegram.",
     },
     SUPPLIER_API: {
-      profileId: "SUPPLIER_API",
-      icon: "service",
       fulfillmentNotice: "Thanh toán thành công → hệ thống kích hoạt với nhà cung cấp.",
     },
     MANUAL_FULFILLMENT: {
-      profileId: "MANUAL_FULFILLMENT",
-      icon: "manual",
       fulfillmentNotice: "Thanh toán thành công → đơn chuyển sang chờ xử lý.",
     },
     QUANTITY_STOCK: {
-      profileId: "QUANTITY_STOCK",
-      icon: "box",
       showQuantity: true,
       fulfillmentNotice: "Thanh toán thành công → số lượng được trừ khỏi kho.",
     },
     UNLIMITED_SERVICE: {
-      profileId: "UNLIMITED_SERVICE",
-      icon: "service",
       fulfillmentNotice: "Thanh toán thành công → dịch vụ được kích hoạt theo gói.",
     },
   };

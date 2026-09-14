@@ -521,16 +521,36 @@ export function createGrammyResponder(
         }
       }
       if (input.message.photo) {
-        const result = await callTelegram("sendPhoto", () =>
-          telegramApi.sendPhoto(input.chatId, new InputFile(input.message.photo!), {
-            caption: input.message.text,
-            reply_markup: replyMarkup,
-          }),
-        );
-        traceTelegram(trace, { method: "sendPhoto", ...summarizeTelegramResult(result) });
-        if (pendingKeyboard)
-          await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
-        return sentMessage(input.chatId, result);
+        try {
+          const result = await callTelegram("sendPhoto", () =>
+            telegramApi.sendPhoto(input.chatId, new InputFile(input.message.photo!), {
+              caption: input.message.text,
+              reply_markup: replyMarkup,
+            }),
+          );
+          traceTelegram(trace, { method: "sendPhoto", ...summarizeTelegramResult(result) });
+          if (pendingKeyboard)
+            await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
+          return sentMessage(input.chatId, result);
+        } catch (error) {
+          // A permanent photo rejection (bad dimensions, oversized file, unsupported format)
+          // must degrade to text rather than swallow the customer's reply: the caption already
+          // carries STK / amount / transfer content, and the copy buttons live in reply_markup.
+          // Retryable and ambiguous outcomes still propagate — a second delivery could double-post.
+          if (
+            error instanceof TelegramRetryableError ||
+            error instanceof TelegramAmbiguousSendError
+          ) {
+            throw error;
+          }
+          const kind = classifyTelegramError(error);
+          if (kind !== "permanent" && kind !== "non-editable-or-missing") throw error;
+          traceTelegram(trace, {
+            method: "sendPhoto",
+            photo_rejected: true,
+            fallback: "sendMessage",
+          });
+        }
       }
       if (input.messageId) {
         try {

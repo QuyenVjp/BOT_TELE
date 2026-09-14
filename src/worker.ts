@@ -123,6 +123,7 @@ import {
   recoverStoredDeliveryNotificationHandoffsBatch,
 } from "./modules/digital-goods/delivery-notification.js";
 import { recoverSePayBatch } from "./modules/payments/recovery.js";
+import { reconcileForPaymentCheck } from "./modules/payments/check-now.js";
 import { setTimeout as delayNotification } from "node:timers/promises";
 import { recoverSupplierOrdersBatch } from "./modules/supplier/recovery.js";
 import type { LatencyMetrics } from "./infrastructure/observability/tracing.js";
@@ -1812,7 +1813,6 @@ async function bootstrap(): Promise<void> {
       accountName: config.VIETQR_ACCOUNT_NAME,
       bankName: config.VIETQR_BANK_NAME,
       bankAlias: config.VIETQR_BANK_ALIAS,
-      template: config.VIETQR_TEMPLATE,
     },
     callbackCodec: buyNowCodec,
     tokenCodec: callbackCodec,
@@ -1840,6 +1840,15 @@ async function bootstrap(): Promise<void> {
       });
       return result.ok ? { ok: true, message: "" } : { ok: false, message: result.message };
     },
+    // "Kiểm tra thanh toán": a bounded, cooldown-guarded, read-only provider check that can
+    // only record evidence the normal matcher accepts. Omitted when SePay is not configured,
+    // so the button degrades to the internal projection read instead of failing.
+    ...(sePayRecoveryPort
+      ? {
+          reconcileForCheck: () =>
+            reconcileForPaymentCheck(dbHandle.db, { port: sePayRecoveryPort }),
+        }
+      : {}),
   });
   const history = createHistoryCallbacks({ db: dbHandle.db });
   const notificationService = { getNotificationPreferences, setNotificationPreferences };
@@ -1852,7 +1861,6 @@ async function bootstrap(): Promise<void> {
     accountName: config.VIETQR_ACCOUNT_NAME,
     bankName: config.VIETQR_BANK_NAME,
     bankAlias: config.VIETQR_BANK_ALIAS,
-    template: config.VIETQR_TEMPLATE,
   };
   const preorderHomeButtons: PresentedMessage["buttons"] = [
     [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],

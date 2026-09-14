@@ -19,7 +19,7 @@ describe("createGrammyResponder admin keyboards", () => {
   it.each([
     ["sendMessage", null],
     ["editMessageText", "42"],
-  ] as const)("includes plain inline keyboard in %s payload", async (method, messageId) => {
+  ] as const)("includes plain inline keyboard in %s payload", async (_method, messageId) => {
     const calls: unknown[][] = [];
     const api = {
       sendMessage: vi.fn(async (...args: unknown[]) => {
@@ -482,5 +482,206 @@ describe("createGrammyResponder payment copy_text", () => {
     expect(api.editMessageCaption).toHaveBeenCalledTimes(1);
     expect(api.sendMessage).not.toHaveBeenCalled();
     expect(result).toEqual({ chatId: "customer-chat", messageId: "88" });
+  });
+
+  it("degrades to a text reply when Telegram permanently rejects the photo", async () => {
+    const sent: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(async (...args: unknown[]) => {
+        sent.push(args);
+        return { message_id: 77 };
+      }),
+      editMessageText: vi.fn(),
+      editMessageCaption: vi.fn(),
+      sendPhoto: vi.fn(async () => {
+        throw new GrammyError(
+          "Call to 'sendPhoto' failed!",
+          {
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: PHOTO_INVALID_DIMENSIONS",
+          },
+          "sendPhoto",
+          {},
+        );
+      }),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const result = await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: {
+        text: "💳 Thanh toán đơn #ORD-1",
+        photo: Buffer.from("png"),
+        buttons: [[{ text: "📋 Sao chép STK", callbackData: "", copyText: "0123456789" }]],
+      },
+    });
+
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect(sent[0]?.[1]).toBe("💳 Thanh toán đơn #ORD-1");
+    const options = sent[0]?.at(-1) as {
+      reply_markup?: { inline_keyboard?: Array<Array<{ copy_text?: { text: string } }>> };
+    };
+    expect(options.reply_markup?.inline_keyboard?.flat()?.[0]?.copy_text).toEqual({
+      text: "0123456789",
+    });
+    expect(result).toEqual({ chatId: "customer-chat", messageId: "77" });
+  });
+
+  it("still surfaces a rate-limited photo failure instead of degrading to text", async () => {
+    const api = {
+      sendMessage: vi.fn(),
+      editMessageText: vi.fn(),
+      editMessageCaption: vi.fn(),
+      sendPhoto: vi.fn(async () => {
+        throw new GrammyError(
+          "Call to 'sendPhoto' failed!",
+          {
+            ok: false,
+            error_code: 429,
+            description: "Too Many Requests: retry after 3",
+            parameters: { retry_after: 3 },
+          },
+          "sendPhoto",
+          {},
+        );
+      }),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    await expect(
+      responder.send({
+        chatId: "customer-chat",
+        messageId: null,
+        message: {
+          text: "pay",
+          photo: Buffer.from("png"),
+          buttons: [[{ text: "📋 Sao chép STK", callbackData: "", copyText: "0123456789" }]],
+        },
+      }),
+    ).rejects.toBeInstanceOf(TelegramRetryableError);
+    expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("re-sends the card as a photo when the media edit is rejected", async () => {
+    const sent: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(),
+      editMessageText: vi.fn(),
+      editMessageCaption: vi.fn(),
+      sendPhoto: vi.fn(async (...args: unknown[]) => {
+        sent.push(args);
+        return { message_id: 99 };
+      }),
+      editMessageMedia: vi.fn(async () => {
+        throw new GrammyError(
+          "Call to 'editMessageMedia' failed!",
+          {
+            ok: false,
+            error_code: 400,
+            description: "Bad Request: there is no photo in the message to edit",
+          },
+          "editMessageMedia",
+          {},
+        );
+      }),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const result = await responder.send({
+      chatId: "customer-chat",
+      messageId: "88",
+      message: {
+        text: "💳 Thanh toán đơn #ORD-1",
+        photo: Buffer.from("png"),
+        buttons: [
+          [{ text: "📋 Sao chép STK", callbackData: "", copyText: "0123456789" }],
+          [{ text: "✅ Kiểm tra thanh toán", callbackData: "pay:refresh:ORD-1" }],
+        ],
+      },
+    });
+    expect(api.editMessageMedia).toHaveBeenCalledTimes(1);
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(sent[0]?.[1]).toBeDefined();
+    const options = sent[0]?.at(-1) as {
+      caption?: string;
+      reply_markup?: {
+        inline_keyboard?: Array<Array<{ text?: string; copy_text?: { text: string } }>>;
+      };
+    };
+    expect(options.caption).toBe("💳 Thanh toán đơn #ORD-1");
+    const flat = options.reply_markup?.inline_keyboard?.flat() ?? [];
+    expect(flat[0]?.copy_text).toEqual({ text: "0123456789" });
+    expect(flat.some((button) => button.text === "✅ Kiểm tra thanh toán")).toBe(true);
+    expect(result).toEqual({ chatId: "customer-chat", messageId: "99" });
+  });
+
+  it("falls all the way back to text when both the media edit and the photo send fail", async () => {
+    const edits: unknown[][] = [];
+    const rejects = (method: string, description: string) =>
+      vi.fn(async () => {
+        throw new GrammyError(
+          `Call to '${method}' failed!`,
+          { ok: false, error_code: 400, description },
+          method,
+          {},
+        );
+      });
+    const api = {
+      sendMessage: vi.fn(),
+      editMessageText: vi.fn(async (...args: unknown[]) => {
+        edits.push(args);
+        return { message_id: 88 };
+      }),
+      editMessageCaption: vi.fn(),
+      editMessageMedia: rejects("editMessageMedia", "Bad Request: message to edit not found"),
+      sendPhoto: rejects("sendPhoto", "Bad Request: PHOTO_INVALID_DIMENSIONS"),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const result = await responder.send({
+      chatId: "customer-chat",
+      messageId: "88",
+      message: {
+        text: "💳 Thanh toán đơn #ORD-1",
+        photo: Buffer.from("png"),
+        buttons: [[{ text: "✅ Kiểm tra thanh toán", callbackData: "pay:refresh:ORD-1" }]],
+      },
+    });
+    // The existing bubble is rewritten in place — no second message is posted.
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(api.editMessageText).toHaveBeenCalledTimes(1);
+    expect(edits[0]?.[2]).toBe("💳 Thanh toán đơn #ORD-1");
+    const options = edits[0]?.at(-1) as {
+      reply_markup?: { inline_keyboard?: Array<Array<{ callback_data?: string }>> };
+    };
+    expect(options.reply_markup?.inline_keyboard?.flat()?.[0]?.callback_data).toBe(
+      "pay:refresh:ORD-1",
+    );
+    expect(result).toEqual({ chatId: "customer-chat", messageId: "88" });
+  });
+
+  it("sends the photo and no text reply when Telegram accepts it", async () => {
+    const api = {
+      sendMessage: vi.fn(),
+      editMessageText: vi.fn(),
+      editMessageCaption: vi.fn(),
+      sendPhoto: vi.fn(async () => ({ message_id: 55 })),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+    const result = await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: {
+        text: "pay",
+        photo: Buffer.from("png"),
+        buttons: [[{ text: "📋 Sao chép STK", callbackData: "", copyText: "0123456789" }]],
+      },
+    });
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    expect(api.sendMessage).not.toHaveBeenCalled();
+    expect(result).toEqual({ chatId: "customer-chat", messageId: "55" });
   });
 });

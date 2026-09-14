@@ -201,6 +201,28 @@ export async function reserveTypedStockForOrder(
   }
 }
 
+/**
+ * How many units this order actually reserved. Read from the RESERVE ledger entry the
+ * reservation itself wrote, so the number is the settled snapshot rather than a value
+ * re-derived (or, worse, taken from a callback) at presentation time.
+ *
+ * Orders that never reserve typed stock (single asset / file / service) and orders whose
+ * reservation has not been written yet are one unit — which is what Buy Now mints today.
+ * Presentation only: never used for money or fulfilment decisions.
+ */
+export async function loadOrderReservedQuantity(exec: Executor, orderId: string): Promise<number> {
+  const result = await sql<{ quantity: number | null }>`
+    select abs(quantity_delta)::int as quantity
+    from quantity_stock_ledger
+    where order_id = ${orderId}
+      and entry_type = 'RESERVE'
+    order by created_at asc, id asc
+    limit 1
+  `.execute(exec);
+  const quantity = result.rows[0]?.quantity ?? 1;
+  return Number.isInteger(quantity) && quantity > 0 ? quantity : 1;
+}
+
 export async function reserveAvailableAssetForOrder(
   exec: Executor,
   input: { variantId: string; orderId: string; reserveUntil: Date },

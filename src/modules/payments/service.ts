@@ -97,8 +97,6 @@ export interface PresentPaymentForOrderInput {
   correlationId: string;
   /** Intent TTL in seconds (default 900). */
   ttlSeconds?: number;
-  /** Optional template override (defaults to NAPAS compact). */
-  template?: string;
 }
 
 /**
@@ -157,7 +155,6 @@ export async function presentPaymentForOrder(
         expiresAt: existing.expiresAt,
         ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
         ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
-        ...(input.template !== undefined ? { template: input.template } : {}),
       });
       return { ok: true, intentId: existing.id, presentation };
     }
@@ -204,7 +201,6 @@ export async function presentPaymentForOrder(
         expiresAt: raced.expiresAt,
         ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
         ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
-        ...(input.template !== undefined ? { template: input.template } : {}),
       });
       return { ok: true, intentId: raced.id, presentation };
     }
@@ -234,7 +230,6 @@ export async function presentPaymentForOrder(
       expiresAt,
       ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
       ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
-      ...(input.template !== undefined ? { template: input.template } : {}),
     });
     return { ok: true, intentId, presentation };
   });
@@ -257,7 +252,6 @@ export interface PresentPreorderPaymentInput {
   accountName: string;
   bankName?: string;
   bankAlias?: string;
-  template?: string;
   correlationId: string;
   /** Intent TTL for the deposit leg in seconds (default 3600). */
   ttlSeconds?: number;
@@ -319,7 +313,6 @@ export async function presentPreorderPayment(
         expiresAt: fields.expiresAt,
         ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
         ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
-        ...(input.template !== undefined ? { template: input.template } : {}),
       });
 
     const now = new Date();

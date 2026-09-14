@@ -135,14 +135,6 @@ export function paymentCopyPayloads(presentation: PaymentPresentation): PaymentC
   };
 }
 
-function pairRows(buttons: InlineButton[]): InlineButton[][] {
-  const rows: InlineButton[][] = [];
-  for (let i = 0; i < buttons.length; i += 2) {
-    rows.push(buttons.slice(i, i + 2));
-  }
-  return rows;
-}
-
 export function buildMobilePaymentKeyboard(input: {
   presentation: PaymentPresentation;
   profile: PaymentPresentationProfile;
@@ -151,33 +143,36 @@ export function buildMobilePaymentKeyboard(input: {
   extraRows?: InlineButton[][];
 }): InlineButton[][] {
   const payloads = paymentCopyPayloads(input.presentation);
-  const copies: InlineButton[] = [];
-  if (input.profile.showAccountCopyButton && payloads.account) {
-    copies.push(copyButton(PAYMENT_COPY.copyAccount, payloads.account));
-  }
-  if (input.profile.showTransferContentCopyButton && payloads.transferContent) {
-    copies.push(copyButton(PAYMENT_COPY.copyContent, payloads.transferContent));
-  }
-  if (input.profile.showAmountCopyButton && payloads.amountDigits) {
-    copies.push(copyButton(PAYMENT_COPY.copyAmount, payloads.amountDigits));
-  }
-  if (
-    input.profile.showOrderCode &&
-    input.profile.showOrderCodeCopyButton &&
-    payloads.orderNumber
-  ) {
-    copies.push(copyButton(PAYMENT_COPY.copyOrder, payloads.orderNumber));
-  }
-  const rows = pairRows(copies);
-  if (input.profile.showPaymentCheckButton && input.refreshCallbackData) {
+  const { profile } = input;
+  // FIXED slots: a hidden copy button leaves a gap, it never reshuffles its neighbours.
+  const rows: InlineButton[][] = [];
+  const bankRow = [
+    profile.showAccountCopyButton && payloads.account
+      ? copyButton(PAYMENT_COPY.copyAccount, payloads.account)
+      : null,
+    profile.showTransferContentCopyButton && payloads.transferContent
+      ? copyButton(PAYMENT_COPY.copyContent, payloads.transferContent)
+      : null,
+  ].filter((button) => button !== null);
+  if (bankRow.length > 0) rows.push(bankRow);
+  const valueRow = [
+    profile.showAmountCopyButton && payloads.amountDigits
+      ? copyButton(PAYMENT_COPY.copyAmount, payloads.amountDigits)
+      : null,
+    profile.showOrderCode && profile.showOrderCodeCopyButton && payloads.orderNumber
+      ? copyButton(PAYMENT_COPY.copyOrder, payloads.orderNumber)
+      : null,
+  ].filter((button) => button !== null);
+  if (valueRow.length > 0) rows.push(valueRow);
+  if (profile.showPaymentCheckButton && input.refreshCallbackData) {
     rows.push([styledButton(PAYMENT_COPY.refresh, input.refreshCallbackData, "success")]);
   }
   const actionRow: InlineButton[] = [];
-  if (input.profile.showCancelButton && input.cancelCallbackData) {
+  if (profile.showCancelButton && input.cancelCallbackData) {
     actionRow.push(styledButton(PAYMENT_COPY.cancel, input.cancelCallbackData, "danger"));
   }
   actionRow.push(styledButton(PAYMENT_COPY.mainMenu, "menu:main"));
-  if (actionRow.length > 0) rows.push(actionRow);
+  rows.push(actionRow);
   if (input.extraRows) rows.push(...input.extraRows);
   return rows;
 }
@@ -197,19 +192,98 @@ function productLine(
   return `📦 ${name}`;
 }
 
-function trimCaption(lines: string[], droppable: ReadonlySet<string>): string {
-  let next = lines.filter((line) => line !== undefined);
-  let text = next.join("\n");
-  while (text.length > TELEGRAM_PHOTO_CAPTION_LIMIT) {
-    const idx = next.findIndex((line) => droppable.has(line) && line.length > 0);
-    if (idx < 0) break;
-    next = next.filter((_, i) => i !== idx);
-    text = next.join("\n");
+/**
+ * One addressable chunk of the payment caption. `dropRank` is the order in which the
+ * block is sacrificed when the caption overflows (1 goes first); `null` marks a field the
+ * customer MUST always see (headline/order, amount, bank, holder, STK, content, expiry).
+ */
+interface CaptionBlock {
+  readonly lines: readonly string[];
+  readonly dropRank: number | null;
+}
+
+/** Drop priorities, lowest sacrificed first (K7). */
+const DROP_EXTRA_NOTICE = 1;
+const DROP_FULFILLMENT_NOTICE = 2;
+const DROP_INSTRUCTION = 3;
+const DROP_NO_SCREENSHOT = 4;
+const DROP_PRODUCT_LINE = 5;
+
+function joinCaptionBlocks(blocks: readonly CaptionBlock[]): string {
+  return blocks.map((block) => block.lines.join("\n")).join("\n");
+}
+
+/**
+ * Render the ordered blocks within Telegram's photo-caption budget: sacrifice blocks by
+ * ascending drop rank until it fits, then truncate by CODE POINT as the last resort so a
+ * surrogate pair is never split into a replacement character.
+ */
+function renderCaption(blocks: readonly CaptionBlock[]): string {
+  let kept = blocks.filter((block) => block.lines.length > 0);
+  let text = joinCaptionBlocks(kept);
+  while ([...text].length > TELEGRAM_PHOTO_CAPTION_LIMIT) {
+    let victim = -1;
+    let victimRank = Number.POSITIVE_INFINITY;
+    kept.forEach((block, index) => {
+      if (block.dropRank !== null && block.dropRank < victimRank) {
+        victimRank = block.dropRank;
+        victim = index;
+      }
+    });
+    if (victim < 0) break;
+    kept = kept.filter((_, index) => index !== victim);
+    text = joinCaptionBlocks(kept);
   }
-  if (text.length > TELEGRAM_PHOTO_CAPTION_LIMIT) {
-    text = [...text].slice(0, TELEGRAM_PHOTO_CAPTION_LIMIT).join("");
+  return [...text].length > TELEGRAM_PHOTO_CAPTION_LIMIT
+    ? [...text].slice(0, TELEGRAM_PHOTO_CAPTION_LIMIT).join("")
+    : text;
+}
+
+/** Caption blocks in render order, each with the rank at which it may be dropped. */
+function paymentCaptionBlocks(
+  presentation: PaymentPresentation,
+  context: PaymentScreenContext,
+  profile: PaymentPresentationProfile,
+): CaptionBlock[] {
+  const amount = formatVnd(makeVnd(presentation.amountVnd));
+  const headline = profile.headline ?? `💳 Thanh toán đơn #${presentation.orderNumber}`;
+  const product = productLine(context, profile);
+  const blocks: CaptionBlock[] = [];
+  if (context.status === "CHECK_PENDING") {
+    blocks.push({
+      lines: [PAYMENT_COPY.checkPending, PAYMENT_COPY.checkPendingHint, ""],
+      dropRank: null,
+    });
   }
-  return text;
+  blocks.push({ lines: [headline], dropRank: null });
+  if (product) blocks.push({ lines: [product], dropRank: DROP_PRODUCT_LINE });
+  blocks.push({ lines: [`💰 Tổng: ${amount}`], dropRank: null });
+  if (presentation.bankName)
+    blocks.push({ lines: [`🏦 Ngân hàng: ${presentation.bankName}`], dropRank: null });
+  if (profile.showBankHolder) {
+    blocks.push({ lines: [`👤 Thụ hưởng: ${presentation.accountName}`], dropRank: null });
+  }
+  blocks.push({ lines: [`💳 STK: ${presentation.accountNumber}`], dropRank: null });
+  blocks.push({
+    lines: [`📝 ${PAYMENT_COPY.contentLabel}: ${presentation.transferContent}`],
+    dropRank: null,
+  });
+  blocks.push({
+    lines: [`⏱️ ${PAYMENT_COPY.expiresLabel}: ${formatExpiryVietnam(presentation.expiresAt)}`],
+    dropRank: null,
+  });
+  blocks.push({ lines: ["", PAYMENT_COPY.instruction], dropRank: DROP_INSTRUCTION });
+  blocks.push({ lines: [PAYMENT_COPY.noScreenshot], dropRank: DROP_NO_SCREENSHOT });
+  if (profile.fulfillmentNotice) {
+    blocks.push({
+      lines: ["", profile.fulfillmentNotice],
+      dropRank: DROP_FULFILLMENT_NOTICE,
+    });
+  }
+  if (profile.extraNotice) {
+    blocks.push({ lines: [profile.extraNotice], dropRank: DROP_EXTRA_NOTICE });
+  }
+  return blocks;
 }
 
 export function buildPaymentCaption(
@@ -217,29 +291,7 @@ export function buildPaymentCaption(
   context: PaymentScreenContext,
   profile: PaymentPresentationProfile,
 ): string {
-  const amount = formatVnd(makeVnd(presentation.amountVnd));
-  const headline = profile.headline ?? `💳 Thanh toán đơn #${presentation.orderNumber}`;
-  const product = productLine(context, profile);
-  const extra = profile.extraNotice;
-  const fulfillment = profile.fulfillmentNotice;
-  const lines: string[] = [];
-  if (context.status === "CHECK_PENDING") {
-    lines.push(PAYMENT_COPY.checkPending, PAYMENT_COPY.checkPendingHint, "");
-  }
-  lines.push(headline);
-  if (product) lines.push(product);
-  lines.push(`💰 Tổng: ${amount}`);
-  if (presentation.bankName) lines.push(`🏦 Ngân hàng: ${presentation.bankName}`);
-  if (profile.showBankHolder) lines.push(`👤 Thụ hưởng: ${presentation.accountName}`);
-  lines.push(`💳 STK: ${presentation.accountNumber}`);
-  lines.push(`📝 ${PAYMENT_COPY.contentLabel}: ${presentation.transferContent}`);
-  lines.push(`⏱️ ${PAYMENT_COPY.expiresLabel}: ${formatExpiryVietnam(presentation.expiresAt)}`);
-  lines.push("", PAYMENT_COPY.instruction, PAYMENT_COPY.noScreenshot);
-  if (fulfillment) lines.push("", fulfillment);
-  if (extra) lines.push(extra);
-
-  const droppable = new Set<string>([extra ?? "", fulfillment ?? "", product ?? ""]);
-  return trimCaption(lines, droppable);
+  return renderCaption(paymentCaptionBlocks(presentation, context, profile));
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -301,20 +353,14 @@ export async function presentPaymentScreen(
 
   const profile = resolveProfile(context);
   const photo = await renderPaymentQrPng(presentation.payload, context.qrRenderer);
-  let text = buildPaymentCaption(presentation, { ...context, status }, profile);
+  const blocks = paymentCaptionBlocks(presentation, { ...context, status }, profile);
+  // No QR: the copy instruction is what carries the customer, so it outranks the product
+  // name when the caption has to give something up (K7 does not rank this line).
   if (!photo) {
-    const fallbackLine = PAYMENT_COPY.qrFallback;
-    const withFallback = `${text}\n\n${fallbackLine}`;
-    text =
-      withFallback.length <= TELEGRAM_PHOTO_CAPTION_LIMIT
-        ? withFallback
-        : trimCaption(
-            [...text.split("\n"), "", fallbackLine],
-            new Set([PAYMENT_COPY.instruction, productLine(context, profile) ?? ""]),
-          );
+    blocks.push({ lines: ["", PAYMENT_COPY.qrFallback], dropRank: DROP_PRODUCT_LINE });
   }
   const message: PresentedMessage = {
-    text,
+    text: renderCaption(blocks),
     buttons: buildMobilePaymentKeyboard({
       presentation,
       profile,
