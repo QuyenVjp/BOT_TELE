@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildVietQrPayload,
   crc16Ccitt,
+  parseEmvTlv,
   presentPayment,
   type VietQrInput,
 } from "../../src/modules/payments/vietqr.js";
@@ -12,6 +13,9 @@ import {
  * VietQR is payment INITIATION only: exact integer VND amount + unique transfer
  * content + merchant bank identity. The rendered payload never asserts settlement.
  * CRC-16/CCITT (poly 0x1021, init 0xFFFF) is the NAPAS/EMVCo standard.
+ *
+ * The QR IMAGE is rendered locally by the presenter (`qrcode.toBuffer(payload)`);
+ * this module emits the EMVCo payload, never an image URL.
  */
 
 const BASE: VietQrInput = {
@@ -20,7 +24,6 @@ const BASE: VietQrInput = {
   accountName: "SHOP DIGITAL",
   amountVnd: 150000,
   transferContent: "ORD20260716A1B2C3D4",
-  template: "compact",
 };
 
 describe("CRC-16/CCITT (EMVCo)", () => {
@@ -77,29 +80,24 @@ describe("payment presentation (FR-008)", () => {
     expect(view.accountName).toBe(BASE.accountName);
     expect(view.bankBin).toBe(BASE.bankBin);
     expect(view.payload).toMatch(/6304[0-9A-F]{4}$/);
-    const imageUrl = new URL(view.imageUrl!);
-    expect(imageUrl.origin + imageUrl.pathname).toBe("https://vietqr.app/img");
-    expect(imageUrl.searchParams.get("acc")).toBe(BASE.accountNumber);
-    expect(imageUrl.searchParams.get("bank")).toBe(BASE.bankBin);
-    expect(imageUrl.searchParams.get("amount")).toBe("150000");
-    expect(imageUrl.searchParams.get("des")).toBe(BASE.transferContent);
-    expect(imageUrl.searchParams.get("template")).toBe("compact");
+    // The presentation carries the EMVCo payload the renderer encodes; no image URL.
+    expect(view).not.toHaveProperty("imageUrl");
+    // Payload proves it encodes the exact amount, beneficiary account and content.
+    const top = parseEmvTlv(view.payload);
+    expect(top.find((f) => f.id === "54")?.value).toBe("150000");
+    expect(top.find((f) => f.id === "53")?.value).toBe("704");
+    expect(top.find((f) => f.id === "58")?.value).toBe("VN");
+    const merchant = parseEmvTlv(top.find((f) => f.id === "38")!.value);
+    const acquirer = parseEmvTlv(merchant.find((f) => f.id === "01")!.value);
+    expect(acquirer.find((f) => f.id === "00")?.value).toBe(BASE.bankBin);
+    expect(acquirer.find((f) => f.id === "01")?.value).toBe(BASE.accountNumber);
+    const additional = parseEmvTlv(top.find((f) => f.id === "62")!.value);
+    expect(additional.find((f) => f.id === "08")?.value).toBe(BASE.transferContent);
     expect(view.expiresAt).toBe(expiresAt.toISOString());
     // Presentation is initiation only — no settlement language.
     const joined = JSON.stringify(view).toLowerCase();
     expect(joined).not.toContain("settled");
     expect(joined).not.toContain("paid");
     expect(joined).not.toContain("đã thanh toán");
-  });
-
-  it("rejects the obsolete compact2 image template", () => {
-    expect(() =>
-      presentPayment({
-        ...BASE,
-        template: "compact2",
-        orderNumber: "ORD-20260716-A1B2C3D4",
-        expiresAt: new Date("2026-07-16T12:15:00.000Z"),
-      }),
-    ).toThrow(/template/i);
   });
 });

@@ -53,6 +53,8 @@ export interface CatalogVariantRow {
   category_id?: string;
   preorder_enabled?: boolean;
   warranty_enabled?: boolean;
+  /** Raw presentation-only override; validated by the zod schema at the app edge. */
+  presentation_profile?: unknown;
 }
 
 export interface PageOptions {
@@ -372,7 +374,8 @@ export async function getVariantById(
       p.description_vi, p.what_customer_receives_vi, p.usage_instructions_vi,
       p.delivery_eta_vi, p.warranty_vi, p.support_vi,
       v.compare_at_price_vnd::text as compare_at_price_vnd,
-      p.stock_display_mode, p.category_id
+      p.stock_display_mode, p.category_id,
+      v.presentation_profile
     from product_variant v
     join product p on p.id = v.product_id
     join category c on c.id = p.category_id
@@ -386,6 +389,29 @@ export async function getVariantById(
       and ${SELLABLE_ROUTE_SQL}
   `.execute(exec);
   return result.rows[0] ?? null;
+}
+
+/**
+ * The variant's stored, presentation-only customization blob.
+ *
+ * Read WITHOUT audience gating and without the sellability filters on purpose: the
+ * only caller decorates the payment screen for an order the customer already owns,
+ * so this exposes no catalog data that order did not already reveal. Returns
+ * `undefined` when unset; the value is untrusted product metadata and must be
+ * validated (the payment presenter parses it with a strict schema and falls back
+ * to the safe default profile when it does not fit).
+ */
+export async function loadVariantPresentationOverride(
+  exec: Executor,
+  variantId: string,
+): Promise<unknown> {
+  const result = await sql<{ presentation_profile: unknown }>`
+    select v.presentation_profile
+    from product_variant v
+    where v.id = ${variantId}
+    limit 1
+  `.execute(exec);
+  return result.rows[0]?.presentation_profile ?? undefined;
 }
 
 export interface StorefrontProductSummary {

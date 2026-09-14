@@ -27,6 +27,10 @@ vi.mock("pg", () => ({
           };
         }
         if (sql.includes("store_control")) return { rows: [{ status: "CLOSED" }] };
+        // Fixture only: unit tests call preflight with probeLiveDependencies
+        // off, so this row is not compared to source migrations. It is not the
+        // current production head (071). Stale-head detection is the live
+        // preflight path, not these config/MFA unit cases.
         if (sql.includes("schema_migrations")) {
           return { rows: [{ filename: "069_step_up_authorization_binding.sql", count: "68" }] };
         }

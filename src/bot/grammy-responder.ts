@@ -88,6 +88,7 @@ type TelegramApi = Pick<
   | "answerInlineQuery"
   | "editMessageMedia"
   | "editMessageText"
+  | "editMessageCaption"
   | "sendDocument"
   | "sendPhoto"
   | "sendMessage"
@@ -202,16 +203,25 @@ type SendReplyMarkup =
   InlineKeyboardMarkup | ReplyKeyboardMarkup | ReplyKeyboardRemove | ForceReply;
 type EditReplyMarkup = InlineKeyboardMarkup;
 
+function inlineButtonFace(button: {
+  text: string;
+  style?: "primary" | "success" | "danger";
+}): string | { text: string; style: "primary" | "success" | "danger" } {
+  return button.style ? { text: button.text, style: button.style } : button.text;
+}
+
 function buildReplyMarkup(message: PresentedMessage): SendReplyMarkup {
   const inline = new InlineKeyboard();
   for (const row of message.buttons) {
     for (const button of row) {
-      if (button.switchInlineQueryCurrentChat !== undefined) {
+      if (button.copyText) {
+        inline.copyText(inlineButtonFace(button), button.copyText);
+      } else if (button.switchInlineQueryCurrentChat !== undefined) {
         inline.switchInlineCurrent(button.text, button.switchInlineQueryCurrentChat);
       } else if (button.url) {
-        inline.url(button.text, button.url);
+        inline.url(inlineButtonFace(button), button.url);
       } else {
-        inline.text(button.text, button.callbackData ?? "");
+        inline.text(inlineButtonFace(button), button.callbackData ?? "");
       }
     }
     inline.row();
@@ -511,16 +521,36 @@ export function createGrammyResponder(
         }
       }
       if (input.message.photo) {
-        const result = await callTelegram("sendPhoto", () =>
-          telegramApi.sendPhoto(input.chatId, new InputFile(input.message.photo!), {
-            caption: input.message.text,
-            reply_markup: replyMarkup,
-          }),
-        );
-        traceTelegram(trace, { method: "sendPhoto", ...summarizeTelegramResult(result) });
-        if (pendingKeyboard)
-          await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
-        return sentMessage(input.chatId, result);
+        try {
+          const result = await callTelegram("sendPhoto", () =>
+            telegramApi.sendPhoto(input.chatId, new InputFile(input.message.photo!), {
+              caption: input.message.text,
+              reply_markup: replyMarkup,
+            }),
+          );
+          traceTelegram(trace, { method: "sendPhoto", ...summarizeTelegramResult(result) });
+          if (pendingKeyboard)
+            await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
+          return sentMessage(input.chatId, result);
+        } catch (error) {
+          // A permanent photo rejection (bad dimensions, oversized file, unsupported format)
+          // must degrade to text rather than swallow the customer's reply: the caption already
+          // carries STK / amount / transfer content, and the copy buttons live in reply_markup.
+          // Retryable and ambiguous outcomes still propagate — a second delivery could double-post.
+          if (
+            error instanceof TelegramRetryableError ||
+            error instanceof TelegramAmbiguousSendError
+          ) {
+            throw error;
+          }
+          const kind = classifyTelegramError(error);
+          if (kind !== "permanent" && kind !== "non-editable-or-missing") throw error;
+          traceTelegram(trace, {
+            method: "sendPhoto",
+            photo_rejected: true,
+            fallback: "sendMessage",
+          });
+        }
       }
       if (input.messageId) {
         try {
@@ -534,6 +564,25 @@ export function createGrammyResponder(
         } catch (error) {
           if (classifyTelegramError(error) === "message-not-modified") return unchanged();
           if (classifyTelegramError(error) !== "non-editable-or-missing") throw error;
+        }
+        if (typeof telegramApi.editMessageCaption === "function") {
+          try {
+            const result = await callTelegram("editMessageCaption", () =>
+              telegramApi.editMessageCaption(input.chatId, Number(input.messageId), {
+                caption: input.message.text,
+                reply_markup: editReplyMarkup,
+              }),
+            );
+            traceTelegram(trace, {
+              method: "editMessageCaption",
+              ...summarizeTelegramResult(result),
+            });
+            return sentMessage(input.chatId, result) ?? unchanged();
+          } catch (captionError) {
+            if (classifyTelegramError(captionError) === "message-not-modified") return unchanged();
+            if (classifyTelegramError(captionError) !== "non-editable-or-missing")
+              throw captionError;
+          }
         }
       }
       const result = await callTelegram("sendMessage", () =>

@@ -30,11 +30,19 @@ type LockSample = {
   progress: Array<{ relname: string; phase: string; blocksDone: string; blocksTotal: string }>;
 };
 
-async function copyMigrationTree(maxNumber?: number): Promise<string> {
+/**
+ * The migration boundary this profile measures. The default cap keeps the tree at the
+ * phase-2 indexes (070) that the assertions below describe, so a later migration cannot
+ * silently change what this run measures — and the `071_…` rollback probe written into
+ * the copy stays the only file with that prefix.
+ */
+const PHASE2_TREE_MAX = 70;
+
+async function copyMigrationTree(maxNumber: number = PHASE2_TREE_MAX): Promise<string> {
   const target = await mkdtemp(join("/tmp", "bot-tele-migrations-"));
   const files = (await readdir(MIGRATIONS_DIR))
     .filter((file) => file.endsWith(".sql"))
-    .filter((file) => maxNumber === undefined || Number(file.slice(0, 3)) <= maxNumber);
+    .filter((file) => Number(file.slice(0, 3)) <= maxNumber);
   await Promise.all(files.map((file) => copyFile(join(MIGRATIONS_DIR, file), join(target, file))));
   return target;
 }

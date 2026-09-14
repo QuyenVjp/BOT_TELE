@@ -86,9 +86,6 @@ export const envSchema = z.object({
   VIETQR_ACCOUNT_NUMBER: z.string().trim().min(4).max(19),
   VIETQR_ACCOUNT_NAME: z.string().min(1),
   VIETQR_BANK_NAME: z.string().trim().min(2).max(100),
-  VIETQR_TEMPLATE: z
-    .union([z.literal(""), z.enum(["compact", "qronly", "standee"])])
-    .default("compact"),
 
   PAYMENT_INTENT_TTL_SECONDS: z.coerce.number().int().positive().default(900),
   WALLET_TOPUP_MIN_VND: z.coerce.number().int().positive().default(50_000),

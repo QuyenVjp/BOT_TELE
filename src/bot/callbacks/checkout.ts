@@ -13,12 +13,18 @@ import {
   presentPaymentScreen,
   presentPaymentExpired,
   presentPaymentNeedsReview,
+  presentPaymentCancelled,
   presentCheckoutPreview,
   presentInsufficientBalance,
   PAYMENT_COPY,
 } from "../presenters/payment.js";
 import { presentStockOutcome, type PresentedMessage } from "../presenters/catalog.js";
-import { getVariantById } from "../../modules/catalog/repository.js";
+import {
+  getVariantById,
+  loadVariantPresentationOverride,
+} from "../../modules/catalog/repository.js";
+import { loadOrderReservedQuantity } from "../../modules/digital-goods/repository.js";
+import type { PaymentCheckResult } from "../../modules/payments/check-now.js";
 import type { FulfillmentType } from "../../modules/catalog/fulfillment-type.js";
 import type { CatalogAudience } from "../../modules/catalog/visibility.js";
 
@@ -37,7 +43,6 @@ export interface MerchantConfig {
   accountName: string;
   bankName: string;
   bankAlias?: string;
-  template?: string;
 }
 
 export interface CheckoutCallbackDeps {
@@ -66,6 +71,12 @@ export interface CheckoutCallbackDeps {
     idempotencyKey: string;
     correlationId: string;
   }) => Promise<{ ok: boolean; message: string }>;
+  /**
+   * On-demand, read-only payment check behind the "Kiểm tra thanh toán" button.
+   * Bounded SePay reconciliation with its own cooldown/lock; absent means the
+   * button falls back to the internal projection only (no provider call).
+   */
+  reconcileForCheck?: () => Promise<PaymentCheckResult>;
 }
 
 /**
@@ -137,7 +148,6 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     accountName: deps.merchant.accountName,
     bankName: deps.merchant.bankName,
     ...(deps.merchant.bankAlias !== undefined ? { bankAlias: deps.merchant.bankAlias } : {}),
-    ...(deps.merchant.template !== undefined ? { template: deps.merchant.template } : {}),
   });
 
   const handleBuyNow = async (input: BuyNowCallbackInput): Promise<PresentedMessage> => {
@@ -163,11 +173,34 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     if (!presented.ok) return errorMessage("Không tạo được mã thanh toán. Vui lòng thử lại.");
     lastOrderNumber = presented.presentation.orderNumber;
     lastTransferContent = presented.presentation.transferContent;
-    return await presentPaymentScreen(presented.presentation);
+    return await presentPaymentScreen(presented.presentation, {
+      status: "PENDING",
+      productName: result.order.productNameVi,
+      variantName: result.order.variantNameVi,
+      fulfillmentType: result.order.fulfillmentType,
+      ...(await presentationContext(result.order.variantId, result.order.id)),
+    });
   };
 
   const isAdmin = (telegramUserId: string): boolean =>
     deps.adminTelegramUserId !== undefined && String(deps.adminTelegramUserId) === telegramUserId;
+
+  /**
+   * Presentation extras for a payment screen: the product's stored presentation
+   * override (untrusted — the presenter parses it strictly and falls back to the
+   * safe default when it does not fit) and the quantity the order actually
+   * reserved. Quantity comes from the RESERVE ledger row, never from the callback.
+   */
+  const presentationContext = async (
+    variantId: string,
+    orderId: string,
+  ): Promise<{ profileOverride?: unknown; quantity: number }> => {
+    const [override, quantity] = await Promise.all([
+      loadVariantPresentationOverride(deps.db, variantId),
+      loadOrderReservedQuantity(deps.db, orderId),
+    ]);
+    return { ...(override !== undefined ? { profileOverride: override } : {}), quantity };
+  };
 
   const loadCheckoutVariant = async (telegramUserId: string, variantId: string) => {
     const audience = deps.resolveAudience
@@ -224,6 +257,93 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
     ],
   });
+
+  /**
+   * The payment/status screen for one owned order.
+   *
+   * `check` is the "Kiểm tra thanh toán" intent: before reading the projection it asks the
+   * bounded, cooldown-guarded, read-only reconciliation to look at the provider once. That
+   * path can only ever record evidence the normal rules accept (it runs the same
+   * `applyPaymentEvidence` as the webhook), so this handler still never marks an order paid
+   * itself — it merely re-reads the projection afterwards. Navigation actions (reopen) pass
+   * `check: false` so they cannot spend a provider call.
+   *
+   * A reconciliation failure is deliberately NOT caught: it means the database itself is
+   * unhealthy, and the surrounding dispatcher retry is the right response — silently
+   * pretending the check happened would be the worse failure.
+   */
+  const presentOrderPayment = async (
+    orderNumber: string,
+    customerId: string,
+    check: boolean,
+  ): Promise<PresentedMessage> => {
+    let order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
+    if (!order) return errorMessage("Không tìm thấy đơn hàng.");
+
+    if (check && deps.reconcileForCheck && order.status === "PENDING_PAYMENT") {
+      const outcome = await deps.reconcileForCheck();
+      if (outcome.reason === "RAN") {
+        // Evidence may have settled this order while the provider was being read.
+        const reread = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
+        if (reread) order = reread;
+      }
+    }
+
+    if (order.status === "COMPLETED") {
+      return {
+        text: `✅ Đơn hàng đã hoàn tất.\n\nĐơn: ${order.orderNumber}`,
+        buttons: [
+          [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
+          [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+        ],
+      };
+    }
+    if (order.status === "PAID" || order.status === "PROCESSING") {
+      const isManual =
+        order.fulfillmentType === "MANUAL_FULFILLMENT" ||
+        order.fulfillmentType === "UNLIMITED_SERVICE";
+      return {
+        text: isManual
+          ? `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang chờ nhân viên xử lý thủ công. Shop sẽ thông báo qua tin nhắn khi hoàn tất.`
+          : `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`,
+        buttons: [
+          [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
+          [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+        ],
+      };
+    }
+    if (order.status === "EXPIRED") {
+      return presentPaymentExpired(order.orderNumber);
+    }
+    if (order.status === "PAYMENT_NEEDS_REVIEW") {
+      return presentPaymentNeedsReview(order.orderNumber, order.orderNumber);
+    }
+    if (order.status === "CANCELLED" || order.status === "REJECTED") {
+      return errorMessage(`Đơn ${order.orderNumber} đã huỷ.`);
+    }
+
+    // Still unpaid: re-present the live intent (or mint one if missing).
+    const presented = await presentPaymentForOrder(deps.db, {
+      orderId: order.id,
+      correlationId: `refresh-${order.id}`,
+      ...merchantInput(),
+    });
+    if (!presented.ok) {
+      // Intent may already be non-live (e.g. NEEDS_REVIEW on the intent).
+      const live = await findLiveIntentByOrderForOwner(deps.db, order.id, customerId);
+      if (!live) return presentPaymentNeedsReview(order.orderNumber, order.orderNumber);
+      return errorMessage("Không tải được mã thanh toán. Vui lòng thử lại.");
+    }
+    lastOrderNumber = presented.presentation.orderNumber;
+    lastTransferContent = presented.presentation.transferContent;
+    return await presentPaymentScreen(presented.presentation, {
+      status: "CHECK_PENDING",
+      productName: order.productNameVi,
+      variantName: order.variantNameVi,
+      fulfillmentType: order.fulfillmentType,
+      ...(await presentationContext(order.variantId, order.id)),
+    });
+  };
 
   return {
     async previewFromCallback(input) {
@@ -406,67 +526,13 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     },
 
     async refresh(orderNumber, customerId) {
-      const order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
-      if (!order) return errorMessage("Không tìm thấy đơn hàng.");
-
-      // Pure internal projection — no SePay call, no mark-paid.
-      if (order.status === "COMPLETED") {
-        return {
-          text: `✅ Đơn hàng đã hoàn tất.\n\nĐơn: ${order.orderNumber}`,
-          buttons: [
-            [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
-            [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
-          ],
-        };
-      }
-      if (order.status === "PAID" || order.status === "PROCESSING") {
-        const isManual =
-          order.fulfillmentType === "MANUAL_FULFILLMENT" ||
-          order.fulfillmentType === "UNLIMITED_SERVICE";
-        return {
-          text: isManual
-            ? `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang chờ nhân viên xử lý thủ công. Shop sẽ thông báo qua tin nhắn khi hoàn tất.`
-            : `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`,
-          buttons: [
-            [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
-            [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
-          ],
-        };
-      }
-      if (order.status === "EXPIRED") {
-        return presentPaymentExpired(order.orderNumber);
-      }
-      if (order.status === "PAYMENT_NEEDS_REVIEW") {
-        return presentPaymentNeedsReview(order.orderNumber, order.id);
-      }
-      if (order.status === "CANCELLED" || order.status === "REJECTED") {
-        return errorMessage(`Đơn ${order.orderNumber} đã huỷ.`);
-      }
-
-      // Still unpaid: re-present the live intent (or mint one if missing).
-      const presented = await presentPaymentForOrder(deps.db, {
-        orderId: order.id,
-        correlationId: `refresh-${order.id}`,
-        ...merchantInput(),
-      });
-      if (!presented.ok) {
-        // Intent may already be non-live (e.g. NEEDS_REVIEW on the intent).
-        const live = await findLiveIntentByOrderForOwner(deps.db, order.id, customerId);
-        if (!live) return presentPaymentNeedsReview(order.orderNumber, order.id);
-        return errorMessage("Không tải được mã thanh toán. Vui lòng thử lại.");
-      }
-      lastOrderNumber = presented.presentation.orderNumber;
-      lastTransferContent = presented.presentation.transferContent;
-      const screen = await presentPaymentScreen(presented.presentation);
-      return {
-        ...screen,
-        text: `⏳ Chưa nhận được thanh toán.\nHệ thống sẽ tự cập nhật ngay khi ngân hàng xác nhận.\n\n${screen.text}`,
-      };
+      return presentOrderPayment(orderNumber, customerId, true);
     },
 
     async reopen(orderNumber, customerId) {
-      // Reopen reuses the same presentation path as refresh for a still-payable order.
-      return this.refresh(orderNumber, customerId);
+      // Same screen as refresh, but reopen is a navigation action: it must not spend a
+      // provider call. The "Kiểm tra thanh toán" button owns that side effect.
+      return presentOrderPayment(orderNumber, customerId, false);
     },
 
     async cancel(orderNumber, customerId, correlationId) {
@@ -478,10 +544,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
         correlationId,
       });
       if (!result.ok) return errorMessage(result.message);
-      return {
-        text: `Đơn ${order.orderNumber} đã huỷ.`,
-        buttons: [[{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }]],
-      };
+      return presentPaymentCancelled(order.orderNumber);
     },
   };
 }

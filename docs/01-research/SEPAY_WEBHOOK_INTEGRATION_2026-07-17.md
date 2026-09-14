@@ -117,13 +117,16 @@ payment truth.
 
 ## VietQR và beneficiary config
 
-SePay hướng dẫn URL ảnh QR dạng:
+URL ảnh QR của SePay chỉ còn giá trị lịch sử — production render QR local:
 
 ```text
 https://vietqr.app/img?acc={SO_TK}&bank={NGAN_HANG}&amount={VND}&des={NOI_DUNG}
 ```
 
-`des` phải URL-encode. QR chỉ điền sẵn thông tin chuyển khoản; QR không chứng minh thanh toán.
+Endpoint trên là ghi chú lịch sử, KHÔNG còn được dùng: bot build payload EMVCo từ
+`buildVietQrPayload` rồi render ảnh local bằng `qrcode.toBuffer(payload)` tại presenter.
+Nếu sau này cần dùng lại, `des` phải URL-encode. QR chỉ điền sẵn thông tin chuyển khoản; QR không
+chứng minh thanh toán.
 
 Owner-provided production beneficiary phải inject bằng secret/config manager, không hardcode vào
 source hoặc docs chứa credential:

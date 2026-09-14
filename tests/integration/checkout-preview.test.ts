@@ -227,7 +227,8 @@ describe("checkout confirmation screen", () => {
       telegramUserId: TELEGRAM_USER_ID,
       correlationId: "t-qr",
     });
-    expect(paid.text).toContain("Thanh toán đơn hàng");
+    expect(paid.text).toMatch(/Thanh toán đơn #ORD-/);
+    expect(paid.buttons.flat().some((b) => b.copyText)).toBe(true);
     expect(await orderCount()).toBe(1);
     expect(await intentCount()).toBe(1);
   });

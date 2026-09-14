@@ -77,6 +77,11 @@ describe("payment screen presenter (FR-008)", () => {
     const msg = await presentPaymentScreen(PRESENTATION);
     expect(msg.text.toLowerCase()).not.toContain("đã thanh toán");
   });
+
+  it("keeps the photo caption within Telegram's 1024-character limit", async () => {
+    const msg = await presentPaymentScreen(PRESENTATION);
+    expect(msg.text.length).toBeLessThanOrEqual(1024);
+  });
 });
 
 describe("terminal payment presenters", () => {
