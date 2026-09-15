@@ -175,6 +175,7 @@ import {
 import {
   getProductPublicationReadiness,
   RESALE_EVIDENCE_SOURCES,
+  type ResaleEvidenceSource,
 } from "./modules/catalog/publication.js";
 import {
   getTerminalOutboxOrphan,
@@ -1526,6 +1527,7 @@ async function bootstrap(): Promise<void> {
     presentAdminNotePrompt,
     presentAdminProductReadiness,
     presentAdminEvidencePrompt,
+    presentAdminEvidenceRevokePrompt,
     presentAdminStoreOpenBlocked,
     presentAdminOperations,
     ADMIN_VARIANT_FIELDS,
@@ -3668,6 +3670,89 @@ async function bootstrap(): Promise<void> {
           variantName: row.name,
         });
       },
+      /**
+       * `admin:products:evrevoke:<evidenceId>:<variantVersion>` off the readiness screen. The
+       * button carried the two opaque halves and nothing else, so this screen re-reads the
+       * evidence before it promises anything — a stale version, an already-revoked row or an
+       * unknown id answers with a screen rather than a prompt — and parks the reason prompt in
+       * admin_callback_state, exactly as the registration prompt does.
+       */
+      async evidenceRevoke(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: input.evidenceId,
+          reason: "Admin resale evidence revocation access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const row = (
+          await sql<{
+            id: string;
+            variant_id: string;
+            product_id: string;
+            variant_name: string;
+            variant_version: number;
+            source: string;
+            status: string;
+            recorded_at: string;
+          }>`
+            select re.id, re.variant_id, re.source, re.status,
+                   to_char(re.created_at, 'YYYY-MM-DD HH24:MI') as recorded_at,
+                   v.product_id, v.name_vi as variant_name, v.version as variant_version
+              from resale_evidence re
+              join product_variant v on v.id = re.variant_id
+             where re.id = ${input.evidenceId}
+             limit 1
+          `.execute(dbHandle.db)
+        ).rows[0];
+        if (!row)
+          return {
+            text: "Bằng chứng không còn hợp lệ.",
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+          };
+        const back = [
+          { text: "🚀 Readiness", callbackData: `admin:products:ready:${row.product_id}` },
+        ];
+        if (row.status !== "ACTIVE")
+          return {
+            text: "Bằng chứng không còn ở trạng thái ACTIVE nên không thể thu hồi.",
+            buttons: [back],
+          };
+        if (row.variant_version !== input.expectedVersion)
+          return {
+            text: "Biến thể đã thay đổi từ lúc mở màn hình. Mở lại readiness rồi thu hồi lại.",
+            buttons: [back],
+          };
+        if (!(RESALE_EVIDENCE_SOURCES as readonly string[]).includes(row.source))
+          return { text: "Nguồn bằng chứng không hợp lệ.", buttons: [back] };
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "ADMIN_RESALE_EVIDENCE_PROMPT",
+          payload: {
+            // Same state kind as the registration prompt, discriminated by intent: the typed
+            // line means a reason here and a SOURCE|REFERENCE|SUMMARY triple there.
+            intent: "REVOKE",
+            productId: row.product_id,
+            variantId: row.variant_id,
+            evidenceId: row.id,
+            expectedVersion: input.expectedVersion,
+          },
+        });
+        return presentAdminEvidenceRevokePrompt({
+          productId: row.product_id,
+          variantName: row.variant_name,
+          evidenceId: row.id,
+          source: row.source as ResaleEvidenceSource,
+          recordedAt: row.recorded_at,
+          variantVersion: input.expectedVersion,
+        });
+      },
       async productPublish(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
@@ -3966,7 +4051,7 @@ async function bootstrap(): Promise<void> {
         if (!state || !adminCallbacks) return null;
         const payload = state.payload ?? {};
         const actor = { numericUserId: Number(input.telegramUserId), chatType: "private" as const };
-        if (state.kind === "ADMIN_RESALE_EVIDENCE_PROMPT") {
+        if (state.kind === "ADMIN_RESALE_EVIDENCE_PROMPT" && payload.intent !== "REVOKE") {
           const variantId = typeof payload.variantId === "string" ? payload.variantId : null;
           const productId = typeof payload.productId === "string" ? payload.productId : null;
           const fields = input.text.split("|").map((value) => value.trim());
@@ -4020,6 +4105,55 @@ async function bootstrap(): Promise<void> {
         const note = input.text.trim();
         if (!note || note.length > 200) {
           return { text: "Ghi chú phải có 1–200 ký tự. Gửi lại một dòng ngắn.", buttons: [] };
+        }
+        if (state.kind === "ADMIN_RESALE_EVIDENCE_PROMPT" && payload.intent === "REVOKE") {
+          const variantId = typeof payload.variantId === "string" ? payload.variantId : null;
+          const productId = typeof payload.productId === "string" ? payload.productId : null;
+          const evidenceId = typeof payload.evidenceId === "string" ? payload.evidenceId : null;
+          const expectedVersion =
+            typeof payload.expectedVersion === "number" ? payload.expectedVersion : null;
+          if (!variantId || !productId || !evidenceId || expectedVersion === null) return null;
+          const result = await adminCallbacks.handle({
+            command: "catalog.evidence.revoke",
+            actor,
+            targetId: variantId,
+            input: evidenceId,
+            expectedVersion,
+            reason: note,
+            correlationId: input.correlationId,
+          });
+          if (!result.ok)
+            return {
+              text: result.message,
+              buttons: [
+                [
+                  {
+                    text: "🔁 Nhập lại lý do",
+                    callbackData: `admin:products:evrevoke:${evidenceId}:${expectedVersion}`,
+                  },
+                ],
+                [{ text: "🚀 Readiness", callbackData: `admin:products:ready:${productId}` }],
+              ],
+            };
+          // The prompt state is dropped only now that a durable command exists: a refused
+          // issue leaves it in place, so the owner can retry the same line exactly as the
+          // registration and disposition prompts do.
+          await sql`delete from admin_callback_state where id = ${state.id} and admin_telegram_user_id = ${input.telegramUserId}`.execute(
+            dbHandle.db,
+          );
+          if (result.needsConfirmation)
+            return presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "catalog.evidence.revoke",
+            });
+          return {
+            text: "✅ Đã thu hồi bằng chứng. Bản xuất bản hiện tại đã cũ — mở lại readiness và xuất bản lại.",
+            buttons: [
+              [{ text: "🚀 Readiness", callbackData: `admin:products:ready:${productId}` }],
+            ],
+          };
         }
         if (state.kind === "ADMIN_PAYMENT_DISPOSITION_PROMPT") {
           const discrepancyId =

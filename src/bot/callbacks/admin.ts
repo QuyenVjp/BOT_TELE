@@ -44,8 +44,10 @@ import {
   publishProductInTransaction,
   registerResaleEvidenceInTransaction,
   RESALE_EVIDENCE_SOURCES,
+  revokeResaleEvidenceInTransaction,
   type ResaleEvidenceSource,
 } from "../../modules/catalog/publication.js";
+import { isId } from "../../shared/ids/index.js";
 import {
   getStoreOpenReadiness,
   transitionStoreModeInTransaction,
@@ -66,6 +68,7 @@ export const OWNER_COMMANDS = [
   "catalog.activate",
   "catalog.deactivate",
   "catalog.evidence.register",
+  "catalog.evidence.revoke",
   "catalog.publish",
   "discrepancy.resolve",
   "outbox.orphan.dispose",
@@ -268,6 +271,11 @@ function sensitiveRequestedData(input: {
       : { expectedVersion: String(input.expectedVersion) }),
     ...(input.command === "catalog.evidence.register" && input.value !== undefined
       ? { evidenceInput: input.value }
+      : {}),
+    // The revocation names the evidence row it withdraws, and the binding layer reads that
+    // row's lifecycle as part of the grant's state, so the id must travel as requested data.
+    ...(input.command === "catalog.evidence.revoke" && input.value !== undefined
+      ? { evidenceId: input.value }
       : {}),
   };
 }
@@ -594,6 +602,23 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         });
         return result.ok;
       }
+      case "catalog.evidence.revoke": {
+        if (typeof action.expectedVersion !== "number" || !action.input || !isId(action.input)) {
+          return false;
+        }
+        // The confirmation id IS the request id, exactly as registration does it: the
+        // message correlation id stays audit-only, and a retried request for the same
+        // evidence is a domain-level replay instead of a second revocation.
+        const result = await revokeResaleEvidenceInTransaction(exec, {
+          evidenceId: action.input,
+          expectedVariantVersion: action.expectedVersion,
+          requestId,
+          actorId: action.actorId,
+          reason: action.reason,
+          correlationId,
+        });
+        return result.ok;
+      }
       case "catalog.publish": {
         if (typeof action.expectedVersion !== "string") return false;
         const result = await publishProductInTransaction(exec, {
@@ -630,16 +655,28 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
       ) {
         return { ok: false, code: "INVALID_REASON", message: "Cần nêu lý do." };
       }
+      const revokeInputInvalid =
+        input.command === "catalog.evidence.revoke" &&
+        // A revocation must name one existing evidence row and the variant version the
+        // owner saw. Both are opaque, so nothing an operator typed can smuggle facts in.
+        (input.input === undefined ||
+          !isId(input.input) ||
+          typeof input.expectedVersion !== "number" ||
+          !Number.isInteger(input.expectedVersion) ||
+          input.expectedVersion <= 0);
       if (
         SENSITIVE_OPERATOR_TEXT.test(input.reason) ||
         (input.input !== undefined && SENSITIVE_OPERATOR_TEXT.test(input.input)) ||
         (input.command === "catalog.evidence.register" &&
-          (input.input === undefined || !isSafeResaleEvidenceInput(input.input)))
+          (input.input === undefined || !isSafeResaleEvidenceInput(input.input))) ||
+        revokeInputInvalid
       ) {
         return {
           ok: false,
           code: "INVALID_REASON",
-          message: "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
+          message: revokeInputInvalid
+            ? "Thiếu bằng chứng hoặc phiên bản biến thể cần thu hồi."
+            : "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
         };
       }
 

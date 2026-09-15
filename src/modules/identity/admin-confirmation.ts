@@ -39,6 +39,7 @@ export const DURABLE_ADMIN_COMMAND_REFS = [
   "store.test",
   "catalog.publish",
   "catalog.evidence.register",
+  "catalog.evidence.revoke",
 ] as const;
 export type DurableAdminCommandRef = (typeof DURABLE_ADMIN_COMMAND_REFS)[number];
 

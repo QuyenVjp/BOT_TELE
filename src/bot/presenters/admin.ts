@@ -730,12 +730,23 @@ export function presentAdminProductReadiness(input: {
       ),
     );
   }
-  const buttons: InlineButton[][] = active.map((variant) => [
-    {
-      text: `🧾 Bằng chứng ${variant.id.slice(-6)}`,
-      callbackData: `admin:products:evidence:${variant.id}`,
-    },
-  ]);
+  const buttons: InlineButton[][] = active.map((variant) => {
+    const revoke = variant.evidenceId
+      ? `admin:products:evrevoke:${variant.evidenceId}:${variant.version}`
+      : null;
+    return [
+      {
+        text: `🧾 Bằng chứng ${variant.id.slice(-6)}`,
+        callbackData: `admin:products:evidence:${variant.id}`,
+      },
+      // Telegram caps callback_data at 64 bytes and the ingress drops anything longer, so a
+      // variant whose evidence id + version no longer fit is offered without the revoke
+      // button rather than with one that would silently do nothing.
+      ...(variant.evidenceActive && revoke !== null && Buffer.byteLength(revoke, "utf8") <= 64
+        ? [{ text: "🚫 Thu hồi", callbackData: revoke }]
+        : []),
+    ];
+  });
   if (readiness.canPublish && input.canSubmit) {
     buttons.push([
       { text: "🚀 Xuất bản", callbackData: `admin:products:publish:${readiness.productId}` },
@@ -779,6 +790,39 @@ export function presentAdminEvidencePrompt(input: {
     ].join("\n"),
     buttons: [
       [{ text: "↩️ Quay lại", callbackData: `admin:products:ready:${input.productId}` }],
+      adminHomeOnly,
+    ],
+  };
+}
+
+/**
+ * The revocation prompt. It names the evidence that will be withdrawn (masked id, source,
+ * recorded time) and asks only for the reason: the evidence facts are immutable, so nothing
+ * the owner types here can rewrite them — the reason is a new provenance fact of its own.
+ */
+export function presentAdminEvidenceRevokePrompt(input: {
+  productId: string;
+  variantName: string;
+  evidenceId: string;
+  source: ResaleEvidenceSource;
+  recordedAt: string;
+  variantVersion: number;
+}): PresentedMessage {
+  return {
+    text: [
+      "🚫 THU HỒI BẰNG CHỨNG NHẬP HÀNG",
+      "",
+      `Biến thể: ${input.variantName}`,
+      `Bằng chứng: …${input.evidenceId.slice(-6)} · ${RESALE_EVIDENCE_SOURCE_LABEL[input.source]}`,
+      `Ghi nhận lúc: ${input.recordedAt}`,
+      `Phiên bản biến thể: ${input.variantVersion}`,
+      "",
+      "Gửi lý do thu hồi (một dòng, tối đa 200 ký tự).",
+      "Thu hồi không sửa dữ liệu bằng chứng: chỉ đổi trạng thái và làm bản xuất bản hiện tại cũ đi, nên phải xuất bản lại.",
+      "Bot sẽ trả mã xác nhận; hoàn tất bằng /confirm <mã xác nhận>.",
+    ].join("\n"),
+    buttons: [
+      [{ text: "↩️ Readiness", callbackData: `admin:products:ready:${input.productId}` }],
       adminHomeOnly,
     ],
   };

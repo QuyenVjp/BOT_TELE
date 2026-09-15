@@ -266,6 +266,39 @@ export async function loadSensitiveAuthorizationBinding(
           publicationEvidenceId: value.publication_evidence_id,
         }
       : null;
+  } else if (input.actionKey === "catalog.evidence.revoke") {
+    // Bound to the variant's CURRENT version and to the evidence named in the requested
+    // data. The evidence facts themselves are immutable; what the grant may spend on is the
+    // pair (variant version, that evidence row's lifecycle), so a revocation pre-verified
+    // against version N cannot be spent after the variant moved or the evidence changed.
+    const evidenceId = requestedString(requested, "evidenceId");
+    const row = await sql<{
+      version: string;
+      evidence_id: string | null;
+      evidence_status: string | null;
+      evidence_variant_id: string | null;
+      publication_evidence_id: string | null;
+    }>`
+      select v.version::text, v.resale_evidence_id as evidence_id,
+             re.status as evidence_status, re.variant_id as evidence_variant_id,
+             v.publication_evidence_id
+        from product_variant v
+        left join resale_evidence re on re.id = ${evidenceId} and re.variant_id = v.id
+       where v.id = ${input.resourceId}
+       limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value?.version ?? "missing";
+    current = value
+      ? {
+          version: value.version,
+          evidenceId: value.evidence_id,
+          publicationEvidenceId: value.publication_evidence_id,
+          requestedEvidenceId: evidenceId,
+          requestedEvidenceStatus: value.evidence_status,
+          requestedEvidenceVariantId: value.evidence_variant_id,
+        }
+      : null;
   } else if (input.actionKey === "discrepancy.resolve") {
     const row = await sql<{
       version: number;

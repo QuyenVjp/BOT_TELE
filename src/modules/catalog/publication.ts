@@ -70,6 +70,30 @@ export type RegisterResaleEvidenceResult =
       message: string;
     };
 
+export interface RevokeResaleEvidenceInput {
+  evidenceId: string;
+  /** Optimistic guard: the `product_variant.version` the operator last saw. */
+  expectedVariantVersion: number;
+  requestId: string;
+  actorId: string;
+  reason: string;
+  correlationId: string;
+}
+
+export type RevokeResaleEvidenceResult =
+  | {
+      ok: true;
+      kind: "REVOKED" | "REPLAYED";
+      evidenceId: string;
+      variantId: string;
+      variantVersion: number;
+    }
+  | {
+      ok: false;
+      code: "INVALID_INPUT" | "NOT_FOUND" | "NOT_ACTIVE" | "VERSION_CONFLICT" | "CONFLICT";
+      message: string;
+    };
+
 export interface PublishProductInput {
   productId: string;
   expectedPublicationVersion: string;
@@ -303,8 +327,7 @@ export async function registerResaleEvidenceInTransaction(
   const summary = normalize(input.summary, 500);
   const reason = normalize(input.reason, 500);
   const requestId = normalize(input.requestId, 128);
-  const evidenceText =
-    source && reference && summary ? `${source}|${reference}|${summary}` : "";
+  const evidenceText = source && reference && summary ? `${source}|${reference}|${summary}` : "";
   if (
     !source ||
     !reference ||
@@ -380,6 +403,151 @@ export async function registerResaleEvidence(
   input: RegisterResaleEvidenceInput,
 ): Promise<RegisterResaleEvidenceResult> {
   return withTransaction(db, (trx) => registerResaleEvidenceInTransaction(trx, input));
+}
+
+/**
+ * Owner-initiated revocation of an ACTIVE resale evidence record.
+ *
+ * Revocation is lifecycle-only, never a rewrite:
+ * - 072's trigger still refuses every change to the facts (source, reference,
+ *   summary, metadata, created_by, registration request, created_at), so the only
+ *   columns this path writes are status/revoked_at/revoked_by/revocation_request_id.
+ * - `product_variant.resale_evidence_id` keeps pointing at the revoked record, so a
+ *   revoked history is never silently swapped for another record. Callers that want
+ *   fresh evidence register a new one explicitly.
+ * - The variant version bump makes every existing publication snapshot stale
+ *   (`publication_variant_version <> version`) and public visibility additionally
+ *   fails on the now non-ACTIVE evidence status.
+ *
+ * Idempotency: `revocation_request_id` is the durable key, so replaying the same
+ * request is a no-op success while reusing it for another record is refused.
+ */
+export async function revokeResaleEvidenceInTransaction(
+  exec: Executor,
+  input: RevokeResaleEvidenceInput,
+): Promise<RevokeResaleEvidenceResult> {
+  const reason = normalize(input.reason, 500);
+  const requestId = normalize(input.requestId, 128);
+  if (
+    !reason ||
+    !requestId ||
+    !Number.isSafeInteger(input.expectedVariantVersion) ||
+    input.expectedVariantVersion < 1
+  ) {
+    return { ok: false, code: "INVALID_INPUT", message: "Yêu cầu thu hồi không hợp lệ." };
+  }
+  if (!isId(input.evidenceId))
+    return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy bằng chứng." };
+
+  // Lock first: concurrent revocations of the same record serialize here, so the
+  // replay/status decisions below cannot race the partial unique index.
+  const evidence = await sql<{
+    id: string;
+    variant_id: string;
+    status: string;
+    revocation_request_id: string | null;
+  }>`
+    select id, variant_id, status, revocation_request_id
+      from resale_evidence
+     where id = ${input.evidenceId}
+     for update
+  `.execute(exec);
+  const row = evidence.rows[0];
+  if (!row) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy bằng chứng." };
+
+  // Replay is checked before the version guard: a retry of an already-applied
+  // request resends the pre-revocation version, which is stale by design.
+  if (row.status === "REVOKED") {
+    if (row.revocation_request_id !== requestId)
+      return {
+        ok: false,
+        code: "NOT_ACTIVE",
+        message: "Bằng chứng đã bị thu hồi bởi yêu cầu khác.",
+      };
+    const current = await sql<{ version: number }>`
+      select version from product_variant where id = ${row.variant_id}
+    `.execute(exec);
+    return {
+      ok: true,
+      kind: "REPLAYED",
+      evidenceId: row.id,
+      variantId: row.variant_id,
+      variantVersion: current.rows[0]?.version ?? input.expectedVariantVersion,
+    };
+  }
+
+  const reused = await sql<{ id: string }>`
+    select id from resale_evidence
+     where revocation_request_id = ${requestId} and id <> ${row.id}
+     limit 1
+  `.execute(exec);
+  if (reused.rows[0])
+    return { ok: false, code: "CONFLICT", message: "Mã yêu cầu đã dùng cho bằng chứng khác." };
+
+  const variant = await sql<{ version: number }>`
+    select version from product_variant where id = ${row.variant_id} for update
+  `.execute(exec);
+  if (!variant.rows[0])
+    return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy biến thể." };
+  if (variant.rows[0].version !== input.expectedVariantVersion)
+    return {
+      ok: false,
+      code: "VERSION_CONFLICT",
+      message: "Biến thể đã thay đổi. Vui lòng mở lại bằng chứng.",
+    };
+
+  const revoked = await sql<{ id: string }>`
+    update resale_evidence
+       set status = 'REVOKED',
+           revoked_at = now(),
+           revoked_by = ${input.actorId},
+           revocation_request_id = ${requestId}
+     where id = ${row.id} and variant_id = ${row.variant_id} and status = 'ACTIVE'
+    returning id
+  `.execute(exec);
+  if (!revoked.rows[0])
+    return { ok: false, code: "NOT_ACTIVE", message: "Bằng chứng không còn ACTIVE." };
+
+  // Only the version moves. resale_evidence_id, the publication_* snapshot columns
+  // and every evidence fact are left untouched: the snapshot goes stale instead of
+  // being rewritten to look current.
+  const bumped = await sql<{ version: number }>`
+    update product_variant
+       set version = version + 1, updated_at = now()
+     where id = ${row.variant_id} and version = ${input.expectedVariantVersion}
+    returning version
+  `.execute(exec);
+  if (!bumped.rows[0]) {
+    // The evidence and variant rows are locked above; reaching this branch means the
+    // storage invariant itself was broken. Do not commit a revoked evidence row without
+    // its version bump.
+    throw new Error("resale evidence revocation lost its variant lock");
+  }
+
+  await appendAuditEvent(exec, {
+    actorType: "ROOT_ADMIN",
+    actorId: input.actorId,
+    action: "catalog.evidence.revoke",
+    targetType: "ProductVariant",
+    targetId: row.variant_id,
+    reason,
+    correlationId: input.correlationId,
+    metadataRedacted: { evidenceId: row.id, requestId },
+  });
+  return {
+    ok: true,
+    kind: "REVOKED",
+    evidenceId: row.id,
+    variantId: row.variant_id,
+    variantVersion: bumped.rows[0].version,
+  };
+}
+
+export async function revokeResaleEvidence(
+  db: Db,
+  input: RevokeResaleEvidenceInput,
+): Promise<RevokeResaleEvidenceResult> {
+  return withTransaction(db, (trx) => revokeResaleEvidenceInTransaction(trx, input));
 }
 
 export async function publishProductInTransaction(

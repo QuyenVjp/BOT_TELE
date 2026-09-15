@@ -16,6 +16,7 @@ import {
   CUSTOMER_COPY,
 } from "../presenters/customer.js";
 import type { TelegramUpdate } from "../webhook.js";
+import { isId } from "../../shared/ids/index.js";
 import { presentSearchPrompt, type PresentedMessage } from "../presenters/catalog.js";
 import type { CheckoutCallbacks } from "./checkout.js";
 import type { TelegramCommandEnvelope } from "../../infrastructure/inbox/telegram.js";
@@ -285,6 +286,14 @@ export interface TelegramDomainDispatcherDeps {
     productEvidence?(input: {
       telegramUserId: string;
       variantId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    /** `admin:products:evrevoke:<evidenceId>:<variantVersion>` — the owner's revocation prompt. */
+    evidenceRevoke?(input: {
+      telegramUserId: string;
+      evidenceId: string;
+      expectedVersion: number;
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
@@ -1870,6 +1879,32 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Bằng chứng sản phẩm không khả dụng.");
+        } else if (route.startsWith("products:evrevoke:")) {
+          // `products:evrevoke:<evidenceId>:<variantVersion>`. Both halves are opaque; the
+          // version is the snapshot the owner saw on the readiness screen, so a malformed or
+          // truncated route is refused rather than silently reinterpreted.
+          const parts = route.split(":");
+          const evidenceId = parts[2] ?? "";
+          const expectedVersion = Number.parseInt(parts[3] ?? "", 10);
+          const revoke = admin.evidenceRevoke;
+          const malformed =
+            parts.length !== 4 ||
+            !isId(evidenceId) ||
+            String(expectedVersion) !== parts[3] ||
+            expectedVersion <= 0;
+          if (!revoke) {
+            message = safeError("Thu hồi bằng chứng không khả dụng.");
+          } else if (malformed) {
+            message = safeError("Yêu cầu thu hồi bằng chứng không hợp lệ.");
+          } else {
+            message = await revoke({
+              telegramUserId: envelope.actorUserId,
+              evidenceId,
+              expectedVersion,
+              chatType: envelope.chatType,
+              correlationId,
+            });
+          }
         } else if (route.startsWith("products:publish:")) {
           message = admin.productPublish
             ? await admin.productPublish({

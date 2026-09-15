@@ -164,8 +164,10 @@ async function main(): Promise<void> {
       },
       ownerPromptText: {
         adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-        // Only one of the three remediation prompts being pending vouches for free text: the
-        // publication evidence triple, a discrepancy disposition note, or an outbox note.
+        // Only one of the remediation prompts being pending vouches for free text: the
+        // publication evidence triple, an evidence revocation reason, a discrepancy
+        // disposition note, or an outbox note. The evidence prompts share one state kind,
+        // discriminated by their payload's intent.
         async isActive(telegramUserId: string) {
           if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return false;
           const row = (
