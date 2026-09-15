@@ -152,11 +152,6 @@ activate sales as part of the migration.
    - Re-check commerce invariants: order/payment-intent relationships,
      quantity-stock ledger continuity, wallet double-entry balance, active
      evidence/publication bindings, and unresolved outbox/discrepancy counts.
-   - Existing variants are intentionally not auto-published by these migrations.
-     Before reopening the store, the owner must use the protected Telegram
-     workflow to register legitimate resale evidence for each intended SKU and
-     publish each ready product. Until that work is complete, an empty storefront
-     or a blocked `OPEN` readiness check is expected and is a stop condition.
    - Do not register evidence, resolve discrepancies, dispose outbox rows, or
      open the store during the migration window. Those are separate owner
      workflows with their own step-up and audit gates.
@@ -170,6 +165,12 @@ activate sales as part of the migration.
    - Treat any blocked `OPEN` readiness result as expected until the owner has
      completed the evidence-registration and per-product publication workflows;
      do not bypass them with direct SQL or a store-mode override.
+   - Existing variants are intentionally not auto-published by these migrations.
+     Before reopening the store, the owner must use the protected Telegram
+     workflow to register legitimate resale evidence for each intended SKU and
+     publish each ready product. Until that work is complete, an empty storefront
+     or a blocked `OPEN` readiness check is expected, not a migration failure;
+     do not treat it as an abort.
    - Opening the store is a separate owner decision and is not part of this
      procedure.
 

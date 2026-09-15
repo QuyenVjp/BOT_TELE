@@ -178,6 +178,7 @@ export type ConfirmActionResult =
         | "NOT_FOUND"
         | SensitiveAuthorizationRefusal;
       message: string;
+      action?: OwnerCommand;
     };
 
 interface PendingAction {
@@ -192,12 +193,13 @@ interface PendingAction {
 
 class InvalidDurableAdminActionError extends Error {}
 
-/** Raised inside the atomic execute so a refused step-up can never reach the mutation. */
 class SensitiveAuthorizationRefusedError extends Error {
   readonly code: SensitiveAuthorizationRefusal;
+  readonly action: OwnerCommand;
 
-  constructor(code: SensitiveAuthorizationRefusal) {
+  constructor(action: OwnerCommand, code: SensitiveAuthorizationRefusal) {
     super(`sensitive admin action refused: ${code}`);
+    this.action = action;
     this.code = code;
   }
 }
@@ -839,7 +841,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
               consumeGrant: true,
             });
             if (!authorization.ok) {
-              throw new SensitiveAuthorizationRefusedError(authorization.code);
+              throw new SensitiveAuthorizationRefusedError(action.command, authorization.code);
             }
             return executeHighRisk(trx, action, durableAction.correlationId, input.confirmationId);
           },
@@ -857,6 +859,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             ok: false,
             code: error.code,
             message: SENSITIVE_REFUSAL_TEXT[error.code],
+            action: error.action,
           };
         }
         throw error;

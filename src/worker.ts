@@ -3101,10 +3101,7 @@ async function bootstrap(): Promise<void> {
           reason: "Manual fulfillment completion requested from Telegram admin UI",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) return presentAdminHandleRefusal(result, "manual_fulfillment.complete");
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -4733,12 +4730,16 @@ async function bootstrap(): Promise<void> {
           correlationId: input.correlationId,
         });
         if (result.ok) return presentHighRiskDone("admin.confirm");
-        if (isSensitiveCallbackRefusal(result.code))
+        if (isSensitiveCallbackRefusal(result.code)) {
+          // A root-gate denial carries no action; the presenter only needs one for a step-up.
+          const refusedAction =
+            result.action && isSensitiveActionKey(result.action) ? result.action : null;
           return presentSensitiveRefusal({
             code: result.code,
-            action: "admin.confirm",
-            category: null,
+            action: refusedAction ?? "admin.confirm",
+            category: refusedAction ? SENSITIVE_ACTION_POLICY[refusedAction] : null,
           });
+        }
         return {
           text: "❌ Xác nhận thất bại hoặc đã hết hạn",
           buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],

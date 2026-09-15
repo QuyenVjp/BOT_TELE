@@ -9,6 +9,16 @@
 import { pathToFileURL } from "node:url";
 import { sql } from "kysely";
 
+/**
+ * Pending owner remediation prompts. While one is active it owns the owner's next private
+ * text, so the product-draft wizard must not read that answer as a wizard step.
+ */
+const REMEDIATION_PROMPT_KINDS_SQL = sql`
+  'ADMIN_RESALE_EVIDENCE_PROMPT',
+  'ADMIN_PAYMENT_DISPOSITION_PROMPT',
+  'ADMIN_OUTBOX_DISPOSITION_PROMPT'
+`;
+
 async function main(): Promise<void> {
   // Local `.env` only. Production is loaded by `node --env-file=` before this
   // process starts; dotenv would fill gaps from a repo `.env` and must not mix in.
@@ -88,6 +98,13 @@ async function main(): Promise<void> {
                   'name','sku','description','variant','deliveryConfig',
                   'variantName','price','inventoryFields','threshold','initialQuantity',
                   'serviceInstructions'
+                )
+                and not exists (
+                  select 1
+                  from admin_callback_state prompt
+                  where prompt.admin_telegram_user_id = ${telegramUserId}
+                    and prompt.kind in (${REMEDIATION_PROMPT_KINDS_SQL})
+                    and prompt.expires_at > now()
                 )
               limit 1
             `.execute(dbHandle.db)
@@ -174,11 +191,7 @@ async function main(): Promise<void> {
             await sql<{ id: string }>`
               select id from admin_callback_state
               where admin_telegram_user_id = ${telegramUserId}
-                and kind in (
-                  'ADMIN_RESALE_EVIDENCE_PROMPT',
-                  'ADMIN_PAYMENT_DISPOSITION_PROMPT',
-                  'ADMIN_OUTBOX_DISPOSITION_PROMPT'
-                )
+                and kind in (${REMEDIATION_PROMPT_KINDS_SQL})
                 and expires_at > now()
               limit 1
             `.execute(dbHandle.db)

@@ -99,8 +99,15 @@ export async function getAdminOverview(
 
   const tickets = await sql<{ new_tickets: number }>`
     select count(*)::int as new_tickets
-    from support_ticket
-    where status in ('OPEN', 'MANUAL_REVIEW')
+    from support_ticket t
+    where t.status in ('OPEN', 'MANUAL_REVIEW')
+      and not exists (
+        select 1
+        from channel_identity ci
+        join test_customer_allowlist a
+          on a.telegram_user_id::text = ci.channel_user_id::text
+        where ci.customer_id = t.customer_id
+      )
   `.execute(exec);
 
   const head = result.rows[0];
