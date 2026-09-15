@@ -232,6 +232,30 @@ export type DiscrepancyClassification = (typeof DISCREPANCY_CLASSIFICATIONS)[num
  * ops reports cannot be built on it; the operator's explanation lives in the
  * (bounded) note instead. `MANUAL_RESOLVE` is retained because it is the code
  * the pre-remediation callback path already wrote.
+ *
+ * ## Adapter contract (which code for which situation)
+ *
+ * The Telegram admin adapter MUST pick from this list — it may never send a
+ * code of its own — and the mapping is:
+ *
+ * | Situation                                                        | Code                  |
+ * | ---------------------------------------------------------------- | --------------------- |
+ * | No economic effect (preproduction canary / non-commerce evidence) | `NO_ACTION_REQUIRED`  |
+ * | The same provider money was seen twice (domain dedupe held)       | `DUPLICATE_EVIDENCE`  |
+ * | The bank row is not attributable to any real transfer             | `INVALID_EVIDENCE`    |
+ * | The operator recorded the missing settlement by hand              | `MANUAL_SETTLE`       |
+ * | A refund obligation was discharged by hand                        | `MANUAL_REFUND`       |
+ * | Handed to engineering / the owner for a code fix                  | `ESCALATED`           |
+ * | Anything else the operator closed with an explanation             | `MANUAL_RESOLVE`      |
+ *
+ * `NO_ACTION_REQUIRED` is the deliberate choice for the no-economic-effect
+ * case: it is the only code that says "this was real evidence, and it needed no
+ * money to move", so the preproduction queue stays countable without inventing a
+ * resolution semantic that the reporting model does not have.
+ *
+ * Closing a discrepancy is a status transition only. It never posts to the
+ * ledger and never rewrites `bank_transaction`, so no code in this list can
+ * settle money — a code only records why the operator closed the row.
  */
 export const DISCREPANCY_RESOLUTION_CODES = [
   "MANUAL_RESOLVE",

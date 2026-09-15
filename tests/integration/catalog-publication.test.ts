@@ -13,6 +13,13 @@ import { startPostgresContainer, type PgTestContext } from "../helpers/pg-contai
 
 let ctx: PgTestContext;
 
+/** This suite seeds no discrepancies, parked outbox rows or tickets: only stock gates the store. */
+const NO_BLOCKING_QUEUES = {
+  openDiscrepancies: 0,
+  terminalOutboxOrphans: 0,
+  criticalSupportTickets: 0,
+} as const;
+
 beforeAll(async () => {
   ctx = await startPostgresContainer();
 }, 180_000);
@@ -23,9 +30,17 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await sql`truncate table product_variant, product, category cascade`.execute(ctx.db);
+  await sql`
+    update store_control
+       set status = 'CLOSED', version = 1, last_request_id = null
+     where id = 'main'
+  `.execute(ctx.db);
 });
 
-async function seedProduct(): Promise<{ productId: string; variantId: string }> {
+async function seedProduct(options: { isTest?: boolean } = {}): Promise<{
+  productId: string;
+  variantId: string;
+}> {
   const categoryId = newId();
   const productId = newId();
   const variantId = newId();
@@ -35,7 +50,7 @@ async function seedProduct(): Promise<{ productId: string; variantId: string }> 
   `.execute(ctx.db);
   await sql`
     insert into product (id, category_id, name_vi, slug, is_active, sort_order, is_test, is_archived)
-    values (${productId}, ${categoryId}, 'GPT Plus', ${`gpt-${productId}`}, true, 1, false, false)
+    values (${productId}, ${categoryId}, 'GPT Plus', ${`gpt-${productId}`}, true, 1, ${options.isTest ?? false}, false)
   `.execute(ctx.db);
   await sql`
     insert into product_variant
@@ -149,7 +164,10 @@ describe("protected catalog publication", () => {
     const ready = await getProductPublicationReadiness(ctx.db, productId);
     expect(ready?.canPublish).toBe(true);
     expect(ready?.variants[0]?.evidenceId).toBe(registration.evidenceId);
-    expect(ready?.publicationVersion).toContain(registration.evidenceId);
+    // The wire version is a bounded fingerprint (`productVersion:sha256`), never the evidence id:
+    // the snapshot is what the confirmation replays, and it must stay inside callback limits.
+    expect(ready?.publicationVersion).toMatch(/^\d+:[0-9a-f]{64}$/u);
+    expect(ready?.publicationVersion).not.toContain(registration.evidenceId);
 
     const stale = await publishProduct(ctx.db, {
       productId,
@@ -172,6 +190,7 @@ describe("protected catalog publication", () => {
     await expect(getStoreOpenReadiness(ctx.db)).resolves.toEqual({
       activeProducts: 1,
       inStockVariants: 1,
+      ...NO_BLOCKING_QUEUES,
     });
 
     const replayedPublish = await publishProduct(ctx.db, {
@@ -188,7 +207,117 @@ describe("protected catalog publication", () => {
     await expect(getStoreOpenReadiness(ctx.db)).resolves.toEqual({
       activeProducts: 1,
       inStockVariants: 0,
+      ...NO_BLOCKING_QUEUES,
     });
+  });
+
+  it("does not promote a TEST_ONLY product while the store is in TEST mode", async () => {
+    const { productId, variantId } = await seedProduct({ isTest: true });
+    await registerEvidence(variantId, "test-mode-register-1");
+    await sql`update store_control set status = 'TEST', version = 2 where id = 'main'`.execute(
+      ctx.db,
+    );
+
+    try {
+      const readiness = await getProductPublicationReadiness(ctx.db, productId);
+      expect(readiness).toMatchObject({
+        testOnly: true,
+        visibilityBlockers: ["PRODUCT_TEST_ONLY"],
+        blockers: ["STORE_TEST_MODE"],
+        canPublish: false,
+      });
+      await expect(
+        publishProduct(ctx.db, {
+          productId,
+          expectedPublicationVersion: readiness!.publicationVersion,
+          actorId: "admin",
+          reason: "Refuse public promotion in TEST mode",
+          correlationId: "test-mode-publish-1",
+        }),
+      ).resolves.toMatchObject({ ok: false, code: "NOT_READY" });
+      expect(await getVariantById(ctx.db, variantId, "public")).toBeNull();
+      await expect(
+        sql<{ is_test: boolean }>`select is_test from product where id = ${productId}`.execute(
+          ctx.db,
+        ),
+      ).resolves.toMatchObject({ rows: [{ is_test: true }] });
+    } finally {
+      await sql`update store_control set status = 'CLOSED', version = 3 where id = 'main'`.execute(
+        ctx.db,
+      );
+    }
+  });
+
+  it("promotes a TEST_ONLY product to public and replays the old confirmation", async () => {
+    const { productId, variantId } = await seedProduct({ isTest: true });
+    const registration = await registerEvidence(variantId, "promote-register-1");
+
+    const before = await getProductPublicationReadiness(ctx.db, productId);
+    // TEST_ONLY is a visibility state, not a technical blocker: the product is publishable, and
+    // publishing is the verb that clears it.
+    expect(before).toMatchObject({
+      testOnly: true,
+      visibilityBlockers: ["PRODUCT_TEST_ONLY"],
+      blockers: [],
+      canPublish: true,
+    });
+    expect(before?.variants[0]).toMatchObject({
+      evidenceId: registration.evidenceId,
+      evidenceActive: true,
+      published: false,
+    });
+    expect(await getVariantById(ctx.db, variantId, "public")).toBeNull();
+
+    const published = await publishProduct(ctx.db, {
+      productId,
+      expectedPublicationVersion: before!.publicationVersion,
+      actorId: "admin",
+      reason: "Promote verified test product",
+      correlationId: "promote-publish-1",
+    });
+    expect(published).toMatchObject({ ok: true, kind: "PUBLISHED", productId });
+
+    const productAfter = (
+      await sql<{ is_test: boolean; version: number }>`
+        select is_test, version from product where id = ${productId}
+      `.execute(ctx.db)
+    ).rows[0]!;
+    expect(productAfter.is_test).toBe(false);
+    const after = await getProductPublicationReadiness(ctx.db, productId);
+    expect(after).toMatchObject({
+      testOnly: false,
+      visibilityBlockers: [],
+      canPublish: true,
+      productVersion: productAfter.version,
+      blockers: [],
+    });
+    expect(await getVariantById(ctx.db, variantId, "public")).not.toBeNull();
+    await expect(getStoreOpenReadiness(ctx.db)).resolves.toEqual({
+      activeProducts: 1,
+      inStockVariants: 1,
+      ...NO_BLOCKING_QUEUES,
+    });
+
+    // The confirmation the owner is still holding carries the pre-promotion snapshot, whose
+    // product version the promotion itself bumped. Replaying it must succeed as a no-op.
+    await expect(
+      publishProduct(ctx.db, {
+        productId,
+        expectedPublicationVersion: before!.publicationVersion,
+        actorId: "admin",
+        reason: "Replay the old confirmation",
+        correlationId: "promote-publish-1-replay",
+      }),
+    ).resolves.toMatchObject({ ok: true, kind: "REPLAYED" });
+    expect(await getVariantById(ctx.db, variantId, "public")).not.toBeNull();
+    await expect(
+      sql`select is_test, version from product where id = ${productId}`.execute(ctx.db),
+    ).resolves.toMatchObject({ rows: [{ is_test: false, version: productAfter.version }] });
+    const audits = await sql<{ count: number }>`
+      select count(*)::int as count from audit_event
+       where action = 'catalog.publish' and target_id = ${productId}
+    `.execute(ctx.db);
+    expect(audits.rows[0]?.count).toBe(1);
   });
 
   it("requires an active category for publication and store opening", async () => {
@@ -204,6 +333,7 @@ describe("protected catalog publication", () => {
     await expect(getStoreOpenReadiness(ctx.db)).resolves.toEqual({
       activeProducts: 0,
       inStockVariants: 0,
+      ...NO_BLOCKING_QUEUES,
     });
   });
 
@@ -332,6 +462,7 @@ describe("protected catalog publication", () => {
     await expect(getStoreOpenReadiness(ctx.db)).resolves.toEqual({
       activeProducts: 0,
       inStockVariants: 0,
+      ...NO_BLOCKING_QUEUES,
     });
 
     const audit = await sql<{

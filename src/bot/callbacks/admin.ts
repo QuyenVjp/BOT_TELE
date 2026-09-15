@@ -50,6 +50,7 @@ import {
 import { isId } from "../../shared/ids/index.js";
 import {
   getStoreOpenReadiness,
+  isStoreOpenReady,
   transitionStoreModeInTransaction,
 } from "../../modules/commerce/store-mode.js";
 
@@ -176,6 +177,7 @@ export type ConfirmActionResult =
         | "WRONG_CONTEXT"
         | "CONFIRM_FAILED"
         | "NOT_FOUND"
+        | "NOT_READY"
         | SensitiveAuthorizationRefusal;
       message: string;
       action?: OwnerCommand;
@@ -203,6 +205,34 @@ class SensitiveAuthorizationRefusedError extends Error {
     this.action = action;
     this.code = code;
   }
+}
+
+/** Keeps a readiness refusal distinguishable from an expired or missing confirmation. */
+class DurableAdminActionRefusedError extends Error {
+  readonly code = "NOT_READY" as const;
+  readonly action: OwnerCommand;
+
+  constructor(action: OwnerCommand, message: string) {
+    super(message);
+    this.action = action;
+  }
+}
+
+function storeOpenRefusalMessage(
+  readiness: Awaited<ReturnType<typeof getStoreOpenReadiness>>,
+): string {
+  const blockers = [
+    ...(readiness.activeProducts === 0 ? ["chưa có sản phẩm public đang hoạt động"] : []),
+    ...(readiness.inStockVariants === 0 ? ["chưa có biến thể còn hàng"] : []),
+    ...(readiness.openDiscrepancies > 0 ? [`còn ${readiness.openDiscrepancies} sai lệch`] : []),
+    ...(readiness.terminalOutboxOrphans > 0
+      ? [`còn ${readiness.terminalOutboxOrphans} outbox terminal`]
+      : []),
+    ...(readiness.criticalSupportTickets > 0
+      ? [`còn ${readiness.criticalSupportTickets} ticket MANUAL_REVIEW`]
+      : []),
+  ];
+  return `❌ Chưa thể mở bán: ${blockers.join("; ") || "readiness đã thay đổi"}. Mở lại Store control sau khi xử lý.`;
 }
 
 export interface AdminCallbacks {
@@ -559,8 +589,15 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
       case "store.test": {
         if (typeof action.expectedVersion !== "number") return false;
         if (action.command === "store.open") {
+          // Re-read inside the executing transaction with the same predicate the durable
+          // transition uses: the preview may be stale, and a parked queue still blocks.
           const readiness = await getStoreOpenReadiness(exec);
-          if (readiness.activeProducts === 0 || readiness.inStockVariants === 0) return false;
+          if (!isStoreOpenReady(readiness)) {
+            throw new DurableAdminActionRefusedError(
+              action.command,
+              storeOpenRefusalMessage(readiness),
+            );
+          }
         }
         const targetMode =
           action.command === "store.open"
@@ -632,6 +669,9 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           reason: action.reason,
           correlationId,
         });
+        if (!result.ok && result.code === "NOT_READY") {
+          throw new DurableAdminActionRefusedError(action.command, result.message);
+        }
         return result.ok;
       }
       default:
@@ -862,6 +902,13 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             message: SENSITIVE_REFUSAL_TEXT[error.code],
             action: error.action,
           };
+        }
+        if (error instanceof DurableAdminActionRefusedError) {
+          telemetry?.recordFailedConfirmation({
+            code: error.code,
+            actionFingerprint: input.confirmationId,
+          });
+          return { ok: false, code: error.code, message: error.message, action: error.action };
         }
         throw error;
       }

@@ -267,6 +267,14 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 - Terminal orphan handling records a reason and audit trail, stops retry churn, and keeps the original outbox payload/evidence available for review.
 - Admin screens expose safe identifiers and summaries only; no raw provider credentials, vault references, account inventory, or customer secrets are rendered.
 
+### Owner-surface adapter rules
+
+- Publication readiness renders visibility-only blockers (`PRODUCT_TEST_ONLY`) apart from the blockers that stop publication. A technically ready `TEST_ONLY` product can be promoted while the store is `CLOSED`; `TEST` mode is an explicit blocker so a public SKU cannot become visible-but-unbuyable in the test lane.
+- The store-open preview and the durable `OPEN` transition read the same readiness through the same `isStoreOpenReady` predicate. The preview names every failing condition (empty public catalog, no in-stock variant, unresolved discrepancies, undisposed terminal outbox rows, `MANUAL_REVIEW` tickets) and offers no confirm button while any of them holds; the transition inside the confirmation remains the final authority.
+- Health and operations screens print actionable work apart from retained history (`outboxDeadLetteredDisposed`, `resolvedDiscrepancies`). Ordinary open/waiting tickets stay informational; only `MANUAL_REVIEW` tickets are reported as critical. Both screens read one fact set, so they cannot disagree.
+- A recorded disposition request is reported as pending, not completed. Only a successful `/confirm` reports completion.
+- Publication, evidence and store transitions stay root-admin gated, step-up protected, and confined to the allowlisted callback path; the worker performs no direct SQL mutation for them. Readiness data carries safe identifiers only — never evidence secrets or vault references.
+
 ### Module seams and risk ledger
 
 - `catalog` owns resale-evidence records, publication readiness, and publication version binding; it reuses the current public/test visibility and route/readiness predicates.

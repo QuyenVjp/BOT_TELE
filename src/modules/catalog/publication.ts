@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
@@ -16,6 +17,7 @@ export type PublicationBlocker =
   | "PRODUCT_INACTIVE"
   | "PRODUCT_ARCHIVED"
   | "PRODUCT_TEST_ONLY"
+  | "STORE_TEST_MODE"
   | "CATEGORY_INACTIVE"
   | "NO_ACTIVE_VARIANTS"
   | "VARIANT_INACTIVE"
@@ -44,8 +46,11 @@ export interface ProductPublicationReadiness {
   active: boolean;
   archived: boolean;
   testOnly: boolean;
-  variants: VariantPublicationReadiness[];
+  /** Visibility-only blockers; TEST_ONLY is promotable after technical checks and outside TEST mode. */
+  visibilityBlockers: PublicationBlocker[];
+  /** Commerce/evidence blockers that prevent a protected publication. */
   blockers: PublicationBlocker[];
+  variants: VariantPublicationReadiness[];
   canPublish: boolean;
   publicationVersion: string;
 }
@@ -155,20 +160,37 @@ function normalize(input: string, max: number): string | null {
   return value.length > 0 && value.length <= max ? value : null;
 }
 
-function publicationVersion(
-  productVersion: number,
-  variants: Array<{ id: string; version: number; evidenceId: string | null }>,
-): string {
-  return `${productVersion}:${variants
-    .map((v) => `${v.id}:${v.version}:${v.evidenceId ?? "-"}`)
-    .sort()
-    .join(",")}`;
+function publicationVersion(input: {
+  productVersion: number;
+  productActive: boolean;
+  productArchived: boolean;
+  productTest: boolean;
+  categoryActive: boolean;
+  variants: Array<{
+    id: string;
+    version: number;
+    priceVnd: string;
+    fulfillmentType: string | null;
+    ready: boolean;
+    routeReady: boolean;
+    evidenceId: string | null;
+    evidenceActive: boolean;
+  }>;
+}): string {
+  const snapshot = JSON.stringify({
+    productVersion: input.productVersion,
+    productActive: input.productActive,
+    productArchived: input.productArchived,
+    productTest: input.productTest,
+    categoryActive: input.categoryActive,
+    variants: [...input.variants].sort((a, b) => a.id.localeCompare(b.id)),
+  });
+  return `${input.productVersion}:${createHash("sha256").update(snapshot, "utf8").digest("hex")}`;
 }
 
 function blockersFor(row: {
   product_active: boolean;
   product_archived: boolean;
-  product_test: boolean;
   category_active: boolean;
   variant_count: number;
   active: boolean;
@@ -181,7 +203,8 @@ function blockersFor(row: {
   const blockers: PublicationBlocker[] = [];
   if (!row.product_active) blockers.push("PRODUCT_INACTIVE");
   if (row.product_archived) blockers.push("PRODUCT_ARCHIVED");
-  if (row.product_test) blockers.push("PRODUCT_TEST_ONLY");
+  // TEST_ONLY is a visibility state, not a technical publication failure. It is
+  // reported separately by getProductPublicationReadiness.
   if (row.category_active === false) blockers.push("CATEGORY_INACTIVE");
   if (row.variant_count === 0) blockers.push("NO_ACTIVE_VARIANTS");
   if (!row.active) blockers.push("VARIANT_INACTIVE");
@@ -235,8 +258,8 @@ export async function getProductPublicationReadiness(
                select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
                 where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE')
              when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
-               select 1 from variant_service_fulfillment sf
-                where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active)
+               select 1 from variant_service_fulfillment sf where sf.variant_id = v.id
+                 and sf.fulfillment_type = v.fulfillment_type and sf.is_active)
              else false
            end as ready,
            ((v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
@@ -260,6 +283,12 @@ export async function getProductPublicationReadiness(
               v.publication_product_version, v.publication_variant_version, v.published_at
      order by v.sort_order nulls last, v.id nulls last
   `.execute(exec);
+  const storeMode =
+    (
+      await sql<{
+        status: string;
+      }>`select status from store_control where id = 'main' limit 1`.execute(exec)
+    ).rows[0]?.status ?? "CLOSED";
   const first = result.rows[0];
   if (!first) return null;
   const variants = result.rows
@@ -268,7 +297,6 @@ export async function getProductPublicationReadiness(
       const blockers = blockersFor({
         product_active: row.product_active,
         product_archived: row.product_archived,
-        product_test: row.product_test,
         category_active: row.category_active,
         variant_count: row.variant_count,
         active: row.active ?? false,
@@ -300,16 +328,37 @@ export async function getProductPublicationReadiness(
   const blockers = Array.from(
     new Set([
       ...(activeVariants.length === 0 ? ["NO_ACTIVE_VARIANTS" as PublicationBlocker] : []),
+      ...(first.product_test && storeMode === "TEST"
+        ? (["STORE_TEST_MODE"] as PublicationBlocker[])
+        : []),
       ...activeVariants.flatMap((variant) => variant.blockers),
     ]),
   );
-  const version = publicationVersion(first.product_version, activeVariants);
+  const visibilityBlockers: PublicationBlocker[] = first.product_test ? ["PRODUCT_TEST_ONLY"] : [];
+  const version = publicationVersion({
+    productVersion: first.product_version,
+    productActive: first.product_active,
+    productArchived: first.product_archived,
+    productTest: first.product_test,
+    categoryActive: first.category_active,
+    variants: activeVariants.map((variant) => ({
+      id: variant.id,
+      version: variant.version,
+      priceVnd: variant.priceVnd,
+      fulfillmentType: variant.fulfillmentType,
+      ready: variant.ready,
+      routeReady: variant.routeReady,
+      evidenceId: variant.evidenceId,
+      evidenceActive: variant.evidenceActive,
+    })),
+  });
   return {
     productId: first.product_id,
     productVersion: first.product_version,
     active: first.product_active,
     archived: first.product_archived,
     testOnly: first.product_test,
+    visibilityBlockers,
     variants,
     blockers,
     canPublish: blockers.length === 0,
@@ -560,79 +609,102 @@ export async function publishProductInTransaction(
   exec: Executor,
   input: PublishProductInput,
 ): Promise<PublishProductResult> {
-  const readiness = await getProductPublicationReadiness(exec, input.productId);
-  if (!readiness) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy sản phẩm." };
-  if (!readiness.canPublish)
+  const initial = await getProductPublicationReadiness(exec, input.productId);
+  if (!initial) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy sản phẩm." };
+  if (!initial.canPublish)
     return {
       ok: false,
       code: "NOT_READY",
-      message: `Chưa đủ điều kiện: ${readiness.blockers.join(", ")}.`,
+      message: `Chưa đủ điều kiện: ${initial.blockers.join(", ")}.`,
     };
-  if (readiness.publicationVersion !== input.expectedPublicationVersion) {
-    return {
-      ok: false,
-      code: "VERSION_CONFLICT",
-      message: "Sản phẩm đã thay đổi. Vui lòng mở lại readiness.",
-    };
-  }
-  const activeVariants = readiness.variants.filter((variant) => variant.active);
-  if (activeVariants.every((variant) => variant.published)) {
-    return {
-      ok: true,
-      kind: "REPLAYED",
-      productId: input.productId,
-      publicationVersion: input.expectedPublicationVersion,
-    };
-  }
-  const product = await sql<{ version: number }>`
-    select version from product where id = ${input.productId} for update
+
+  const product = await sql<{ version: number; is_test: boolean }>`
+    select version, is_test
+      from product
+     where id = ${input.productId}
+     for update
   `.execute(exec);
-  if (product.rows[0]?.version !== readiness.productVersion) {
-    return {
-      ok: false,
-      code: "VERSION_CONFLICT",
-      message: "Sản phẩm đã thay đổi. Vui lòng mở lại readiness.",
-    };
-  }
+  if (!product.rows[0])
+    return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy sản phẩm." };
+
   const lockedVariants = await sql<{ id: string; version: number }>`
     select id, version
       from product_variant
      where product_id = ${input.productId} and is_active
      for update
   `.execute(exec);
+  const lockedReadiness = await getProductPublicationReadiness(exec, input.productId);
+  if (!lockedReadiness)
+    return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy sản phẩm." };
+  if (!lockedReadiness.canPublish)
+    return {
+      ok: false,
+      code: "NOT_READY",
+      message: `Chưa đủ điều kiện: ${lockedReadiness.blockers.join(", ")}.`,
+    };
+
+  const activeVariants = lockedReadiness.variants.filter((variant) => variant.active);
   const lockedVersions = new Map(lockedVariants.rows.map((row) => [row.id, row.version]));
   if (
+    product.rows[0].version !== initial.productVersion ||
     lockedVariants.rows.length !== activeVariants.length ||
     activeVariants.some((variant) => lockedVersions.get(variant.id) !== variant.version)
   ) {
     return {
       ok: false,
       code: "VERSION_CONFLICT",
-      message: "Biến thể đã thay đổi. Vui lòng mở lại readiness.",
+      message: "Sản phẩm hoặc biến thể đã thay đổi. Vui lòng mở lại readiness.",
     };
   }
-  const updated = await sql<{ id: string }>`
-    update product_variant v
-       set publication_evidence_id = v.resale_evidence_id,
-           publication_product_version = p.version,
-           publication_variant_version = v.version,
-           published_at = now(),
-           published_by = ${input.actorId}
-      from product p
-     where v.product_id = p.id and p.id = ${input.productId}
-       and p.version = ${readiness.productVersion}
-       and v.id in (${sql.join(
-         activeVariants.map((variant) => sql`${variant.id}`),
-         sql`, `,
-       )})
-     returning v.id
-  `.execute(exec);
-  if (updated.rows.length !== activeVariants.length) {
+
+  // A retried confirmation is safe once every current variant is already bound. This
+  // check intentionally precedes the snapshot comparison: the first successful
+  // publish may have bumped product.version while completing TEST_ONLY -> PUBLIC.
+  if (!product.rows[0].is_test && activeVariants.every((variant) => variant.published)) {
+    return {
+      ok: true,
+      kind: "REPLAYED",
+      productId: input.productId,
+      publicationVersion: lockedReadiness.publicationVersion,
+    };
+  }
+  if (lockedReadiness.publicationVersion !== input.expectedPublicationVersion) {
     return {
       ok: false,
       code: "VERSION_CONFLICT",
-      message: "Biến thể đã thay đổi. Vui lòng mở lại readiness.",
+      message: "Sản phẩm đã thay đổi. Vui lòng mở lại readiness.",
     };
+  }
+
+  let publicationProductVersion = product.rows[0].version;
+  if (product.rows[0].is_test) {
+    const promoted = await sql<{ version: number }>`
+      update product
+         set is_test = false, version = version + 1, updated_at = now()
+       where id = ${input.productId} and version = ${product.rows[0].version} and is_test
+      returning version
+    `.execute(exec);
+    if (!promoted.rows[0]) throw new Error("catalog publication lost its product lock");
+    publicationProductVersion = promoted.rows[0].version;
+  }
+
+  const updated = await sql<{ id: string }>`
+    update product_variant
+       set publication_evidence_id = resale_evidence_id,
+           publication_product_version = ${publicationProductVersion},
+           publication_variant_version = version,
+           published_at = now(),
+           published_by = ${input.actorId}
+     where product_id = ${input.productId}
+       and is_active
+       and id in (${sql.join(
+         activeVariants.map((variant) => sql`${variant.id}`),
+         sql`, `,
+       )})
+     returning id
+  `.execute(exec);
+  if (updated.rows.length !== activeVariants.length) {
+    throw new Error("catalog publication lost its variant lock");
   }
   await appendAuditEvent(exec, {
     actorType: "ROOT_ADMIN",
@@ -644,14 +716,17 @@ export async function publishProductInTransaction(
     correlationId: input.correlationId,
     metadataRedacted: {
       publicationVersion: input.expectedPublicationVersion,
-      variants: readiness.variants.filter((variant) => variant.active).length,
+      variants: activeVariants.length,
+      visibilityChanged: initial.testOnly,
+      productVersion: publicationProductVersion,
     },
   });
+  const published = await getProductPublicationReadiness(exec, input.productId);
   return {
     ok: true,
     kind: "PUBLISHED",
     productId: input.productId,
-    publicationVersion: input.expectedPublicationVersion,
+    publicationVersion: published?.publicationVersion ?? input.expectedPublicationVersion,
   };
 }
 

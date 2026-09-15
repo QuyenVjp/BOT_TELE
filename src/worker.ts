@@ -1459,6 +1459,7 @@ async function bootstrap(): Promise<void> {
     getStoreControl,
     getStoreMode,
     getStoreOpenReadiness,
+    isStoreOpenReady,
     addTestCustomer,
     listTestCustomers,
   } = await import("./modules/commerce/store-mode.js");
@@ -3161,35 +3162,19 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied("NOT_ROOT_ADMIN");
         const control = await getStoreControl(dbHandle.db);
         if (control.status !== "CLOSED") return presentAdminStoreMode(control);
-        const counts = await readStoreOpenCounts();
-        const row = {
-          active_products: counts.activeProducts,
-          in_stock_variants: counts.inStockVariants,
-        };
-        if (row.active_products === 0 || row.in_stock_variants === 0)
-          return presentAdminStoreOpenBlocked({
-            activeProducts: row.active_products,
-            inStockVariants: row.in_stock_variants,
-            control,
-          });
-        return presentAdminStoreOpenConfirmation({
-          activeProducts: row.active_products,
-          inStockVariants: row.in_stock_variants,
-        });
+        const readiness = await readStoreOpenCounts();
+        if (!isStoreOpenReady(readiness))
+          return presentAdminStoreOpenBlocked({ readiness, control });
+        return presentAdminStoreOpenConfirmation(readiness);
       },
       async storeOpenConfirm(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const control = await getStoreControl(dbHandle.db);
         if (control.status !== "CLOSED") return presentAdminStoreMode(control);
-        const counts = await readStoreOpenCounts();
-        if (counts.activeProducts === 0 || counts.inStockVariants === 0) {
-          return presentAdminStoreOpenBlocked({
-            activeProducts: counts.activeProducts,
-            inStockVariants: counts.inStockVariants,
-            control,
-          });
-        }
+        const readiness = await readStoreOpenCounts();
+        if (!isStoreOpenReady(readiness))
+          return presentAdminStoreOpenBlocked({ readiness, control });
         const result = await adminCallbacks.handle({
           command: "store.open",
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -3442,44 +3427,30 @@ async function bootstrap(): Promise<void> {
         const readiness = await Promise.all(
           productRows.rows.map((row) => getProductPublicationReadiness(dbHandle.db, row.id)),
         );
-        const counts = await sql<{
-          open_discrepancies: number;
-          terminal_outbox: number;
-          open_support: number;
-          stock_account_not_ready: number;
-        }>`
-          select
-            (select count(*)::int from discrepancy where resolved_at is null) as open_discrepancies,
-            (select count(*)::int from outbox_event
-              where dead_lettered_at is not null and published_at is null and disposition_status is null) as terminal_outbox,
-            (select count(*)::int from support_ticket t
-              where t.status in ('OPEN','MANUAL_REVIEW')
-                and not exists (
-                  select 1
-                    from channel_identity ci
-                    join test_customer_allowlist a
-                      on a.telegram_user_id::text = ci.channel_user_id::text
-                   where ci.customer_id = t.customer_id
-                )) as open_support,
-            (select count(*)::int from product_variant v
-              join product p on p.id = v.product_id
-              where v.is_active and p.is_active and not p.is_test and not p.is_archived
-                and v.fulfillment_type = 'STOCK_ACCOUNT'
-                and not exists (select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE')) as stock_account_not_ready
-        `.execute(dbHandle.db);
-        const row = counts.rows[0] ?? {
-          open_discrepancies: 0,
-          terminal_outbox: 0,
-          open_support: 0,
-          stock_account_not_ready: 0,
-        };
+        // One source of truth for the queue counters: the operations screen and the health screen
+        // must never disagree about what "open" means, so both read the same facts.
+        const [health, stock] = await Promise.all([
+          getAdminHealthFacts(dbHandle.db),
+          sql<{ stock_account_not_ready: number }>`
+            select
+              (select count(*)::int from product_variant v
+                join product p on p.id = v.product_id
+                where v.is_active and p.is_active and not p.is_test and not p.is_archived
+                  and v.fulfillment_type = 'STOCK_ACCOUNT'
+                  and not exists (select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE')) as stock_account_not_ready
+          `.execute(dbHandle.db),
+        ]);
         return presentAdminOperations({
           control: await getStoreControl(dbHandle.db),
+          database: health.database,
           publicationBlocked: readiness.filter((item) => item !== null && !item.canPublish).length,
-          openDiscrepancies: row.open_discrepancies,
-          terminalOutboxOrphans: row.terminal_outbox,
-          openSupportTickets: row.open_support,
-          stockAccountNotReady: row.stock_account_not_ready,
+          openDiscrepancies: health.queues.openDiscrepancies,
+          resolvedDiscrepancies: health.queues.resolvedDiscrepancies,
+          terminalOutboxOrphans: health.queues.outboxDeadLettered,
+          terminalOutboxOrphansDisposed: health.queues.outboxDeadLetteredDisposed,
+          openSupportTickets: health.queues.openSupportTickets,
+          criticalSupportTickets: health.queues.criticalSupportTickets,
+          stockAccountNotReady: stock.rows[0]?.stock_account_not_ready ?? 0,
         });
       },
       async productFeature(input) {
@@ -4208,7 +4179,8 @@ async function bootstrap(): Promise<void> {
                 action: "discrepancy.resolve",
               })
             : {
-                text: "✅ Đã ghi nhận xử lý sai lệch.",
+                // Request recorded, not resolved: only a successful /confirm says completed.
+                text: "⏳ Đã ghi nhận yêu cầu xử lý sai lệch. Chỉ xác nhận thành công mới coi là đã xử lý.",
                 buttons: [[{ text: "⚠️ Sai lệch", callbackData: "admin:payments:discrepancy" }]],
               };
         }
@@ -4249,7 +4221,8 @@ async function bootstrap(): Promise<void> {
               action: "outbox.orphan.dispose",
             })
           : {
-              text: "✅ Đã ghi nhận xử lý outbox terminal.",
+              // Request recorded, not resolved: only a successful /confirm says completed.
+              text: "⏳ Đã ghi nhận yêu cầu xử lý outbox terminal. Chỉ xác nhận thành công mới coi là đã xử lý.",
               buttons: [[{ text: "🧯 Outbox treo", callbackData: "admin:payments:outbox" }]],
             };
       },
@@ -4730,6 +4703,12 @@ async function bootstrap(): Promise<void> {
           correlationId: input.correlationId,
         });
         if (result.ok) return presentHighRiskDone("admin.confirm");
+        if (result.code === "NOT_READY") {
+          return {
+            text: result.message,
+            buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+          };
+        }
         if (isSensitiveCallbackRefusal(result.code)) {
           // A root-gate denial carries no action; the presenter only needs one for a step-up.
           const refusedAction =
