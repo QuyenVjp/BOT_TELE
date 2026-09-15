@@ -3,7 +3,7 @@ import type { Executor } from "../../infrastructure/db/transaction.js";
 import type { DeliveryType, StockPolicy } from "./domain.js";
 import type { FulfillmentType } from "./fulfillment-type.js";
 import { newId } from "../../shared/ids/index.js";
-import { catalogVisibilitySql, type CatalogAudience } from "./visibility.js";
+import { catalogVisibilitySql, currentPublicationSql, type CatalogAudience } from "./visibility.js";
 import { ensureTaxonomy, isFulfillmentTaxonomyNode } from "./taxonomy.js";
 
 /**
@@ -67,7 +67,7 @@ export interface Page<T> {
   nextCursor: string | null;
 }
 
-const VARIANT_READY_SQL = sql`
+export const VARIANT_READY_SQL = sql`
   case
     when v.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then exists (
       select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE'
@@ -88,7 +88,7 @@ const VARIANT_READY_SQL = sql`
   end
 `;
 
-const SELLABLE_ROUTE_SQL = sql`
+export const SELLABLE_ROUTE_SQL = sql`
   (
     (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
     or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
@@ -254,17 +254,12 @@ export async function listActiveProductsByCategory(
       and c.id = ${categoryId}
       and exists (
         select 1 from product_variant v
+        left join variant_quantity_stock q on q.variant_id = v.id
         where v.product_id = p.id
           and v.is_active
           and v.price_vnd > 0
-          and v.resale_evidence_id is not null
-          and (
-            (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
-            or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
-              select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-              where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-            ))
-          )
+          and ${currentPublicationSql()}
+          and ${SELLABLE_ROUTE_SQL}
       )
     order by p.sort_order asc, p.id asc
   `.execute(exec);
@@ -466,9 +461,15 @@ export async function listStorefrontProducts(
           else 0
         end as available_count
       from product_variant v
+      join product p on p.id = v.product_id
       where v.is_active
         and v.price_vnd > 0
-        and v.resale_evidence_id is not null
+        and v.publication_evidence_id = v.resale_evidence_id
+        and v.publication_product_version = p.version
+        and v.publication_variant_version = v.version
+        and v.published_at is not null
+        and ${SELLABLE_ROUTE_SQL}
+        and exists (select 1 from resale_evidence re where re.id = v.publication_evidence_id and re.variant_id = v.id and re.status = 'ACTIVE')
     ),
     product_summary as (
       select
@@ -571,6 +572,7 @@ function subtreeProductCountSql(audience: CatalogAudience) {
     select count(distinct p.id)::int
     from product p
     join product_variant v on v.product_id = p.id
+    left join variant_quantity_stock q on q.variant_id = v.id
     join category leaf on leaf.id = p.category_id
     where (leaf.id = c.id or leaf.parent_id = c.id)
       and leaf.is_active
@@ -651,6 +653,7 @@ async function listScopedProducts(
     from product p
     join category c on c.id = p.category_id
     join product_variant v on v.product_id = p.id
+    left join variant_quantity_stock q on q.variant_id = v.id
     where c.is_active
       and p.is_active
       and v.is_active
@@ -753,6 +756,7 @@ export async function listPublicCategoryPage(
     from product p
     join category c on c.id = p.category_id
     join product_variant v on v.product_id = p.id
+    left join variant_quantity_stock q on q.variant_id = v.id
     where p.category_id = ${categoryId}
       and c.is_active and p.is_active and v.is_active and v.price_vnd > 0
       ${catalogVisibilitySql(audience)}

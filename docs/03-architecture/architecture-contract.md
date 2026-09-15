@@ -253,3 +253,30 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 - `src/infrastructure/observability/tracing.ts` remains an optional in-process seam; it does not start an exporter or become a source of truth.
 - Latency samples are bounded per metric. Implementations retain at most the latest 256 `valuesMs` entries while `count`, `totalMs`, and `errors` remain aggregate counters.
 - No metric label may contain secrets, raw credentials, customer message text, or unbounded identifiers. PostgreSQL remains authoritative for operational state.
+
+## 13. Production cutover remediation contract (2026-09)
+
+This remediation closes the remaining owner-facing commissioning blockers without changing the Telegram-only product surface. It adds protected domain workflows for product publication, store-mode transitions, payment discrepancy disposition, terminal outbox-orphan handling, and readiness diagnostics.
+
+### Required invariants
+
+- A public product variant is sellable only when its product/category/variant state, price, fulfillment route, inventory/readiness, and supplier/resale evidence all satisfy the existing catalog predicates.
+- Resale evidence is a first-class immutable reference. Publication binds the selected evidence and current commercial/fulfillment versions; changing those inputs invalidates the publication until an owner republishes.
+- Store transitions are explicit, version-checked, audited, idempotent, and protected by the existing root-admin step-up policy. `TEST` is isolated from real customers; `CLOSED` rejects checkout; `OPEN` is reachable only after the existing commissioning gates pass.
+- Bank transactions, payment evidence, discrepancies, outbox events, and delivery evidence remain append-only or status-transitioned. Resolution never deletes or rewrites provider evidence.
+- Terminal orphan handling records a reason and audit trail, stops retry churn, and keeps the original outbox payload/evidence available for review.
+- Admin screens expose safe identifiers and summaries only; no raw provider credentials, vault references, account inventory, or customer secrets are rendered.
+
+### Module seams and risk ledger
+
+- `catalog` owns resale-evidence records, publication readiness, and publication version binding; it reuses the current public/test visibility and route/readiness predicates.
+- `commerce/store-mode` owns the state machine and optimistic version guard; `identity` owns step-up authorization and audit events.
+- `payments/admin` owns discrepancy evidence/disposition; `infrastructure/outbox` owns terminal orphan classification and replay-safe disposition.
+- Telegram admin callbacks/presenters are adapters only. They must call domain services and cannot mutate PostgreSQL directly.
+- `invariants_preserved`: Telegram-only UX; closed-loop VND accounting; verified SePay evidence; transactional outbox; idempotent admin confirmations; secret-safe diagnostics; no direct inventory or payment bypass.
+- `intentional_breaks`: none to customer-facing commerce semantics; the remediation only makes previously implicit owner controls explicit and blocks unsafe publication/opening paths.
+- `risked_invariants`: evidence version drift, concurrent store transitions, duplicate disposition/replay, and retry suppression. Focused tests must cover stale versions, idempotent repeats, authorization boundaries, rollback, and terminal-vs-retry classification.
+
+### Cutover contract
+
+No production publication, store opening, discrepancy resolution, or support closure is performed by code deployment alone. The owner must supply legitimate evidence and complete the normal Telegram step-up flow. Production remains non-open until those human gates are observed and verified.

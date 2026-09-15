@@ -98,7 +98,7 @@ async function addOrder(
 }
 
 beforeEach(async () => {
-  await sql`truncate table support_ticket, outbox_event, payment_allocation, discrepancy, bank_transaction, payment_intent, order_transition, digital_asset, "order", product_variant, product, category, customer cascade`.execute(
+  await sql`truncate table test_customer_allowlist, support_ticket, outbox_event, payment_allocation, discrepancy, bank_transaction, payment_intent, order_transition, digital_asset, "order", product_variant, product, category, customer cascade`.execute(
     ctx.db,
   );
 });
@@ -166,6 +166,23 @@ describe("admin overview", () => {
 
   it("counts open and manual-review tickets as new work", async () => {
     const seedRow = await seed();
+    const testCustomerId = newId();
+    const testTelegramUserId = "990001";
+    await sql`insert into customer (id, status, locale) values (${testCustomerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into channel_identity (id, customer_id, channel, channel_user_id)
+      values (${newId()}, ${testCustomerId}, 'TELEGRAM', ${testTelegramUserId})
+    `.execute(ctx.db);
+    await sql`
+      insert into test_customer_allowlist (id, telegram_user_id, note, added_by)
+      values (${newId()}, ${testTelegramUserId}, 'overview test', 'test')
+    `.execute(ctx.db);
+    await sql`
+      insert into support_ticket (id, customer_id, reason_code, status, safe_summary, due_at)
+      values (${newId()}, ${testCustomerId}, 'OTHER', 'OPEN', 'test customer', now())
+    `.execute(ctx.db);
     for (const status of ["OPEN", "MANUAL_REVIEW", "RESOLVED"]) {
       const id = newId();
       await sql`

@@ -4,8 +4,8 @@ import type { Executor } from "../../infrastructure/db/transaction.js";
 /**
  * Admin overview aggregate (goal §71 summary block, §136 business overview).
  *
- * Read-only. Every figure EXCLUDES test and canary inventory: an `is_test` product is not real
- * trade, and the goal requires that test fixtures never inflate the owner's dashboard.
+ * Read-only. Revenue and order figures exclude test and archived products; support workload also
+ * excludes customers on the explicit test allowlist.
  *
  * The Vietnam day boundary is computed in JS from an injected `now` so the window is
  * deterministic under test instead of depending on the database session timezone.
@@ -99,8 +99,15 @@ export async function getAdminOverview(
 
   const tickets = await sql<{ new_tickets: number }>`
     select count(*)::int as new_tickets
-    from support_ticket
-    where status in ('OPEN', 'MANUAL_REVIEW')
+    from support_ticket t
+    where t.status in ('OPEN', 'MANUAL_REVIEW')
+      and not exists (
+        select 1
+        from channel_identity ci
+        join test_customer_allowlist a
+          on a.telegram_user_id::text = ci.channel_user_id::text
+        where ci.customer_id = t.customer_id
+      )
   `.execute(exec);
 
   const head = result.rows[0];

@@ -192,6 +192,18 @@ export interface AdminWarrantyAdjustTextIngress {
   isActive(telegramUserId: string): Promise<boolean>;
 }
 
+/**
+ * The owner-prompt free-text context (production-remediation screens): the publication
+ * evidence prompt, the discrepancy note prompt and the outbox-orphan note prompt each ask
+ * the owner to type one line. As with the other admin inputs, raw text is dropped before
+ * the dispatcher ever sees it, so the ingress has to vouch for it — and only while one of
+ * those prompts is actually pending.
+ */
+export interface AdminOwnerPromptTextIngress {
+  adminTelegramUserId: number;
+  isActive(telegramUserId: string): Promise<boolean>;
+}
+
 export interface TelegramWebhookOptions {
   path: string;
   secretToken: string;
@@ -201,6 +213,8 @@ export interface TelegramWebhookOptions {
   productContentEditText?: AdminProductContentEditIngress;
   /** Goal §26: the owner's typed refund adjustment, admitted only while the prompt is pending. */
   warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress;
+  /** Publication evidence / disposition notes; admitted only while one of those prompts is pending. */
+  ownerPromptText?: AdminOwnerPromptTextIngress;
   /** Goal §28: the search prompt's one-shot permission for a typed query. */
   customerSearchQuery?: CustomerSearchQueryIngress;
   metrics?: LatencyMetrics;
@@ -228,6 +242,7 @@ export async function registerTelegramWebhook(
           options.inventoryImportText,
           options.productContentEditText,
           options.warrantyRefundAdjustText,
+          options.ownerPromptText,
           options.customerSearchQuery,
         )
       : null;
@@ -295,6 +310,7 @@ async function normalizeTelegramUpdate(
   inventoryImportText?: AdminInventoryImportTextIngress,
   productContentEditText?: AdminProductContentEditIngress,
   warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress,
+  ownerPromptText?: AdminOwnerPromptTextIngress,
   customerSearchQuery?: CustomerSearchQueryIngress,
 ): Promise<TelegramCommandEnvelope | null> {
   if (
@@ -393,6 +409,7 @@ async function normalizeTelegramUpdate(
     inventoryImportText?: true;
     productContentEditText?: true;
     warrantyRefundAdjustText?: true;
+    ownerPromptText?: true;
   } | null = null;
   const isGroup = chatType === "group" || chatType === "supergroup";
   const isMentioned = Boolean(
@@ -443,6 +460,7 @@ async function normalizeTelegramUpdate(
       ...(inventoryImportText ? { inventoryImportText } : {}),
       ...(productContentEditText ? { productContentEditText } : {}),
       ...(warrantyRefundAdjustText ? { warrantyRefundAdjustText } : {}),
+      ...(ownerPromptText ? { ownerPromptText } : {}),
     });
   }
   const action =
@@ -454,9 +472,11 @@ async function normalizeTelegramUpdate(
           ? ("ADMIN" as const)
           : normalizedMessageText?.productContentEditText
             ? ("ADMIN" as const)
-            : normalizedMessageText?.rootProductDraftText
+            : normalizedMessageText?.ownerPromptText
               ? ("ADMIN" as const)
-              : classifyAction(callbackData, command);
+              : normalizedMessageText?.rootProductDraftText
+                ? ("ADMIN" as const)
+                : classifyAction(callbackData, command);
   const actorUsername = normalizeUsernameMetadata(actor.username);
   const contact = update.message?.contact;
   const contactPhoneNumber =
@@ -514,6 +534,7 @@ async function normalizeTelegramUpdate(
     ...(normalizedMessageText?.warrantyRefundAdjustText
       ? { warrantyRefundAdjustText: true as const }
       : {}),
+    ...(normalizedMessageText?.ownerPromptText ? { ownerPromptText: true as const } : {}),
     ...(actor.first_name ? { firstName: actor.first_name } : {}),
     ...(actor.last_name ? { lastName: actor.last_name } : {}),
     ...(actor.language_code ? { languageCode: actor.language_code } : {}),
@@ -649,6 +670,7 @@ async function normalizeSafeMessageText(
     inventoryImportText?: AdminInventoryImportTextIngress;
     productContentEditText?: AdminProductContentEditIngress;
     warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress;
+    ownerPromptText?: AdminOwnerPromptTextIngress;
   },
 ): Promise<{
   text: string;
@@ -656,6 +678,7 @@ async function normalizeSafeMessageText(
   inventoryImportText?: true;
   productContentEditText?: true;
   warrantyRefundAdjustText?: true;
+  ownerPromptText?: true;
 } | null> {
   if (!text || command) return null;
   const normalized = text.normalize("NFC").trim();
@@ -703,6 +726,8 @@ async function normalizeSafeMessageText(
       if (sanitized) return { text: sanitized, warrantyRefundAdjustText: true };
     }
   }
+  // A pending remediation prompt owns the next private text; otherwise keep the draft branch
+  // first so a valid wizard answer cannot become an operator note.
   if (
     context.rootProductDraftText &&
     context.chatType === "private" &&
@@ -711,6 +736,17 @@ async function normalizeSafeMessageText(
     const step = await context.rootProductDraftText.activeStep(String(context.actorId));
     const productText = step ? normalizeRootProductDraftText(normalized, step) : null;
     if (productText) return { text: productText, rootProductDraftText: true };
+  }
+  if (
+    context.ownerPromptText &&
+    context.chatType === "private" &&
+    context.actorId === context.ownerPromptText.adminTelegramUserId
+  ) {
+    const active = await context.ownerPromptText.isActive(String(context.actorId));
+    if (active) {
+      const sanitized = sanitizeProductContentText(normalized);
+      if (sanitized) return { text: sanitized, ownerPromptText: true };
+    }
   }
   return /^(?:0|[1-9][0-9]*|[1-9][0-9]{0,2}([.,])[0-9]{3}(?:\1[0-9]{3})*)$/u.test(normalized)
     ? { text: normalized }

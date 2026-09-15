@@ -5,7 +5,8 @@ import {
   addTestCustomer,
   canPurchase,
   getStoreMode,
-  setStoreMode,
+  setStoreModeForTest,
+  transitionStoreMode,
 } from "../../src/modules/commerce/store-mode.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -43,8 +44,110 @@ describe("store-mode safety", () => {
     expect(gate).toEqual({ ok: false, code: "STORE_CLOSED" });
   });
 
+  it("refuses OPEN when no published in-stock product is ready", async () => {
+    await expect(
+      transitionStoreMode(ctx.db, {
+        targetMode: "OPEN",
+        expectedVersion: 1,
+        requestId: "store-open-not-ready",
+        actorId: "admin",
+        reason: "must have a sellable product",
+        correlationId: "store-open-not-ready",
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "NOT_READY" });
+    expect(await getStoreMode(ctx.db)).toBe("CLOSED");
+  });
+
+  it("requires CLOSED-mediated transitions, optimistic versions, and idempotent replay", async () => {
+    const first = await transitionStoreMode(ctx.db, {
+      targetMode: "TEST",
+      expectedVersion: 1,
+      requestId: "store-test-1",
+      actorId: "admin",
+      reason: "pre-production test",
+      correlationId: "store-test-1",
+    });
+    expect(first).toMatchObject({
+      ok: true,
+      kind: "CHANGED",
+      control: { status: "TEST", version: 2 },
+    });
+
+    const replay = await transitionStoreMode(ctx.db, {
+      targetMode: "TEST",
+      expectedVersion: 1,
+      requestId: "store-test-1",
+      actorId: "admin",
+      reason: "pre-production test",
+      correlationId: "store-test-1-replay",
+    });
+    expect(replay).toMatchObject({
+      ok: true,
+      kind: "REPLAYED",
+      control: { status: "TEST", version: 2 },
+    });
+
+    await expect(
+      transitionStoreMode(ctx.db, {
+        targetMode: "OPEN",
+        expectedVersion: 2,
+        requestId: "store-open-invalid",
+        actorId: "admin",
+        reason: "must close first",
+        correlationId: "store-open-invalid",
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "INVALID_TRANSITION" });
+    await expect(
+      transitionStoreMode(ctx.db, {
+        targetMode: "CLOSED",
+        expectedVersion: 1,
+        requestId: "store-close-stale",
+        actorId: "admin",
+        reason: "stale snapshot",
+        correlationId: "store-close-stale",
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "VERSION_CONFLICT" });
+  });
+  it("returns the current control state when an old transition is replayed", async () => {
+    await transitionStoreMode(ctx.db, {
+      targetMode: "TEST",
+      expectedVersion: 1,
+      requestId: "store-test-replay-state",
+      actorId: "admin",
+      reason: "pre-production test",
+      correlationId: "store-test-replay-state",
+    });
+    await transitionStoreMode(ctx.db, {
+      targetMode: "CLOSED",
+      expectedVersion: 2,
+      requestId: "store-close-after-test",
+      actorId: "admin",
+      reason: "close after test",
+      correlationId: "store-close-after-test",
+    });
+
+    await expect(
+      transitionStoreMode(ctx.db, {
+        targetMode: "TEST",
+        expectedVersion: 1,
+        requestId: "store-test-replay-state",
+        actorId: "admin",
+        reason: "pre-production test",
+        correlationId: "store-test-replay-state-replay",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      kind: "REPLAYED",
+      control: {
+        status: "CLOSED",
+        version: 3,
+        lastRequestId: "store-close-after-test",
+      },
+    });
+  });
+
   it("TEST mode denies public SKUs and non-allowlisted buyers of test SKUs", async () => {
-    await setStoreMode(ctx.db, "TEST", "admin");
+    await setStoreModeForTest(ctx.db, "TEST", "admin");
     expect(await getStoreMode(ctx.db)).toBe("TEST");
     expect(
       await canPurchase(ctx.db, {
@@ -78,7 +181,7 @@ describe("store-mode safety", () => {
   });
 
   it("OPEN mode denies test SKUs", async () => {
-    await setStoreMode(ctx.db, "OPEN", "admin");
+    await setStoreModeForTest(ctx.db, "OPEN", "admin");
     expect(
       await canPurchase(ctx.db, {
         telegramUserId: "1",

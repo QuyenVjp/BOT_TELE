@@ -44,7 +44,7 @@ import type {
   presentAdminOrderDetail,
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
-import type { AdminCallbacks } from "./bot/callbacks/admin.js";
+import type { AdminCallbacks, HandleResult } from "./bot/callbacks/admin.js";
 import type { AuthorizationJsonValue } from "./modules/identity/authorization-payload.js";
 import type {
   SensitiveActionDeps,
@@ -168,9 +168,20 @@ import {
 } from "./modules/admin/order-operations.js";
 import {
   ADMIN_PAYMENT_OPS_VIEWS,
+  getAdminDiscrepancyDetail,
+  isDiscrepancyResolutionCode,
   listAdminPaymentOps,
-  type AdminPaymentOpsView,
 } from "./modules/admin/payment-ops.js";
+import {
+  getProductPublicationReadiness,
+  RESALE_EVIDENCE_SOURCES,
+  type ResaleEvidenceSource,
+} from "./modules/catalog/publication.js";
+import {
+  getTerminalOutboxOrphan,
+  isOutboxDispositionCode,
+  listTerminalOutboxOrphans,
+} from "./infrastructure/outbox/disposition.js";
 import { appendAuditEvent, listAuditEvents } from "./modules/identity/audit.js";
 
 export function marketingBroadcastClassForAudience(
@@ -1444,8 +1455,13 @@ async function bootstrap(): Promise<void> {
   const { DESCRIPTION_TEMPLATES } = await import("./modules/catalog/description-templates.js");
   const { createAdminProduct, createAdminVariant, updateAdminVariant } =
     await import("./modules/catalog/admin-products.js");
-  const { getStoreMode, setStoreMode, addTestCustomer, listTestCustomers } =
-    await import("./modules/commerce/store-mode.js");
+  const {
+    getStoreControl,
+    getStoreMode,
+    getStoreOpenReadiness,
+    addTestCustomer,
+    listTestCustomers,
+  } = await import("./modules/commerce/store-mode.js");
   const { adjustQuantityStock, listVariantInventoryHistory } =
     await import("./modules/catalog/quantity-stock.js");
   const {
@@ -1505,6 +1521,15 @@ async function bootstrap(): Promise<void> {
     presentAdminVariantDraft,
     presentAdminVariantFieldPrompt,
     presentAdminPaymentOps,
+    presentAdminDiscrepancyDetail,
+    presentAdminOutboxOrphans,
+    presentAdminOutboxDetail,
+    presentAdminNotePrompt,
+    presentAdminProductReadiness,
+    presentAdminEvidencePrompt,
+    presentAdminEvidenceRevokePrompt,
+    presentAdminStoreOpenBlocked,
+    presentAdminOperations,
     ADMIN_VARIANT_FIELDS,
     presentAdminVariantMutationDone,
     presentKillSwitchDone,
@@ -2094,6 +2119,25 @@ async function bootstrap(): Promise<void> {
     error instanceof SensitiveAuthorizationRefusedError
       ? presentSensitiveRefusal({ code: error.code, action, category })
       : null;
+  const isSensitiveCallbackRefusal = (code: string): code is SensitiveAuthorizationRefusal =>
+    code === "NOT_ROOT_ADMIN" ||
+    code === "STEP_UP_REQUIRED" ||
+    code === "STEP_UP_GRANT_MISSING" ||
+    code === "STEP_UP_NOT_ENROLLED" ||
+    code === "STEP_UP_LOCKED_OUT";
+  const presentAdminHandleRefusal = (
+    result: Extract<HandleResult, { ok: false }>,
+    action: SensitiveActionKey,
+  ): PresentedMessage =>
+    result.code === "WRONG_CONTEXT"
+      ? presentAdminDenied("WRONG_CONTEXT")
+      : isSensitiveCallbackRefusal(result.code)
+        ? presentSensitiveRefusal({
+            code: result.code,
+            action,
+            category: SENSITIVE_ACTION_POLICY[action],
+          })
+        : presentAdminDenied("NOT_ROOT_ADMIN");
 
   const authorizeSensitiveFor = (
     input: { telegramUserId: string; chatType: string; correlationId: string },
@@ -2259,6 +2303,7 @@ async function bootstrap(): Promise<void> {
       "telegram command menu sync failed",
     );
   }
+  const readStoreOpenCounts = () => getStoreOpenReadiness(dbHandle.db);
   const telegramDispatcher = createTelegramDomainDispatcher({
     codec: callbackCodec,
     resolveCustomerId,
@@ -2907,10 +2952,7 @@ async function bootstrap(): Promise<void> {
           reason: "Replacement approval requested from Telegram admin support UI",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) return presentAdminHandleRefusal(result, "support.replacement.approve");
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3059,10 +3101,7 @@ async function bootstrap(): Promise<void> {
           reason: "Manual fulfillment completion requested from Telegram admin UI",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) return presentAdminHandleRefusal(result, "manual_fulfillment.complete");
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3092,68 +3131,47 @@ async function bootstrap(): Promise<void> {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
           return presentAdminDenied("NOT_ROOT_ADMIN");
-        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+        return presentAdminStoreMode(await getStoreControl(dbHandle.db));
       },
       async storeTest(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
-          return presentAdminDenied("NOT_ROOT_ADMIN");
-        await setStoreMode(dbHandle.db, "TEST", input.telegramUserId);
-        await appendAuditEvent(dbHandle.db, {
-          actorType: "ROOT_ADMIN",
-          actorId: input.telegramUserId,
-          action: "store.test",
-          targetType: "StoreControl",
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const control = await getStoreControl(dbHandle.db);
+        const result = await adminCallbacks.handle({
+          command: "store.test",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           targetId: "main",
+          expectedVersion: control.version,
           reason: "Bật chế độ TEST — chỉ khách test mua được sản phẩm test",
           correlationId: input.correlationId,
         });
-        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.test");
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "store.test",
+            })
+          : presentAdminStoreMode(await getStoreControl(dbHandle.db));
       },
       async storeOpen(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
           return presentAdminDenied("NOT_ROOT_ADMIN");
-        const counts = await sql<{ active_products: number; in_stock_variants: number }>`
-          with public_variants as (
-            select v.id, v.fulfillment_type
-            from product_variant v
-            join product p on p.id = v.product_id
-            where v.is_active and p.is_active and not p.is_test and not p.is_archived
-              and v.price_vnd > 0
-          ),
-          stock as (
-            select pv.id,
-              case
-                when pv.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then (
-                  select count(*)::int from digital_asset a where a.variant_id = pv.id and a.status = 'AVAILABLE'
-                )
-                when pv.fulfillment_type = 'QUANTITY_STOCK' then coalesce((
-                  select q.available_quantity from variant_quantity_stock q where q.variant_id = pv.id
-                ), 0)::int
-                when pv.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then 1
-                when pv.fulfillment_type = 'DIGITAL_FILE' then (
-                  select count(*)::int from variant_file_artifact f where f.variant_id = pv.id and f.is_active
-                )
-                else 0
-              end as available
-            from public_variants pv
-          )
-          select
-            (select count(distinct p.id)::int from product p
-              join product_variant v on v.product_id = p.id and v.is_active
-              where p.is_active and not p.is_test and not p.is_archived) as active_products,
-            (select count(*)::int from stock where available > 0) as in_stock_variants
-        `.execute(dbHandle.db);
-        const row = counts.rows[0] ?? { active_products: 0, in_stock_variants: 0 };
-        if (row.active_products === 0)
-          return {
-            text: "Không thể mở bán: chưa có sản phẩm public đang hoạt động.\n\nTạo và kích hoạt ít nhất một sản phẩm public trước, hoặc dùng 🧪 Chế độ TEST để thử luồng mua.",
-            buttons: [
-              [{ text: "🧪 Chế độ TEST", callbackData: "admin:store:test" }],
-              [{ text: "⬅️ Quay lại", callbackData: "admin:store:mode" }],
-            ],
-          };
+        const control = await getStoreControl(dbHandle.db);
+        if (control.status !== "CLOSED") return presentAdminStoreMode(control);
+        const counts = await readStoreOpenCounts();
+        const row = {
+          active_products: counts.activeProducts,
+          in_stock_variants: counts.inStockVariants,
+        };
+        if (row.active_products === 0 || row.in_stock_variants === 0)
+          return presentAdminStoreOpenBlocked({
+            activeProducts: row.active_products,
+            inStockVariants: row.in_stock_variants,
+            control,
+          });
         return presentAdminStoreOpenConfirmation({
           activeProducts: row.active_products,
           inStockVariants: row.in_stock_variants,
@@ -3161,35 +3179,56 @@ async function bootstrap(): Promise<void> {
       },
       async storeOpenConfirm(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
-          return presentAdminDenied("NOT_ROOT_ADMIN");
-        await setStoreMode(dbHandle.db, "OPEN", input.telegramUserId);
-        await appendAuditEvent(dbHandle.db, {
-          actorType: "ROOT_ADMIN",
-          actorId: input.telegramUserId,
-          action: "store.open",
-          targetType: "StoreControl",
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const control = await getStoreControl(dbHandle.db);
+        if (control.status !== "CLOSED") return presentAdminStoreMode(control);
+        const counts = await readStoreOpenCounts();
+        if (counts.activeProducts === 0 || counts.inStockVariants === 0) {
+          return presentAdminStoreOpenBlocked({
+            activeProducts: counts.activeProducts,
+            inStockVariants: counts.inStockVariants,
+            control,
+          });
+        }
+        const result = await adminCallbacks.handle({
+          command: "store.open",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           targetId: "main",
+          expectedVersion: control.version,
           reason: "Mở bán công khai (xác nhận qua nút)",
           correlationId: input.correlationId,
         });
-        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.open");
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "store.open",
+            })
+          : presentAdminStoreMode(await getStoreControl(dbHandle.db));
       },
       async storeClose(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
-          return presentAdminDenied("NOT_ROOT_ADMIN");
-        await setStoreMode(dbHandle.db, "CLOSED", input.telegramUserId);
-        await appendAuditEvent(dbHandle.db, {
-          actorType: "ROOT_ADMIN",
-          actorId: input.telegramUserId,
-          action: "store.close",
-          targetType: "StoreControl",
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const control = await getStoreControl(dbHandle.db);
+        const result = await adminCallbacks.handle({
+          command: "store.close",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           targetId: "main",
+          expectedVersion: control.version,
           reason: "Đóng cửa hàng tạm dừng bán",
           correlationId: input.correlationId,
         });
-        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.close");
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "store.close",
+            })
+          : presentAdminStoreMode(await getStoreControl(dbHandle.db));
       },
       async dashboard(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -3383,6 +3422,66 @@ async function bootstrap(): Promise<void> {
         return presentAdminProducts(result.rows.slice(0, pageSize), { view, page, hasMore });
       },
       /** Goal §11 — featured is a product flag the owner toggles, on an existing product too. */
+      async operations(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: "admin-operations",
+          reason: "Admin operations readiness access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const productRows = await sql<{ id: string }>`
+          select id from product where is_active and not is_test and not is_archived
+        `.execute(dbHandle.db);
+        const readiness = await Promise.all(
+          productRows.rows.map((row) => getProductPublicationReadiness(dbHandle.db, row.id)),
+        );
+        const counts = await sql<{
+          open_discrepancies: number;
+          terminal_outbox: number;
+          open_support: number;
+          stock_account_not_ready: number;
+        }>`
+          select
+            (select count(*)::int from discrepancy where resolved_at is null) as open_discrepancies,
+            (select count(*)::int from outbox_event
+              where dead_lettered_at is not null and published_at is null and disposition_status is null) as terminal_outbox,
+            (select count(*)::int from support_ticket t
+              where t.status in ('OPEN','MANUAL_REVIEW')
+                and not exists (
+                  select 1
+                    from channel_identity ci
+                    join test_customer_allowlist a
+                      on a.telegram_user_id::text = ci.channel_user_id::text
+                   where ci.customer_id = t.customer_id
+                )) as open_support,
+            (select count(*)::int from product_variant v
+              join product p on p.id = v.product_id
+              where v.is_active and p.is_active and not p.is_test and not p.is_archived
+                and v.fulfillment_type = 'STOCK_ACCOUNT'
+                and not exists (select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE')) as stock_account_not_ready
+        `.execute(dbHandle.db);
+        const row = counts.rows[0] ?? {
+          open_discrepancies: 0,
+          terminal_outbox: 0,
+          open_support: 0,
+          stock_account_not_ready: 0,
+        };
+        return presentAdminOperations({
+          control: await getStoreControl(dbHandle.db),
+          publicationBlocked: readiness.filter((item) => item !== null && !item.canPublish).length,
+          openDiscrepancies: row.open_discrepancies,
+          terminalOutboxOrphans: row.terminal_outbox,
+          openSupportTickets: row.open_support,
+          stockAccountNotReady: row.stock_account_not_ready,
+        });
+      },
       async productFeature(input) {
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -3518,6 +3617,217 @@ async function bootstrap(): Promise<void> {
             expectedVersion: variant.version,
           })),
         });
+      },
+      async productReadiness(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: input.productId,
+          reason: "Admin product publication readiness access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const product = await sql<{ name: string }>`
+          select name_vi as name from product where id = ${input.productId} limit 1
+        `.execute(dbHandle.db);
+        const readiness = await getProductPublicationReadiness(dbHandle.db, input.productId);
+        if (!readiness || !product.rows[0])
+          return {
+            text: "Sản phẩm không còn hợp lệ.",
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+          };
+        return presentAdminProductReadiness({
+          name: product.rows[0].name,
+          readiness,
+          canSubmit: readiness.publicationVersion.length <= 300,
+        });
+      },
+      async productEvidence(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: input.variantId,
+          reason: "Admin resale evidence registration access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const variant = await sql<{ product_id: string; name: string }>`
+          select product_id, name_vi as name from product_variant where id = ${input.variantId} limit 1
+        `.execute(dbHandle.db);
+        const row = variant.rows[0];
+        if (!row)
+          return {
+            text: "Biến thể không còn hợp lệ.",
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+          };
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "ADMIN_RESALE_EVIDENCE_PROMPT",
+          payload: { productId: row.product_id, variantId: input.variantId },
+        });
+        return presentAdminEvidencePrompt({
+          productId: row.product_id,
+          variantId: input.variantId,
+          variantName: row.name,
+        });
+      },
+      /**
+       * `admin:products:evrevoke:<evidenceId>:<variantVersion>` off the readiness screen. The
+       * button carried the two opaque halves and nothing else, so this screen re-reads the
+       * evidence before it promises anything — a stale version, an already-revoked row or an
+       * unknown id answers with a screen rather than a prompt — and parks the reason prompt in
+       * admin_callback_state, exactly as the registration prompt does.
+       */
+      async evidenceRevoke(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: input.evidenceId,
+          reason: "Admin resale evidence revocation access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const row = (
+          await sql<{
+            id: string;
+            variant_id: string;
+            product_id: string;
+            variant_name: string;
+            variant_version: number;
+            source: string;
+            status: string;
+            recorded_at: string;
+          }>`
+            select re.id, re.variant_id, re.source, re.status,
+                   to_char(re.created_at, 'YYYY-MM-DD HH24:MI') as recorded_at,
+                   v.product_id, v.name_vi as variant_name, v.version as variant_version
+              from resale_evidence re
+              join product_variant v on v.id = re.variant_id
+             where re.id = ${input.evidenceId}
+             limit 1
+          `.execute(dbHandle.db)
+        ).rows[0];
+        if (!row)
+          return {
+            text: "Bằng chứng không còn hợp lệ.",
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+          };
+        const back = [
+          { text: "🚀 Readiness", callbackData: `admin:products:ready:${row.product_id}` },
+        ];
+        if (row.status !== "ACTIVE")
+          return {
+            text: "Bằng chứng không còn ở trạng thái ACTIVE nên không thể thu hồi.",
+            buttons: [back],
+          };
+        if (row.variant_version !== input.expectedVersion)
+          return {
+            text: "Biến thể đã thay đổi từ lúc mở màn hình. Mở lại readiness rồi thu hồi lại.",
+            buttons: [back],
+          };
+        if (!(RESALE_EVIDENCE_SOURCES as readonly string[]).includes(row.source))
+          return { text: "Nguồn bằng chứng không hợp lệ.", buttons: [back] };
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "ADMIN_RESALE_EVIDENCE_PROMPT",
+          payload: {
+            // Same state kind as the registration prompt, discriminated by intent: the typed
+            // line means a reason here and a SOURCE|REFERENCE|SUMMARY triple there.
+            intent: "REVOKE",
+            productId: row.product_id,
+            variantId: row.variant_id,
+            evidenceId: row.id,
+            expectedVersion: input.expectedVersion,
+          },
+        });
+        return presentAdminEvidenceRevokePrompt({
+          productId: row.product_id,
+          variantName: row.variant_name,
+          evidenceId: row.id,
+          source: row.source as ResaleEvidenceSource,
+          recordedAt: row.recorded_at,
+          variantVersion: input.expectedVersion,
+        });
+      },
+      async productPublish(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: input.productId,
+          reason: "Admin product publication access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const [product, readiness] = await Promise.all([
+          sql<{
+            name: string;
+          }>`select name_vi as name from product where id = ${input.productId} limit 1`.execute(
+            dbHandle.db,
+          ),
+          getProductPublicationReadiness(dbHandle.db, input.productId),
+        ]);
+        if (!readiness || !product.rows[0])
+          return {
+            text: "Sản phẩm không còn hợp lệ.",
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
+          };
+        if (!readiness.canPublish)
+          return presentAdminProductReadiness({
+            name: product.rows[0].name,
+            readiness,
+            canSubmit: readiness.publicationVersion.length <= 300,
+          });
+        const result = await adminCallbacks.handle({
+          command: "catalog.publish",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: input.productId,
+          expectedVersion: readiness.publicationVersion,
+          reason: "Xuất bản sản phẩm sau khi kiểm tra readiness và bằng chứng",
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) {
+          if (result.code === "WRONG_CONTEXT" || isSensitiveCallbackRefusal(result.code))
+            return presentAdminHandleRefusal(result, "catalog.publish");
+          return {
+            text: "Không thể tạo yêu cầu xuất bản; readiness hoặc phiên bản đã thay đổi. Mở lại để kiểm tra.",
+            buttons: [
+              [{ text: "🚀 Readiness", callbackData: `admin:products:ready:${input.productId}` }],
+            ],
+          };
+        }
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "catalog.publish",
+            })
+          : presentAdminProductReadiness({
+              name: product.rows[0].name,
+              readiness:
+                (await getProductPublicationReadiness(dbHandle.db, input.productId)) ?? readiness,
+              canSubmit: true,
+            });
       },
       async variantCreatePrompt(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -3738,16 +4048,216 @@ async function bootstrap(): Promise<void> {
        * value alone, and the state it writes is what vouches for the reply — free text with no such
        * state open falls through to the rest of the text chain.
        */
+      async ownerPromptText(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        const pending = await sql<{ id: string; kind: string; payload: Record<string, unknown> }>`
+          select id, kind, payload_redacted as payload
+            from admin_callback_state
+           where admin_telegram_user_id = ${input.telegramUserId}
+             and kind in ('ADMIN_RESALE_EVIDENCE_PROMPT','ADMIN_PAYMENT_DISPOSITION_PROMPT','ADMIN_OUTBOX_DISPOSITION_PROMPT')
+             and expires_at > now()
+           order by created_at desc, id desc
+           limit 1
+        `.execute(dbHandle.db);
+        const state = pending.rows[0];
+        if (!state || !adminCallbacks) return null;
+        const payload = state.payload ?? {};
+        const actor = { numericUserId: Number(input.telegramUserId), chatType: "private" as const };
+        if (state.kind === "ADMIN_RESALE_EVIDENCE_PROMPT" && payload.intent !== "REVOKE") {
+          const variantId = typeof payload.variantId === "string" ? payload.variantId : null;
+          const productId = typeof payload.productId === "string" ? payload.productId : null;
+          const fields = input.text.split("|").map((value) => value.trim());
+          const source = fields[0];
+          if (
+            !variantId ||
+            !productId ||
+            fields.length !== 3 ||
+            !source ||
+            !(RESALE_EVIDENCE_SOURCES as readonly string[]).includes(source)
+          ) {
+            return {
+              text: "Định dạng không hợp lệ. Gửi đúng: NGUỒN|MÃ THAM CHIẾU|TÓM TẮT AN TOÀN",
+              buttons: [
+                [{ text: "↩️ Readiness", callbackData: `admin:products:ready:${productId ?? ""}` }],
+              ],
+            };
+          }
+          const result = await adminCallbacks.handle({
+            command: "catalog.evidence.register",
+            actor,
+            targetId: variantId,
+            input: fields.join("|"),
+            reason: "Đăng ký bằng chứng nguồn nhập hàng qua Telegram",
+            correlationId: input.correlationId,
+          });
+          if (!result.ok)
+            return {
+              text: result.message,
+              buttons: [
+                [{ text: "🧾 Nhập lại", callbackData: `admin:products:evidence:${variantId}` }],
+              ],
+            };
+          await sql`delete from admin_callback_state where id = ${state.id} and admin_telegram_user_id = ${input.telegramUserId}`.execute(
+            dbHandle.db,
+          );
+          if (result.needsConfirmation)
+            return presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "catalog.evidence.register",
+            });
+          return {
+            text: "✅ Đã đăng ký yêu cầu bằng chứng. Mở lại readiness để kiểm tra.",
+            buttons: [
+              [{ text: "🚀 Readiness", callbackData: `admin:products:ready:${productId}` }],
+            ],
+          };
+        }
+        const note = input.text.trim();
+        if (!note || note.length > 200) {
+          return { text: "Ghi chú phải có 1–200 ký tự. Gửi lại một dòng ngắn.", buttons: [] };
+        }
+        if (state.kind === "ADMIN_RESALE_EVIDENCE_PROMPT" && payload.intent === "REVOKE") {
+          const variantId = typeof payload.variantId === "string" ? payload.variantId : null;
+          const productId = typeof payload.productId === "string" ? payload.productId : null;
+          const evidenceId = typeof payload.evidenceId === "string" ? payload.evidenceId : null;
+          const expectedVersion =
+            typeof payload.expectedVersion === "number" ? payload.expectedVersion : null;
+          if (!variantId || !productId || !evidenceId || expectedVersion === null) return null;
+          const result = await adminCallbacks.handle({
+            command: "catalog.evidence.revoke",
+            actor,
+            targetId: variantId,
+            input: evidenceId,
+            expectedVersion,
+            reason: note,
+            correlationId: input.correlationId,
+          });
+          if (!result.ok)
+            return {
+              text: result.message,
+              buttons: [
+                [
+                  {
+                    text: "🔁 Nhập lại lý do",
+                    callbackData: `admin:products:evrevoke:${evidenceId}:${expectedVersion}`,
+                  },
+                ],
+                [{ text: "🚀 Readiness", callbackData: `admin:products:ready:${productId}` }],
+              ],
+            };
+          // The prompt state is dropped only now that a durable command exists: a refused
+          // issue leaves it in place, so the owner can retry the same line exactly as the
+          // registration and disposition prompts do.
+          await sql`delete from admin_callback_state where id = ${state.id} and admin_telegram_user_id = ${input.telegramUserId}`.execute(
+            dbHandle.db,
+          );
+          if (result.needsConfirmation)
+            return presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "catalog.evidence.revoke",
+            });
+          return {
+            text: "✅ Đã thu hồi bằng chứng. Hãy đăng ký bằng chứng mới rồi mở lại readiness và xuất bản lại.",
+            buttons: [
+              [{ text: "🚀 Readiness", callbackData: `admin:products:ready:${productId}` }],
+            ],
+          };
+        }
+        if (state.kind === "ADMIN_PAYMENT_DISPOSITION_PROMPT") {
+          const discrepancyId =
+            typeof payload.discrepancyId === "string" ? payload.discrepancyId : null;
+          const expectedVersion =
+            typeof payload.expectedVersion === "number" ? payload.expectedVersion : null;
+          const resolutionCode =
+            typeof payload.resolutionCode === "string" ? payload.resolutionCode : null;
+          if (
+            !discrepancyId ||
+            expectedVersion === null ||
+            !resolutionCode ||
+            !isDiscrepancyResolutionCode(resolutionCode)
+          )
+            return null;
+          const result = await adminCallbacks.handle({
+            command: "discrepancy.resolve",
+            actor,
+            targetId: discrepancyId,
+            expectedVersion,
+            resolutionCode,
+            reason: note,
+            correlationId: input.correlationId,
+          });
+          if (!result.ok)
+            return {
+              text: result.message,
+              buttons: [[{ text: "⬅️ Sai lệch", callbackData: "admin:payments:discrepancy" }]],
+            };
+          await sql`delete from admin_callback_state where id = ${state.id} and admin_telegram_user_id = ${input.telegramUserId}`.execute(
+            dbHandle.db,
+          );
+          return result.needsConfirmation
+            ? presentHighRiskChallenge({
+                confirmationId: result.confirmationId,
+                challenge: result.challenge,
+                expiresAt: result.expiresAt,
+                action: "discrepancy.resolve",
+              })
+            : {
+                text: "✅ Đã ghi nhận xử lý sai lệch.",
+                buttons: [[{ text: "⚠️ Sai lệch", callbackData: "admin:payments:discrepancy" }]],
+              };
+        }
+        const eventId = typeof payload.eventId === "string" ? payload.eventId : null;
+        const expectedVersion =
+          typeof payload.expectedVersion === "number" ? payload.expectedVersion : null;
+        const dispositionCode =
+          typeof payload.resolutionCode === "string" ? payload.resolutionCode : null;
+        if (
+          !eventId ||
+          expectedVersion === null ||
+          !dispositionCode ||
+          !isOutboxDispositionCode(dispositionCode)
+        )
+          return null;
+        const result = await adminCallbacks.handle({
+          command: "outbox.orphan.dispose",
+          actor,
+          targetId: eventId,
+          expectedVersion,
+          resolutionCode: dispositionCode,
+          reason: note,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok)
+          return {
+            text: result.message,
+            buttons: [[{ text: "⬅️ Outbox treo", callbackData: "admin:payments:outbox" }]],
+          };
+        await sql`delete from admin_callback_state where id = ${state.id} and admin_telegram_user_id = ${input.telegramUserId}`.execute(
+          dbHandle.db,
+        );
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "outbox.orphan.dispose",
+            })
+          : {
+              text: "✅ Đã ghi nhận xử lý outbox terminal.",
+              buttons: [[{ text: "🧯 Outbox treo", callbackData: "admin:payments:outbox" }]],
+            };
+      },
       /** Goal §95: the payment queues behind the admin payment screen. */
       async paymentsView(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
-        const view = input.view as AdminPaymentOpsView;
-        if (!ADMIN_PAYMENT_OPS_VIEWS.some((entry) => entry.view === view))
-          return {
-            text: "Mục thanh toán không hợp lệ.",
-            buttons: [[{ text: "💳 Thanh toán", callbackData: "admin:payments" }]],
-          };
+        const view = input.view;
         const gate = await adminCallbacks.handle({
           command: "order.inspect",
           actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
@@ -3759,8 +4269,91 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const page = await listAdminPaymentOps(dbHandle.db, view);
-        return presentAdminPaymentOps(page);
+
+        if (view === "outbox") {
+          const rows = await listTerminalOutboxOrphans(dbHandle.db);
+          return presentAdminOutboxOrphans({
+            rows: rows.map((row) => ({
+              id: row.id,
+              eventType: row.eventType,
+              lastErrorCode: row.lastErrorCode,
+              attemptCount: row.attemptCount,
+              dispositionStatus: row.dispositionStatus,
+            })),
+          });
+        }
+        const [route, id, code] = view.split(":");
+        if (route === "o" && id) {
+          const detail = await getTerminalOutboxOrphan(dbHandle.db, id);
+          return detail
+            ? presentAdminOutboxDetail(detail)
+            : {
+                text: "Không tìm thấy outbox treo hoặc event đã không còn terminal.",
+                buttons: [[{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }]],
+              };
+        }
+        if ((route === "d" || route === "r") && id) {
+          const detail = await getAdminDiscrepancyDetail(dbHandle.db, id);
+          if (!detail)
+            return {
+              text: "Không tìm thấy sai lệch hoặc dữ liệu đã thay đổi.",
+              buttons: [[{ text: "⬅️ Sai lệch", callbackData: "admin:payments:discrepancy" }]],
+            };
+          if (route === "d") return presentAdminDiscrepancyDetail(detail);
+          if (!code || !isDiscrepancyResolutionCode(code))
+            return presentAdminDiscrepancyDetail(detail);
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "ADMIN_PAYMENT_DISPOSITION_PROMPT",
+            payload: {
+              discrepancyId: detail.id,
+              expectedVersion: detail.version,
+              resolutionCode: code,
+            },
+          });
+          return presentAdminNotePrompt({
+            title: "⚠️ GHI NHẬN XỬ LÝ SAI LỆCH",
+            action: code,
+            back: `admin:payments:d:${detail.id}`,
+          });
+        }
+        if (route === "x" && id) {
+          const detail = await getTerminalOutboxOrphan(dbHandle.db, id);
+          if (!detail) {
+            return {
+              text: "Không tìm thấy outbox treo hoặc event đã không còn terminal.",
+              buttons: [[{ text: "⬅️ Outbox treo", callbackData: "admin:payments:outbox" }]],
+            };
+          }
+          if (!code || !isOutboxDispositionCode(code)) return presentAdminOutboxDetail(detail);
+          await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "ADMIN_OUTBOX_DISPOSITION_PROMPT",
+            payload: {
+              eventId: detail.orphan.id,
+              expectedVersion: detail.orphan.dispositionVersion,
+              resolutionCode: code,
+            },
+          });
+          return presentAdminNotePrompt({
+            title: "🧯 ĐÓNG OUTBOX TERMINAL",
+            action: code,
+            back: `admin:payments:o:${detail.orphan.id}`,
+          });
+        }
+        const standardView = ADMIN_PAYMENT_OPS_VIEWS.find((entry) => entry.view === view)?.view;
+        if (!standardView)
+          return {
+            text: "Mục thanh toán không hợp lệ.",
+            buttons: [[{ text: "💳 Thanh toán", callbackData: "admin:payments" }]],
+          };
+        const page = await listAdminPaymentOps(dbHandle.db, standardView, 20);
+        return presentAdminPaymentOps({
+          ...page,
+          ...(standardView === "unmatched" || standardView === "discrepancy"
+            ? { rowCallbackPrefix: "admin:payments:d:" }
+            : {}),
+        });
       },
       async variantEditField(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -4103,10 +4696,11 @@ async function bootstrap(): Promise<void> {
           reason: "Signed Telegram owner callback",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) {
+          if (result.code === "WRONG_CONTEXT") return presentAdminDenied("WRONG_CONTEXT");
+          if (isSensitiveActionKey(command)) return presentAdminHandleRefusal(result, command);
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        }
         if (result.needsConfirmation)
           return presentHighRiskChallenge({
             confirmationId: result.confirmationId,
@@ -4135,12 +4729,21 @@ async function bootstrap(): Promise<void> {
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           correlationId: input.correlationId,
         });
-        return result.ok
-          ? presentHighRiskDone("admin.confirm")
-          : {
-              text: "❌ Xác nhận thất bại hoặc đã hết hạn",
-              buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
-            };
+        if (result.ok) return presentHighRiskDone("admin.confirm");
+        if (isSensitiveCallbackRefusal(result.code)) {
+          // A root-gate denial carries no action; the presenter only needs one for a step-up.
+          const refusedAction =
+            result.action && isSensitiveActionKey(result.action) ? result.action : null;
+          return presentSensitiveRefusal({
+            code: result.code,
+            action: refusedAction ?? "admin.confirm",
+            category: refusedAction ? SENSITIVE_ACTION_POLICY[refusedAction] : null,
+          });
+        }
+        return {
+          text: "❌ Xác nhận thất bại hoặc đã hết hạn",
+          buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+        };
       },
       async inventory(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");

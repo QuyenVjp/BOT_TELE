@@ -80,6 +80,23 @@ async function seed(): Promise<SeedIds> {
       (${supplierOnlyProductId}, ${activeCategoryId}, 'Chỉ nhà cung cấp', 'chi-nha-cung-cap', true, 3)
   `.execute(ctx.db);
 
+  // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+  const publishVariant = async (variantId: string, evidenceId: string) => {
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION', ${"TEST-REF-" + evidenceId}, 'fixture publication evidence', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = ${evidenceId},
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
+  };
+
   // Five sellable variants for pagination (sort_order 1..5).
   const sellableVariantIds: string[] = [];
   for (let i = 1; i <= 5; i++) {
@@ -93,6 +110,13 @@ async function seed(): Promise<SeedIds> {
         (${id}, ${activeProductId}, ${"SKU-OK-" + i}, ${"Gói " + i}, ${100000 * i},
          'P1M', 'LICENSE', 30, 'LOCAL_ONLY', ${"RES-" + i}, true, ${i})
     `.execute(ctx.db);
+    await publishVariant(id, "RES-" + i);
+    // LICENSE resolves to STOCK_CODE, so the sellable route needs one available asset.
+    const assetId = newId();
+    await sql`
+      insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+      values (${assetId}, ${id}, 'TEST_FIXTURE', ${"test-vault-ref-" + assetId}, ${"test-fp-" + assetId}, 'AVAILABLE')
+    `.execute(ctx.db);
   }
 
   await sql`
@@ -105,6 +129,8 @@ async function seed(): Promise<SeedIds> {
       (${configuredSupplierVariantId}, ${supplierOnlyProductId}, 'SKU-SUPPLIER-OK', 'Nguồn nhà cung cấp OK', 100000,
        'P1M', 'LICENSE', 30, 'SUPPLIER_ONLY', 'RES-SUP-OK', true, 7, 'SUPPLIER_API')
   `.execute(ctx.db);
+  await publishVariant(zeroQuantityVariantId, "RES-QTY");
+  await publishVariant(configuredSupplierVariantId, "RES-SUP-OK");
   await sql`insert into variant_quantity_stock (variant_id, available_quantity) values (${zeroQuantityVariantId}, 0)`.execute(
     ctx.db,
   );

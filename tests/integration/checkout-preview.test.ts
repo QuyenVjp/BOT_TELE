@@ -57,6 +57,20 @@ async function seedCatalog(): Promise<Catalog> {
     insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, resale_evidence_id)
     values (${variantId}, ${productId}, ${"SKU-" + variantId}, '1 tháng', ${price}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'RES-1')
   `.execute(ctx.db);
+  // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+  await sql`
+    insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+    values ('RES-1', ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF-CHECKOUT-PREVIEW', 'fixture publication evidence', 'test')
+  `.execute(ctx.db);
+  await sql`
+    update product_variant
+       set publication_evidence_id = 'RES-1',
+           publication_product_version = 1,
+           publication_variant_version = 1,
+           published_at = now(),
+           published_by = 'test'
+     where id = ${variantId}
+  `.execute(ctx.db);
   for (let i = 0; i < 3; i++) {
     const assetId = newId();
     await sql`

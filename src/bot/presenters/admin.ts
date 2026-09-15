@@ -5,7 +5,7 @@ import {
   type FulfillmentType,
   type InventoryField,
 } from "../../modules/catalog/fulfillment-type.js";
-import type { StoreMode } from "../../modules/commerce/store-mode.js";
+import type { StoreControl, StoreMode } from "../../modules/commerce/store-mode.js";
 import type { AuditEvent } from "../../modules/identity/audit.js";
 import type { SensitiveAuthorizationRefusal } from "../../modules/identity/sensitive-action.js";
 import type { BroadcastRefusal } from "../../modules/notification/service.js";
@@ -16,6 +16,20 @@ import type {
 } from "../../modules/admin/order-operations.js";
 import { canTicketTransition, type SupportTicketStatus } from "../../modules/support/domain.js";
 import type { AdminSupportTicketRow } from "../../modules/support/service.js";
+import type {
+  AdminDiscrepancyDetail,
+  DiscrepancyResolutionCode,
+} from "../../modules/admin/payment-ops.js";
+import type {
+  OutboxDispositionCode,
+  TerminalOutboxOrphanDetail,
+} from "../../infrastructure/outbox/disposition.js";
+import type {
+  PublicationBlocker,
+  ProductPublicationReadiness,
+  ResaleEvidenceSource,
+} from "../../modules/catalog/publication.js";
+import { isId } from "../../shared/ids/index.js";
 import { REASON_LABEL } from "./support.js";
 import { renderAdminProductList, type AdminProductView } from "./admin-product-list.js";
 
@@ -89,7 +103,7 @@ export const ADMIN_NAV_ITEMS: AdminNavItem[] = [
     id: "operations",
     label: ADMIN_COPY.operations,
     callbackData: "admin:operations",
-    enabled: false,
+    enabled: true,
   },
   { id: "audit", label: ADMIN_COPY.audit, callbackData: "admin:audit", enabled: false },
 ] as const;
@@ -109,6 +123,7 @@ export const ADMIN_VISIBLE_ROUTE_KEYS = ADMIN_NAV_ITEMS.filter((item) => item.en
   | "suppliers"
   | "support"
   | "testing"
+  | "operations"
 >;
 
 /**
@@ -176,17 +191,97 @@ export function presentAdminMenu(
   };
 }
 
-export function presentAdminStoreMode(mode: StoreMode): PresentedMessage {
+export const STORE_MODE_BANNER: Record<StoreMode, string> = {
+  OPEN: "🟢 ĐANG MỞ BÁN",
+  TEST: "🟡 CHẾ ĐỘ TEST",
+  CLOSED: "🔴 CỬA HÀNG ĐANG ĐÓNG",
+};
+
+/**
+ * The guarded store control, as the owner must see it: the current status WITH the
+ * version every transition is checked against, and only the buttons the store state
+ * machine can actually accept. `TEST → OPEN` is not an allowed transition, so the
+ * screen used to offer an "open" button whose confirmation could never succeed.
+ */
+export function presentAdminStoreMode(control: StoreControl): PresentedMessage {
+  const mode = control.status;
   const buttons: InlineButton[][] = [];
-  if (mode === "CLOSED")
+  if (mode === "CLOSED") {
     buttons.push([{ text: "🧪 Chế độ TEST", callbackData: "admin:store:test" }]);
-  if (mode !== "OPEN") buttons.push([{ text: "🟢 Mở bán", callbackData: "admin:store:open" }]);
+    buttons.push([{ text: "🟢 Mở bán", callbackData: "admin:store:open" }]);
+  }
   if (mode !== "CLOSED")
     buttons.push([{ text: "🔴 Đóng cửa hàng", callbackData: "admin:store:close" }]);
   buttons.push([{ text: "⬅️ Quay lại", callbackData: "admin:menu" }]);
   return {
-    text: `🏪 Trạng thái cửa hàng\n\n${mode === "OPEN" ? "🟢 ĐANG MỞ BÁN" : mode === "TEST" ? "🟡 CHẾ ĐỘ TEST" : "🔴 CỬA HÀNG ĐANG ĐÓNG"}`,
+    text: [
+      "🏪 Trạng thái cửa hàng",
+      "",
+      STORE_MODE_BANNER[mode],
+      `Phiên bản điều khiển: ${control.version}`,
+      `Cập nhật: ${control.updatedAt}${control.updatedBy ? ` · bởi ${control.updatedBy}` : ""}`,
+      ...(mode === "TEST"
+        ? ["", "Đang ở chế độ TEST. Muốn mở bán công khai, đóng cửa hàng trước rồi mở bán."]
+        : []),
+    ].join("\n"),
     buttons,
+  };
+}
+
+/** The commissioning gate refused the open: show the counts, never a shortcut around them. */
+export interface AdminOperationsSnapshot {
+  control: StoreControl;
+  publicationBlocked: number;
+  openDiscrepancies: number;
+  terminalOutboxOrphans: number;
+  openSupportTickets: number;
+  stockAccountNotReady: number;
+}
+
+export function presentAdminOperations(input: AdminOperationsSnapshot): PresentedMessage {
+  const { control } = input;
+  return {
+    text: [
+      "🛠 VẬN HÀNH / READINESS",
+      "",
+      `${STORE_MODE_BANNER[control.status]} · phiên bản ${control.version}`,
+      `Publication còn blocker: ${input.publicationBlocked}`,
+      `STOCK_ACCOUNT chưa sẵn sàng: ${input.stockAccountNotReady}`,
+      `Sai lệch thanh toán mở: ${input.openDiscrepancies}`,
+      `Outbox terminal treo: ${input.terminalOutboxOrphans}`,
+      `Ticket hỗ trợ mở: ${input.openSupportTickets}`,
+      "",
+      "Không có thao tác tự động trên màn hình này; từng mutation vẫn đi qua owner confirmation.",
+    ].join("\n"),
+    buttons: [
+      [{ text: "💳 Thanh toán / sai lệch", callbackData: "admin:payments:discrepancy" }],
+      [{ text: "🛍 Readiness sản phẩm", callbackData: "admin:products" }],
+      [{ text: "🏪 Store control", callbackData: "admin:store:mode" }],
+      [{ text: "💬 Ticket hỗ trợ", callbackData: "admin:support" }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentAdminStoreOpenBlocked(input: {
+  activeProducts: number;
+  inStockVariants: number;
+  control: StoreControl;
+}): PresentedMessage {
+  return {
+    text: [
+      "⚠️ CHƯA THỂ MỞ BÁN",
+      "",
+      `Sản phẩm public đang hoạt động: ${input.activeProducts}`,
+      `Biến thể đang còn hàng: ${input.inStockVariants}`,
+      "",
+      "Cần ít nhất một sản phẩm public đang hoạt động và còn hàng, hoặc mở bán sẽ bán ra sản phẩm rỗng.",
+      `${STORE_MODE_BANNER[input.control.status]} · phiên bản ${input.control.version}`,
+    ].join("\n"),
+    buttons: [
+      [{ text: "↩️ Trạng thái cửa hàng", callbackData: "admin:store:mode" }],
+      adminNav("admin:menu"),
+    ],
   };
 }
 export function presentAdminStoreOpenConfirmation(input: {
@@ -429,6 +524,7 @@ export function presentAdminPaymentsMenu(statusText?: string | undefined): Prese
         { text: "⚠️ Sai lệch", callbackData: "admin:payments:discrepancy" },
         { text: "↩️ Cần hoàn tiền", callbackData: "admin:payments:refund" },
       ],
+      [{ text: "🧯 Outbox treo", callbackData: "admin:payments:outbox" }],
       adminNav("admin:menu"),
     ],
   };
@@ -438,15 +534,323 @@ export function presentAdminPaymentOps(input: {
   title: string;
   rows: Array<{ id: string; label: string; detail: string }>;
   emptyHint: string;
+  rowCallbackPrefix?: string;
 }): PresentedMessage {
   const body = input.rows.length
     ? input.rows.map((row) => `• ${row.label}\n   ${row.detail}`).join("\n")
     : input.emptyHint;
+  const rowButtons = input.rowCallbackPrefix
+    ? input.rows.map((row) => [
+        {
+          text: `🔎 ${row.label.slice(0, 28)}`,
+          callbackData: `${input.rowCallbackPrefix}${row.id}`,
+        },
+      ])
+    : [];
   return {
     text: `${input.title}\n\n${body}`,
-    buttons: [[{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }], adminNav("admin:menu")],
+    buttons: [
+      ...rowButtons,
+      [{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }],
+      adminNav("admin:menu"),
+    ],
   };
 }
+
+const DISCREPANCY_DISPOSITION_BUTTONS: ReadonlyArray<readonly [string, DiscrepancyResolutionCode]> =
+  [
+    ["✅ Đã đối soát", "MANUAL_SETTLE"],
+    ["↩️ Hoàn tiền", "MANUAL_REFUND"],
+    ["♻️ Trùng chứng từ", "DUPLICATE_EVIDENCE"],
+    ["🚫 Chứng từ sai", "INVALID_EVIDENCE"],
+    ["📌 Không cần xử lý", "NO_ACTION_REQUIRED"],
+    ["🚨 Chuyển escalated", "ESCALATED"],
+  ];
+
+export function presentAdminDiscrepancyDetail(detail: AdminDiscrepancyDetail): PresentedMessage {
+  const evidence = detail.evidence;
+  const lines = [
+    `⚠️ SAI LỆCH ${detail.id.slice(-6)}`,
+    `Phân loại: ${detail.classification}${detail.classificationKnown ? "" : " (legacy)"}`,
+    `Trạng thái: ${detail.status} · phiên bản ${detail.version}`,
+    `Lý do: ${detail.reason}`,
+    `Chủ xử lý: ${detail.owner} · hạn ${detail.dueAt ?? "—"}`,
+    `Đơn: ${detail.orderNumber ?? "không gắn đơn"}`,
+    `Payment intent: ${detail.paymentIntentId ? "có" : "không"}`,
+  ];
+  if (evidence) {
+    lines.push(
+      `Bằng chứng ${evidence.provider} · ${evidence.direction} · ${evidence.amountVnd.toLocaleString("vi-VN")} ₫`,
+      `Provider GD: ${evidence.providerTransactionIdMasked} · tài khoản: ${evidence.merchantAccountMasked}`,
+      `Reference: ${evidence.referenceMasked ?? "—"} · nội dung: ${evidence.transferContentSummary ?? "—"}`,
+      `Ký: ${evidence.signatureStatus} · immutable: ${evidence.immutable ? "yes" : "no"}`,
+    );
+  }
+  const buttons =
+    detail.status === "OPEN"
+      ? DISCREPANCY_DISPOSITION_BUTTONS.map(([text, code]) => [
+          { text, callbackData: `admin:payments:r:${detail.id}:${code}` },
+        ])
+      : [];
+  if (detail.resolutionCode)
+    lines.push(`Kết luận: ${detail.resolutionCode} · ghi chú: ${detail.resolutionNote ?? "—"}`);
+  return {
+    text: lines.join("\n"),
+    buttons: [
+      ...buttons,
+      [{ text: "⬅️ Sai lệch", callbackData: "admin:payments:discrepancy" }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+const OUTBOX_DISPOSITION_BUTTONS: ReadonlyArray<readonly [string, OutboxDispositionCode]> = [
+  ["✅ Đã xử lý thủ công", "HANDLED_MANUALLY"],
+  ["🚫 Không còn áp dụng", "NO_LONGER_APPLICABLE"],
+  ["♻️ Sự kiện trùng", "DUPLICATE_EVENT"],
+  ["⛔ Event không hợp lệ", "INVALID_EVENT"],
+  ["🚨 Escalate", "ESCALATED"],
+];
+
+export function presentAdminOutboxOrphans(input: {
+  rows: Array<{
+    id: string;
+    eventType: string;
+    lastErrorCode: string | null;
+    attemptCount: number;
+    dispositionStatus: string | null;
+  }>;
+}): PresentedMessage {
+  const body = input.rows.length
+    ? input.rows
+        .map(
+          (row) =>
+            `• ${row.eventType} · ${row.lastErrorCode ?? "—"} · lần ${row.attemptCount}${row.dispositionStatus ? ` · ${row.dispositionStatus}` : ""}`,
+        )
+        .join("\n")
+    : "Không có outbox treo cần xử lý.";
+  const buttons = input.rows.map((row) => [
+    { text: `🔎 ${row.eventType.slice(0, 28)}`, callbackData: `admin:payments:o:${row.id}` },
+  ]);
+  return {
+    text: `🧯 OUTBOX TREO\n\n${body}`,
+    buttons: [
+      ...buttons,
+      [{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+
+export function presentAdminOutboxDetail(detail: TerminalOutboxOrphanDetail): PresentedMessage {
+  const row = detail.orphan;
+  const lines = [
+    `🧯 OUTBOX ${row.id.slice(-6)}`,
+    `Event: ${row.eventType} · aggregate ${row.aggregateType}`,
+    `Lỗi cuối: ${row.lastErrorCode ?? "—"} · attempts ${row.attemptCount}`,
+    `Parked: ${row.deadLetteredAt} · disposition version ${row.dispositionVersion}`,
+    `Trạng thái: ${row.dispositionStatus ?? "OPEN"}`,
+    "Payload gốc được giữ nguyên trong hệ thống; màn hình không render payload khách hàng.",
+  ];
+  const buttons =
+    row.dispositionStatus === null
+      ? OUTBOX_DISPOSITION_BUTTONS.map(([text, code]) => [
+          { text, callbackData: `admin:payments:x:${row.id}:${code}` },
+        ])
+      : [];
+  if (row.dispositionCode)
+    lines.push(`Kết luận: ${row.dispositionCode} · ghi chú: ${row.dispositionNote ?? "—"}`);
+  return {
+    text: lines.join("\n"),
+    buttons: [
+      ...buttons,
+      [{ text: "⬅️ Outbox treo", callbackData: "admin:payments:outbox" }],
+      adminNav("admin:menu"),
+    ],
+  };
+}
+/* -------------------------------------------------------------------------- *
+ * Product publication readiness + resale evidence (production remediation).
+ *
+ * The adapter may render a readiness snapshot, but it must never invent the
+ * evidence a variant needs: the source/reference/summary triple is typed by the
+ * operator, and publication replays the snapshot version the operator saw.
+ * -------------------------------------------------------------------------- */
+
+export const PUBLICATION_BLOCKER_LABEL: Record<PublicationBlocker, string> = {
+  PRODUCT_NOT_FOUND: "Không tìm thấy sản phẩm",
+  PRODUCT_INACTIVE: "Sản phẩm đang tạm dừng",
+  PRODUCT_ARCHIVED: "Sản phẩm đã lưu trữ",
+  PRODUCT_TEST_ONLY: "Sản phẩm chỉ dành cho TEST",
+  CATEGORY_INACTIVE: "Danh mục sản phẩm đang tắt",
+  NO_ACTIVE_VARIANTS: "Không có biến thể đang bán",
+  VARIANT_INACTIVE: "Biến thể đang tạm dừng",
+  VARIANT_PRICE_INVALID: "Giá biến thể không hợp lệ",
+  FULFILLMENT_NOT_READY: "Chưa có hàng/kho cho biến thể",
+  SELLABLE_ROUTE_MISSING: "Thiếu tuyến bán (kho hoặc nhà cung cấp)",
+  RESALE_EVIDENCE_MISSING: "Thiếu bằng chứng nguồn nhập hàng",
+};
+
+export const RESALE_EVIDENCE_SOURCE_LABEL: Record<ResaleEvidenceSource, string> = {
+  SUPPLIER_AUTHORIZATION: "Uỷ quyền nhà cung cấp",
+  OWNER_ATTESTATION: "Chủ shop xác nhận",
+  CONTRACT_REFERENCE: "Tham chiếu hợp đồng",
+};
+
+export function presentAdminProductReadiness(input: {
+  name: string;
+  readiness: ProductPublicationReadiness;
+  /** False when the snapshot version cannot travel in a Telegram callback at all. */
+  canSubmit: boolean;
+}): PresentedMessage {
+  const readiness = input.readiness;
+  const active = readiness.variants.filter((variant) => variant.active);
+  const withEvidence = active.filter((variant) => variant.evidenceActive).length;
+  const blockers = Array.from(new Set(readiness.blockers));
+  const lines = [
+    "🚀 XUẤT BẢN SẢN PHẨM",
+    "",
+    `Tên: ${input.name}`,
+    `Mã: ${readiness.productId}`,
+    `Trạng thái: ${readiness.active ? "đang bán" : "tạm dừng"}${readiness.archived ? " · đã lưu trữ" : ""}${readiness.testOnly ? " · TEST" : ""}`,
+    `Phiên bản sản phẩm: ${readiness.productVersion}`,
+    `Biến thể đang bán: ${active.length} · đã có bằng chứng: ${withEvidence}`,
+    "",
+    readiness.canPublish
+      ? "✅ Đủ điều kiện xuất bản."
+      : ["⛔ Còn thiếu:", ...blockers.map((code) => `• ${PUBLICATION_BLOCKER_LABEL[code]}`)].join(
+          "\n",
+        ),
+  ];
+  if (active.length) {
+    lines.push(
+      "",
+      ...active.map(
+        (variant) =>
+          `• ${variant.id.slice(-6)} v${variant.version} — ${variant.evidenceActive ? "có bằng chứng" : "CHƯA có bằng chứng"}${variant.published ? " · đã xuất bản" : ""}`,
+      ),
+    );
+  }
+  const buttons: InlineButton[][] = active.map((variant) => {
+    const revoke = variant.evidenceId
+      ? `admin:products:evrevoke:${variant.evidenceId}:${variant.version}`
+      : null;
+    return [
+      {
+        text: `🧾 Bằng chứng ${variant.id.slice(-6)}`,
+        callbackData: `admin:products:evidence:${variant.id}`,
+      },
+      // Telegram caps callback_data at 64 bytes and the ingress drops anything longer, so a
+      // variant whose evidence id + version no longer fit is offered without the revoke
+      // button rather than with one that would silently do nothing.
+      ...(variant.evidenceActive &&
+      variant.evidenceId !== null &&
+      isId(variant.evidenceId) &&
+      revoke !== null &&
+      Buffer.byteLength(revoke, "utf8") <= 64
+        ? [{ text: "🚫 Thu hồi", callbackData: revoke }]
+        : []),
+    ];
+  });
+  if (readiness.canPublish && input.canSubmit) {
+    buttons.push([
+      { text: "🚀 Xuất bản", callbackData: `admin:products:publish:${readiness.productId}` },
+    ]);
+  }
+  if (readiness.canPublish && !input.canSubmit) {
+    lines.push(
+      "",
+      "Snapshot quá dài để xác nhận qua Telegram (quá nhiều biến thể đang bán). Tạm dừng bớt biến thể rồi mở lại màn hình này.",
+    );
+  }
+  buttons.push([
+    { text: "↩️ Sản phẩm", callbackData: `admin:products:detail:${readiness.productId}` },
+  ]);
+  buttons.push(adminHomeOnly);
+  return { text: lines.join("\n"), buttons };
+}
+
+/**
+ * The evidence prompt. It states the exact wire format and refuses to prefill
+ * anything: a fabricated source/reference pair would make publication a lie.
+ */
+export function presentAdminEvidencePrompt(input: {
+  productId: string;
+  variantId: string;
+  variantName: string;
+}): PresentedMessage {
+  return {
+    text: [
+      "🧾 ĐĂNG KÝ BẰNG CHỨNG NHẬP HÀNG",
+      "",
+      `Biến thể: ${input.variantName}`,
+      "Gửi một dòng theo dạng:",
+      "NGUỒN|MÃ THAM CHIẾU|TÓM TẮT AN TOÀN",
+      "",
+      `NGUỒN hợp lệ: ${Object.keys(RESALE_EVIDENCE_SOURCE_LABEL).join(", ")}`,
+      "Mã tham chiếu: chỉ chữ, số và . _ : / - (tối đa 200 ký tự).",
+      "Tóm tắt: tối đa 500 ký tự, không dán mật khẩu hay khoá API.",
+      "",
+      "Bot không tự tạo bằng chứng: không gửi thì biến thể vẫn không thể xuất bản.",
+    ].join("\n"),
+    buttons: [
+      [{ text: "↩️ Quay lại", callbackData: `admin:products:ready:${input.productId}` }],
+      adminHomeOnly,
+    ],
+  };
+}
+
+/**
+ * The revocation prompt. It names the evidence that will be withdrawn (masked id, source,
+ * recorded time) and asks only for the reason: the evidence facts are immutable, so nothing
+ * the owner types here can rewrite them — the reason is a new provenance fact of its own.
+ */
+export function presentAdminEvidenceRevokePrompt(input: {
+  productId: string;
+  variantName: string;
+  evidenceId: string;
+  source: ResaleEvidenceSource;
+  recordedAt: string;
+  variantVersion: number;
+}): PresentedMessage {
+  return {
+    text: [
+      "🚫 THU HỒI BẰNG CHỨNG NHẬP HÀNG",
+      "",
+      `Biến thể: ${input.variantName}`,
+      `Bằng chứng: …${input.evidenceId.slice(-6)} · ${RESALE_EVIDENCE_SOURCE_LABEL[input.source]}`,
+      `Ghi nhận lúc: ${input.recordedAt}`,
+      `Phiên bản biến thể: ${input.variantVersion}`,
+      "",
+      "Gửi lý do thu hồi (một dòng, tối đa 200 ký tự).",
+      "Thu hồi không sửa dữ liệu bằng chứng: chỉ đổi trạng thái và làm bản xuất bản hiện tại cũ đi. Hãy đăng ký bằng chứng mới rồi xuất bản lại.",
+      "Bot sẽ trả mã xác nhận; hoàn tất bằng /confirm <mã xác nhận>.",
+    ].join("\n"),
+    buttons: [
+      [{ text: "↩️ Readiness", callbackData: `admin:products:ready:${input.productId}` }],
+      adminHomeOnly,
+    ],
+  };
+}
+
+/** The note a protected disposition needs before a confirmation can be issued. */
+export function presentAdminNotePrompt(input: {
+  title: string;
+  action: string;
+  back: string;
+}): PresentedMessage {
+  return {
+    text: [
+      input.title,
+      "",
+      `Xử lý: ${input.action}`,
+      "Gửi ghi chú xử lý (một dòng, tối đa 200 ký tự).",
+      "Bot sẽ trả mã xác nhận; hoàn tất bằng /confirm <mã xác nhận>.",
+    ].join("\n"),
+    buttons: [adminNav(input.back)],
+  };
+}
+
 export interface AdminSupplierOverview {
   id: string;
   name: string;
@@ -1756,6 +2160,7 @@ export function presentAdminProductDetail(input: {
       ...(input.description ? ["", input.description] : []),
     ].join("\n"),
     buttons: [
+      [{ text: "🚀 Readiness xuất bản", callbackData: `admin:products:ready:${input.id}` }],
       [{ text: "✏️ Sửa nội dung", callbackData: `admin:products:content:${input.id}` }],
       [
         {

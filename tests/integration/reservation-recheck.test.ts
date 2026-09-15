@@ -62,6 +62,20 @@ describe.skipIf(!hasDocker)("SKIP LOCKED recheck on lock-holder rollback (T156)"
         (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', ${price}, 'P1M', 'CREDENTIAL', 30,
          'LOCAL_ONLY', 'RES-1', true, 1)
     `.execute(ctx.db);
+    // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values ('RES-1', ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF-RESERVATION-RECHECK', 'fixture publication evidence', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = 'RES-1',
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
     await sql`
       insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
       values (${assetId}, ${variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId}, 'AVAILABLE')

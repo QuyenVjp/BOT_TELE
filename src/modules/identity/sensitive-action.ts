@@ -39,8 +39,13 @@ export type SensitiveActionKey =
   | "manual_fulfillment.complete"
   | "support.replacement.approve"
   | "discrepancy.resolve"
+  | "outbox.orphan.dispose"
   | "store.open"
   | "store.close"
+  | "store.test"
+  | "catalog.publish"
+  | "catalog.evidence.register"
+  | "catalog.evidence.revoke"
   | "catalog.activate"
   | "catalog.deactivate"
   | "catalog.variant.price.change"
@@ -65,8 +70,15 @@ export const SENSITIVE_ACTION_POLICY: Record<SensitiveActionKey, StepUpActionCat
   "warranty.refund.adjust": "REFUND",
   "warranty.replacement.approve": "DELIVERY_REISSUE",
   "discrepancy.resolve": "PAYMENT_OVERRIDE",
+  "outbox.orphan.dispose": "PAYMENT_OVERRIDE",
   "store.open": "PERMISSION_CHANGE",
   "store.close": "PERMISSION_CHANGE",
+  "store.test": "PERMISSION_CHANGE",
+  "catalog.publish": "PERMISSION_CHANGE",
+  "catalog.evidence.register": "PERMISSION_CHANGE",
+  // Revoking evidence takes the same second factor as registering it: it is the verb that
+  // withdraws the sourcing proof a published variant is sold on.
+  "catalog.evidence.revoke": "PERMISSION_CHANGE",
   "catalog.activate": "PERMISSION_CHANGE",
   "catalog.deactivate": "PERMISSION_CHANGE",
   // A price or a deposit is the number the shop charges, so it takes a second

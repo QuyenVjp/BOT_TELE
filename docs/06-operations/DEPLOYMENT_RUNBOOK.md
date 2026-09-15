@@ -84,24 +84,24 @@ npm run migrate:production
 
 ## Current production migration head
 
-After PR #7, the source tree contains **70** SQL files under
+After this remediation branch, the source tree contains **75** SQL files under
 `src/infrastructure/db/migrations/`. The expected production
 `schema_migrations` head is:
 
-- **filename:** `071_variant_presentation_profile.sql`
-- **count:** `70`
+- **filename:** `076_resale_evidence_revocation.sql`
+- **count:** `75`
 
-Migration 071 adds `product_variant.presentation_profile` (jsonb, object-or-null
-check `product_variant_presentation_profile_object_chk`). It is presentation-only;
-no product override needs to be populated at deploy time. Keep the store
-`CLOSED` during migration and deploy. Do not edit older migration files.
+Migrations 072–076 add version-bound catalog publication, guarded store-mode
+transitions, payment/outbox dispositions, durable command references, and
+owner-controlled resale-evidence revocation. Keep the store `CLOSED` during
+migration and deploy. Do not edit older migration files.
 
-The procedure below for 070 is historical (already applied). For this release,
-run the 071 procedure.
+The procedures below for 070 and 071 are historical. For this release, run the
+076 procedure.
 
-## Migration 071 — post-merge production procedure
+## Migrations 072–076 — post-merge production procedure
 
-This procedure is **not executed by review**. Run it only after PR #7 has
+This procedure is **not executed by review**. Run it only after this branch has
 merged, the production artifact is built from that merge, and the owner has
 scheduled a controlled database window. Keep the store `CLOSED`; do not
 activate sales as part of the migration.
@@ -114,14 +114,14 @@ activate sales as part of the migration.
    - Take and verify a fresh production PostgreSQL backup. Record size and
      SHA-256. Do not print or copy `DATABASE_URL`.
    - Record the pre-migration `schema_migrations` head/count. Expected before
-     071: head `070_phase2_hot_indexes.sql`, count `69`.
+     072: head `071_variant_presentation_profile.sql`, count `70`.
 
 2. **Quiesce writers**
    - Keep Telegram/SePay ingress and the store `CLOSED` while the database
      window is active. Do not delete or cancel business rows to make the window
      quiet.
 
-3. **Apply 071 and record the operation**
+3. **Apply 072–076 and record the operation**
    - Run `npm run preflight:production` again immediately before the migration.
    - Measure the command and retain its exit status:
 
@@ -130,34 +130,47 @@ activate sales as part of the migration.
      npm run migrate:production
      status=$?
      finished_at=$(date +%s)
-     printf 'migration_071_exit=%s duration_seconds=%s\n' \
+     printf 'migration_072_076_exit=%s duration_seconds=%s\n' \
        "$status" "$((finished_at - started_at))"
      test "$status" -eq 0
      ```
 
    - The pinned production runner acquires the migration advisory lock and
-     applies `071_variant_presentation_profile.sql` transactionally. The change
-     is an additive nullable jsonb column plus a check constraint.
-   - If the command fails, stop here. Verify the transaction rolled back and
-     the migration head remains `070_phase2_hot_indexes.sql`. Investigate and
-     ship a forward fix.
+     applies each pending file transactionally in filename order.
+   - If the command fails, stop here. Verify the failed file rolled back and
+     investigate with a forward migration; do not edit or delete migration
+     history.
 
 4. **Verify schema**
    - Query `schema_migrations` and require head
-     `071_variant_presentation_profile.sql` with count `70`.
-   - Require column `product_variant.presentation_profile` of type `jsonb`
-     and constraint `product_variant_presentation_profile_object_chk`.
-   - Existing rows must remain valid (`presentation_profile` null is allowed).
-     Do not populate product overrides as part of this migration.
+     `076_resale_evidence_revocation.sql` with count `75`.
+   - Require the publication/version fields and store transition table from
+     072; the payment/outbox disposition columns and guarded checks from 073;
+     the admin state/command references from 074–075; and
+     `resale_evidence.revocation_request_id` plus its guarded unique index/check
+     from 076.
    - Re-check commerce invariants: order/payment-intent relationships,
-     quantity-stock ledger continuity, wallet double-entry balance.
+     quantity-stock ledger continuity, wallet double-entry balance, active
+     evidence/publication bindings, and unresolved outbox/discrepancy counts.
+   - Do not register evidence, resolve discrepancies, dispose outbox rows, or
+     open the store during the migration window. Those are separate owner
+     workflows with their own step-up and audit gates.
 
 5. **Resume and close the window**
    - Restart the existing API/worker supervisors from the merged main
      artifact, then verify `/health` (`dirty=false`, merged SHA) and `/ready`.
    - Run `npm run preflight:production` once more; require the same production
-     target, `storeStatus=CLOSED`, migration head 071, reachable dependencies,
+     target, `storeStatus=CLOSED`, migration head 076, reachable dependencies,
      and a usable admin step-up factor.
+   - Treat any blocked `OPEN` readiness result as expected until the owner has
+     completed the evidence-registration and per-product publication workflows;
+     do not bypass them with direct SQL or a store-mode override.
+   - Existing variants are intentionally not auto-published by these migrations.
+     Before reopening the store, the owner must use the protected Telegram
+     workflow to register legitimate resale evidence for each intended SKU and
+     publish each ready product. Until that work is complete, an empty storefront
+     or a blocked `OPEN` readiness check is expected, not a migration failure;
+     do not treat it as an abort.
    - Opening the store is a separate owner decision and is not part of this
      procedure.
 

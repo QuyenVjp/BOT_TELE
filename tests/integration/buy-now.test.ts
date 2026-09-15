@@ -59,6 +59,7 @@ async function seed(
   const productId = newId();
   const variantId = newId();
   const price = overrides.price ?? 120000;
+  const resaleEvidence = overrides.resale === undefined ? "RES-NF1" : overrides.resale;
   const slug = `cat-${categoryId.slice(-10)}`;
 
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
@@ -76,9 +77,24 @@ async function seed(
        stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
     values
       (${variantId}, ${productId}, 'NF-1M', 'Gói 1 tháng', ${price}, 'P1M', 'CREDENTIAL', 30,
-       ${overrides.stockPolicy ?? "LOCAL_ONLY"}, ${overrides.resale === undefined ? "RES-NF1" : overrides.resale},
+       ${overrides.stockPolicy ?? "LOCAL_ONLY"}, ${resaleEvidence},
        ${overrides.active ?? true}, 1, ${overrides.fulfillmentType ?? null})
   `.execute(ctx.db);
+  if (resaleEvidence) {
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values (${resaleEvidence}, ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF', 'fixture publication evidence', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = resale_evidence_id,
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
+  }
 
   // FR-006a: LOCAL_ONLY / LOCAL_THEN_SUPPLIER variants require finite local stock
   // to be reserved before Order/Payment Intent creation. Seed enough AVAILABLE
@@ -210,6 +226,25 @@ describe("Buy Now revalidation (FR-006)", () => {
     });
     expect(result.ok).toBe(false);
     expect((result as Extract<BuyNowResult, { ok: false }>).code).toBe("PRICE_CHANGED");
+    const count = await sql<{ count: string }>`select count(*)::text as count from "order"`.execute(
+      ctx.db,
+    );
+    expect(Number(count.rows[0]?.count)).toBe(0);
+  });
+
+  it("rejects a variant whose published snapshot is stale", async () => {
+    const s = await seed();
+    await sql`update product_variant set version = version + 1 where id = ${s.variantId}`.execute(
+      ctx.db,
+    );
+    const result = await buyNow(ctx.db, {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-stale-publication",
+      correlationId: "corr-stale-publication",
+    });
+    expect(result).toMatchObject({ ok: false, code: "POLICY_BLOCKED" });
     const count = await sql<{ count: string }>`select count(*)::text as count from "order"`.execute(
       ctx.db,
     );

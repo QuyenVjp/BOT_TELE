@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
-import { buyNow, isStoreOpen, setStoreStatus } from "../../src/modules/commerce/buy-now.js";
+import { buyNow, isStoreOpen } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import { createWalletPurchaseService } from "../../src/modules/wallet/purchase.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -48,6 +49,19 @@ describe("global store kill-switch enforcement", () => {
       insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, resale_evidence_id, is_active)
       values (${variantId}, ${productId}, 'ACTIVE-SKU', 'V1', ${price}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'RES-1', true)
     `.execute(ctx.db);
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values ('RES-1', ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF', 'fixture publication evidence', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = resale_evidence_id,
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
 
     const assetId = newId();
     await sql`
@@ -84,7 +98,7 @@ describe("global store kill-switch enforcement", () => {
     expect(counts.rows[0]).toEqual({ orders: 0, intents: 0, reserved: 0 });
 
     // When store is opened
-    await setStoreStatus(ctx.db, "OPEN", "admin");
+    await setStoreModeForTest(ctx.db, "OPEN", "admin");
     expect(await isStoreOpen(ctx.db)).toBe(true);
 
     const allowed = await buyNow(ctx.db, {
@@ -101,7 +115,7 @@ describe("global store kill-switch enforcement", () => {
     }
 
     // When closed again
-    await setStoreStatus(ctx.db, "CLOSED", "admin");
+    await setStoreModeForTest(ctx.db, "CLOSED", "admin");
     expect(await isStoreOpen(ctx.db)).toBe(false);
 
     // Wallet purchase attempt when closed

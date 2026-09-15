@@ -221,13 +221,133 @@ export async function loadSensitiveAuthorizationBinding(
           policyVersion: value.policy_version,
         }
       : null;
-  } else if (input.resourceType === "StoreControl") {
-    const row = await sql<{ status: string; updated_at: string }>`
-      select status, updated_at::text from store_control where id = ${input.resourceId} limit 1
+  } else if (input.actionKey === "catalog.publish") {
+    const row = await sql<{ product_version: string; variant_fingerprint: string | null }>`
+      select p.version::text as product_version,
+             string_agg(
+               v.id || ':' || v.version::text || ':' || coalesce(v.resale_evidence_id, ''),
+               ',' order by v.id
+             ) filter (where v.is_active) as variant_fingerprint
+        from product p
+        left join product_variant v on v.product_id = p.id
+       where p.id = ${input.resourceId}
+       group by p.version
+       limit 1
     `.execute(db);
     const value = row.rows[0];
-    resourceVersion = value?.updated_at ?? "missing";
-    current = value ? { status: value.status, updatedAt: value.updated_at } : null;
+    const fingerprint = value?.variant_fingerprint ?? "";
+    resourceVersion = value
+      ? `${value.product_version}:${createHash("sha256").update(fingerprint, "utf8").digest("hex")}`
+      : "missing";
+    current = value
+      ? { productVersion: value.product_version, activeVariantFingerprint: fingerprint }
+      : null;
+  } else if (input.actionKey === "catalog.evidence.register") {
+    const row = await sql<{
+      version: string;
+      evidence_id: string | null;
+      evidence_status: string | null;
+      publication_evidence_id: string | null;
+    }>`
+      select v.version::text, v.resale_evidence_id as evidence_id,
+             re.status as evidence_status, v.publication_evidence_id
+        from product_variant v
+        left join resale_evidence re on re.id = v.resale_evidence_id
+       where v.id = ${input.resourceId}
+       limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value?.version ?? "missing";
+    current = value
+      ? {
+          version: value.version,
+          evidenceId: value.evidence_id,
+          evidenceStatus: value.evidence_status,
+          publicationEvidenceId: value.publication_evidence_id,
+        }
+      : null;
+  } else if (input.actionKey === "catalog.evidence.revoke") {
+    // Bound to the variant's CURRENT version and to the evidence named in the requested
+    // data. The evidence facts themselves are immutable; what the grant may spend on is the
+    // pair (variant version, that evidence row's lifecycle), so a revocation pre-verified
+    // against version N cannot be spent after the variant moved or the evidence changed.
+    const evidenceId = requestedString(requested, "evidenceId");
+    const row = await sql<{
+      version: string;
+      evidence_id: string | null;
+      evidence_status: string | null;
+      evidence_variant_id: string | null;
+      publication_evidence_id: string | null;
+    }>`
+      select v.version::text, v.resale_evidence_id as evidence_id,
+             re.status as evidence_status, re.variant_id as evidence_variant_id,
+             v.publication_evidence_id
+        from product_variant v
+        left join resale_evidence re on re.id = ${evidenceId} and re.variant_id = v.id
+       where v.id = ${input.resourceId}
+       limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value?.version ?? "missing";
+    current = value
+      ? {
+          version: value.version,
+          evidenceId: value.evidence_id,
+          publicationEvidenceId: value.publication_evidence_id,
+          requestedEvidenceId: evidenceId,
+          requestedEvidenceStatus: value.evidence_status,
+          requestedEvidenceVariantId: value.evidence_variant_id,
+        }
+      : null;
+  } else if (input.actionKey === "discrepancy.resolve") {
+    const row = await sql<{
+      version: number;
+      status: string;
+      resolution_code: string | null;
+      resolved_by: string | null;
+    }>`
+      select version, status, resolution_code, resolved_by
+        from discrepancy where id = ${input.resourceId} limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value ? String(value.version) : "missing";
+    current = value
+      ? {
+          version: value.version,
+          status: value.status,
+          resolutionCode: value.resolution_code,
+          resolvedBy: value.resolved_by,
+        }
+      : null;
+  } else if (input.actionKey === "outbox.orphan.dispose") {
+    const row = await sql<{
+      disposition_version: number;
+      status: string;
+      event_type: string;
+      disposition_code: string | null;
+    }>`
+      select disposition_version, status, event_type, disposition_code
+        from outbox_event where id = ${input.resourceId} limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value ? String(value.disposition_version) : "missing";
+    current = value
+      ? {
+          dispositionVersion: value.disposition_version,
+          status: value.status,
+          eventType: value.event_type,
+          dispositionCode: value.disposition_code,
+        }
+      : null;
+  } else if (input.resourceType === "StoreControl") {
+    const row = await sql<{ status: string; version: number; updated_at: string }>`
+      select status, version, updated_at::text from store_control where id = ${input.resourceId} limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value ? String(value.version) : "missing";
+    current = value
+      ? { status: value.status, version: value.version, updatedAt: value.updated_at }
+      : null;
   } else {
     current = { resourceType: input.resourceType, resourceId: input.resourceId };
   }

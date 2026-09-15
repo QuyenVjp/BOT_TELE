@@ -17,6 +17,7 @@ import {
   presentAdminOrdersMenu,
   presentAdminPaymentsMenu,
   presentAdminProductDetail,
+  presentAdminProductReadiness,
   presentAdminProducts,
   presentAdminProductsMenu,
   presentAdminSupplierVariant,
@@ -43,6 +44,7 @@ describe("admin operational presenters", () => {
       "health",
       "warranty",
       "testing",
+      "operations",
     ]);
 
     const menu = presentAdminMenu();
@@ -64,6 +66,7 @@ describe("admin operational presenters", () => {
         "🛡 Hỗ trợ/BH",
         "🩺 Hệ thống",
         "🧪 Test Lab",
+        ADMIN_COPY.operations,
         "⚙️ Cài đặt",
         "🛒 Về Shop",
       ]),
@@ -141,6 +144,51 @@ describe("admin operational presenters", () => {
     for (const callback of callbacks) {
       expect(new TextEncoder().encode(callback).byteLength).toBeLessThanOrEqual(64);
     }
+  });
+
+  it("offers the evidence revoke button only while its opaque halves fit the limit", () => {
+    const readinessFor = (version: number, evidenceActive: boolean) => ({
+      productId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      productVersion: version,
+      active: true,
+      archived: false,
+      testOnly: false,
+      variants: [
+        {
+          id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+          version,
+          active: true,
+          priceVnd: "250000",
+          fulfillmentType: "STOCK_ACCOUNT",
+          ready: true,
+          routeReady: true,
+          evidenceId: "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+          evidenceActive,
+          published: false,
+          blockers: [],
+        },
+      ],
+      blockers: [],
+      canPublish: true,
+      publicationVersion: "1:01ARZ3NDEKTSV4RRFFQ69G5FAX:1:01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+    });
+    const revokeButton = (version: number, evidenceActive = true) =>
+      presentAdminProductReadiness({
+        name: "GPT Plus",
+        readiness: readinessFor(version, evidenceActive),
+        canSubmit: false,
+      })
+        .buttons.flat()
+        .find((button) => button.text === "🚫 Thu hồi");
+
+    // The button carries the evidence id and the variant version the owner is looking at.
+    expect(revokeButton(1)?.callbackData).toBe(
+      "admin:products:evrevoke:01ARZ3NDEKTSV4RRFFQ69G5FAZ:1",
+    );
+    // A version that no longer fits is dropped rather than truncated into a wrong revocation.
+    expect(revokeButton(12345678901234)).toBeUndefined();
+    // Nothing to withdraw when the variant has no active evidence row.
+    expect(revokeButton(1, false)).toBeUndefined();
   });
 
   it("renders bounded dashboard counters without sensitive data", () => {

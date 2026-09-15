@@ -91,8 +91,9 @@ export interface FulfillmentOutcome {
  * - success → PUBLISHED
  * - OUT_OF_STOCK / NEEDS_REVIEW / ISSUE_FAILED → RETRY (stock may land, supplier
  *   may recover, vault may recover)
- * - NOT_PAID / NOT_FOUND → TERMINAL_REVIEW (domain invariant; spinning forever
- *   will not help and hides the real defect)
+ * - NOT_PAID / NOT_FOUND / DELIVERY_HANDOFF_* → TERMINAL_REVIEW (domain
+ *   invariant or missing delivery route; spinning forever will not help and
+ *   hides the real defect from the operator)
  */
 export function classifyFulfillmentOutcome(result: FulfillmentOutcome): DispatchDecision {
   if (result.ok) return { kind: "PUBLISHED" };
@@ -102,8 +103,13 @@ export function classifyFulfillmentOutcome(result: FulfillmentOutcome): Dispatch
     case "NEEDS_REVIEW":
     case "ISSUE_FAILED":
       return { kind: "RETRY", errorCode: code };
+    // No order/bundle to hand off and no retry can synthesize one: the delivery
+    // handoff path parks the row for operator review instead of burning the
+    // attempt budget on an outcome that is already deterministic.
     case "NOT_PAID":
     case "NOT_FOUND":
+    case "DELIVERY_HANDOFF_NOT_READY":
+    case "DELIVERY_HANDOFF_ORDER_MISSING":
       return { kind: "TERMINAL_REVIEW", errorCode: code };
     default:
       // Unknown codes are treated as retryable so a future error code does not

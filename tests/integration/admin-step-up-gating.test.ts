@@ -442,7 +442,11 @@ describe.skipIf(!hasDocker)("sensitive admin actions are step-up gated", () => {
       actor: ROOT_ACTOR,
       correlationId: "gate-5-confirm",
     });
-    expect(confirmed).toMatchObject({ ok: false, code: "STEP_UP_GRANT_MISSING" });
+    expect(confirmed).toMatchObject({
+      ok: false,
+      code: "STEP_UP_GRANT_MISSING",
+      action: "wallet.refund",
+    });
     expect(await state(seeded)).toEqual(before);
     // An expired grant is refused, not silently burned into "consumed".
     const grant = await sql<{ consumed_at: Date | null }>`

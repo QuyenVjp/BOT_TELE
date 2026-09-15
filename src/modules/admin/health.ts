@@ -86,7 +86,7 @@ export async function getAdminHealthFacts(exec: Executor): Promise<AdminHealthFa
       (select count(*)::int from outbox_event
          where published_at is null and dead_lettered_at is null) as outbox_backlog,
       (select count(*)::int from outbox_event
-         where dead_lettered_at is not null) as outbox_dead_lettered,
+         where dead_lettered_at is not null and disposition_status is null) as outbox_dead_lettered,
       (select count(*)::int from discrepancy where resolved_at is null) as open_discrepancies,
       (select count(*)::int from payment_intent i
          join "order" o on o.id = i.order_id

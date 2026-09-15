@@ -309,6 +309,42 @@ describe("critical durable recovery", () => {
     expect(await auditFor(id)).toHaveLength(1);
   });
 
+  it("refuses to re-arm an outbox event an operator already resolved", async () => {
+    const id = await deadOutbox();
+    await sql`
+      update outbox_event
+      set disposition_status='RESOLVED', disposition_code='HANDLED_MANUALLY',
+          disposition_note='handled outside the queue', dispositioned_at=now(),
+          dispositioned_by='111222333', disposition_version=disposition_version+1
+      where id=${id}
+    `.execute(ctx.db);
+
+    const result = await recoverCriticalJob(ctx.db, { family: "outbox", id, ...operator });
+
+    expect(result).toMatchObject({
+      ok: false,
+      family: "outbox",
+      id,
+      code: "MANUAL_REVIEW_REQUIRED",
+    });
+    const row = await sql<{
+      dead_lettered_at: Date | null;
+      claim_generation: string;
+      disposition_status: string | null;
+      disposition_version: number;
+    }>`
+      select dead_lettered_at, claim_generation::text, disposition_status, disposition_version
+      from outbox_event where id=${id}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toMatchObject({
+      dead_lettered_at: expect.any(Date),
+      claim_generation: "3",
+      disposition_status: "RESOLVED",
+      disposition_version: 2,
+    });
+    expect(await auditFor(id)).toHaveLength(0);
+  });
+
   it("returns not found without audit", async () => {
     const id = newId();
 

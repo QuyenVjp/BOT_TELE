@@ -31,6 +31,7 @@ describe("admin health facts", () => {
   it("counts a published outbox row as done and an unpublished one as backlog", async () => {
     const pending = newId();
     const sent = newId();
+    const resolvedDeadLetter = newId();
     await sql`
       insert into outbox_event (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted, occurred_at)
       values (${pending}, 'Order', ${newId()}, 1, 'OrderPaid', '{}'::jsonb, now())
@@ -39,11 +40,21 @@ describe("admin health facts", () => {
       insert into outbox_event (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted, occurred_at, published_at)
       values (${sent}, 'Order', ${newId()}, 1, 'OrderPaid', '{}'::jsonb, now(), now())
     `.execute(ctx.db);
+    await sql`
+      insert into outbox_event
+        (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted, occurred_at,
+         dead_lettered_at, disposition_status, disposition_code, dispositioned_at, dispositioned_by)
+      values
+        (${resolvedDeadLetter}, 'Order', ${newId()}, 1, 'OrderPaid', '{}'::jsonb, now(),
+         now(), 'RESOLVED', 'HANDLED_MANUALLY', now(), 'admin')
+    `.execute(ctx.db);
 
     const facts = await getAdminHealthFacts(ctx.db);
     expect(facts.queues.outboxBacklog).toBe(1);
     expect(facts.queues.outboxDeadLettered).toBe(0);
-    await sql`delete from outbox_event where id in (${pending}, ${sent})`.execute(ctx.db);
+    await sql`delete from outbox_event where id in (${pending}, ${sent}, ${resolvedDeadLetter})`.execute(
+      ctx.db,
+    );
   });
 
   it("counts an unresolved discrepancy and a new ticket as operator work", async () => {

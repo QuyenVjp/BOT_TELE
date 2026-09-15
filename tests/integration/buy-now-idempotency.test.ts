@@ -71,6 +71,20 @@ async function seed(): Promise<Seed> {
       (${otherVariantId}, ${productId}, ${"SKU-" + otherVariantId}, 'V2', ${price + 1}, 'P1M',
        'CREDENTIAL', 'LOCAL_ONLY', 'RES-2')
   `.execute(ctx.db);
+  await sql`
+    insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+    values ('RES-1', ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF-1', 'fixture publication evidence', 'test'),
+           ('RES-2', ${otherVariantId}, 'OWNER_ATTESTATION', 'TEST-REF-2', 'fixture publication evidence', 'test')
+  `.execute(ctx.db);
+  await sql`
+    update product_variant
+       set publication_evidence_id = resale_evidence_id,
+           publication_product_version = 1,
+           publication_variant_version = 1,
+           published_at = now(),
+           published_by = 'test'
+     where product_id = ${productId}
+  `.execute(ctx.db);
   for (const id of [newId(), newId(), newId()]) {
     await sql`
       insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)

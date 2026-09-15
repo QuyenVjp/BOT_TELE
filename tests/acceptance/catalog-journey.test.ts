@@ -42,6 +42,23 @@ beforeEach(async () => {
     from product_variant
     where sku in ('NF-1M', 'NF-3M', 'SP-1M')
   `.execute(ctx.db);
+  // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+  // NF-NOAUTH (no evidence) and SP-PAUSED (paused policy) are deliberately left unpublished.
+  await sql`
+    insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+    select v.resale_evidence_id, v.id, 'OWNER_ATTESTATION', 'TEST-REF-' || v.sku, 'fixture publication evidence', 'test'
+    from product_variant v
+    where v.sku in ('NF-1M', 'NF-3M', 'SP-1M')
+  `.execute(ctx.db);
+  await sql`
+    update product_variant v
+       set publication_evidence_id = v.resale_evidence_id,
+           publication_product_version = 1,
+           publication_variant_version = 1,
+           published_at = now(),
+           published_by = 'test'
+     where v.sku in ('NF-1M', 'NF-3M', 'SP-1M')
+  `.execute(ctx.db);
   callbacks = createCatalogCallbacks({
     db: ctx.db,
     parser: createSearchParser({ driver: "deterministic", timeoutMs: 100 }),

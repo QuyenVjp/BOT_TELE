@@ -48,6 +48,10 @@ function setup() {
     text: "dashboard",
     buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
   });
+  const adminOperations = vi.fn().mockResolvedValue({
+    text: "operations readiness",
+    buttons: [[{ text: "⚙️ Quản trị", callbackData: "admin:menu" }]],
+  });
   const adminAudit = vi.fn().mockResolvedValue({
     text: "audit",
     buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
@@ -107,6 +111,7 @@ function setup() {
   const broadcastCompose = vi.fn().mockResolvedValue({ text: "choose audience", buttons: [] });
   const broadcastAudience = vi.fn().mockResolvedValue({ text: "compose", buttons: [] });
   const broadcastText = vi.fn().mockResolvedValue(null);
+  const ownerPromptText = vi.fn().mockResolvedValue({ text: "owner prompt handled", buttons: [] });
   const broadcastConfirm = vi.fn().mockResolvedValue({ text: "status", buttons: [] });
   const broadcastCancel = vi.fn().mockResolvedValue({ text: "cancelled", buttons: [] });
   const broadcastStatus = vi.fn().mockResolvedValue({ text: "status", buttons: [] });
@@ -219,6 +224,7 @@ function setup() {
       }),
       mainMenu: adminMainMenu,
       dashboard: adminDashboard,
+      operations: adminOperations,
       audit: adminAudit,
       products: adminProducts,
       productDetail: adminProductDetail,
@@ -266,6 +272,7 @@ function setup() {
       broadcastCompose,
       broadcastAudience,
       broadcastText,
+      ownerPromptText,
       broadcastConfirm,
       broadcastCancel,
       broadcastStatus,
@@ -321,6 +328,7 @@ function setup() {
     broadcastCompose,
     broadcastAudience,
     broadcastText,
+    ownerPromptText,
     broadcastConfirm,
     broadcastCancel,
     broadcastStatus,
@@ -949,6 +957,29 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       text: "state-1|SKU2|Premium 2|99000|CUSTOM|0|1",
       chatType: "private",
       correlationId: "telegram:variant-text",
+    });
+    expect(workflowMessageText).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
+  it("routes owner remediation prompt text before generic admin text", async () => {
+    const { dispatcher, ownerPromptText, workflowMessageText, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "owner-remediation-text",
+      action: "ADMIN",
+      messageText: "OWNER_ATTESTATION|REF-1|pre-production authorization",
+      ownerPromptText: true,
+    });
+
+    expect(ownerPromptText).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      text: "OWNER_ATTESTATION|REF-1|pre-production authorization",
+      chatType: "private",
+      correlationId: "telegram:owner-remediation-text",
     });
     expect(workflowMessageText).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);

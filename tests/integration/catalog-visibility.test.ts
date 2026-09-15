@@ -13,7 +13,7 @@ import { resolveCatalogAudience } from "../../src/modules/catalog/visibility.js"
 import {
   addTestCustomer,
   canPurchase,
-  setStoreMode,
+  setStoreModeForTest,
 } from "../../src/modules/commerce/store-mode.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -49,24 +49,41 @@ async function seedPair(): Promise<{ publicId: string; testId: string; hiddenId:
       (${publicProduct}, ${categoryId}, 'GPT Plus', 'gpt-plus', true, 1, false, false),
       (${testProduct}, ${categoryId}, 'GPT Test', 'gpt-test', true, 2, true, false)
   `.execute(ctx.db);
+  const evidenceId = newId();
   await sql`
     insert into product_variant
       (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
        stock_policy, resale_evidence_id, is_active, sort_order)
     values
       (${publicId}, ${publicProduct}, 'GPT-PLUS-1M', '1 tháng', 250000, 'P1M', 'CREDENTIAL', 30,
-       'LOCAL_ONLY', 'RES-PUBLIC', true, 1),
+       'LOCAL_ONLY', ${evidenceId}, true, 1),
       (${testId}, ${testProduct}, 'TEST-ACCOUNT-AUTO', 'Test 1 tháng', 250000, 'P1M', 'CREDENTIAL', 30,
        'LOCAL_ONLY', null, true, 2),
       (${hiddenId}, ${publicProduct}, 'NO-EVIDENCE', 'Ẩn', 250000, 'P1M', 'CREDENTIAL', 30,
        'LOCAL_ONLY', null, true, 3)
+  `.execute(ctx.db);
+  await sql`
+    insert into resale_evidence (id, variant_id, source, reference, summary, created_by, registration_request_id)
+    values (${evidenceId}, ${publicId}, 'OWNER_ATTESTATION', 'test-public-evidence', 'test fixture evidence', 'test', ${evidenceId})
+  `.execute(ctx.db);
+  await sql`
+    update product_variant
+       set publication_evidence_id = ${evidenceId}, publication_product_version = 1,
+           publication_variant_version = version, published_at = now(), published_by = 'test'
+     where id = ${publicId}
+  `.execute(ctx.db);
+  await sql`
+    insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+    values
+      (${newId()}, ${publicId}, 'TEST_FIXTURE', 'test-vault-ref-public', ${newId()}, 'AVAILABLE'),
+      (${newId()}, ${testId}, 'TEST_FIXTURE', 'test-vault-ref-test', ${newId()}, 'AVAILABLE')
   `.execute(ctx.db);
   return { publicId, testId, hiddenId };
 }
 
 describe("catalog visibility (public vs test)", () => {
   it("keeps frozen canPurchase CLOSED semantics", async () => {
-    await setStoreMode(ctx.db, "CLOSED", "test");
+    await setStoreModeForTest(ctx.db, "CLOSED", "test");
     const gate = await canPurchase(ctx.db, {
       telegramUserId: "1",
       isRootAdmin: true,
@@ -90,7 +107,7 @@ describe("catalog visibility (public vs test)", () => {
 
   it("allows TEST allowlist to see test SKUs without changing public browse", async () => {
     const ids = await seedPair();
-    await setStoreMode(ctx.db, "TEST", "test");
+    await setStoreModeForTest(ctx.db, "TEST", "test");
     await addTestCustomer(ctx.db, "42", "root");
     const audience = await resolveCatalogAudience(ctx.db, {
       telegramUserId: "42",
@@ -145,14 +162,31 @@ async function insertSellable(input: {
       ${input.isTest ?? false}, ${input.isArchived ?? false}
     )
   `.execute(ctx.db);
+  const evidenceId = input.evidence === null ? null : newId();
   await sql`
     insert into product_variant
       (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
        stock_policy, resale_evidence_id, is_active, sort_order)
     values (
       ${variantId}, ${productId}, ${input.slug.toUpperCase()}, '1 tháng', 250000, 'P1M', 'CREDENTIAL', 30,
-      'LOCAL_ONLY', ${input.evidence === undefined ? "RES-PUBLIC" : input.evidence}, true, 1
+      'LOCAL_ONLY', ${evidenceId}, true, 1
     )
+  `.execute(ctx.db);
+  if (evidenceId) {
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by, registration_request_id)
+      values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION', ${`test-${input.slug}`}, 'test fixture evidence', 'test', ${evidenceId})
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = ${evidenceId}, publication_product_version = 1,
+             publication_variant_version = version, published_at = now(), published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
+  }
+  await sql`
+    insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+    values (${newId()}, ${variantId}, 'TEST_FIXTURE', ${`test-vault-ref-${input.slug}`}, ${newId()}, 'AVAILABLE')
   `.execute(ctx.db);
 }
 
@@ -236,11 +270,11 @@ describe("public category visibility", () => {
     });
     await addTestCustomer(ctx.db, "42", "root");
     for (const mode of ["CLOSED", "OPEN"] as const) {
-      await setStoreMode(ctx.db, mode, "test");
+      await setStoreModeForTest(ctx.db, mode, "test");
       expect(await resolveCatalogAudience(ctx.db, { telegramUserId: "42" })).toBe("public");
       expect(await listPublicRootCategories(ctx.db, "public")).toEqual([]);
     }
-    await setStoreMode(ctx.db, "TEST", "test");
+    await setStoreModeForTest(ctx.db, "TEST", "test");
     expect(await resolveCatalogAudience(ctx.db, { telegramUserId: "42", isRootAdmin: false })).toBe(
       "test",
     );
