@@ -611,6 +611,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         // evidence is a domain-level replay instead of a second revocation.
         const result = await revokeResaleEvidenceInTransaction(exec, {
           evidenceId: action.input,
+          variantId: action.targetId,
           expectedVariantVersion: action.expectedVersion,
           requestId,
           actorId: action.actorId,
@@ -640,6 +641,21 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
       if (!isOwnerCommand(input.command)) {
         return { ok: false, code: "UNKNOWN_COMMAND", message: "Lệnh không được hỗ trợ." };
       }
+      const gate = await guardRootAction(
+        db,
+        {
+          actor: input.actor,
+          config: rootConfig,
+          correlationId: input.correlationId,
+          action: input.command,
+          targetType: targetTypeFor(input.command),
+          targetId: input.targetId,
+        },
+        telemetry,
+      );
+      if (!gate.ok) {
+        return { ok: false, code: gate.reason, message: "Không được phép." };
+      }
       if (
         input.reason.trim().length === 0 ||
         input.reason.length > 500 ||
@@ -666,7 +682,9 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           input.expectedVersion <= 0);
       if (
         SENSITIVE_OPERATOR_TEXT.test(input.reason) ||
-        (input.input !== undefined && SENSITIVE_OPERATOR_TEXT.test(input.input)) ||
+        (input.command !== "inventory.import" &&
+          input.input !== undefined &&
+          SENSITIVE_OPERATOR_TEXT.test(input.input)) ||
         (input.command === "catalog.evidence.register" &&
           (input.input === undefined || !isSafeResaleEvidenceInput(input.input))) ||
         revokeInputInvalid
@@ -678,22 +696,6 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             ? "Thiếu bằng chứng hoặc phiên bản biến thể cần thu hồi."
             : "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
         };
-      }
-
-      const gate = await guardRootAction(
-        db,
-        {
-          actor: input.actor,
-          config: rootConfig,
-          correlationId: input.correlationId,
-          action: input.command,
-          targetType: targetTypeFor(input.command),
-          targetId: input.targetId,
-        },
-        telemetry,
-      );
-      if (!gate.ok) {
-        return { ok: false, code: gate.reason, message: "Không được phép." };
       }
 
       const actionKey: SensitiveActionKey | null = isDurableAdminCommandRef(input.command)

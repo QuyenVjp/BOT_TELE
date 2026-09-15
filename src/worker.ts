@@ -44,7 +44,7 @@ import type {
   presentAdminOrderDetail,
   presentAdminOrders as presentAdminOrdersPresenter,
 } from "./bot/presenters/admin.js";
-import type { AdminCallbacks } from "./bot/callbacks/admin.js";
+import type { AdminCallbacks, HandleResult } from "./bot/callbacks/admin.js";
 import type { AuthorizationJsonValue } from "./modules/identity/authorization-payload.js";
 import type {
   SensitiveActionDeps,
@@ -2119,6 +2119,25 @@ async function bootstrap(): Promise<void> {
     error instanceof SensitiveAuthorizationRefusedError
       ? presentSensitiveRefusal({ code: error.code, action, category })
       : null;
+  const isSensitiveCallbackRefusal = (code: string): code is SensitiveAuthorizationRefusal =>
+    code === "NOT_ROOT_ADMIN" ||
+    code === "STEP_UP_REQUIRED" ||
+    code === "STEP_UP_GRANT_MISSING" ||
+    code === "STEP_UP_NOT_ENROLLED" ||
+    code === "STEP_UP_LOCKED_OUT";
+  const presentAdminHandleRefusal = (
+    result: Extract<HandleResult, { ok: false }>,
+    action: SensitiveActionKey,
+  ): PresentedMessage =>
+    result.code === "WRONG_CONTEXT"
+      ? presentAdminDenied("WRONG_CONTEXT")
+      : isSensitiveCallbackRefusal(result.code)
+        ? presentSensitiveRefusal({
+            code: result.code,
+            action,
+            category: SENSITIVE_ACTION_POLICY[action],
+          })
+        : presentAdminDenied("NOT_ROOT_ADMIN");
 
   const authorizeSensitiveFor = (
     input: { telegramUserId: string; chatType: string; correlationId: string },
@@ -3132,10 +3151,7 @@ async function bootstrap(): Promise<void> {
           reason: "Bật chế độ TEST — chỉ khách test mua được sản phẩm test",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.test");
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3188,10 +3204,7 @@ async function bootstrap(): Promise<void> {
           reason: "Mở bán công khai (xác nhận qua nút)",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.open");
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3213,10 +3226,7 @@ async function bootstrap(): Promise<void> {
           reason: "Đóng cửa hàng tạm dừng bán",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.close");
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3794,13 +3804,16 @@ async function bootstrap(): Promise<void> {
           reason: "Xuất bản sản phẩm sau khi kiểm tra readiness và bằng chứng",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
+        if (!result.ok) {
+          if (result.code === "WRONG_CONTEXT" || isSensitiveCallbackRefusal(result.code))
+            return presentAdminHandleRefusal(result, "catalog.publish");
           return {
             text: "Không thể tạo yêu cầu xuất bản; readiness hoặc phiên bản đã thay đổi. Mở lại để kiểm tra.",
             buttons: [
               [{ text: "🚀 Readiness", callbackData: `admin:products:ready:${input.productId}` }],
             ],
           };
+        }
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -4149,7 +4162,7 @@ async function bootstrap(): Promise<void> {
               action: "catalog.evidence.revoke",
             });
           return {
-            text: "✅ Đã thu hồi bằng chứng. Bản xuất bản hiện tại đã cũ — mở lại readiness và xuất bản lại.",
+            text: "✅ Đã thu hồi bằng chứng. Hãy đăng ký bằng chứng mới rồi mở lại readiness và xuất bản lại.",
             buttons: [
               [{ text: "🚀 Readiness", callbackData: `admin:products:ready:${productId}` }],
             ],

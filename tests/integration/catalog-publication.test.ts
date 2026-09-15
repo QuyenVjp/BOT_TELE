@@ -265,6 +265,7 @@ describe("protected catalog publication", () => {
     const before = await readVariant(variantId);
 
     const revoked = await revokeResaleEvidence(ctx.db, {
+      variantId,
       evidenceId: registration.evidenceId,
       expectedVariantVersion: before.version,
       requestId: "revoke-request-1",
@@ -360,6 +361,7 @@ describe("protected catalog publication", () => {
 
     await expect(
       revokeResaleEvidence(ctx.db, {
+        variantId: first.variantId,
         evidenceId: firstRegistration.evidenceId,
         expectedVariantVersion: firstVersion,
         requestId: "revoke-shared",
@@ -372,6 +374,7 @@ describe("protected catalog publication", () => {
     // Same request, same record, and the pre-revocation version the retry still carries.
     await expect(
       revokeResaleEvidence(ctx.db, {
+        variantId: first.variantId,
         evidenceId: firstRegistration.evidenceId,
         expectedVariantVersion: firstVersion,
         requestId: "revoke-shared",
@@ -393,6 +396,7 @@ describe("protected catalog publication", () => {
     const secondVersion = (await readVariant(second.variantId)).version;
     await expect(
       revokeResaleEvidence(ctx.db, {
+        variantId: second.variantId,
         evidenceId: secondRegistration.evidenceId,
         expectedVariantVersion: secondVersion,
         requestId: "revoke-shared",
@@ -420,6 +424,7 @@ describe("protected catalog publication", () => {
 
     await expect(
       revokeResaleEvidence(ctx.db, {
+        variantId,
         evidenceId: registration.evidenceId,
         expectedVariantVersion: version + 5,
         requestId: "revoke-guard-stale",
@@ -436,6 +441,7 @@ describe("protected catalog publication", () => {
 
     await expect(
       revokeResaleEvidence(ctx.db, {
+        variantId,
         evidenceId: registration.evidenceId,
         expectedVariantVersion: version,
         requestId: "revoke-guard-1",
@@ -447,6 +453,7 @@ describe("protected catalog publication", () => {
 
     await expect(
       revokeResaleEvidence(ctx.db, {
+        variantId,
         evidenceId: registration.evidenceId,
         expectedVariantVersion: version + 1,
         requestId: "revoke-guard-2",
@@ -457,21 +464,39 @@ describe("protected catalog publication", () => {
     ).resolves.toMatchObject({ ok: false, code: "NOT_ACTIVE" });
 
     const invalid = [
-      { evidenceId: "not-an-id", expectedVariantVersion: version, requestId: "revoke-bad-id" },
-      { evidenceId: newId(), expectedVariantVersion: version, requestId: "revoke-unknown-id" },
-      { evidenceId: registration.evidenceId, expectedVariantVersion: version, requestId: "  " },
+      {
+        evidenceId: "not-an-id",
+        variantId,
+        expectedVariantVersion: version,
+        requestId: "revoke-bad-id",
+      },
+      {
+        evidenceId: newId(),
+        variantId,
+        expectedVariantVersion: version,
+        requestId: "revoke-unknown-id",
+      },
       {
         evidenceId: registration.evidenceId,
+        variantId,
+        expectedVariantVersion: version,
+        requestId: "  ",
+      },
+      {
+        evidenceId: registration.evidenceId,
+        variantId,
         expectedVariantVersion: version,
         requestId: "x".repeat(129),
       },
       {
         evidenceId: registration.evidenceId,
+        variantId,
         expectedVariantVersion: 0,
         requestId: "revoke-zero-v",
       },
       {
         evidenceId: registration.evidenceId,
+        variantId,
         expectedVariantVersion: version,
         requestId: "revoke-long-reason",
         reason: "y".repeat(501),
@@ -514,6 +539,7 @@ describe("protected catalog publication", () => {
 
     await expect(
       revokeResaleEvidence(ctx.db, {
+        variantId,
         evidenceId: registration.evidenceId,
         expectedVariantVersion: version,
         requestId: "revoke-immutable",

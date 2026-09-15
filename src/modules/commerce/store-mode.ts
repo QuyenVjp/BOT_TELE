@@ -227,12 +227,12 @@ export async function transitionStoreModeInTransaction(
       ok: true,
       kind: "REPLAYED",
       control: {
-        id: "main",
-        status: asMode(existing.rows[0].to_status),
-        version: existing.rows[0].resulting_version,
+        id: row.id,
+        status: mode,
+        version: row.version,
         updatedAt: toIso(row.updated_at),
         updatedBy: row.updated_by,
-        lastRequestId: requestId,
+        lastRequestId: row.last_request_id,
       },
     };
   }

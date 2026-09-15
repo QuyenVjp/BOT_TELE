@@ -29,6 +29,7 @@ import type {
   ProductPublicationReadiness,
   ResaleEvidenceSource,
 } from "../../modules/catalog/publication.js";
+import { isId } from "../../shared/ids/index.js";
 import { REASON_LABEL } from "./support.js";
 import { renderAdminProductList, type AdminProductView } from "./admin-product-list.js";
 
@@ -742,7 +743,11 @@ export function presentAdminProductReadiness(input: {
       // Telegram caps callback_data at 64 bytes and the ingress drops anything longer, so a
       // variant whose evidence id + version no longer fit is offered without the revoke
       // button rather than with one that would silently do nothing.
-      ...(variant.evidenceActive && revoke !== null && Buffer.byteLength(revoke, "utf8") <= 64
+      ...(variant.evidenceActive &&
+      variant.evidenceId !== null &&
+      isId(variant.evidenceId) &&
+      revoke !== null &&
+      Buffer.byteLength(revoke, "utf8") <= 64
         ? [{ text: "🚫 Thu hồi", callbackData: revoke }]
         : []),
     ];
@@ -818,7 +823,7 @@ export function presentAdminEvidenceRevokePrompt(input: {
       `Phiên bản biến thể: ${input.variantVersion}`,
       "",
       "Gửi lý do thu hồi (một dòng, tối đa 200 ký tự).",
-      "Thu hồi không sửa dữ liệu bằng chứng: chỉ đổi trạng thái và làm bản xuất bản hiện tại cũ đi, nên phải xuất bản lại.",
+      "Thu hồi không sửa dữ liệu bằng chứng: chỉ đổi trạng thái và làm bản xuất bản hiện tại cũ đi. Hãy đăng ký bằng chứng mới rồi xuất bản lại.",
       "Bot sẽ trả mã xác nhận; hoàn tất bằng /confirm <mã xác nhận>.",
     ].join("\n"),
     buttons: [

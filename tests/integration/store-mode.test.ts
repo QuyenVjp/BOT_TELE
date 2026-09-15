@@ -108,6 +108,43 @@ describe("store-mode safety", () => {
       }),
     ).resolves.toMatchObject({ ok: false, code: "VERSION_CONFLICT" });
   });
+  it("returns the current control state when an old transition is replayed", async () => {
+    await transitionStoreMode(ctx.db, {
+      targetMode: "TEST",
+      expectedVersion: 1,
+      requestId: "store-test-replay-state",
+      actorId: "admin",
+      reason: "pre-production test",
+      correlationId: "store-test-replay-state",
+    });
+    await transitionStoreMode(ctx.db, {
+      targetMode: "CLOSED",
+      expectedVersion: 2,
+      requestId: "store-close-after-test",
+      actorId: "admin",
+      reason: "close after test",
+      correlationId: "store-close-after-test",
+    });
+
+    await expect(
+      transitionStoreMode(ctx.db, {
+        targetMode: "TEST",
+        expectedVersion: 1,
+        requestId: "store-test-replay-state",
+        actorId: "admin",
+        reason: "pre-production test",
+        correlationId: "store-test-replay-state-replay",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      kind: "REPLAYED",
+      control: {
+        status: "CLOSED",
+        version: 3,
+        lastRequestId: "store-close-after-test",
+      },
+    });
+  });
 
   it("TEST mode denies public SKUs and non-allowlisted buyers of test SKUs", async () => {
     await setStoreModeForTest(ctx.db, "TEST", "admin");

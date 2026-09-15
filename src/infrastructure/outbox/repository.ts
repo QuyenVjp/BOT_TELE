@@ -257,7 +257,9 @@ export async function countUnpublished(exec: Executor): Promise<number> {
 /** Count rows that exhausted the retry budget (operational visibility). */
 export async function countDeadLettered(exec: Executor): Promise<number> {
   const result = await sql<{ count: string }>`
-    select count(*)::text as count from outbox_event where dead_lettered_at is not null
+    select count(*)::text as count
+      from outbox_event
+     where dead_lettered_at is not null and disposition_status is null
   `.execute(exec);
   return Number(result.rows[0]?.count ?? "0");
 }

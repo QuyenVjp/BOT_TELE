@@ -72,6 +72,7 @@ export type RegisterResaleEvidenceResult =
 
 export interface RevokeResaleEvidenceInput {
   evidenceId: string;
+  variantId: string;
   /** Optimistic guard: the `product_variant.version` the operator last saw. */
   expectedVariantVersion: number;
   requestId: string;
@@ -341,6 +342,9 @@ export async function registerResaleEvidenceInTransaction(
   }
   if (!isId(input.variantId))
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy biến thể." };
+  // Serialize the request key before checking the unique idempotency row. This
+  // covers concurrent retries even when the same key is submitted for another variant.
+  await sql`select pg_advisory_xact_lock(hashtext(${requestId}))`.execute(exec);
   const existingRequest = await sql<{ id: string; variant_id: string; variant_version: number }>`
     select re.id, re.variant_id, v.version as variant_version
       from resale_evidence re
@@ -436,7 +440,7 @@ export async function revokeResaleEvidenceInTransaction(
   ) {
     return { ok: false, code: "INVALID_INPUT", message: "Yêu cầu thu hồi không hợp lệ." };
   }
-  if (!isId(input.evidenceId))
+  if (!isId(input.evidenceId) || !isId(input.variantId))
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy bằng chứng." };
 
   // Lock first: concurrent revocations of the same record serialize here, so the
@@ -454,6 +458,8 @@ export async function revokeResaleEvidenceInTransaction(
   `.execute(exec);
   const row = evidence.rows[0];
   if (!row) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy bằng chứng." };
+  if (row.variant_id !== input.variantId)
+    return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy bằng chứng." };
 
   // Replay is checked before the version guard: a retry of an already-applied
   // request resends the pre-revocation version, which is stale by design.

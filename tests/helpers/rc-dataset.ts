@@ -53,7 +53,7 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
         (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, resale_evidence_id, sort_order)
       select '01VAR0' || lpad(gs::text, 20, '0'),
         '01PRD0' || lpad((((gs - 1) / 5)::int + 1)::text, 20, '0'),
-        'RC-SKU-' || gs, 'RC Variant ' || gs, 100000 + gs, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'QUANTITY_STOCK', 'RC-RESALE-' || gs, gs
+        'RC-SKU-' || gs, 'RC Variant ' || gs, 100000 + gs, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'QUANTITY_STOCK', '01EVD0' || lpad(gs::text, 20, '0'), gs
       from generate_series(1, ${COUNTS.variants}) gs
     `.execute(trx);
 
@@ -69,7 +69,7 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
     await sql`
       insert into resale_evidence
         (id, variant_id, source, reference, summary, metadata_redacted, status, created_by)
-      select 'RC-RESALE-' || gs,
+      select '01EVD0' || lpad(gs::text, 20, '0'),
         '01VAR0' || lpad(gs::text, 20, '0'),
         'OWNER_ATTESTATION',
         'rc-synthetic-attestation-' || gs,
