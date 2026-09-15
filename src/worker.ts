@@ -4703,7 +4703,7 @@ async function bootstrap(): Promise<void> {
           correlationId: input.correlationId,
         });
         if (result.ok) return presentHighRiskDone("admin.confirm");
-        if (result.code === "NOT_READY") {
+        if (result.code === "NOT_READY" || result.code === "ACTION_REFUSED") {
           return {
             text: result.message,
             buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],

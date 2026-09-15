@@ -178,6 +178,7 @@ export type ConfirmActionResult =
         | "CONFIRM_FAILED"
         | "NOT_FOUND"
         | "NOT_READY"
+        | "ACTION_REFUSED"
         | SensitiveAuthorizationRefusal;
       message: string;
       action?: OwnerCommand;
@@ -209,13 +210,29 @@ class SensitiveAuthorizationRefusedError extends Error {
 
 /** Keeps a readiness refusal distinguishable from an expired or missing confirmation. */
 class DurableAdminActionRefusedError extends Error {
-  readonly code = "NOT_READY" as const;
+  readonly code: "NOT_READY" | "ACTION_REFUSED";
   readonly action: OwnerCommand;
 
-  constructor(action: OwnerCommand, message: string) {
+  constructor(
+    action: OwnerCommand,
+    message: string,
+    code: "NOT_READY" | "ACTION_REFUSED" = "ACTION_REFUSED",
+  ) {
     super(message);
     this.action = action;
+    this.code = code;
   }
+}
+
+function durableResultOrThrow(
+  action: PendingAction,
+  result: { ok: boolean; message?: string },
+): boolean {
+  if (result.ok) return true;
+  throw new DurableAdminActionRefusedError(
+    action.command,
+    result.message ?? "Lệnh quản trị không được áp dụng.",
+  );
 }
 
 function storeOpenRefusalMessage(
@@ -527,7 +544,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           actorId: action.actorId,
           correlationId,
         });
-        return result.ok;
+        return durableResultOrThrow(action, result);
       }
       case "outbox.orphan.dispose": {
         if (
@@ -545,7 +562,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           actorId: action.actorId,
           correlationId,
         });
-        return result.ok;
+        return durableResultOrThrow(action, result);
       }
       case "wallet.refund": {
         const refunded = await refundWalletCredit(exec, {
@@ -553,7 +570,9 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           correlationId,
           approvedBy: action.actorId,
         });
-        if (!refunded.ok) return false;
+        if (!refunded.ok) {
+          throw new DurableAdminActionRefusedError(action.command, refunded.message);
+        }
         await appendAuditEvent(exec, {
           actorType: "ROOT_ADMIN",
           actorId: action.actorId,
@@ -572,7 +591,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           actorId: action.actorId,
           correlationId,
         });
-        return completed.ok;
+        return durableResultOrThrow(action, completed);
       }
       case "support.replacement.approve": {
         if (!deps.supportReplacementApprove) return false;
@@ -582,7 +601,13 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           actorId: action.actorId,
           correlationId,
         });
-        return approved.ok;
+        if (!approved.ok) {
+          throw new DurableAdminActionRefusedError(
+            action.command,
+            "Yêu cầu thay thế chưa được áp dụng.",
+          );
+        }
+        return true;
       }
       case "store.open":
       case "store.close":
@@ -596,6 +621,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             throw new DurableAdminActionRefusedError(
               action.command,
               storeOpenRefusalMessage(readiness),
+              "NOT_READY",
             );
           }
         }
@@ -613,7 +639,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           reason: action.reason,
           correlationId,
         });
-        return result.ok;
+        return durableResultOrThrow(action, result);
       }
       case "catalog.evidence.register": {
         if (!action.input) return false;
@@ -640,7 +666,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           reason: action.reason,
           correlationId,
         });
-        return result.ok;
+        return durableResultOrThrow(action, result);
       }
       case "catalog.evidence.revoke": {
         if (typeof action.expectedVersion !== "number" || !action.input || !isId(action.input)) {
@@ -658,7 +684,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           reason: action.reason,
           correlationId,
         });
-        return result.ok;
+        return durableResultOrThrow(action, result);
       }
       case "catalog.publish": {
         if (typeof action.expectedVersion !== "string") return false;
@@ -672,7 +698,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         if (!result.ok && result.code === "NOT_READY") {
           throw new DurableAdminActionRefusedError(action.command, result.message);
         }
-        return result.ok;
+        return durableResultOrThrow(action, result);
       }
       default:
         return false;

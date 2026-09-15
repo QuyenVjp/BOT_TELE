@@ -248,6 +248,37 @@ describe("protected catalog publication", () => {
     }
   });
 
+  it("does not publish a public product while the store is in TEST mode", async () => {
+    const { productId, variantId } = await seedProduct();
+    await registerEvidence(variantId, "public-test-mode-register-1");
+    await sql`update store_control set status = 'TEST', version = 2 where id = 'main'`.execute(
+      ctx.db,
+    );
+
+    try {
+      const readiness = await getProductPublicationReadiness(ctx.db, productId);
+      expect(readiness).toMatchObject({
+        testOnly: false,
+        blockers: ["STORE_TEST_MODE"],
+        canPublish: false,
+      });
+      await expect(
+        publishProduct(ctx.db, {
+          productId,
+          expectedPublicationVersion: readiness!.publicationVersion,
+          actorId: "admin",
+          reason: "Refuse public publication in TEST mode",
+          correlationId: "public-test-mode-publish-1",
+        }),
+      ).resolves.toMatchObject({ ok: false, code: "NOT_READY" });
+      expect(await getVariantById(ctx.db, variantId, "public")).toBeNull();
+    } finally {
+      await sql`update store_control set status = 'CLOSED', version = 3 where id = 'main'`.execute(
+        ctx.db,
+      );
+    }
+  });
+
   it("promotes a TEST_ONLY product to public and replays the old confirmation", async () => {
     const { productId, variantId } = await seedProduct({ isTest: true });
     const registration = await registerEvidence(variantId, "promote-register-1");

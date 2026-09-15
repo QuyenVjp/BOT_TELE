@@ -328,9 +328,7 @@ export async function getProductPublicationReadiness(
   const blockers = Array.from(
     new Set([
       ...(activeVariants.length === 0 ? ["NO_ACTIVE_VARIANTS" as PublicationBlocker] : []),
-      ...(first.product_test && storeMode === "TEST"
-        ? (["STORE_TEST_MODE"] as PublicationBlocker[])
-        : []),
+      ...(storeMode === "TEST" ? (["STORE_TEST_MODE"] as PublicationBlocker[]) : []),
       ...activeVariants.flatMap((variant) => variant.blockers),
     ]),
   );
