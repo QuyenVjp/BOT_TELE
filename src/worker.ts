@@ -1444,7 +1444,7 @@ async function bootstrap(): Promise<void> {
   const { DESCRIPTION_TEMPLATES } = await import("./modules/catalog/description-templates.js");
   const { createAdminProduct, createAdminVariant, updateAdminVariant } =
     await import("./modules/catalog/admin-products.js");
-  const { getStoreMode, setStoreMode, addTestCustomer, listTestCustomers } =
+  const { getStoreControl, getStoreMode, addTestCustomer, listTestCustomers } =
     await import("./modules/commerce/store-mode.js");
   const { adjustQuantityStock, listVariantInventoryHistory } =
     await import("./modules/catalog/quantity-stock.js");
@@ -3096,19 +3096,25 @@ async function bootstrap(): Promise<void> {
       },
       async storeTest(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
-          return presentAdminDenied("NOT_ROOT_ADMIN");
-        await setStoreMode(dbHandle.db, "TEST", input.telegramUserId);
-        await appendAuditEvent(dbHandle.db, {
-          actorType: "ROOT_ADMIN",
-          actorId: input.telegramUserId,
-          action: "store.test",
-          targetType: "StoreControl",
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const control = await getStoreControl(dbHandle.db);
+        const result = await adminCallbacks.handle({
+          command: "store.test",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           targetId: "main",
+          expectedVersion: control.version,
           reason: "Bật chế độ TEST — chỉ khách test mua được sản phẩm test",
           correlationId: input.correlationId,
         });
-        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+        if (!result.ok) return presentAdminDenied(result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN");
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "store.test",
+            })
+          : presentAdminStoreMode(await getStoreMode(dbHandle.db));
       },
       async storeOpen(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -3161,35 +3167,47 @@ async function bootstrap(): Promise<void> {
       },
       async storeOpenConfirm(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
-          return presentAdminDenied("NOT_ROOT_ADMIN");
-        await setStoreMode(dbHandle.db, "OPEN", input.telegramUserId);
-        await appendAuditEvent(dbHandle.db, {
-          actorType: "ROOT_ADMIN",
-          actorId: input.telegramUserId,
-          action: "store.open",
-          targetType: "StoreControl",
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const control = await getStoreControl(dbHandle.db);
+        const result = await adminCallbacks.handle({
+          command: "store.open",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           targetId: "main",
+          expectedVersion: control.version,
           reason: "Mở bán công khai (xác nhận qua nút)",
           correlationId: input.correlationId,
         });
-        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+        if (!result.ok) return presentAdminDenied(result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN");
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "store.open",
+            })
+          : presentAdminStoreMode(await getStoreMode(dbHandle.db));
       },
       async storeClose(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
-        if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
-          return presentAdminDenied("NOT_ROOT_ADMIN");
-        await setStoreMode(dbHandle.db, "CLOSED", input.telegramUserId);
-        await appendAuditEvent(dbHandle.db, {
-          actorType: "ROOT_ADMIN",
-          actorId: input.telegramUserId,
-          action: "store.close",
-          targetType: "StoreControl",
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const control = await getStoreControl(dbHandle.db);
+        const result = await adminCallbacks.handle({
+          command: "store.close",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           targetId: "main",
+          expectedVersion: control.version,
           reason: "Đóng cửa hàng tạm dừng bán",
           correlationId: input.correlationId,
         });
-        return presentAdminStoreMode(await getStoreMode(dbHandle.db));
+        if (!result.ok) return presentAdminDenied(result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN");
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "store.close",
+            })
+          : presentAdminStoreMode(await getStoreMode(dbHandle.db));
       },
       async dashboard(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");

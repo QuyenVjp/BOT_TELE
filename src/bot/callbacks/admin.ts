@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import type { Db, Trx } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
@@ -28,7 +29,23 @@ import {
   markSupplierSkuManuallyVerified,
   selectVariantSupplierMapping,
 } from "../../modules/supplier/admin.js";
-import { setStoreStatus } from "../../modules/commerce/buy-now.js";
+import {
+  dispositionDiscrepancyInTransaction,
+  isDiscrepancyResolutionCode,
+  type DiscrepancyResolutionCode,
+} from "../../modules/admin/payment-ops.js";
+import {
+  dispositionTerminalOutboxEventInTransaction,
+  isOutboxDispositionCode,
+  type OutboxDispositionCode,
+} from "../../infrastructure/outbox/disposition.js";
+import {
+  publishProductInTransaction,
+  registerResaleEvidenceInTransaction,
+  RESALE_EVIDENCE_SOURCES,
+  type ResaleEvidenceSource,
+} from "../../modules/catalog/publication.js";
+import { transitionStoreModeInTransaction } from "../../modules/commerce/store-mode.js";
 
 /**
  * Allowlisted owner callbacks (T097, FR-021–FR-023).
@@ -43,7 +60,10 @@ import { setStoreStatus } from "../../modules/commerce/buy-now.js";
 export const OWNER_COMMANDS = [
   "catalog.activate",
   "catalog.deactivate",
+  "catalog.evidence.register",
+  "catalog.publish",
   "discrepancy.resolve",
+  "outbox.orphan.dispose",
   "discrepancy.list",
   "order.inspect",
   "inventory.import",
@@ -55,6 +75,7 @@ export const OWNER_COMMANDS = [
   "support.replacement.approve",
   "store.open",
   "store.close",
+  "store.test",
 ] as const;
 
 export type OwnerCommand = (typeof OWNER_COMMANDS)[number];
@@ -100,6 +121,8 @@ export interface HandleInput {
   resolutionCode?: string;
   correlationId: string;
   input?: string;
+  /** Snapshot version supplied by the operator; publication uses its composite string. */
+  expectedVersion?: number | string;
 }
 export type HandleResult =
   | {
@@ -153,6 +176,8 @@ interface PendingAction {
   reason: string;
   resolutionCode?: string;
   actorId: string;
+  input?: string;
+  expectedVersion?: number | string;
 }
 
 class InvalidDurableAdminActionError extends Error {}
@@ -172,22 +197,34 @@ export interface AdminCallbacks {
   confirm(input: ConfirmActionInput): Promise<ConfirmActionResult>;
 }
 
-function fingerprintFor(command: string, targetId: string, resolutionCode?: string): string {
-  return `${command}:${targetId}:${resolutionCode ?? ""}`;
+function fingerprintFor(
+  command: string,
+  targetId: string,
+  resolutionCode?: string,
+  expectedVersion?: number | string,
+  input?: string,
+): string {
+  const inputHash = input === undefined ? "" : createHash("sha256").update(input, "utf8").digest("hex");
+  return `${command}:${targetId}:${resolutionCode ?? ""}:${expectedVersion ?? ""}:${inputHash}`;
 }
 
 function targetTypeFor(
   command: OwnerCommand,
 ):
   | "ProductVariant"
+  | "Product"
   | "Discrepancy"
+  | "OutboxEvent"
   | "Order"
   | "ManualFulfillmentTask"
   | "SupplierSku"
   | "ReplacementCase"
   | "StoreControl" {
   if (command.startsWith("store.")) return "StoreControl";
+  if (command === "catalog.publish") return "Product";
+  if (command === "catalog.evidence.register") return "ProductVariant";
   if (command.startsWith("catalog.")) return "ProductVariant";
+  if (command === "outbox.orphan.dispose") return "OutboxEvent";
   if (command.startsWith("supplier.mapping.clear")) return "ProductVariant";
   if (command.startsWith("supplier.")) return "SupplierSku";
   if (command.startsWith("discrepancy.")) return "Discrepancy";
@@ -207,6 +244,7 @@ function sensitiveRequestedData(input: {
   targetId: string;
   value: string | undefined;
   resolutionCode: string | undefined;
+  expectedVersion: number | string | undefined;
 }): AuthorizationJsonValue {
   if (input.command === "supplier.mapping.select" || input.command === "supplier.mapping.verify") {
     return {
@@ -217,6 +255,10 @@ function sensitiveRequestedData(input: {
   return {
     targetId: input.targetId,
     ...(input.resolutionCode === undefined ? {} : { resolutionCode: input.resolutionCode }),
+    ...(input.expectedVersion === undefined ? {} : { expectedVersion: String(input.expectedVersion) }),
+    ...(input.command === "catalog.evidence.register" && input.value !== undefined
+      ? { evidenceInput: input.value }
+      : {}),
   };
 }
 
@@ -226,6 +268,8 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
   const reason = payload.reason;
   const actorId = payload.actorId;
   const resolutionCode = payload.resolutionCode;
+  const input = payload.input;
+  const expectedVersion = payload.expectedVersion;
   if (
     !isDurableAdminCommandRef(action.commandRef) ||
     typeof targetId !== "string" ||
@@ -237,7 +281,12 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
     typeof actorId !== "string" ||
     !/^\d{1,20}$/.test(actorId) ||
     (resolutionCode !== undefined &&
-      (typeof resolutionCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(resolutionCode)))
+      (typeof resolutionCode !== "string" || !/^[A-Z0-9_]{1,64}$/.test(resolutionCode))) ||
+    (input !== undefined && (typeof input !== "string" || input.length === 0 || input.length > 2_000)) ||
+    (expectedVersion !== undefined &&
+      (typeof expectedVersion !== "number" && typeof expectedVersion !== "string" ||
+        (typeof expectedVersion === "number" && !Number.isInteger(expectedVersion)) ||
+        (typeof expectedVersion === "string" && (expectedVersion.length === 0 || expectedVersion.length > 300))))
   ) {
     throw new InvalidDurableAdminActionError("durable admin action payload is invalid");
   }
@@ -248,6 +297,10 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
     actorId,
   };
   if (typeof resolutionCode === "string") result.resolutionCode = resolutionCode;
+  if (typeof input === "string") result.input = input;
+  if (typeof expectedVersion === "number" || typeof expectedVersion === "string") {
+    result.expectedVersion = expectedVersion;
+  }
   return result;
 }
 
@@ -331,19 +384,6 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         });
         return result.ok ? { ok: true, needsConfirmation: false } : mapSupplierError(result);
       }
-      case "store.close": {
-        await setStoreStatus(db, "CLOSED", String(input.actor.numericUserId));
-        await appendAuditEvent(db, {
-          actorType: "ROOT_ADMIN",
-          actorId: String(input.actor.numericUserId),
-          action: "store.close",
-          targetType: "StoreControl",
-          targetId: "main",
-          reason: input.reason,
-          correlationId: input.correlationId,
-        });
-        return { ok: true, needsConfirmation: false };
-      }
       case "catalog.activate":
       case "catalog.deactivate": {
         const active = command === "catalog.activate";
@@ -418,26 +458,34 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
   ): Promise<boolean> {
     switch (action.command) {
       case "discrepancy.resolve": {
-        const res = await sql<{ id: string }>`
-          update discrepancy
-          set status = 'RESOLVED',
-              resolution_code = ${action.resolutionCode ?? "MANUAL_RESOLVE"},
-              resolved_at = now()
-          where id = ${action.targetId} and status = 'OPEN'
-          returning id
-        `.execute(exec);
-        if (res.rows.length === 0) return false;
-        await appendAuditEvent(exec, {
-          actorType: "ROOT_ADMIN",
+        if (typeof action.expectedVersion !== "number" || !isDiscrepancyResolutionCode(action.resolutionCode ?? "")) {
+          return false;
+        }
+        const result = await dispositionDiscrepancyInTransaction(exec, {
+          discrepancyId: action.targetId,
+          expectedVersion: action.expectedVersion,
+          resolutionCode: action.resolutionCode as DiscrepancyResolutionCode,
+          note: action.reason,
+          requestId: correlationId,
           actorId: action.actorId,
-          action: "discrepancy.resolve",
-          targetType: "Discrepancy",
-          targetId: action.targetId,
-          reason: action.reason,
           correlationId,
-          metadataRedacted: { resolutionCode: action.resolutionCode ?? "MANUAL_RESOLVE" },
         });
-        return true;
+        return result.ok;
+      }
+      case "outbox.orphan.dispose": {
+        if (typeof action.expectedVersion !== "number" || !isOutboxDispositionCode(action.resolutionCode ?? "")) {
+          return false;
+        }
+        const result = await dispositionTerminalOutboxEventInTransaction(exec, {
+          eventId: action.targetId,
+          expectedVersion: action.expectedVersion,
+          code: action.resolutionCode as OutboxDispositionCode,
+          note: action.reason,
+          requestId: correlationId,
+          actorId: action.actorId,
+          correlationId,
+        });
+        return result.ok;
       }
       case "wallet.refund": {
         const refunded = await refundWalletCredit(exec, {
@@ -476,18 +524,53 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         });
         return approved.ok;
       }
-      case "store.open": {
-        await setStoreStatus(exec, "OPEN", action.actorId);
-        await appendAuditEvent(exec, {
-          actorType: "ROOT_ADMIN",
+      case "store.open":
+      case "store.close":
+      case "store.test": {
+        if (typeof action.expectedVersion !== "number") return false;
+        const targetMode = action.command === "store.open" ? "OPEN" : action.command === "store.close" ? "CLOSED" : "TEST";
+        const result = await transitionStoreModeInTransaction(exec, {
+          targetMode,
+          expectedVersion: action.expectedVersion,
+          requestId: correlationId,
           actorId: action.actorId,
-          action: "store.open",
-          targetType: "StoreControl",
-          targetId: "main",
           reason: action.reason,
           correlationId,
         });
-        return true;
+        return result.ok;
+      }
+      case "catalog.evidence.register": {
+        if (!action.input) return false;
+        const fields = action.input.split("|");
+        if (fields.length !== 3) return false;
+        const source = fields[0]?.trim();
+        const reference = fields[1]?.trim();
+        const summary = fields[2]?.trim();
+        if (!source || !reference || !summary || !(RESALE_EVIDENCE_SOURCES as readonly string[]).includes(source)) {
+          return false;
+        }
+        const result = await registerResaleEvidenceInTransaction(exec, {
+          variantId: action.targetId,
+          source: source as ResaleEvidenceSource,
+          reference,
+          summary,
+          requestId: correlationId,
+          actorId: action.actorId,
+          reason: action.reason,
+          correlationId,
+        });
+        return result.ok;
+      }
+      case "catalog.publish": {
+        if (typeof action.expectedVersion !== "string") return false;
+        const result = await publishProductInTransaction(exec, {
+          productId: action.targetId,
+          expectedPublicationVersion: action.expectedVersion,
+          actorId: action.actorId,
+          reason: action.reason,
+          correlationId,
+        });
+        return result.ok;
       }
       default:
         return false;
@@ -504,7 +587,11 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         input.reason.length > 500 ||
         input.targetId.length === 0 ||
         input.targetId.length > 128 ||
-        (input.resolutionCode !== undefined && !/^[A-Z0-9_]{1,64}$/.test(input.resolutionCode))
+        (input.input !== undefined && (input.input.length === 0 || input.input.length > 2_000)) ||
+        (input.resolutionCode !== undefined && !/^[A-Z0-9_]{1,64}$/.test(input.resolutionCode)) ||
+        (input.expectedVersion !== undefined &&
+          ((typeof input.expectedVersion === "number" && !Number.isInteger(input.expectedVersion)) ||
+            (typeof input.expectedVersion === "string" && (input.expectedVersion.length === 0 || input.expectedVersion.length > 300))))
       ) {
         return { ok: false, code: "INVALID_REASON", message: "Cần nêu lý do." };
       }
@@ -546,6 +633,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             targetId: input.targetId,
             value: input.input,
             resolutionCode: input.resolutionCode,
+            expectedVersion: input.expectedVersion,
           }),
           consumeGrant: !isDurableAdminCommandRef(input.command),
         });
@@ -559,7 +647,13 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
       }
 
       if (isDurableAdminCommandRef(input.command)) {
-        const fingerprint = fingerprintFor(input.command, input.targetId, input.resolutionCode);
+        const fingerprint = fingerprintFor(
+          input.command,
+          input.targetId,
+          input.resolutionCode,
+          input.expectedVersion,
+          input.input,
+        );
         const payloadRedacted: Record<string, unknown> = {
           targetId: input.targetId,
           reason: input.reason.trim(),
@@ -567,6 +661,12 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         };
         if (input.resolutionCode !== undefined) {
           payloadRedacted.resolutionCode = input.resolutionCode;
+        }
+        if (input.input !== undefined) {
+          payloadRedacted.input = input.input;
+        }
+        if (input.expectedVersion !== undefined) {
+          payloadRedacted.expectedVersion = input.expectedVersion;
         }
         const issued = await confirmation.issue({
           rootChannelIdentityId,
@@ -617,7 +717,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             const action = pendingActionFrom(durableAction);
             if (
               action.actorId !== String(input.actor.numericUserId) ||
-              fingerprintFor(action.command, action.targetId, action.resolutionCode) !==
+              fingerprintFor(action.command, action.targetId, action.resolutionCode, action.expectedVersion, action.input) !==
                 durableAction.actionFingerprint
             ) {
               throw new InvalidDurableAdminActionError("durable admin action binding is invalid");
@@ -641,8 +741,9 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
               requestedData: sensitiveRequestedData({
                 command: action.command,
                 targetId: action.targetId,
-                value: undefined,
+                value: action.input,
                 resolutionCode: action.resolutionCode,
+                expectedVersion: action.expectedVersion,
               }),
               consumeGrant: true,
             });

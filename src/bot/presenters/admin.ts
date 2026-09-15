@@ -16,6 +16,8 @@ import type {
 } from "../../modules/admin/order-operations.js";
 import { canTicketTransition, type SupportTicketStatus } from "../../modules/support/domain.js";
 import type { AdminSupportTicketRow } from "../../modules/support/service.js";
+import type { AdminDiscrepancyDetail, DiscrepancyResolutionCode } from "../../modules/admin/payment-ops.js";
+import type { OutboxDispositionCode, TerminalOutboxOrphanDetail } from "../../infrastructure/outbox/disposition.js";
 import { REASON_LABEL } from "./support.js";
 import { renderAdminProductList, type AdminProductView } from "./admin-product-list.js";
 
@@ -429,6 +431,7 @@ export function presentAdminPaymentsMenu(statusText?: string | undefined): Prese
         { text: "⚠️ Sai lệch", callbackData: "admin:payments:discrepancy" },
         { text: "↩️ Cần hoàn tiền", callbackData: "admin:payments:refund" },
       ],
+      [{ text: "🧯 Outbox treo", callbackData: "admin:payments:outbox" }],
       adminNav("admin:menu"),
     ],
   };
@@ -438,13 +441,98 @@ export function presentAdminPaymentOps(input: {
   title: string;
   rows: Array<{ id: string; label: string; detail: string }>;
   emptyHint: string;
+  rowCallbackPrefix?: string;
 }): PresentedMessage {
   const body = input.rows.length
     ? input.rows.map((row) => `• ${row.label}\n   ${row.detail}`).join("\n")
     : input.emptyHint;
+  const rowButtons = input.rowCallbackPrefix
+    ? input.rows.map((row) => [
+        { text: `🔎 ${row.label.slice(0, 28)}`, callbackData: `${input.rowCallbackPrefix}${row.id}` },
+      ])
+    : [];
   return {
     text: `${input.title}\n\n${body}`,
-    buttons: [[{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }], adminNav("admin:menu")],
+    buttons: [...rowButtons, [{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }], adminNav("admin:menu")],
+  };
+}
+
+const DISCREPANCY_DISPOSITION_BUTTONS: ReadonlyArray<readonly [string, DiscrepancyResolutionCode]> = [
+  ["✅ Đã đối soát", "MANUAL_SETTLE"],
+  ["↩️ Hoàn tiền", "MANUAL_REFUND"],
+  ["♻️ Trùng chứng từ", "DUPLICATE_EVIDENCE"],
+  ["🚫 Chứng từ sai", "INVALID_EVIDENCE"],
+  ["📌 Không cần xử lý", "NO_ACTION_REQUIRED"],
+  ["🚨 Chuyển escalated", "ESCALATED"],
+];
+
+export function presentAdminDiscrepancyDetail(detail: AdminDiscrepancyDetail): PresentedMessage {
+  const evidence = detail.evidence;
+  const lines = [
+    `⚠️ SAI LỆCH ${detail.id.slice(-6)}`,
+    `Phân loại: ${detail.classification}${detail.classificationKnown ? "" : " (legacy)"}`,
+    `Trạng thái: ${detail.status} · phiên bản ${detail.version}`,
+    `Lý do: ${detail.reason}`,
+    `Chủ xử lý: ${detail.owner} · hạn ${detail.dueAt ?? "—"}`,
+    `Đơn: ${detail.orderNumber ?? "không gắn đơn"}`,
+    `Payment intent: ${detail.paymentIntentId ? "có" : "không"}`,
+  ];
+  if (evidence) {
+    lines.push(
+      `Bằng chứng ${evidence.provider} · ${evidence.direction} · ${evidence.amountVnd.toLocaleString("vi-VN")} ₫`,
+      `Provider GD: ${evidence.providerTransactionIdMasked} · tài khoản: ${evidence.merchantAccountMasked}`,
+      `Reference: ${evidence.referenceMasked ?? "—"} · nội dung: ${evidence.transferContentSummary ?? "—"}`,
+      `Ký: ${evidence.signatureStatus} · immutable: ${evidence.immutable ? "yes" : "no"}`,
+    );
+  }
+  const buttons = DISCREPANCY_DISPOSITION_BUTTONS.map(([text, code]) => [
+    { text, callbackData: `admin:payments:r:${detail.id}:${code}` },
+  ]);
+  return {
+    text: lines.join("\n"),
+    buttons: [...buttons, [{ text: "⬅️ Sai lệch", callbackData: "admin:payments:discrepancy" }], adminNav("admin:menu")],
+  };
+}
+
+const OUTBOX_DISPOSITION_BUTTONS: ReadonlyArray<readonly [string, OutboxDispositionCode]> = [
+  ["✅ Đã xử lý thủ công", "HANDLED_MANUALLY"],
+  ["🚫 Không còn áp dụng", "NO_LONGER_APPLICABLE"],
+  ["♻️ Sự kiện trùng", "DUPLICATE_EVENT"],
+  ["⛔ Event không hợp lệ", "INVALID_EVENT"],
+  ["🚨 Escalate", "ESCALATED"],
+];
+
+export function presentAdminOutboxOrphans(input: {
+  rows: Array<{ id: string; eventType: string; lastErrorCode: string | null; attemptCount: number; dispositionStatus: string | null }>;
+}): PresentedMessage {
+  const body = input.rows.length
+    ? input.rows.map((row) => `• ${row.eventType} · ${row.lastErrorCode ?? "—"} · lần ${row.attemptCount}${row.dispositionStatus ? ` · ${row.dispositionStatus}` : ""}`).join("\n")
+    : "Không có outbox treo cần xử lý.";
+  const buttons = input.rows.map((row) => [
+    { text: `🔎 ${row.eventType.slice(0, 28)}`, callbackData: `admin:payments:o:${row.id}` },
+  ]);
+  return {
+    text: `🧯 OUTBOX TREO\n\n${body}`,
+    buttons: [...buttons, [{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }], adminNav("admin:menu")],
+  };
+}
+
+export function presentAdminOutboxDetail(detail: TerminalOutboxOrphanDetail): PresentedMessage {
+  const row = detail.orphan;
+  const lines = [
+    `🧯 OUTBOX ${row.id.slice(-6)}`,
+    `Event: ${row.eventType} · aggregate ${row.aggregateType}`,
+    `Lỗi cuối: ${row.lastErrorCode ?? "—"} · attempts ${row.attemptCount}`,
+    `Parked: ${row.deadLetteredAt} · disposition version ${row.dispositionVersion}`,
+    `Trạng thái: ${row.dispositionStatus ?? "OPEN"}`,
+    "Payload gốc được giữ nguyên trong hệ thống; màn hình không render payload khách hàng.",
+  ];
+  const buttons = OUTBOX_DISPOSITION_BUTTONS.map(([text, code]) => [
+    { text, callbackData: `admin:payments:x:${row.id}:${code}` },
+  ]);
+  return {
+    text: lines.join("\n"),
+    buttons: [...buttons, [{ text: "⬅️ Outbox treo", callbackData: "admin:payments:outbox" }], adminNav("admin:menu")],
   };
 }
 export interface AdminSupplierOverview {

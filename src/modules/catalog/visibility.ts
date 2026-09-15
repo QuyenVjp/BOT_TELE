@@ -27,14 +27,32 @@ export async function resolveCatalogAudience(
   return "public";
 }
 
+/** Current publication binding. Expects SQL aliases `p` and `v`. */
+export function currentPublicationSql() {
+  return sql`(
+    v.resale_evidence_id is not null
+    and v.publication_evidence_id = v.resale_evidence_id
+    and v.publication_product_version = p.version
+    and v.publication_variant_version = v.version
+    and v.published_at is not null
+    and exists (
+      select 1 from resale_evidence re
+      where re.id = v.publication_evidence_id
+        and re.variant_id = v.id
+        and re.status = 'ACTIVE'
+    )
+  )`;
+}
+
 /**
  * Product+variant visibility predicate. Expects SQL aliases `p` (product) and
- * `v` (product_variant). Public listings never include `is_test`. Test audience
- * may include test SKUs; resale evidence is required only for non-test products.
+ * `v` (product_variant). Public listings never include test or unpublished rows.
+ * Test audience may include test SKUs without a publication binding.
  */
 export function catalogVisibilitySql(audience: CatalogAudience) {
+  const published = currentPublicationSql();
   if (audience === "test") {
-    return sql`and not p.is_archived and (p.is_test or v.resale_evidence_id is not null)`;
+    return sql`and not p.is_archived and (p.is_test or ${published})`;
   }
-  return sql`and not p.is_archived and not p.is_test and v.resale_evidence_id is not null`;
+  return sql`and not p.is_archived and not p.is_test and ${published}`;
 }

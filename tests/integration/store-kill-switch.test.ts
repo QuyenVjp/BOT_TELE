@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
-import { buyNow, isStoreOpen, setStoreStatus } from "../../src/modules/commerce/buy-now.js";
+import { buyNow, isStoreOpen, setStoreStatusForTest } from "../../src/modules/commerce/buy-now.js";
 import { createWalletPurchaseService } from "../../src/modules/wallet/purchase.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -84,7 +84,7 @@ describe("global store kill-switch enforcement", () => {
     expect(counts.rows[0]).toEqual({ orders: 0, intents: 0, reserved: 0 });
 
     // When store is opened
-    await setStoreStatus(ctx.db, "OPEN", "admin");
+    await setStoreStatusForTest(ctx.db, "OPEN", "admin");
     expect(await isStoreOpen(ctx.db)).toBe(true);
 
     const allowed = await buyNow(ctx.db, {
@@ -101,7 +101,7 @@ describe("global store kill-switch enforcement", () => {
     }
 
     // When closed again
-    await setStoreStatus(ctx.db, "CLOSED", "admin");
+    await setStoreStatusForTest(ctx.db, "CLOSED", "admin");
     expect(await isStoreOpen(ctx.db)).toBe(false);
 
     // Wallet purchase attempt when closed

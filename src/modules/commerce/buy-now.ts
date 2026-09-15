@@ -345,7 +345,7 @@ export async function isStoreOpen(db: Db): Promise<boolean> {
   return result.rows[0]?.status === "OPEN";
 }
 
-export async function setStoreStatus(
+export async function setStoreStatusForTest(
   db: Db,
   status: "OPEN" | "CLOSED",
   updatedBy: string,

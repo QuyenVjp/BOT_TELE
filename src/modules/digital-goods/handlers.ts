@@ -198,14 +198,25 @@ export function createFulfillmentOutboxHandler(
         const orderId = typeof p.orderId === "string" ? p.orderId : null;
         const correlationId =
           typeof p.correlationId === "string" ? p.correlationId : `outbox-${event.id}`;
-        if (!orderId) return { kind: "RETRY", errorCode: "DELIVERY_HANDOFF_ORDER_MISSING" };
+        if (!orderId) {
+          // The payload carries no order reference and the aggregate id is the
+          // bundle, not the order: no retry can recover it. Park it visibly.
+          return classifyFulfillmentOutcome({ ok: false, code: "DELIVERY_HANDOFF_ORDER_MISSING" });
+        }
         const result = await fulfillPaidOrder(deps.db, {
           orderId,
           correlationId,
           deps: fulfillmentDeps,
         });
-        if (!result.ok || result.kind !== "DELIVERY_BUNDLE" || !result.token) {
-          return { kind: "RETRY", errorCode: "DELIVERY_HANDOFF_NOT_READY" };
+        // Transient outcomes (OUT_OF_STOCK / NEEDS_REVIEW / ISSUE_FAILED) keep
+        // retrying; a missing or unpayable order parks as terminal review.
+        if (!result.ok) return classifyFulfillmentOutcome(result);
+        if (result.kind !== "DELIVERY_BUNDLE" || result.token === "") {
+          // Paid order, but this event can never mint a handoff: no bundle came
+          // back, or the bundle's reveal token is not recoverable. Retrying
+          // reproduces exactly this outcome and burns the attempt budget, so it
+          // becomes operator review — the row and its evidence stay inspectable.
+          return classifyFulfillmentOutcome({ ok: false, code: "DELIVERY_HANDOFF_NOT_READY" });
         }
         await createDeliveryNotificationHandoff(deps.db, {
           vault: deps.vault,

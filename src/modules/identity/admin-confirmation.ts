@@ -30,10 +30,15 @@ export type ConfirmErrorCode =
 
 export const DURABLE_ADMIN_COMMAND_REFS = [
   "discrepancy.resolve",
+  "outbox.orphan.dispose",
   "wallet.refund",
   "manual_fulfillment.complete",
   "support.replacement.approve",
   "store.open",
+  "store.close",
+  "store.test",
+  "catalog.publish",
+  "catalog.evidence.register",
 ] as const;
 export type DurableAdminCommandRef = (typeof DURABLE_ADMIN_COMMAND_REFS)[number];
 

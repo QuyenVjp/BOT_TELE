@@ -45,6 +45,22 @@ describe("classifyFulfillmentOutcome", () => {
   it("retries an issue failure (transient infra) with backoff", () => {
     expect(classifyFulfillmentOutcome({ ok: false, code: "ISSUE_FAILED" }).kind).toBe("RETRY");
   });
+
+  it("parks a delivery handoff that no retry can satisfy", () => {
+    // A missing order/bundle used to RETRY until the attempt budget ran out,
+    // which hid the row instead of showing it to an operator.
+    expect(classifyFulfillmentOutcome({ ok: false, code: "DELIVERY_HANDOFF_NOT_READY" }).kind).toBe(
+      "TERMINAL_REVIEW",
+    );
+    expect(
+      classifyFulfillmentOutcome({ ok: false, code: "DELIVERY_HANDOFF_ORDER_MISSING" }).kind,
+    ).toBe("TERMINAL_REVIEW");
+  });
+
+  it("keeps an unknown outcome retryable so a new code is never dropped", () => {
+    expect(classifyFulfillmentOutcome({ ok: false, code: "SOMETHING_NEW" }).kind).toBe("RETRY");
+    expect(classifyFulfillmentOutcome({ ok: false }).kind).toBe("RETRY");
+  });
 });
 
 describe("known outbox event types", () => {
