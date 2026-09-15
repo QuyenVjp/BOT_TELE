@@ -126,9 +126,8 @@ function mapOrphan(row: OrphanRow): TerminalOutboxOrphan {
 }
 
 /**
- * The operator queue: dead-lettered, unpublished orphans, newest park first.
- * Rows already dispositioned stay visible (with their disposition) so a closed
- * orphan is reviewable rather than erased.
+ * The operator queue: unresolved dead-lettered, unpublished orphans, newest park first.
+ * Resolved rows remain queryable by id for audit review, but no longer occupy the queue.
  */
 export async function listTerminalOutboxOrphans(
   exec: Executor,
@@ -137,7 +136,9 @@ export async function listTerminalOutboxOrphans(
   const bounded = Number.isInteger(limit) ? Math.max(1, Math.min(MAX_LIST_LIMIT, limit)) : 8;
   const result = await sql<OrphanRow>`
     ${ORPHAN_SELECT}
-    where dead_lettered_at is not null and published_at is null
+    where dead_lettered_at is not null
+      and published_at is null
+      and disposition_status is null
     order by dead_lettered_at desc, id
     limit ${bounded}
   `.execute(exec);

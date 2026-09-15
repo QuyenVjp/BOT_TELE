@@ -1,7 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { createAdminCallbacks } from "../../src/bot/callbacks/admin.js";
-import { createAdminConfirmation } from "../../src/modules/identity/admin-confirmation.js";
+import {
+  createAdminConfirmation,
+  DURABLE_ADMIN_COMMAND_REFS,
+} from "../../src/modules/identity/admin-confirmation.js";
 import { listAuditEvents } from "../../src/modules/identity/audit.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
@@ -243,5 +246,99 @@ describe("durable AdminConfirmation (T163/T164)", () => {
       discrepancy_status: "OPEN",
       confirmation_status: "CREATED",
     });
+  });
+
+  it("issues a confirmation for every durable command ref the database allows", async () => {
+    const seeded = await seed();
+    const admin = callbacks(seeded.rootChannelIdentityId);
+
+    for (const command of DURABLE_ADMIN_COMMAND_REFS) {
+      const issued = await admin.handle({
+        command,
+        actor,
+        targetId: newId(),
+        reason: `Synthetic vocabulary probe for ${command}`,
+        correlationId: `vocabulary-${command}`,
+        ...(command === "catalog.evidence.register"
+          ? { input: "OWNER_ATTESTATION|owner-reference-probe|Synthetic evidence probe" }
+          : {}),
+      });
+      expect(issued, command).toMatchObject({ ok: true, needsConfirmation: true });
+      if (!issued.ok || !issued.needsConfirmation) return;
+
+      const persisted = await sql<{ allowlisted_command_ref: string | null }>`
+        select allowlisted_command_ref from admin_confirmation where id = ${issued.confirmationId}
+      `.execute(ctx.db);
+      expect(persisted.rows[0]?.allowlisted_command_ref, command).toBe(command);
+    }
+  });
+  it("uses a fresh confirmation id for each transition from one edited screen", async () => {
+    const seeded = await seed();
+    await sql`delete from store_mode_transition`.execute(ctx.db);
+    await sql`
+      insert into store_control (id, status, updated_at, updated_by, version)
+      values ('main', 'CLOSED', now(), 'test', 1)
+      on conflict (id) do update
+        set status = 'CLOSED', updated_at = now(), updated_by = 'test',
+            version = 1, last_request_id = null
+    `.execute(ctx.db);
+    const admin = callbacks(seeded.rootChannelIdentityId);
+    const first = await admin.handle({
+      command: "store.test",
+      actor,
+      targetId: "main",
+      expectedVersion: 1,
+      reason: "Enter TEST from the same admin screen",
+      correlationId: "telegram:edited-screen",
+    });
+    expect(first).toMatchObject({ ok: true, needsConfirmation: true });
+    if (!first.ok || !first.needsConfirmation) return;
+    await expect(
+      admin.confirm({
+        confirmationId: first.confirmationId,
+        challenge: first.challenge,
+        actor,
+        correlationId: "telegram:edited-screen",
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    const second = await admin.handle({
+      command: "store.close",
+      actor,
+      targetId: "main",
+      expectedVersion: 2,
+      reason: "Close TEST from the same edited screen",
+      correlationId: "telegram:edited-screen",
+    });
+    expect(second).toMatchObject({ ok: true, needsConfirmation: true });
+    if (!second.ok || !second.needsConfirmation) return;
+    expect(second.confirmationId).not.toBe(first.confirmationId);
+    await expect(
+      admin.confirm({
+        confirmationId: second.confirmationId,
+        challenge: second.challenge,
+        actor,
+        correlationId: "telegram:edited-screen",
+      }),
+    ).resolves.toEqual({ ok: true });
+
+    const control = await sql<{ status: string; version: number }>`
+      select status, version from store_control where id = 'main'
+    `.execute(ctx.db);
+    expect(control.rows[0]).toEqual({ status: "CLOSED", version: 3 });
+  });
+
+  it("rejects a command ref outside the durable vocabulary", async () => {
+    const seeded = await seed();
+    await expect(
+      sql`
+        insert into admin_confirmation
+          (id, root_channel_identity_id, action_fingerprint, challenge_hash, status,
+           expires_at, correlation_id, allowlisted_command_ref)
+        values
+          (${newId()}, ${seeded.rootChannelIdentityId}, 'vocabulary-probe', 'vocabulary-probe',
+           'CREATED', now(), 'vocabulary-probe', 'wallet.withdraw')
+      `.execute(ctx.db),
+    ).rejects.toThrow(/admin_confirmation_command_ref_ck/);
   });
 });

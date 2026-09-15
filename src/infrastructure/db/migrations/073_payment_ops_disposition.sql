@@ -77,7 +77,8 @@ begin
               'INVALID_EVENT','ESCALATED'
             )
             and dispositioned_at is not null)
-      );
+      )
+      not valid;
   end if;
 end $$;
 

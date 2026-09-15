@@ -40,6 +40,7 @@ import {
   type OutboxDispositionCode,
 } from "../../infrastructure/outbox/disposition.js";
 import {
+  isSafeResaleEvidenceInput,
   publishProductInTransaction,
   registerResaleEvidenceInTransaction,
   RESALE_EVIDENCE_SOURCES,
@@ -87,6 +88,8 @@ export type OwnerCommand = (typeof OWNER_COMMANDS)[number];
 export function isOwnerCommand(command: string): command is OwnerCommand {
   return (OWNER_COMMANDS as readonly string[]).includes(command);
 }
+const SENSITIVE_OPERATOR_TEXT =
+  /(secret|token|password|passwd|credential|vault|private\s+key|api\s*key|otp|seed|cookie|session|mật khẩu|khóa\s+(?:api|bí mật))/iu;
 export interface AdminCallbackDeps {
   db: Db;
   rootConfig: RootAdminConfig;
@@ -464,6 +467,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
     exec: Trx,
     action: PendingAction,
     correlationId: string,
+    requestId: string,
   ): Promise<boolean> {
     switch (action.command) {
       case "discrepancy.resolve": {
@@ -478,7 +482,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           expectedVersion: action.expectedVersion,
           resolutionCode: action.resolutionCode as DiscrepancyResolutionCode,
           note: action.reason,
-          requestId: correlationId,
+          requestId,
           actorId: action.actorId,
           correlationId,
         });
@@ -496,7 +500,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           expectedVersion: action.expectedVersion,
           code: action.resolutionCode as OutboxDispositionCode,
           note: action.reason,
-          requestId: correlationId,
+          requestId,
           actorId: action.actorId,
           correlationId,
         });
@@ -556,7 +560,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         const result = await transitionStoreModeInTransaction(exec, {
           targetMode,
           expectedVersion: action.expectedVersion,
-          requestId: correlationId,
+          requestId,
           actorId: action.actorId,
           reason: action.reason,
           correlationId,
@@ -583,7 +587,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           source: source as ResaleEvidenceSource,
           reference,
           summary,
-          requestId: correlationId,
+          requestId,
           actorId: action.actorId,
           reason: action.reason,
           correlationId,
@@ -625,6 +629,18 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
               (input.expectedVersion.length === 0 || input.expectedVersion.length > 300))))
       ) {
         return { ok: false, code: "INVALID_REASON", message: "Cần nêu lý do." };
+      }
+      if (
+        SENSITIVE_OPERATOR_TEXT.test(input.reason) ||
+        (input.input !== undefined && SENSITIVE_OPERATOR_TEXT.test(input.input)) ||
+        (input.command === "catalog.evidence.register" &&
+          (input.input === undefined || !isSafeResaleEvidenceInput(input.input)))
+      ) {
+        return {
+          ok: false,
+          code: "INVALID_REASON",
+          message: "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
+        };
       }
 
       const gate = await guardRootAction(
@@ -786,7 +802,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             if (!authorization.ok) {
               throw new SensitiveAuthorizationRefusedError(authorization.code);
             }
-            return executeHighRisk(trx, action, durableAction.correlationId);
+            return executeHighRisk(trx, action, durableAction.correlationId, input.confirmationId);
           },
         });
       } catch (error) {

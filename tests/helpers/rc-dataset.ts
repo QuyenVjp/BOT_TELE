@@ -63,6 +63,40 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
       from generate_series(1, ${COUNTS.variants}) gs
     `.execute(trx);
 
+    // Resale evidence is metadata-only: the synthetic attestation asserts no
+    // supplier agreement, holds no credential, and exists so the dataset has a
+    // real evidence row per variant to bind a publication to.
+    await sql`
+      insert into resale_evidence
+        (id, variant_id, source, reference, summary, metadata_redacted, status, created_by)
+      select 'RC-RESALE-' || gs,
+        '01VAR0' || lpad(gs::text, 20, '0'),
+        'OWNER_ATTESTATION',
+        'rc-synthetic-attestation-' || gs,
+        'RC synthetic owner attestation for load profiling; no supplier authorization is asserted.',
+        jsonb_build_object('synthetic', true, 'assertedBy', 'rc-seed', 'scope', 'rc-profile'),
+        'ACTIVE', 'rc-seed'
+      from generate_series(1, ${COUNTS.variants}) gs
+    `.execute(trx);
+
+    // Publish every variant against its own evidence at the row's current
+    // version, which is the exact binding the catalog visibility predicate and
+    // the buy-now publication guard compare against.
+    await sql`
+      update product_variant v
+         set publication_evidence_id = v.resale_evidence_id,
+             publication_product_version = p.version,
+             publication_variant_version = v.version,
+             published_at = now(),
+             published_by = 'rc-seed'
+        from product p
+       where p.id = v.product_id
+         and exists (
+           select 1 from resale_evidence re
+           where re.id = v.resale_evidence_id and re.variant_id = v.id and re.status = 'ACTIVE'
+         )
+    `.execute(trx);
+
     await sql`
       insert into customer (id, status, locale)
       select '01CST0' || lpad(gs::text, 20, '0'), 'ACTIVE', 'vi-VN'
@@ -314,9 +348,24 @@ export async function verifyRcDataset(db: Kysely<Database>): Promise<RcDatasetSu
       from notification_delivery d
       where not exists (select 1 from notification_campaign c where c.id = d.campaign_id and c.status = 'QUEUED')
         or not exists (select 1 from customer c where c.id = d.customer_id)
+    ), publication_failures as (
+      select count(*)::int as n
+      from product_variant v
+      join product p on p.id = v.product_id
+      left join resale_evidence re on re.id = v.publication_evidence_id
+      where v.resale_evidence_id is null
+        or v.publication_evidence_id is distinct from v.resale_evidence_id
+        or v.publication_product_version is distinct from p.version
+        or v.publication_variant_version is distinct from v.version
+        or v.published_at is null
+        or v.published_by is null
+        or re.id is null
+        or re.variant_id is distinct from v.id
+        or re.status <> 'ACTIVE'
     )
     select ((select n from wallet_failures) + (select n from order_failures) +
-      (select n from fulfillment_failures) + (select n from stock_failures) + (select n from delivery_failures))::int as failures
+      (select n from fulfillment_failures) + (select n from stock_failures) +
+      (select n from delivery_failures) + (select n from publication_failures))::int as failures
   `.execute(db);
 
   const failures = invariants.rows[0]?.failures ?? 1;

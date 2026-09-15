@@ -172,6 +172,7 @@ describe("terminal outbox orphans", () => {
       correlationId: "corr-close",
     });
     expect(result).toMatchObject({ ok: true, kind: "DISPOSITIONED", version: 2 });
+    expect(await listTerminalOutboxOrphans(ctx.db, 10)).toHaveLength(0);
 
     const after = await preservedEvidence(orphan.eventId);
     expect(after).toEqual(before);

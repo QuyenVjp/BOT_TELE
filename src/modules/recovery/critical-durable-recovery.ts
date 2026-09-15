@@ -132,17 +132,27 @@ async function recoverOutbox(
       aggregate_id: string;
       dead_lettered_at: Date | string | null;
       published_at: Date | string | null;
+      disposition_status: string | null;
       claimed_by: string | null;
       claim_expires_at: Date | string | null;
       claim_generation: string;
     }>`
-      select id,event_type,aggregate_id,dead_lettered_at,published_at,claimed_by,claim_expires_at,claim_generation::text
+      select id,event_type,aggregate_id,dead_lettered_at,published_at,disposition_status,claimed_by,claim_expires_at,claim_generation::text
       from outbox_event where id=${input.id} for update
     `.execute(trx)
   ).rows[0];
   if (!row) return fail(input, "NOT_FOUND", "outbox row not found");
   if (row.published_at || !row.dead_lettered_at)
     return fail(input, "NOT_TERMINAL", "outbox row is not dead-lettered");
+  // A terminal disposition is the operator's final word on this orphan. Retrying
+  // it would replay work they closed by hand, so the disposition is never re-armed.
+  if (row.disposition_status !== null) {
+    return fail(
+      input,
+      "MANUAL_REVIEW_REQUIRED",
+      "outbox row is already dispositioned as resolved; do not re-arm",
+    );
+  }
   if (hasActiveLease(row)) return fail(input, "ACTIVE_LEASE", "outbox row has an active lease");
   if (!(row.event_type === "OrderPaid" || RETRY_SAFE_OUTBOX_EVENTS[row.event_type] === true)) {
     return fail(

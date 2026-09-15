@@ -91,6 +91,22 @@ const SECRET_KEY = /(secret|token|password|passwd|credential|vault|private|raw|p
 const SENSITIVE_TEXT =
   /(secret|token|password|passwd|credential|vault|private\s+key|api\s*key|otp|seed|cookie|session|mật khẩu|khóa\s+(?:api|bí mật))/iu;
 const CODE_RE = /^[A-Za-z0-9._:/-]{1,200}$/;
+export function isSafeResaleEvidenceInput(value: string): boolean {
+  const fields = value.split("|");
+  if (fields.length !== 3) return false;
+  const source = fields[0]?.trim() ?? "";
+  const reference = fields[1]?.trim() ?? "";
+  const summary = fields[2]?.trim() ?? "";
+  return (
+    (RESALE_EVIDENCE_SOURCES as readonly string[]).includes(source) &&
+    CODE_RE.test(reference) &&
+    reference.length <= 200 &&
+    summary.length > 0 &&
+    summary.length <= 500 &&
+    !SENSITIVE_TEXT.test(reference) &&
+    !SENSITIVE_TEXT.test(summary)
+  );
+}
 
 function validMetadata(
   value: Record<string, string | number | boolean | null> | undefined,
@@ -98,7 +114,12 @@ function validMetadata(
   if (!value) return true;
   if (Object.keys(value).some((key) => SECRET_KEY.test(key))) return false;
   try {
-    return Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_METADATA_BYTES;
+    const serialized = JSON.stringify(value);
+    return (
+      typeof serialized === "string" &&
+      Buffer.byteLength(serialized, "utf8") <= MAX_METADATA_BYTES &&
+      !SENSITIVE_TEXT.test(serialized)
+    );
   } catch {
     return false;
   }
@@ -282,6 +303,8 @@ export async function registerResaleEvidenceInTransaction(
   const summary = normalize(input.summary, 500);
   const reason = normalize(input.reason, 500);
   const requestId = normalize(input.requestId, 128);
+  const evidenceText =
+    source && reference && summary ? `${source}|${reference}|${summary}` : "";
   if (
     !source ||
     !reference ||
@@ -289,9 +312,7 @@ export async function registerResaleEvidenceInTransaction(
     !reason ||
     !requestId ||
     !validMetadata(input.metadataRedacted) ||
-    !CODE_RE.test(reference) ||
-    SENSITIVE_TEXT.test(reference) ||
-    SENSITIVE_TEXT.test(summary)
+    !isSafeResaleEvidenceInput(evidenceText)
   ) {
     return { ok: false, code: "INVALID_INPUT", message: "Bằng chứng hoặc lý do không hợp lệ." };
   }
@@ -389,6 +410,33 @@ export async function publishProductInTransaction(
       publicationVersion: input.expectedPublicationVersion,
     };
   }
+  const product = await sql<{ version: number }>`
+    select version from product where id = ${input.productId} for update
+  `.execute(exec);
+  if (product.rows[0]?.version !== readiness.productVersion) {
+    return {
+      ok: false,
+      code: "VERSION_CONFLICT",
+      message: "Sản phẩm đã thay đổi. Vui lòng mở lại readiness.",
+    };
+  }
+  const lockedVariants = await sql<{ id: string; version: number }>`
+    select id, version
+      from product_variant
+     where product_id = ${input.productId} and is_active
+     for update
+  `.execute(exec);
+  const lockedVersions = new Map(lockedVariants.rows.map((row) => [row.id, row.version]));
+  if (
+    lockedVariants.rows.length !== activeVariants.length ||
+    activeVariants.some((variant) => lockedVersions.get(variant.id) !== variant.version)
+  ) {
+    return {
+      ok: false,
+      code: "VERSION_CONFLICT",
+      message: "Biến thể đã thay đổi. Vui lòng mở lại readiness.",
+    };
+  }
   const updated = await sql<{ id: string }>`
     update product_variant v
        set publication_evidence_id = v.resale_evidence_id,
@@ -399,16 +447,13 @@ export async function publishProductInTransaction(
       from product p
      where v.product_id = p.id and p.id = ${input.productId}
        and p.version = ${readiness.productVersion}
-       and v.is_active
-       and v.version in (${sql.join(
-         readiness.variants
-           .filter((variant) => variant.active)
-           .map((variant) => sql`${variant.version}`),
+       and v.id in (${sql.join(
+         activeVariants.map((variant) => sql`${variant.id}`),
          sql`, `,
        )})
      returning v.id
   `.execute(exec);
-  if (updated.rows.length !== readiness.variants.filter((variant) => variant.active).length) {
+  if (updated.rows.length !== activeVariants.length) {
     return {
       ok: false,
       code: "VERSION_CONFLICT",
