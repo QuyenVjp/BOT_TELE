@@ -4,8 +4,8 @@ import type { Executor } from "../../infrastructure/db/transaction.js";
 /**
  * Admin overview aggregate (goal §71 summary block, §136 business overview).
  *
- * Read-only. Every figure EXCLUDES test and canary inventory: an `is_test` product is not real
- * trade, and the goal requires that test fixtures never inflate the owner's dashboard.
+ * Read-only. Revenue and order figures exclude test and archived products; support workload also
+ * excludes customers on the explicit test allowlist.
  *
  * The Vietnam day boundary is computed in JS from an injected `now` so the window is
  * deterministic under test instead of depending on the database session timezone.
