@@ -392,6 +392,56 @@ describe("durable AdminConfirmation (T163/T164)", () => {
     expect(control.rows[0]).toEqual({ status: "CLOSED", version: 3 });
   });
 
+  it("preserves a publication readiness refusal through durable confirmation", async () => {
+    const seeded = await seed();
+    const fixture = await seedEvidence();
+    const admin = callbacks(seeded.rootChannelIdentityId);
+    await sql`
+      insert into digital_asset
+        (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+      values
+        (${newId()}, ${fixture.variantId}, 'OWNER_IMPORT', 'vault:fixture',
+         ${newId()}, 'AVAILABLE')
+    `.execute(ctx.db);
+    await sql`
+      update store_control
+         set status = 'CLOSED', version = 1, updated_at = now(), updated_by = 'test',
+             last_request_id = null
+       where id = 'main'
+    `.execute(ctx.db);
+
+    const readiness = await getProductPublicationReadiness(ctx.db, fixture.productId);
+    expect(readiness?.canPublish).toBe(true);
+    const requested = await admin.handle({
+      command: "catalog.publish",
+      actor,
+      targetId: fixture.productId,
+      expectedVersion: readiness!.publicationVersion,
+      reason: "Publish verified GPT Plus",
+      correlationId: "publish-readiness-refusal",
+    });
+    expect(requested).toMatchObject({ ok: true, needsConfirmation: true });
+    if (!requested.ok || !requested.needsConfirmation) return;
+
+    await sql`
+      update store_control
+         set status = 'TEST', version = version + 1, updated_at = now(), updated_by = 'test'
+       where id = 'main'
+    `.execute(ctx.db);
+    const refused = await admin.confirm({
+      confirmationId: requested.confirmationId,
+      challenge: requested.challenge,
+      actor,
+      correlationId: "publish-readiness-refusal-confirm",
+    });
+    expect(refused).toMatchObject({ ok: false, code: "NOT_READY" });
+    expect(
+      await sql<{ is_test: boolean }>`
+        select is_test from product where id = ${fixture.productId}
+      `.execute(ctx.db),
+    ).toEqual({ rows: [{ is_test: false }] });
+  });
+
   it("revokes evidence through the durable confirmation without rewriting the evidence facts", async () => {
     const seeded = await seed();
     const fixture = await seedEvidence();

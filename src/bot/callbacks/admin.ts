@@ -208,7 +208,7 @@ class SensitiveAuthorizationRefusedError extends Error {
   }
 }
 
-/** Keeps a readiness refusal distinguishable from an expired or missing confirmation. */
+/** Carries a safe, durable action refusal back to the owner callback. */
 class DurableAdminActionRefusedError extends Error {
   readonly code: "NOT_READY" | "ACTION_REFUSED";
   readonly action: OwnerCommand;
@@ -226,12 +226,14 @@ class DurableAdminActionRefusedError extends Error {
 
 function durableResultOrThrow(
   action: PendingAction,
-  result: { ok: boolean; message?: string },
+  result: { ok: boolean; code?: string; message?: string },
 ): boolean {
   if (result.ok) return true;
+  const code = result.code === "NOT_READY" ? "NOT_READY" : "ACTION_REFUSED";
   throw new DurableAdminActionRefusedError(
     action.command,
     result.message ?? "Lệnh quản trị không được áp dụng.",
+    code,
   );
 }
 
@@ -695,9 +697,6 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           reason: action.reason,
           correlationId,
         });
-        if (!result.ok && result.code === "NOT_READY") {
-          throw new DurableAdminActionRefusedError(action.command, result.message);
-        }
         return durableResultOrThrow(action, result);
       }
       default:
