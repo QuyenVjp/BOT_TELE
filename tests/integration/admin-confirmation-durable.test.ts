@@ -421,7 +421,8 @@ describe("durable AdminConfirmation (T163/T164)", () => {
     if (!requested.ok || !requested.needsConfirmation) return;
 
     // The variant moving under the challenge must refuse, not revoke a stale snapshot.
-    // `TARGET_NOT_FOUND` is what an unapplied atomic execution maps to.
+    // The durable action preserves the domain refusal instead of collapsing it to
+    // the generic missing-target response.
     await sql`
       update product_variant set version = version + 1 where id = ${fixture.variantId}
     `.execute(ctx.db);
@@ -431,7 +432,7 @@ describe("durable AdminConfirmation (T163/T164)", () => {
       actor,
       correlationId: "telegram:revoke-stale",
     });
-    expect(stale).toMatchObject({ ok: false, code: "NOT_FOUND" });
+    expect(stale).toMatchObject({ ok: false, code: "ACTION_REFUSED" });
     const refused = await sql<{ status: string; revoked_at: string | null }>`
       select status, revoked_at::text as revoked_at
         from resale_evidence where id = ${fixture.evidenceId}
