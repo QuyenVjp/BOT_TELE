@@ -44,6 +44,7 @@ async function seedCatalog(options: { fulfillmentType?: string } = {}): Promise<
   const categoryId = newId();
   const productId = newId();
   const variantId = newId();
+  const evidenceId = newId();
   const price = 199000;
   const account = "0123456789";
   const slug = categoryId.slice(-8);
@@ -59,7 +60,21 @@ async function seedCatalog(options: { fulfillmentType?: string } = {}): Promise<
   );
   await sql`
     insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, resale_evidence_id, fulfillment_type)
-    values (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', ${price}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'RES-1', ${options.fulfillmentType ?? null})
+    values (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', ${price}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', ${evidenceId}, ${options.fulfillmentType ?? null})
+  `.execute(ctx.db);
+  // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+  await sql`
+    insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+    values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF-CHECKOUT-CALLBACKS', 'fixture publication evidence', 'test')
+  `.execute(ctx.db);
+  await sql`
+    update product_variant
+       set publication_evidence_id = ${evidenceId},
+           publication_product_version = 1,
+           publication_variant_version = 1,
+           published_at = now(),
+           published_by = 'test'
+     where id = ${variantId}
   `.execute(ctx.db);
   if (options.fulfillmentType === "QUANTITY_STOCK") {
     await sql`insert into variant_quantity_stock (variant_id, available_quantity) values (${variantId}, 5)`.execute(

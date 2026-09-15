@@ -73,17 +73,47 @@ describe("category management repository", () => {
       (${claudeId}, ${bucket.id}, 'Claude Pro', 'claude-pro', true, 1),
       (${vpnId}, ${bucket.id}, 'ExpressVPN 1 tháng', 'expressvpn-1m', true, 2),
       (${randomId}, ${bucket.id}, 'Gói lẻ khác', 'goi-le-khac', true, 3)`.execute(ctx.db);
+    const claudeVariantId = newId();
+    const vpnVariantId = newId();
     await sql`
       insert into product_variant
         (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
          stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
       values
-        (${newId()}, ${claudeId}, 'CLAUDE-PRO-1M', '1 tháng', 250000, 'P1M', 'CREDENTIAL', 30,
+        (${claudeVariantId}, ${claudeId}, 'CLAUDE-PRO-1M', '1 tháng', 250000, 'P1M', 'CREDENTIAL', 30,
          'LOCAL_ONLY', 'RES-CLAUDE', true, 1, 'STOCK_ACCOUNT'),
-        (${newId()}, ${vpnId}, 'EXPRESS-1M', '1 tháng', 150000, 'P1M', 'LICENSE', 30,
+        (${vpnVariantId}, ${vpnId}, 'EXPRESS-1M', '1 tháng', 150000, 'P1M', 'LICENSE', 30,
          'LOCAL_ONLY', 'RES-VPN', true, 1, 'STOCK_CODE')
     `.execute(ctx.db);
     await ensureDefaultCategories(ctx.db);
+    // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+    // Published AFTER the taxonomy move: moving a product bumps product.version, which would
+    // otherwise leave the version-bound publication stale.
+    for (const [variantId, evidenceId] of [
+      [claudeVariantId, "RES-CLAUDE"],
+      [vpnVariantId, "RES-VPN"],
+    ] as const) {
+      await sql`
+        insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+        values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION', ${"TEST-REF-" + evidenceId}, 'fixture publication evidence', 'test')
+      `.execute(ctx.db);
+      await sql`
+        update product_variant v
+           set publication_evidence_id = ${evidenceId},
+               publication_product_version = p.version,
+               publication_variant_version = v.version,
+               published_at = now(),
+               published_by = 'test'
+          from product p
+         where v.id = ${variantId} and p.id = v.product_id
+      `.execute(ctx.db);
+      // STOCK_ACCOUNT / STOCK_CODE readiness needs one available asset per variant.
+      const assetId = newId();
+      await sql`
+        insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+        values (${assetId}, ${variantId}, 'TEST_FIXTURE', ${"test-vault-ref-" + assetId}, ${"test-fp-" + assetId}, 'AVAILABLE')
+      `.execute(ctx.db);
+    }
     const claude = (
       await sql<{
         category_id: string;

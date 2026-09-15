@@ -43,6 +43,7 @@ describe("admin operational presenters", () => {
       "health",
       "warranty",
       "testing",
+      "operations",
     ]);
 
     const menu = presentAdminMenu();
@@ -64,6 +65,7 @@ describe("admin operational presenters", () => {
         "🛡 Hỗ trợ/BH",
         "🩺 Hệ thống",
         "🧪 Test Lab",
+        ADMIN_COPY.operations,
         "⚙️ Cài đặt",
         "🛒 Về Shop",
       ]),

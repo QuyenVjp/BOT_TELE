@@ -22,13 +22,9 @@ alter table discrepancy
   add column if not exists resolved_by text,
   add column if not exists disposition_request_id text;
 
--- Bounded-shape check, NOT a closed vocabulary. `resolution_code` is still
--- written by the legacy Telegram adapter (which accepts any /^[A-Z0-9_]{1,64}$/
--- code, e.g. MANUAL_ACCEPT), so pinning the column to the new allowlist now
--- would reject a live operator path before the parent rewires it. The closed
--- vocabulary is enforced at the typed API boundary
--- (DISCREPANCY_RESOLUTION_CODES in modules/admin/payment-ops.ts); migrate this
--- column to the same closed set once the adapter routes through that API.
+-- Bounded-shape check. The typed disposition API enforces the closed
+-- vocabulary; this database constraint keeps legacy rows readable while
+-- rejecting malformed new values during the cutover.
 do $$
 begin
   if not exists (

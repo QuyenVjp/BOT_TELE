@@ -68,9 +68,30 @@ async function seedCatalog(
   for (let i = 0; i < variants; i++) {
     const variantId = newId();
     variantIds.push(variantId);
+    const evidenceId = "RES-" + i;
     await sql`
       insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, resale_evidence_id, sort_order)
-      values (${variantId}, ${productId}, ${"SKU-" + variantId}, ${"Gói " + i}, ${100000 + i * 1000}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', ${"RES-" + i}, ${i})
+      values (${variantId}, ${productId}, ${"SKU-" + variantId}, ${"Gói " + i}, ${100000 + i * 1000}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', ${evidenceId}, ${i})
+    `.execute(ctx.db);
+    // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION', ${"TEST-REF-" + evidenceId}, 'fixture publication evidence', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = ${evidenceId},
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
+    // CREDENTIAL resolves to STOCK_ACCOUNT: one available asset keeps the route sellable.
+    const assetId = newId();
+    await sql`
+      insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+      values (${assetId}, ${variantId}, 'TEST_FIXTURE', ${"test-vault-ref-" + assetId}, ${"test-fp-" + assetId}, 'AVAILABLE')
     `.execute(ctx.db);
   }
   return { categoryId, variantIds };

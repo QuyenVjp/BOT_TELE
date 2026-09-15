@@ -94,6 +94,13 @@ interface LiveVariant {
   warranty_days: number;
   stock_policy: string;
   resale_evidence_id: string | null;
+  publication_evidence_id: string | null;
+  publication_product_version: number | null;
+  publication_variant_version: number | null;
+  published_at: Date | string | null;
+  evidence_active: boolean;
+  product_version: number;
+  variant_version: number;
   fulfillment_type: TypedStockKind;
   is_test: boolean;
   is_active: boolean;
@@ -128,8 +135,15 @@ async function loadLiveVariant(
     select
       v.id, v.product_id, p.name_vi as product_name_vi, v.name_vi,
       v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
-      v.stock_policy, v.fulfillment_type, v.resale_evidence_id, p.is_test,
-      v.is_active,
+      v.stock_policy, v.fulfillment_type, v.resale_evidence_id,
+      v.publication_evidence_id, v.publication_product_version,
+      v.publication_variant_version, v.published_at,
+      exists (
+        select 1 from resale_evidence re
+         where re.id = v.resale_evidence_id and re.variant_id = v.id and re.status = 'ACTIVE'
+      ) as evidence_active,
+      p.version as product_version, v.version as variant_version,
+      p.is_test, v.is_active,
       p.is_active as product_active,
       c.is_active as category_active
     from product_variant v
@@ -154,7 +168,16 @@ function revalidate(live: LiveVariant, expectedPriceVnd: number): BuyNowErrorCod
   ) {
     return "POLICY_BLOCKED";
   }
-  if (!live.is_test && !live.resale_evidence_id) return "POLICY_BLOCKED";
+  if (
+    !live.is_test &&
+    (!live.resale_evidence_id ||
+      !live.evidence_active ||
+      live.publication_evidence_id !== live.resale_evidence_id ||
+      live.publication_product_version !== live.product_version ||
+      live.publication_variant_version !== live.variant_version ||
+      live.published_at === null)
+  )
+    return "POLICY_BLOCKED";
   if (Number(live.price_vnd) !== expectedPriceVnd) return "PRICE_CHANGED";
   if (Number(live.price_vnd) <= 0) return "VARIANT_UNAVAILABLE";
   return null;
@@ -343,19 +366,6 @@ export async function isStoreOpen(db: Db): Promise<boolean> {
     select status from store_control where id = 'main' limit 1
   `.execute(db);
   return result.rows[0]?.status === "OPEN";
-}
-
-export async function setStoreStatusForTest(
-  db: Db,
-  status: "OPEN" | "CLOSED",
-  updatedBy: string,
-): Promise<void> {
-  await sql`
-    insert into store_control (id, status, updated_at, updated_by)
-    values ('main', ${status}, now(), ${updatedBy})
-    on conflict (id) do update
-    set status = excluded.status, updated_at = now(), updated_by = excluded.updated_by
-  `.execute(db);
 }
 
 /** The persisted immutable Order snapshot is the canonical Buy Now fingerprint. */

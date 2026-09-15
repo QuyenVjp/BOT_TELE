@@ -162,6 +162,28 @@ async function main(): Promise<void> {
           return Boolean(row);
         },
       },
+      ownerPromptText: {
+        adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+        // Only one of the three remediation prompts being pending vouches for free text: the
+        // publication evidence triple, a discrepancy disposition note, or an outbox note.
+        async isActive(telegramUserId: string) {
+          if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return false;
+          const row = (
+            await sql<{ id: string }>`
+              select id from admin_callback_state
+              where admin_telegram_user_id = ${telegramUserId}
+                and kind in (
+                  'ADMIN_RESALE_EVIDENCE_PROMPT',
+                  'ADMIN_PAYMENT_DISPOSITION_PROMPT',
+                  'ADMIN_OUTBOX_DISPOSITION_PROMPT'
+                )
+                and expires_at > now()
+              limit 1
+            `.execute(dbHandle.db)
+          ).rows[0];
+          return Boolean(row);
+        },
+      },
     },
     sepay: {
       path: "/webhooks/sepay",

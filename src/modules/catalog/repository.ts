@@ -259,14 +259,7 @@ export async function listActiveProductsByCategory(
           and v.is_active
           and v.price_vnd > 0
           and ${currentPublicationSql()}
-          and ${VARIANT_READY_SQL}
-          and (
-            (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
-            or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
-              select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-              where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-            ))
-          )
+          and ${SELLABLE_ROUTE_SQL}
       )
     order by p.sort_order asc, p.id asc
   `.execute(exec);
@@ -338,7 +331,6 @@ export async function listSellableVariants(
       and v.is_active
       and v.price_vnd > 0
       ${catalogVisibilitySql(options.audience ?? "public")}
-      and ${VARIANT_READY_SQL}
       and ${SELLABLE_ROUTE_SQL}
       ${productFilter}
       ${categoryFilter}
@@ -389,7 +381,6 @@ export async function getVariantById(
       and v.is_active
       and v.price_vnd > 0
       ${catalogVisibilitySql(audience)}
-      and ${VARIANT_READY_SQL}
       and ${SELLABLE_ROUTE_SQL}
   `.execute(exec);
   return result.rows[0] ?? null;
@@ -477,6 +468,7 @@ export async function listStorefrontProducts(
         and v.publication_product_version = p.version
         and v.publication_variant_version = v.version
         and v.published_at is not null
+        and ${SELLABLE_ROUTE_SQL}
         and exists (select 1 from resale_evidence re where re.id = v.publication_evidence_id and re.variant_id = v.id and re.status = 'ACTIVE')
     ),
     product_summary as (
@@ -588,7 +580,6 @@ function subtreeProductCountSql(audience: CatalogAudience) {
       and v.is_active
       and v.price_vnd > 0
       ${catalogVisibilitySql(audience)}
-      and ${VARIANT_READY_SQL}
       and ${SELLABLE_ROUTE_SQL}
   )`;
 }
@@ -668,7 +659,6 @@ async function listScopedProducts(
       and v.is_active
       and v.price_vnd > 0
       ${catalogVisibilitySql(audience)}
-      and ${VARIANT_READY_SQL}
       and ${SELLABLE_ROUTE_SQL}
       ${categoryFilter}
       ${featuredFilter}
@@ -770,7 +760,6 @@ export async function listPublicCategoryPage(
     where p.category_id = ${categoryId}
       and c.is_active and p.is_active and v.is_active and v.price_vnd > 0
       ${catalogVisibilitySql(audience)}
-      and ${VARIANT_READY_SQL}
       and ${SELLABLE_ROUTE_SQL}
   `.execute(exec);
   const total = countResult.rows[0]?.n ?? 0;

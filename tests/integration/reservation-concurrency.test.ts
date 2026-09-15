@@ -81,6 +81,20 @@ describe.skipIf(!hasDocker)("atomic pre-payment reservation (T154)", () => {
         (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', ${price}, 'P1M', 'CREDENTIAL', 30,
          'LOCAL_ONLY', 'RES-1', true, 1)
     `.execute(ctx.db);
+    // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values ('RES-1', ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF-RESERVATION-CONCURRENCY', 'fixture publication evidence', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = 'RES-1',
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
     // Exactly ONE available asset — the contested final unit.
     assetIds.push(...(await seedAssets(variantId, 1)));
     const customerIds: string[] = [];

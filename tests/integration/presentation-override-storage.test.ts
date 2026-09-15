@@ -49,6 +49,26 @@ async function seedSellableVariant(): Promise<string> {
       (${variantId}, ${productId}, 'SKU-OVERRIDE', 'Gói 1 tháng', 100000, 'P1M', 'LICENSE', 30,
        'LOCAL_ONLY', 'RES-OVERRIDE', true, 1)
   `.execute(ctx.db);
+  // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+  await sql`
+    insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+    values ('RES-OVERRIDE', ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF-PRESENTATION-OVERRIDE', 'fixture publication evidence', 'test')
+  `.execute(ctx.db);
+  await sql`
+    update product_variant
+       set publication_evidence_id = 'RES-OVERRIDE',
+           publication_product_version = 1,
+           publication_variant_version = 1,
+           published_at = now(),
+           published_by = 'test'
+     where id = ${variantId}
+  `.execute(ctx.db);
+  // LICENSE resolves to STOCK_CODE: one available asset keeps the route sellable.
+  const assetId = newId();
+  await sql`
+    insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+    values (${assetId}, ${variantId}, 'TEST_FIXTURE', ${"test-vault-ref-" + assetId}, ${"test-fp-" + assetId}, 'AVAILABLE')
+  `.execute(ctx.db);
   return variantId;
 }
 

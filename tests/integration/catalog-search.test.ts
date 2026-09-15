@@ -61,24 +61,46 @@ async function seed() {
       (${spotifyId ? newId() : newId()}, ${spotifyId}, 'nhac', 'vi', 1)
   `.execute(ctx.db);
 
-  const mkVariant = (
+  // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+  const publishVariant = async (variantId: string, evidenceId: string) => {
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION', ${"TEST-REF-" + evidenceId}, 'fixture publication evidence', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = ${evidenceId},
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
+  };
+
+  const mkVariant = async (
     productId: string,
     sku: string,
     price: number,
     delivery: string,
     order: number,
-  ) =>
-    sql`
+  ) => {
+    const variantId = newId();
+    const evidenceId = "RES-" + sku;
+    await sql`
       insert into product_variant
         (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
          stock_policy, resale_evidence_id, is_active, sort_order)
       values
-        (${newId()}, ${productId}, ${sku}, ${sku}, ${price}, 'P1M', ${delivery}, 30,
-         'LOCAL_ONLY', ${"RES-" + sku}, true, ${order})
-    `;
-  await mkVariant(netflixId, "NF-1", 100000, "LICENSE", 1).execute(ctx.db);
-  await mkVariant(netflixId, "NF-2", 200000, "ACTIVATION_KEY", 2).execute(ctx.db);
-  await mkVariant(spotifyId, "SP-1", 150000, "INVITE", 3).execute(ctx.db);
+        (${variantId}, ${productId}, ${sku}, ${sku}, ${price}, 'P1M', ${delivery}, 30,
+         'LOCAL_ONLY', ${evidenceId}, true, ${order})
+    `.execute(ctx.db);
+    await publishVariant(variantId, evidenceId);
+  };
+  await mkVariant(netflixId, "NF-1", 100000, "LICENSE", 1);
+  await mkVariant(netflixId, "NF-2", 200000, "ACTIVATION_KEY", 2);
+  await mkVariant(spotifyId, "SP-1", 150000, "INVITE", 3);
+  // Legacy unconfigured supplier-only SKU: intentionally left without evidence → stays hidden.
   await sql`
     insert into product_variant
       (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
@@ -87,14 +109,16 @@ async function seed() {
       (${newId()}, ${supplierId}, 'SUP-1', 'SUP-1', 180000, 'P1M', 'LICENSE', 30,
        'SUPPLIER_ONLY', 'RES-SUP', true, 4)
   `.execute(ctx.db);
+  const supplierVariantId = newId();
   await sql`
     insert into product_variant
       (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, warranty_days,
        stock_policy, resale_evidence_id, is_active, sort_order, fulfillment_type)
     values
-      (${newId()}, ${supplierOkId}, 'SUP-OK', 'SUP-OK', 180000, 'P1M', 'LICENSE', 30,
+      (${supplierVariantId}, ${supplierOkId}, 'SUP-OK', 'SUP-OK', 180000, 'P1M', 'LICENSE', 30,
        'SUPPLIER_ONLY', 'RES-SUP-OK', true, 5, 'SUPPLIER_API')
   `.execute(ctx.db);
+  await publishVariant(supplierVariantId, "RES-SUP-OK");
   await sql`insert into supplier (id, name, adapter_type, credential_vault_ref, status) values (${supplierSkuId}, 'Primary', 'sandbox', 'vault:supplier', 'ACTIVE')`.execute(
     ctx.db,
   );

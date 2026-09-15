@@ -135,8 +135,9 @@ describe("owner operations acceptance (US5)", () => {
         observedUsername: "Quyenvjp",
       },
       targetId: seeded.discrepancyId,
+      expectedVersion: 1,
       reason: "Customer topped up the shortfall offline",
-      resolutionCode: "MANUAL_ACCEPT",
+      resolutionCode: "MANUAL_SETTLE",
       correlationId: "own-2",
     });
     expect(request.ok).toBe(true);
@@ -163,7 +164,7 @@ describe("owner operations acceptance (US5)", () => {
       select status, resolution_code from discrepancy where id = ${seeded.discrepancyId}
     `.execute(ctx.db);
     expect(disc.rows[0]?.status).toBe("RESOLVED");
-    expect(disc.rows[0]?.resolution_code).toBe("MANUAL_ACCEPT");
+    expect(disc.rows[0]?.resolution_code).toBe("MANUAL_SETTLE");
 
     const discAudit = await listAuditEvents(ctx.db, {
       targetType: "Discrepancy",

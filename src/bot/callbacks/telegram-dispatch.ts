@@ -240,6 +240,11 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    operations?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     audit?(input: {
       telegramUserId: string;
       chatType: string;
@@ -266,6 +271,24 @@ export interface TelegramDomainDispatcherDeps {
       page?: number;
     }): Promise<PresentedMessage>;
     productDetail?(input: {
+      telegramUserId: string;
+      productId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    productReadiness?(input: {
+      telegramUserId: string;
+      productId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    productEvidence?(input: {
+      telegramUserId: string;
+      variantId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    productPublish?(input: {
       telegramUserId: string;
       productId: string;
       chatType: string;
@@ -705,6 +728,12 @@ export interface TelegramDomainDispatcherDeps {
       correlationId: string;
     }): Promise<PresentedMessage>;
     broadcastText?(input: {
+      telegramUserId: string;
+      text: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage | null>;
+    ownerPromptText?(input: {
       telegramUserId: string;
       text: string;
       chatType: string;
@@ -1487,6 +1516,14 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Dashboard không khả dụng.");
+        } else if (route === "operations") {
+          message = admin.operations
+            ? await admin.operations({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Màn hình vận hành không khả dụng.");
         } else if (route === "products:view" || route.startsWith("products:view:")) {
           // `products:view:<view>[:<page>]` — one route family so paging keeps the active filter.
           const parts = route.split(":");
@@ -1815,6 +1852,33 @@ export function createTelegramDomainDispatcher(
                 fieldKey,
               })
             : safeError("Sửa nội dung sản phẩm không khả dụng.");
+        } else if (route.startsWith("products:ready:")) {
+          message = admin.productReadiness
+            ? await admin.productReadiness({
+                telegramUserId: envelope.actorUserId,
+                productId: route.slice("products:ready:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Readiness sản phẩm không khả dụng.");
+        } else if (route.startsWith("products:evidence:")) {
+          message = admin.productEvidence
+            ? await admin.productEvidence({
+                telegramUserId: envelope.actorUserId,
+                variantId: route.slice("products:evidence:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Bằng chứng sản phẩm không khả dụng.");
+        } else if (route.startsWith("products:publish:")) {
+          message = admin.productPublish
+            ? await admin.productPublish({
+                telegramUserId: envelope.actorUserId,
+                productId: route.slice("products:publish:".length),
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Xuất bản sản phẩm không khả dụng.");
         } else if (route.startsWith("products:detail:")) {
           message = admin.productDetail
             ? await admin.productDetail({
@@ -2593,6 +2657,14 @@ export function createTelegramDomainDispatcher(
             chatType: envelope.chatType,
             correlationId,
           })) ?? (await shopHome(deps, envelope));
+      } else if (envelope.ownerPromptText && deps.admin?.ownerPromptText) {
+        message =
+          (await deps.admin.ownerPromptText({
+            telegramUserId: envelope.actorUserId,
+            text: envelope.messageText ?? "",
+            chatType: envelope.chatType,
+            correlationId,
+          })) ?? safeError("Không có thao tác quản trị đang chờ.");
       } else if (envelope.productContentEditText && deps.admin?.workflow?.messageText) {
         // The ingress vouched for this text as an in-place product content edit, so it goes
         // straight to the workflow handler. It must not fall through the admin/customer text

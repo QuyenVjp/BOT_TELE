@@ -27,7 +27,13 @@ export type StoreModeTransitionResult =
   | { ok: true; kind: "CHANGED" | "REPLAYED"; control: StoreControl }
   | {
       ok: false;
-      code: "INVALID_INPUT" | "NOT_FOUND" | "INVALID_TRANSITION" | "VERSION_CONFLICT" | "CONFLICT";
+      code:
+        | "INVALID_INPUT"
+        | "NOT_FOUND"
+        | "INVALID_TRANSITION"
+        | "VERSION_CONFLICT"
+        | "NOT_READY"
+        | "CONFLICT";
       message: string;
     };
 
@@ -83,12 +89,85 @@ export async function getStoreMode(db: Executor): Promise<StoreMode> {
   return (await getStoreControl(db)).status;
 }
 
+export interface StoreOpenReadiness {
+  activeProducts: number;
+  inStockVariants: number;
+}
+
+/**
+ * Final OPEN gate. Keep this in the mode domain so both the Telegram preview and the durable
+ * confirmation check the same publication/stock invariant; a stale preview can never open an empty
+ * or unpublished store.
+ */
+export async function getStoreOpenReadiness(exec: Executor): Promise<StoreOpenReadiness> {
+  const result = await sql<{ active_products: number; in_stock_variants: number }>`
+    with public_variants as (
+      select v.id, v.fulfillment_type, v.stock_policy
+        from product_variant v
+        join product p on p.id = v.product_id
+        join category c on c.id = p.category_id
+       where v.is_active and p.is_active and c.is_active and not p.is_test and not p.is_archived
+         and v.price_vnd > 0
+         and v.resale_evidence_id is not null
+         and v.publication_evidence_id = v.resale_evidence_id
+         and v.publication_product_version = p.version
+         and v.publication_variant_version = v.version
+         and v.published_at is not null
+         and ((v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
+           or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
+             select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
+              where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE')))
+         and exists (
+           select 1 from resale_evidence re
+            where re.id = v.publication_evidence_id and re.variant_id = v.id and re.status = 'ACTIVE'
+         )
+    ),
+    stock as (
+      select pv.id,
+        case
+          when pv.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then (
+            select count(*)::int from digital_asset a where a.variant_id = pv.id and a.status = 'AVAILABLE'
+          )
+          when pv.fulfillment_type = 'QUANTITY_STOCK' then coalesce((
+            select q.available_quantity from variant_quantity_stock q where q.variant_id = pv.id
+          ), 0)::int
+          when pv.fulfillment_type = 'DIGITAL_FILE' then (
+            select count(*)::int from variant_file_artifact f where f.variant_id = pv.id and f.is_active
+          )
+          when pv.fulfillment_type = 'SUPPLIER_API' then (
+            select count(*)::int from supplier_sku ss join supplier s on s.id = ss.supplier_id
+             where ss.variant_id = pv.id and ss.is_active and s.status = 'ACTIVE'
+          )
+          when pv.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then (
+            select count(*)::int from variant_service_fulfillment sf
+             where sf.variant_id = pv.id and sf.fulfillment_type = pv.fulfillment_type and sf.is_active
+          )
+          else 0
+        end as available
+      from public_variants pv
+    )
+    select
+      (select count(distinct p.id)::int
+         from public_variants pv
+         join product_variant v on v.id = pv.id
+         join product p on p.id = v.product_id) as active_products,
+      (select count(*)::int from stock where available > 0) as in_stock_variants
+  `.execute(exec);
+  const row = result.rows[0];
+  return {
+    activeProducts: row?.active_products ?? 0,
+    inStockVariants: row?.in_stock_variants ?? 0,
+  };
+}
+
 /** Test fixture compatibility only. Production owner mutations use transitionStoreMode. */
-export async function setStoreMode(
+export async function setStoreModeForTest(
   db: Executor,
   mode: StoreMode,
   updatedBy: string,
 ): Promise<void> {
+  if (process.env.NODE_ENV === "production")
+    throw new Error("setStoreModeForTest is unavailable in production");
   await sql`
     insert into store_control (id, status, updated_at, updated_by, version)
     values ('main', ${mode}, now(), ${updatedBy}, 1)
@@ -166,6 +245,16 @@ export async function transitionStoreModeInTransaction(
   }
   if (row.version !== input.expectedVersion) {
     return { ok: false, code: "VERSION_CONFLICT", message: "Store đã thay đổi. Vui lòng mở lại." };
+  }
+  if (input.targetMode === "OPEN") {
+    const readiness = await getStoreOpenReadiness(exec);
+    if (readiness.activeProducts === 0 || readiness.inStockVariants === 0) {
+      return {
+        ok: false,
+        code: "NOT_READY",
+        message: "Chưa có sản phẩm đã publish và còn hàng để mở store.",
+      };
+    }
   }
   const updated = await sql<{
     version: number;

@@ -67,8 +67,9 @@ describe("durable AdminConfirmation (T163/T164)", () => {
       command: "discrepancy.resolve",
       actor,
       targetId: seeded.discrepancyId,
+      expectedVersion: 1,
       reason: "Verified manual settlement",
-      resolutionCode: "MANUAL_ACCEPT",
+      resolutionCode: "MANUAL_SETTLE",
       correlationId: "restart-action",
     });
     expect(requested.ok).toBe(true);
@@ -86,7 +87,7 @@ describe("durable AdminConfirmation (T163/T164)", () => {
       payload_redacted: {
         targetId: seeded.discrepancyId,
         reason: "Verified manual settlement",
-        resolutionCode: "MANUAL_ACCEPT",
+        resolutionCode: "MANUAL_SETTLE",
         actorId: String(ROOT_ID),
       },
     });
@@ -115,7 +116,7 @@ describe("durable AdminConfirmation (T163/T164)", () => {
     `.execute(ctx.db);
     expect(discrepancy.rows[0]).toEqual({
       status: "RESOLVED",
-      resolution_code: "MANUAL_ACCEPT",
+      resolution_code: "MANUAL_SETTLE",
     });
 
     const wrongChallenge = await afterRestart.confirm({
@@ -147,8 +148,9 @@ describe("durable AdminConfirmation (T163/T164)", () => {
       command: "discrepancy.resolve",
       actor,
       targetId: seeded.discrepancyId,
+      expectedVersion: 1,
       reason: "Atomic action",
-      resolutionCode: "MANUAL_ACCEPT",
+      resolutionCode: "MANUAL_SETTLE",
       correlationId: "atomic-action",
     });
     expect(requested.ok).toBe(true);
@@ -210,8 +212,9 @@ describe("durable AdminConfirmation (T163/T164)", () => {
       command: "discrepancy.resolve",
       actor,
       targetId: seeded.discrepancyId,
+      expectedVersion: 1,
       reason: "Bound action",
-      resolutionCode: "MANUAL_ACCEPT",
+      resolutionCode: "MANUAL_SETTLE",
       correlationId: "binding-action",
     });
     expect(requested.ok).toBe(true);

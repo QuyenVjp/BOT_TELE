@@ -236,7 +236,9 @@ export async function loadSensitiveAuthorizationBinding(
     `.execute(db);
     const value = row.rows[0];
     const fingerprint = value?.variant_fingerprint ?? "";
-    resourceVersion = value ? `${value.product_version}:${createHash("sha256").update(fingerprint, "utf8").digest("hex")}` : "missing";
+    resourceVersion = value
+      ? `${value.product_version}:${createHash("sha256").update(fingerprint, "utf8").digest("hex")}`
+      : "missing";
     current = value
       ? { productVersion: value.product_version, activeVariantFingerprint: fingerprint }
       : null;
@@ -272,12 +274,17 @@ export async function loadSensitiveAuthorizationBinding(
       resolved_by: string | null;
     }>`
       select version, status, resolution_code, resolved_by
-        from payment_discrepancy where id = ${input.resourceId} limit 1
+        from discrepancy where id = ${input.resourceId} limit 1
     `.execute(db);
     const value = row.rows[0];
     resourceVersion = value ? String(value.version) : "missing";
     current = value
-      ? { version: value.version, status: value.status, resolutionCode: value.resolution_code, resolvedBy: value.resolved_by }
+      ? {
+          version: value.version,
+          status: value.status,
+          resolutionCode: value.resolution_code,
+          resolvedBy: value.resolved_by,
+        }
       : null;
   } else if (input.actionKey === "outbox.orphan.dispose") {
     const row = await sql<{
@@ -305,7 +312,9 @@ export async function loadSensitiveAuthorizationBinding(
     `.execute(db);
     const value = row.rows[0];
     resourceVersion = value ? String(value.version) : "missing";
-    current = value ? { status: value.status, version: value.version, updatedAt: value.updated_at } : null;
+    current = value
+      ? { status: value.status, version: value.version, updatedAt: value.updated_at }
+      : null;
   } else {
     current = { resourceType: input.resourceType, resourceId: input.resourceId };
   }

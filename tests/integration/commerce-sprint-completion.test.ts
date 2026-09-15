@@ -69,6 +69,20 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         50000, 24, 24
       )
     `.execute(ctx.db);
+    // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values ('RES_TEST_1', ${varId}, 'OWNER_ATTESTATION', 'TEST-REF-COMMERCE-SPRINT', 'fixture publication evidence', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+         set publication_evidence_id = 'RES_TEST_1',
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${varId}
+    `.execute(ctx.db);
 
     // Also seed a test Canary product to verify it is filtered out of customer view
     const canaryProdId = newId();

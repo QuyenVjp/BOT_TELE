@@ -167,6 +167,57 @@ describe("input normalization (SR-004)", () => {
   });
 });
 
+describe("owner remediation prompt text ingress", () => {
+  it("admits owner text only while a remediation prompt is active", async () => {
+    const accepted: unknown[] = [];
+    let active = true;
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      ownerPromptText: {
+        adminTelegramUserId: 123456789,
+        isActive: async () => active,
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(
+          8991,
+          123456789,
+          "OWNER_ATTESTATION|REF-1|pre-production authorization",
+        ),
+      });
+      active = false;
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(8992, 123456789, "OWNER_ATTESTATION|REF-2|must not pass"),
+      });
+
+      expect(accepted).toHaveLength(2);
+      expect(accepted[0]).toMatchObject({
+        messageText: "OWNER_ATTESTATION|REF-1|pre-production authorization",
+        ownerPromptText: true,
+      });
+      expect(accepted[1]).not.toHaveProperty("messageText");
+    } finally {
+      await ingress.close();
+    }
+  });
+});
+
 describe("root product draft text ingress", () => {
   it("preserves bounded root-active product metadata and suppresses other raw text", async () => {
     const accepted: unknown[] = [];
