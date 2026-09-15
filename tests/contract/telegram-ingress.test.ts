@@ -216,6 +216,45 @@ describe("owner remediation prompt text ingress", () => {
       await ingress.close();
     }
   });
+  it("prioritizes an active product draft over an overlapping owner remediation prompt", async () => {
+    const accepted: TelegramCommandEnvelope[] = [];
+    const ingress = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(ingress, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          accepted.push(input.envelope);
+          return { kind: "ACCEPTED", id: `accepted:${input.sourceEventId}` };
+        },
+      },
+      ownerPromptText: {
+        adminTelegramUserId: 123456789,
+        isActive: async () => true,
+      },
+      rootProductDraftText: {
+        adminTelegramUserId: 123456789,
+        activeStep: async () => "name",
+      },
+    });
+    await ingress.ready();
+    try {
+      await ingress.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(8993, 123456789, "New product"),
+      });
+      expect(accepted).toHaveLength(1);
+      expect(accepted[0]).toMatchObject({
+        messageText: "New product",
+        rootProductDraftText: true,
+      });
+      expect(accepted[0]?.ownerPromptText).toBeUndefined();
+    } finally {
+      await ingress.close();
+    }
+  });
 });
 
 describe("root product draft text ingress", () => {

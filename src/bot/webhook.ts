@@ -727,6 +727,15 @@ async function normalizeSafeMessageText(
     }
   }
   if (
+    context.rootProductDraftText &&
+    context.chatType === "private" &&
+    context.actorId === context.rootProductDraftText.adminTelegramUserId
+  ) {
+    const step = await context.rootProductDraftText.activeStep(String(context.actorId));
+    const productText = step ? normalizeRootProductDraftText(normalized, step) : null;
+    if (productText) return { text: productText, rootProductDraftText: true };
+  }
+  if (
     context.ownerPromptText &&
     context.chatType === "private" &&
     context.actorId === context.ownerPromptText.adminTelegramUserId
@@ -736,15 +745,6 @@ async function normalizeSafeMessageText(
       const sanitized = sanitizeProductContentText(normalized);
       if (sanitized) return { text: sanitized, ownerPromptText: true };
     }
-  }
-  if (
-    context.rootProductDraftText &&
-    context.chatType === "private" &&
-    context.actorId === context.rootProductDraftText.adminTelegramUserId
-  ) {
-    const step = await context.rootProductDraftText.activeStep(String(context.actorId));
-    const productText = step ? normalizeRootProductDraftText(normalized, step) : null;
-    if (productText) return { text: productText, rootProductDraftText: true };
   }
   return /^(?:0|[1-9][0-9]*|[1-9][0-9]{0,2}([.,])[0-9]{3}(?:\1[0-9]{3})*)$/u.test(normalized)
     ? { text: normalized }

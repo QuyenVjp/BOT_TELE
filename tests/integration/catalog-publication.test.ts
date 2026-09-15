@@ -358,6 +358,24 @@ describe("protected catalog publication", () => {
     const firstRegistration = await registerEvidence(first.variantId, "revoke-register-a");
     const secondRegistration = await registerEvidence(second.variantId, "revoke-register-b");
     const firstVersion = (await readVariant(first.variantId)).version;
+    const secondVersionBefore = (await readVariant(second.variantId)).version;
+    await expect(
+      revokeResaleEvidence(ctx.db, {
+        variantId: first.variantId,
+        evidenceId: secondRegistration.evidenceId,
+        expectedVariantVersion: firstVersion,
+        requestId: "revoke-pair-mismatch",
+        actorId: "admin",
+        reason: "Reject mismatched evidence and variant",
+        correlationId: "revoke-pair-mismatch",
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "NOT_FOUND" });
+    await expect(readEvidence(secondRegistration.evidenceId)).resolves.toMatchObject({
+      status: "ACTIVE",
+    });
+    await expect(readVariant(second.variantId)).resolves.toMatchObject({
+      version: secondVersionBefore,
+    });
 
     await expect(
       revokeResaleEvidence(ctx.db, {

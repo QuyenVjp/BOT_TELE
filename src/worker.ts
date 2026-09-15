@@ -2952,10 +2952,7 @@ async function bootstrap(): Promise<void> {
           reason: "Replacement approval requested from Telegram admin support UI",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) return presentAdminHandleRefusal(result, "support.replacement.approve");
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3458,8 +3455,15 @@ async function bootstrap(): Promise<void> {
             (select count(*)::int from discrepancy where resolved_at is null) as open_discrepancies,
             (select count(*)::int from outbox_event
               where dead_lettered_at is not null and published_at is null and disposition_status is null) as terminal_outbox,
-            (select count(*)::int from support_ticket
-              where status in ('OPEN','WAITING_SHOP','WAITING_CUSTOMER','MANUAL_REVIEW')) as open_support,
+            (select count(*)::int from support_ticket t
+              where t.status in ('OPEN','MANUAL_REVIEW')
+                and not exists (
+                  select 1
+                    from channel_identity ci
+                    join test_customer_allowlist a
+                      on a.telegram_user_id::text = ci.channel_user_id::text
+                   where ci.customer_id = t.customer_id
+                )) as open_support,
             (select count(*)::int from product_variant v
               join product p on p.id = v.product_id
               where v.is_active and p.is_active and not p.is_test and not p.is_archived
@@ -4695,10 +4699,11 @@ async function bootstrap(): Promise<void> {
           reason: "Signed Telegram owner callback",
           correlationId: input.correlationId,
         });
-        if (!result.ok)
-          return presentAdminDenied(
-            result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
-          );
+        if (!result.ok) {
+          if (result.code === "WRONG_CONTEXT") return presentAdminDenied("WRONG_CONTEXT");
+          if (isSensitiveActionKey(command)) return presentAdminHandleRefusal(result, command);
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        }
         if (result.needsConfirmation)
           return presentHighRiskChallenge({
             confirmationId: result.confirmationId,
@@ -4727,12 +4732,17 @@ async function bootstrap(): Promise<void> {
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           correlationId: input.correlationId,
         });
-        return result.ok
-          ? presentHighRiskDone("admin.confirm")
-          : {
-              text: "❌ Xác nhận thất bại hoặc đã hết hạn",
-              buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
-            };
+        if (result.ok) return presentHighRiskDone("admin.confirm");
+        if (isSensitiveCallbackRefusal(result.code))
+          return presentSensitiveRefusal({
+            code: result.code,
+            action: "admin.confirm",
+            category: null,
+          });
+        return {
+          text: "❌ Xác nhận thất bại hoặc đã hết hạn",
+          buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+        };
       },
       async inventory(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
