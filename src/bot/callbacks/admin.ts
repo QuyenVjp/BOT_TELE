@@ -193,6 +193,7 @@ interface PendingAction {
 
 class InvalidDurableAdminActionError extends Error {}
 
+/** Carries a refused step-up through the atomic confirmation boundary without applying a mutation. */
 class SensitiveAuthorizationRefusedError extends Error {
   readonly code: SensitiveAuthorizationRefusal;
   readonly action: OwnerCommand;

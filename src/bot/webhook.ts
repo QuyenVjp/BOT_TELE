@@ -726,8 +726,8 @@ async function normalizeSafeMessageText(
       if (sanitized) return { text: sanitized, warrantyRefundAdjustText: true };
     }
   }
-  // The DB-backed draft activity check yields while a remediation prompt is pending; keep the
-  // draft branch first so a valid wizard answer cannot become an operator note.
+  // A pending remediation prompt owns the next private text; otherwise keep the draft branch
+  // first so a valid wizard answer cannot become an operator note.
   if (
     context.rootProductDraftText &&
     context.chatType === "private" &&
