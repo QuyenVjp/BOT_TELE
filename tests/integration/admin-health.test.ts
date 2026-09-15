@@ -2,6 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { getAdminHealthFacts } from "../../src/modules/admin/health.js";
+import { listTerminalOutboxOrphans } from "../../src/infrastructure/outbox/disposition.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
@@ -52,6 +53,9 @@ describe("admin health facts", () => {
     const facts = await getAdminHealthFacts(ctx.db);
     expect(facts.queues.outboxBacklog).toBe(1);
     expect(facts.queues.outboxDeadLettered).toBe(0);
+    // The already-closed dead letter is reported as retained history, so the
+    // operator can see the disposition happened without the row looking like work.
+    expect(facts.queues.outboxDeadLetteredDisposed).toBe(1);
     await sql`delete from outbox_event where id in (${pending}, ${sent}, ${resolvedDeadLetter})`.execute(
       ctx.db,
     );
@@ -74,6 +78,93 @@ describe("admin health facts", () => {
     const facts = await getAdminHealthFacts(ctx.db);
     expect(facts.queues.openDiscrepancies).toBe(1);
     expect(facts.queues.openSupportTickets).toBe(1);
+  });
+
+  it("separates actionable dead letters from retained disposition history", async () => {
+    const actionable = newId();
+    const published = newId();
+    const disposed = newId();
+
+    await sql`
+      insert into outbox_event
+        (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted,
+         occurred_at, dead_lettered_at)
+      values (${actionable}, 'Order', ${newId()}, 1, 'OrderPaid', '{}'::jsonb, now(), now())
+    `.execute(ctx.db);
+    // Delivered after being parked: no longer an actionable orphan.
+    await sql`
+      insert into outbox_event
+        (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted,
+         occurred_at, dead_lettered_at, published_at)
+      values (${published}, 'Order', ${newId()}, 1, 'OrderPaid', '{}'::jsonb, now(), now(), now())
+    `.execute(ctx.db);
+    // Closed by a real disposition: retained evidence, not work.
+    await sql`
+      insert into outbox_event
+        (id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted,
+         occurred_at, dead_lettered_at, disposition_status, disposition_code, dispositioned_at,
+         dispositioned_by)
+      values (${disposed}, 'Order', ${newId()}, 1, 'OrderPaid', '{}'::jsonb, now(), now(), 'RESOLVED',
+              'HANDLED_MANUALLY', now(), 'admin')
+    `.execute(ctx.db);
+
+    const facts = await getAdminHealthFacts(ctx.db);
+    // Actionable is exactly the predicate the disposition command acts on: the
+    // published row is excluded (it delivered) and the disposed row is history.
+    expect(facts.queues.outboxDeadLettered).toBe(1);
+    expect(facts.queues.outboxDeadLetteredDisposed).toBe(1);
+
+    // Parity with the operator queue: the screen's actionable count equals the
+    // set of rows `listTerminalOutboxOrphans` hands the disposition flow.
+    const orphans = await listTerminalOutboxOrphans(ctx.db, 20);
+    expect(orphans.map((row) => row.id)).toEqual([actionable]);
+
+    await sql`
+      delete from outbox_event where id in (${actionable}, ${published}, ${disposed})
+    `.execute(ctx.db);
+  });
+
+  it("counts a resolved discrepancy as retained history, not as open work", async () => {
+    const before = await getAdminHealthFacts(ctx.db);
+    const resolved = newId();
+    await sql`
+      insert into discrepancy (id, type, status, reason, owner, due_at, source, resolved_at, resolution_code)
+      values (${resolved}, 'UNMATCHED', 'RESOLVED', 'seed', 'ops', now(), 'WEBHOOK',
+              now(), 'NO_ACTION_REQUIRED')
+    `.execute(ctx.db);
+    await sql`
+      insert into discrepancy (id, type, status, reason, owner, due_at, source)
+      values (${newId()}, 'AMBIGUOUS_CORRELATION', 'OPEN', 'seed', 'ops', now(), 'WEBHOOK')
+    `.execute(ctx.db);
+
+    const facts = await getAdminHealthFacts(ctx.db);
+    // History is reported, never added to the open queue — and an ambiguous
+    // classification stays open; no counter may imply it was disposed of.
+    expect(facts.queues.openDiscrepancies).toBe(before.queues.openDiscrepancies + 1);
+    expect(facts.queues.resolvedDiscrepancies).toBe(before.queues.resolvedDiscrepancies + 1);
+  });
+
+  it("splits support tickets into informational open work and critical manual review", async () => {
+    const customerId = newId();
+    await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    const before = await getAdminHealthFacts(ctx.db);
+    // A ticket waiting on the customer is ordinary work.
+    await sql`
+      insert into support_ticket (id, customer_id, reason_code, status, safe_summary, due_at)
+      values (${newId()}, ${customerId}, 'OTHER', 'WAITING_CUSTOMER', 'seed', now())
+    `.execute(ctx.db);
+    // MANUAL_REVIEW is the escalation status and must never be hidden inside
+    // the informational count.
+    await sql`
+      insert into support_ticket (id, customer_id, reason_code, status, safe_summary, due_at)
+      values (${newId()}, ${customerId}, 'OTHER', 'MANUAL_REVIEW', 'seed', now())
+    `.execute(ctx.db);
+
+    const facts = await getAdminHealthFacts(ctx.db);
+    expect(facts.queues.openSupportTickets).toBe(before.queues.openSupportTickets + 1);
+    expect(facts.queues.criticalSupportTickets).toBe(before.queues.criticalSupportTickets + 1);
   });
 
   it("excludes a test-order payment intent from the operator queue", async () => {
@@ -144,14 +235,17 @@ describe("admin health facts", () => {
     expect(facts.queues).toEqual({
       outboxBacklog: 0,
       outboxDeadLettered: 0,
+      outboxDeadLetteredDisposed: 0,
       inboxDeadLetteredTelegram: 0,
       inboxDeadLetteredSePay: 0,
       inboxPendingTelegram: 0,
       inboxPendingSePay: 0,
       openDiscrepancies: 0,
+      resolvedDiscrepancies: 0,
       intentsAwaitingSettlement: 0,
       paymentsNeedingReview: 0,
       openSupportTickets: 0,
+      criticalSupportTickets: 0,
     });
   });
 });

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ADMIN_COPY,
   ADMIN_VISIBLE_ROUTE_KEYS,
+  PUBLICATION_BLOCKER_LABEL,
   presentAdminDashboard,
   presentAdminInventory,
   presentAdminInventoryItemActions,
@@ -23,6 +24,9 @@ import {
   presentAdminSupplierVariant,
   presentAdminSuppliersMenu,
   presentAdminSupportMenu,
+  presentAdminOperations,
+  presentAdminStoreOpenBlocked,
+  presentAdminStoreOpenConfirmation,
   presentProductDraftPreview,
 } from "../../src/bot/presenters/admin.js";
 
@@ -153,6 +157,7 @@ describe("admin operational presenters", () => {
       active: true,
       archived: false,
       testOnly: false,
+      visibilityBlockers: [],
       variants: [
         {
           id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
@@ -189,6 +194,151 @@ describe("admin operational presenters", () => {
     expect(revokeButton(12345678901234)).toBeUndefined();
     // Nothing to withdraw when the variant has no active evidence row.
     expect(revokeButton(1, false)).toBeUndefined();
+  });
+
+  // TEST_ONLY is a visibility state, not a technical failure: publishing is what promotes the
+  // product to public. The screen must therefore name it apart from the blockers and still offer
+  // the publish button, or the owner is told to fix something that publishing itself fixes.
+  it("renders visibility-only blockers apart from the blockers that stop publication", () => {
+    const readinessFor = (overrides: {
+      testOnly: boolean;
+      visibilityBlockers: string[];
+      blockers: string[];
+      canPublish: boolean;
+    }) =>
+      ({
+        productId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+        productVersion: 3,
+        active: true,
+        archived: false,
+        variants: [
+          {
+            id: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+            version: 1,
+            active: true,
+            priceVnd: "250000",
+            fulfillmentType: "STOCK_ACCOUNT",
+            ready: true,
+            routeReady: true,
+            evidenceId: "01ARZ3NDEKTSV4RRFFQ69G5FAZ",
+            evidenceActive: true,
+            published: false,
+            blockers: [],
+          },
+        ],
+        publicationVersion: `3:${"a".repeat(64)}`,
+        ...overrides,
+      }) as Parameters<typeof presentAdminProductReadiness>[0]["readiness"];
+
+    const publishButton = (message: { buttons: Array<Array<{ text: string }>> }) =>
+      message.buttons.flat().find((button) => button.text === "🚀 Xuất bản");
+
+    const testOnly = presentAdminProductReadiness({
+      name: "GPT Plus",
+      readiness: readinessFor({
+        testOnly: true,
+        visibilityBlockers: ["PRODUCT_TEST_ONLY"],
+        blockers: [],
+        canPublish: true,
+      }),
+      canSubmit: true,
+    });
+    expect(testOnly.text).toContain("🔎 Riêng hiển thị công khai:");
+    expect(testOnly.text).toContain(PUBLICATION_BLOCKER_LABEL.PRODUCT_TEST_ONLY);
+    expect(testOnly.text).not.toContain("⛔ Còn thiếu:");
+    expect(publishButton(testOnly)).toBeDefined();
+
+    const technicallyBlocked = presentAdminProductReadiness({
+      name: "GPT Plus",
+      readiness: readinessFor({
+        testOnly: false,
+        visibilityBlockers: [],
+        blockers: ["RESALE_EVIDENCE_MISSING"],
+        canPublish: false,
+      }),
+      canSubmit: true,
+    });
+    expect(technicallyBlocked.text).toContain("⛔ Còn thiếu:");
+    expect(technicallyBlocked.text).toContain(PUBLICATION_BLOCKER_LABEL.RESALE_EVIDENCE_MISSING);
+    expect(technicallyBlocked.text).not.toContain("🔎 Riêng hiển thị công khai:");
+    expect(publishButton(technicallyBlocked)).toBeUndefined();
+
+    // The evidence id names the record; nothing on the screen carries a vault reference.
+    expect(`${testOnly.text}${JSON.stringify(testOnly.buttons)}`).not.toMatch(/vault:|secret/i);
+  });
+
+  // The preview and the durable transition read the same readiness, so a blocked preview must
+  // name every condition `isStoreOpenReady` checks — and it must not offer the confirm button.
+  it("marks operations counters as untrusted when the database probe is down", () => {
+    const message = presentAdminOperations({
+      control: {
+        id: "main",
+        status: "CLOSED",
+        version: 4,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        updatedBy: null,
+        lastRequestId: null,
+      },
+      database: "down",
+      publicationBlocked: 0,
+      openDiscrepancies: 0,
+      resolvedDiscrepancies: 0,
+      terminalOutboxOrphans: 0,
+      terminalOutboxOrphansDisposed: 0,
+      openSupportTickets: 0,
+      criticalSupportTickets: 0,
+      stockAccountNotReady: 0,
+    });
+    expect(message.text).toContain("DATABASE DOWN");
+    expect(message.text).toContain("không xác nhận trạng thái thực tế");
+  });
+
+  it("names every blocking queue on the blocked store-open preview", () => {
+    const control = {
+      id: "main",
+      status: "CLOSED" as const,
+      version: 3,
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      updatedBy: null,
+      lastRequestId: null,
+    };
+
+    const blocked = presentAdminStoreOpenBlocked({
+      readiness: {
+        activeProducts: 0,
+        inStockVariants: 0,
+        openDiscrepancies: 2,
+        terminalOutboxOrphans: 1,
+        criticalSupportTickets: 3,
+      },
+      control,
+    });
+    for (const reason of [
+      "Chưa có sản phẩm public đang hoạt động.",
+      "Chưa có biến thể nào còn hàng.",
+      "Còn 2 sai lệch thanh toán chưa xử lý.",
+      "Còn 1 outbox terminal chưa có kết luận.",
+      "Còn 3 phiếu hỗ trợ chờ người xử lý.",
+    ]) {
+      expect(blocked.text).toContain(reason);
+    }
+    expect(blocked.text).toContain("phiên bản 3");
+    expect(blocked.buttons.flat().map((button) => button.callbackData)).not.toContain(
+      "admin:store:open:confirm",
+    );
+
+    const confirmation = presentAdminStoreOpenConfirmation({
+      activeProducts: 4,
+      inStockVariants: 6,
+      openDiscrepancies: 0,
+      terminalOutboxOrphans: 0,
+      criticalSupportTickets: 0,
+    });
+    expect(confirmation.text).toContain("Sản phẩm public đang hoạt động: 4");
+    expect(confirmation.text).toContain("Biến thể đang còn hàng: 6");
+    expect(confirmation.buttons.flat().map((button) => button.callbackData)).toContain(
+      "admin:store:open:confirm",
+    );
   });
 
   it("renders bounded dashboard counters without sensitive data", () => {

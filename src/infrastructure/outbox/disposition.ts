@@ -27,6 +27,15 @@ import { appendAuditEvent } from "../../modules/identity/audit.js";
 /**
  * Bounded terminal disposition vocabulary. Each code answers "why is this
  * orphan closed?", which is what an ops report needs to query.
+ *
+ * ## Adapter contract
+ *
+ * The Telegram admin adapter MUST send one of these codes and may never invent
+ * one. For a no-economic-effect orphan — a preproduction canary or a test-order
+ * effect that never needed to happen — the code is `NO_LONGER_APPLICABLE`: the
+ * business context that justified the event is gone, and the operator carries
+ * out nothing. A code only records the decision; it never publishes the event,
+ * so no choice here can deliver a customer-visible effect.
  */
 export const OUTBOX_DISPOSITION_CODES = [
   /** The operator carried the downstream effect out by hand. */

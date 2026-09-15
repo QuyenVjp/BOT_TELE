@@ -92,6 +92,31 @@ export async function getStoreMode(db: Executor): Promise<StoreMode> {
 export interface StoreOpenReadiness {
   activeProducts: number;
   inStockVariants: number;
+  /**
+   * Actionable unresolved reconciliation work: `discrepancy` rows without `resolved_at`.
+   */
+  openDiscrepancies: number;
+  /**
+   * Actionable parked outbox work: exactly `listTerminalOutboxOrphans` —
+   * `dead_lettered_at is not null and published_at is null and disposition_status is null`.
+   */
+  terminalOutboxOrphans: number;
+  /** Operator-escalation tickets (`MANUAL_REVIEW`), excluding test-customer allowlist identities. */
+  criticalSupportTickets: number;
+}
+
+/**
+ * A store may only OPEN with something sellable and nothing actionable left queued. Fail closed:
+ * any blocking queue keeps the store CLOSED until an operator clears it.
+ */
+export function isStoreOpenReady(readiness: StoreOpenReadiness): boolean {
+  return (
+    readiness.activeProducts > 0 &&
+    readiness.inStockVariants > 0 &&
+    readiness.openDiscrepancies === 0 &&
+    readiness.terminalOutboxOrphans === 0 &&
+    readiness.criticalSupportTickets === 0
+  );
 }
 
 /**
@@ -100,7 +125,13 @@ export interface StoreOpenReadiness {
  * or unpublished store.
  */
 export async function getStoreOpenReadiness(exec: Executor): Promise<StoreOpenReadiness> {
-  const result = await sql<{ active_products: number; in_stock_variants: number }>`
+  const result = await sql<{
+    active_products: number;
+    in_stock_variants: number;
+    open_discrepancies: number;
+    terminal_outbox_orphans: number;
+    critical_support_tickets: number;
+  }>`
     with public_variants as (
       select v.id, v.fulfillment_type, v.stock_policy
         from product_variant v
@@ -151,12 +182,28 @@ export async function getStoreOpenReadiness(exec: Executor): Promise<StoreOpenRe
          from public_variants pv
          join product_variant v on v.id = pv.id
          join product p on p.id = v.product_id) as active_products,
-      (select count(*)::int from stock where available > 0) as in_stock_variants
+      (select count(*)::int from stock where available > 0) as in_stock_variants,
+      (select count(*)::int from discrepancy d where d.resolved_at is null) as open_discrepancies,
+      (select count(*)::int from outbox_event o
+         where o.dead_lettered_at is not null
+           and o.published_at is null
+           and o.disposition_status is null) as terminal_outbox_orphans,
+      (select count(*)::int from support_ticket t
+         where t.status = 'MANUAL_REVIEW'
+           and not exists (
+             select 1
+               from channel_identity ci
+               join test_customer_allowlist a
+                 on a.telegram_user_id::text = ci.channel_user_id::text
+              where ci.customer_id = t.customer_id)) as critical_support_tickets
   `.execute(exec);
   const row = result.rows[0];
   return {
     activeProducts: row?.active_products ?? 0,
     inStockVariants: row?.in_stock_variants ?? 0,
+    openDiscrepancies: row?.open_discrepancies ?? 0,
+    terminalOutboxOrphans: row?.terminal_outbox_orphans ?? 0,
+    criticalSupportTickets: row?.critical_support_tickets ?? 0,
   };
 }
 
@@ -247,12 +294,15 @@ export async function transitionStoreModeInTransaction(
     return { ok: false, code: "VERSION_CONFLICT", message: "Store đã thay đổi. Vui lòng mở lại." };
   }
   if (input.targetMode === "OPEN") {
+    // Recheck inside this transaction: the preview may be stale, and any unresolved
+    // discrepancy, parked outbox orphan or escalated ticket keeps the store closed.
     const readiness = await getStoreOpenReadiness(exec);
-    if (readiness.activeProducts === 0 || readiness.inStockVariants === 0) {
+    if (!isStoreOpenReady(readiness)) {
       return {
         ok: false,
         code: "NOT_READY",
-        message: "Chưa có sản phẩm đã publish và còn hàng để mở store.",
+        message:
+          "Chưa sẵn sàng mở store: cần sản phẩm đã publish còn hàng và không còn chênh lệch, outbox kẹt hay phiếu hỗ trợ chờ xử lý.",
       };
     }
   }

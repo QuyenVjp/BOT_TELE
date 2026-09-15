@@ -5,7 +5,11 @@ import {
   type FulfillmentType,
   type InventoryField,
 } from "../../modules/catalog/fulfillment-type.js";
-import type { StoreControl, StoreMode } from "../../modules/commerce/store-mode.js";
+import type {
+  StoreControl,
+  StoreMode,
+  StoreOpenReadiness,
+} from "../../modules/commerce/store-mode.js";
 import type { AuditEvent } from "../../modules/identity/audit.js";
 import type { SensitiveAuthorizationRefusal } from "../../modules/identity/sensitive-action.js";
 import type { BroadcastRefusal } from "../../modules/notification/service.js";
@@ -231,10 +235,20 @@ export function presentAdminStoreMode(control: StoreControl): PresentedMessage {
 /** The commissioning gate refused the open: show the counts, never a shortcut around them. */
 export interface AdminOperationsSnapshot {
   control: StoreControl;
+  database: "ok" | "down";
   publicationBlocked: number;
+  /** Actionable: discrepancies with no resolution yet. */
   openDiscrepancies: number;
+  /** Retained history: discrepancies already resolved. Evidence, not work. */
+  resolvedDiscrepancies: number;
+  /** Actionable: parked outbox rows with no disposition yet. */
   terminalOutboxOrphans: number;
+  /** Retained history: parked outbox rows a disposition already closed. */
+  terminalOutboxOrphansDisposed: number;
+  /** Informational: ordinary tickets waiting on the shop or the customer. */
   openSupportTickets: number;
+  /** Actionable: tickets parked for operator judgement (`MANUAL_REVIEW`). */
+  criticalSupportTickets: number;
   stockAccountNotReady: number;
 }
 
@@ -245,11 +259,19 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
       "🛠 VẬN HÀNH / READINESS",
       "",
       `${STORE_MODE_BANNER[control.status]} · phiên bản ${control.version}`,
+      ...(input.database === "down"
+        ? ["⚠️ DATABASE DOWN — các bộ đếm queue không xác nhận trạng thái thực tế."]
+        : []),
       `Publication còn blocker: ${input.publicationBlocked}`,
       `STOCK_ACCOUNT chưa sẵn sàng: ${input.stockAccountNotReady}`,
-      `Sai lệch thanh toán mở: ${input.openDiscrepancies}`,
-      `Outbox terminal treo: ${input.terminalOutboxOrphans}`,
-      `Ticket hỗ trợ mở: ${input.openSupportTickets}`,
+      "",
+      // Actionable work and retained history are printed apart on purpose: one blended
+      // figure makes a finished queue look like an incident and hides a real one behind it.
+      `⚠️ Cần xử lý — sai lệch thanh toán: ${input.openDiscrepancies}`,
+      `⚠️ Cần xử lý — outbox terminal chưa kết luận: ${input.terminalOutboxOrphans}`,
+      `🚨 Cần xử lý — phiếu hỗ trợ chờ người xử lý: ${input.criticalSupportTickets}`,
+      `✅ Đã xử lý (chỉ lưu vết) — sai lệch: ${input.resolvedDiscrepancies} · outbox: ${input.terminalOutboxOrphansDisposed}`,
+      `ℹ️ Ticket thường đang mở (chờ shop/khách): ${input.openSupportTickets}`,
       "",
       "Không có thao tác tự động trên màn hình này; từng mutation vẫn đi qua owner confirmation.",
     ].join("\n"),
@@ -263,19 +285,43 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
   };
 }
 
+/**
+ * The actionable half of the OPEN gate, as reasons. `isStoreOpenReady` decides with these same
+ * five conditions, so the preview can never be more permissive than the durable transition.
+ */
+function storeOpenReasons(readiness: StoreOpenReadiness): string[] {
+  return [
+    ...(readiness.activeProducts === 0 ? ["Chưa có sản phẩm public đang hoạt động."] : []),
+    ...(readiness.inStockVariants === 0 ? ["Chưa có biến thể nào còn hàng."] : []),
+    ...(readiness.openDiscrepancies > 0
+      ? [`Còn ${readiness.openDiscrepancies} sai lệch thanh toán chưa xử lý.`]
+      : []),
+    ...(readiness.terminalOutboxOrphans > 0
+      ? [`Còn ${readiness.terminalOutboxOrphans} outbox terminal chưa có kết luận.`]
+      : []),
+    ...(readiness.criticalSupportTickets > 0
+      ? [`Còn ${readiness.criticalSupportTickets} phiếu hỗ trợ chờ người xử lý.`]
+      : []),
+  ];
+}
+
 export function presentAdminStoreOpenBlocked(input: {
-  activeProducts: number;
-  inStockVariants: number;
+  readiness: StoreOpenReadiness;
   control: StoreControl;
 }): PresentedMessage {
+  const { readiness } = input;
   return {
     text: [
       "⚠️ CHƯA THỂ MỞ BÁN",
       "",
-      `Sản phẩm public đang hoạt động: ${input.activeProducts}`,
-      `Biến thể đang còn hàng: ${input.inStockVariants}`,
+      `Sản phẩm public đang hoạt động: ${readiness.activeProducts} (cần ≥ 1)`,
+      `Biến thể đang còn hàng: ${readiness.inStockVariants} (cần ≥ 1)`,
+      `Sai lệch thanh toán chưa xử lý: ${readiness.openDiscrepancies} (cần 0)`,
+      `Outbox terminal chưa kết luận: ${readiness.terminalOutboxOrphans} (cần 0)`,
+      `Phiếu hỗ trợ chờ người xử lý: ${readiness.criticalSupportTickets} (cần 0)`,
       "",
-      "Cần ít nhất một sản phẩm public đang hoạt động và còn hàng, hoặc mở bán sẽ bán ra sản phẩm rỗng.",
+      ...storeOpenReasons(readiness).map((reason) => `⛔ ${reason}`),
+      "Cửa hàng vẫn đang đóng cho tới khi các mục trên bằng 0.",
       `${STORE_MODE_BANNER[input.control.status]} · phiên bản ${input.control.version}`,
     ].join("\n"),
     buttons: [
@@ -284,12 +330,16 @@ export function presentAdminStoreOpenBlocked(input: {
     ],
   };
 }
-export function presentAdminStoreOpenConfirmation(input: {
-  activeProducts: number;
-  inStockVariants: number;
-}): PresentedMessage {
+export function presentAdminStoreOpenConfirmation(readiness: StoreOpenReadiness): PresentedMessage {
   return {
-    text: `⚠️ XÁC NHẬN MỞ BÁN\n\nSản phẩm public đang hoạt động: ${input.activeProducts}\nBiến thể đang còn hàng: ${input.inStockVariants}`,
+    text: [
+      "⚠️ XÁC NHẬN MỞ BÁN",
+      "",
+      `Sản phẩm public đang hoạt động: ${readiness.activeProducts}`,
+      `Biến thể đang còn hàng: ${readiness.inStockVariants}`,
+      `Sai lệch chưa xử lý: ${readiness.openDiscrepancies} · outbox terminal chưa kết luận: ${readiness.terminalOutboxOrphans} · phiếu hỗ trợ chờ người xử lý: ${readiness.criticalSupportTickets}`,
+      "Cửa hàng chỉ mở nếu tất cả đều đạt; bấm MỞ BÁN sẽ kiểm tra lại.",
+    ].join("\n"),
     buttons: [
       [{ text: "✅ MỞ BÁN", callbackData: "admin:store:open:confirm" }],
       [{ text: "❌ Huỷ", callbackData: "admin:store:mode" }],
@@ -682,6 +732,7 @@ export const PUBLICATION_BLOCKER_LABEL: Record<PublicationBlocker, string> = {
   PRODUCT_INACTIVE: "Sản phẩm đang tạm dừng",
   PRODUCT_ARCHIVED: "Sản phẩm đã lưu trữ",
   PRODUCT_TEST_ONLY: "Sản phẩm chỉ dành cho TEST",
+  STORE_TEST_MODE: "Đang ở chế độ TEST; đóng cửa hàng trước khi xuất bản công khai",
   CATEGORY_INACTIVE: "Danh mục sản phẩm đang tắt",
   NO_ACTIVE_VARIANTS: "Không có biến thể đang bán",
   VARIANT_INACTIVE: "Biến thể đang tạm dừng",
@@ -707,6 +758,11 @@ export function presentAdminProductReadiness(input: {
   const active = readiness.variants.filter((variant) => variant.active);
   const withEvidence = active.filter((variant) => variant.evidenceActive).length;
   const blockers = Array.from(new Set(readiness.blockers));
+  // VISIBILITY-ONLY: the technical checklist below is what `canPublish` answers. TEST_ONLY does
+  // not block publication (publishing is what promotes the product to public), so it is printed
+  // on its own line and never mixed into the blocker list — the owner must be able to read what
+  // still stops a publish separately from what publishing will change.
+  const visibility = Array.from(new Set(readiness.visibilityBlockers));
   const lines = [
     "🚀 XUẤT BẢN SẢN PHẨM",
     "",
@@ -721,6 +777,14 @@ export function presentAdminProductReadiness(input: {
       : ["⛔ Còn thiếu:", ...blockers.map((code) => `• ${PUBLICATION_BLOCKER_LABEL[code]}`)].join(
           "\n",
         ),
+    ...(visibility.length
+      ? [
+          "",
+          "🔎 Riêng hiển thị công khai:",
+          ...visibility.map((code) => `• ${PUBLICATION_BLOCKER_LABEL[code]}`),
+          ...(readiness.testOnly ? ["Xuất bản sẽ chuyển sản phẩm này sang bán công khai."] : []),
+        ]
+      : []),
   ];
   if (active.length) {
     lines.push(
@@ -2451,15 +2515,24 @@ export interface AdminSystemHealthFacts {
   sepayReconciliation: string;
   queues: {
     outboxBacklog: number;
+    /** Actionable: dead-lettered rows with no disposition yet. */
     outboxDeadLettered: number;
+    /** Retained history: dead-lettered rows a disposition already closed. */
+    outboxDeadLetteredDisposed: number;
     inboxDeadLetteredTelegram: number;
     inboxDeadLetteredSePay: number;
     inboxPendingTelegram: number;
     inboxPendingSePay: number;
+    /** Actionable: discrepancies with no resolution yet. */
     openDiscrepancies: number;
+    /** Retained history: discrepancies already resolved. Evidence, not work. */
+    resolvedDiscrepancies: number;
     intentsAwaitingSettlement: number;
     paymentsNeedingReview: number;
+    /** Informational: ordinary tickets waiting on the shop or the customer. */
     openSupportTickets: number;
+    /** Actionable: tickets parked for operator judgement (`MANUAL_REVIEW`). */
+    criticalSupportTickets: number;
   };
 }
 
@@ -2479,13 +2552,17 @@ export function presentAdminSystemHealth(input: AdminSystemHealthFacts): Present
       `🏦 Đối soát SePay: ${input.sepayReconciliation}`,
       "",
       `📤 Hàng đợi outbox: ${input.queues.outboxBacklog}`,
-      `☠️ Outbox dead-letter: ${input.queues.outboxDeadLettered}`,
+      `☠️ Outbox dead-letter cần xử lý: ${input.queues.outboxDeadLettered}`,
       `📥 Inbox Telegram: chờ ${input.queues.inboxPendingTelegram} · dead ${input.queues.inboxDeadLetteredTelegram}`,
       `📥 Inbox SePay: chờ ${input.queues.inboxPendingSePay} · dead ${input.queues.inboxDeadLetteredSePay}`,
       `⚠️ Sai lệch cần soát: ${input.queues.openDiscrepancies}`,
       `⏳ Intent chờ thanh toán: ${input.queues.intentsAwaitingSettlement}`,
       `🔎 Thanh toán cần kiểm tra: ${input.queues.paymentsNeedingReview}`,
-      `🛡 Ticket đang mở: ${input.queues.openSupportTickets}`,
+      `🚨 Ticket cần người xử lý: ${input.queues.criticalSupportTickets}`,
+      `🛡 Ticket thường đang mở (chờ shop/khách): ${input.queues.openSupportTickets}`,
+      // Retained history, kept as evidence: a closed queue is not an incident, and hiding it
+      // would hide how much the disposition APIs have actually cleared.
+      `🗄 Đã xử lý (chỉ lưu vết): outbox ${input.queues.outboxDeadLetteredDisposed} · sai lệch ${input.queues.resolvedDiscrepancies}`,
     ].join("\n"),
     buttons: [
       [
