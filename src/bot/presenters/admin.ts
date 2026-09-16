@@ -276,7 +276,7 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
       "Không có thao tác tự động trên màn hình này; từng mutation vẫn đi qua owner confirmation.",
     ].join("\n"),
     buttons: [
-      [{ text: "💳 Thanh toán / sai lệch", callbackData: "admin:payments:discrepancy" }],
+      [{ text: "💳 Thanh toán / sai lệch", callbackData: "admin:payments" }],
       [{ text: "🛍 Readiness sản phẩm", callbackData: "admin:products" }],
       [{ text: "🏪 Store control", callbackData: "admin:store:mode" }],
       [{ text: "💬 Ticket hỗ trợ", callbackData: "admin:support" }],

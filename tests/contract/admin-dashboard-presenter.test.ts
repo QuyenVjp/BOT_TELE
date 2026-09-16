@@ -292,6 +292,32 @@ describe("admin operational presenters", () => {
     expect(message.text).toContain("DATABASE DOWN");
     expect(message.text).toContain("không xác nhận trạng thái thực tế");
   });
+  it("routes the umbrella payment queue to the payments menu", () => {
+    const message = presentAdminOperations({
+      control: {
+        id: "main",
+        status: "CLOSED",
+        version: 1,
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        updatedBy: null,
+        lastRequestId: null,
+      },
+      database: "ok",
+      publicationBlocked: 0,
+      openDiscrepancies: 14,
+      resolvedDiscrepancies: 0,
+      terminalOutboxOrphans: 1,
+      terminalOutboxOrphansDisposed: 0,
+      openSupportTickets: 1,
+      criticalSupportTickets: 0,
+      stockAccountNotReady: 0,
+    });
+
+    expect(
+      message.buttons.flat().find((button) => button.text === "💳 Thanh toán / sai lệch")
+        ?.callbackData,
+    ).toBe("admin:payments");
+  });
 
   it("names every blocking queue on the blocked store-open preview", () => {
     const control = {
