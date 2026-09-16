@@ -294,6 +294,12 @@ export async function transitionStoreModeInTransaction(
     return { ok: false, code: "VERSION_CONFLICT", message: "Store đã thay đổi. Vui lòng mở lại." };
   }
   if (input.targetMode === "OPEN") {
+    // Queue writers acquire ROW EXCLUSIVE locks in these tables. Taking the
+    // stronger table locks first makes the readiness snapshot and OPEN commit
+    // one serial point without an in-memory mutex.
+    await sql`lock table support_ticket, discrepancy, outbox_event in share row exclusive mode`.execute(
+      exec,
+    );
     // Recheck inside this transaction: the preview may be stale, and any unresolved
     // discrepancy, parked outbox orphan or escalated ticket keeps the store closed.
     const readiness = await getStoreOpenReadiness(exec);
