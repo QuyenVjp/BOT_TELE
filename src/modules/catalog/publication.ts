@@ -364,6 +364,16 @@ export async function getProductPublicationReadiness(
   };
 }
 
+export async function countAdminPublicationBlockers(exec: Executor): Promise<number> {
+  const products = await sql<{ id: string }>`
+    select id from product where is_active and not is_archived
+  `.execute(exec);
+  const readiness = await Promise.all(
+    products.rows.map((row) => getProductPublicationReadiness(exec, row.id)),
+  );
+  return readiness.filter((item) => item !== null && !item.canPublish).length;
+}
+
 export async function registerResaleEvidenceInTransaction(
   exec: Executor,
   input: RegisterResaleEvidenceInput,
@@ -607,6 +617,10 @@ export async function publishProductInTransaction(
   exec: Executor,
   input: PublishProductInput,
 ): Promise<PublishProductResult> {
+  // Serialize publication with CLOSED↔TEST transitions. A shared row lock is
+  // held until this transaction commits, so TEST cannot slip between readiness
+  // validation and the visibility mutation.
+  await sql`select id from store_control where id = 'main' for share`.execute(exec);
   const initial = await getProductPublicationReadiness(exec, input.productId);
   if (!initial) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy sản phẩm." };
   if (!initial.canPublish)

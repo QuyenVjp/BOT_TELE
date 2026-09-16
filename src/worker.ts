@@ -173,6 +173,7 @@ import {
   listAdminPaymentOps,
 } from "./modules/admin/payment-ops.js";
 import {
+  countAdminPublicationBlockers,
   getProductPublicationReadiness,
   RESALE_EVIDENCE_SOURCES,
   type ResaleEvidenceSource,
@@ -3421,14 +3422,9 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const productRows = await sql<{ id: string }>`
-          select id from product where is_active and not is_test and not is_archived
-        `.execute(dbHandle.db);
-        const readiness = await Promise.all(
-          productRows.rows.map((row) => getProductPublicationReadiness(dbHandle.db, row.id)),
-        );
-        // One source of truth for the queue counters: the operations screen and the health screen
-        // must never disagree about what "open" means, so both read the same facts.
+        const publicationBlocked = await countAdminPublicationBlockers(dbHandle.db);
+        // The operations and health screens use the same queue predicates, but they are separate reads
+        // and may differ transiently while concurrent work commits.
         const [health, stock] = await Promise.all([
           getAdminHealthFacts(dbHandle.db),
           sql<{ stock_account_not_ready: number }>`
@@ -3443,7 +3439,7 @@ async function bootstrap(): Promise<void> {
         return presentAdminOperations({
           control: await getStoreControl(dbHandle.db),
           database: health.database,
-          publicationBlocked: readiness.filter((item) => item !== null && !item.canPublish).length,
+          publicationBlocked,
           openDiscrepancies: health.queues.openDiscrepancies,
           resolvedDiscrepancies: health.queues.resolvedDiscrepancies,
           terminalOutboxOrphans: health.queues.outboxDeadLettered,
