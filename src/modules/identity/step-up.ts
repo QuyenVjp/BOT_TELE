@@ -18,8 +18,8 @@ import { appendAuditEvent } from "./audit.js";
  *  - the TOTP seed is 20 random bytes, base32-encoded, and lives ONLY behind the
  *    vault boundary under the `admin-totp` namespace keyed by the numeric id;
  *  - `admin_step_up_secret` stores the opaque vault ref, never key material;
- *  - no function here returns the seed except `enroll`, whose whole purpose is
- *    to hand the operator an `otpauth://` URI for their authenticator app;
+ *  - no function returns raw seed; enrollment and recovery initiation return only
+ *    an `otpauth://` URI for the local operator hand-off;
  *  - the seed never reaches an audit event, a failure code, or a log line.
  *
  * Brute-force resistance is durable: every code check appends to the
@@ -41,6 +41,24 @@ export type StepUpActionCategory =
 
 export type StepUpFailureCode =
   "NOT_ENROLLED" | "INVALID_CODE" | "LOCKED_OUT" | "NOT_GRANTED" | "GRANT_EXPIRED";
+
+export type RecoveryFailureCode =
+  | "NO_ACTIVE_FACTOR"
+  | "NO_PENDING_RECOVERY"
+  | "RECOVERY_EXPIRED"
+  | "RECOVERY_UNAVAILABLE"
+  | "STALE_RECOVERY"
+  | "INVALID_CODE"
+  | "LOCKED_OUT";
+
+export type RecoveryConfirmationResult =
+  | { ok: true; factorVersion: number; revokedGrantCount: number }
+  | { ok: false; code: RecoveryFailureCode };
+
+export interface RecoveryInitiation {
+  otpauthUri: string;
+  expiresAt: Date;
+}
 
 export interface StepUpGrant {
   adminTelegramUserId: string;
@@ -69,6 +87,19 @@ export interface StepUpService {
     currentCode: string;
     now?: Date;
   }): Promise<{ otpauthUri: string }>;
+  /** Create a short-lived Vault-backed candidate without changing the active factor. */
+  initiateRecovery(input: {
+    adminTelegramUserId: string;
+    issuer: string;
+    accountLabel: string;
+    now?: Date;
+  }): Promise<RecoveryInitiation>;
+  /** Verify and atomically promote the pending candidate, revoking live grants. */
+  confirmRecovery(input: {
+    adminTelegramUserId: string;
+    code: string;
+    now?: Date;
+  }): Promise<RecoveryConfirmationResult>;
   isEnrolled(adminTelegramUserId: string): Promise<boolean>;
   /** Verify a code and bind the resulting grant to one exact authorization payload. */
   verify(input: {
@@ -94,6 +125,7 @@ export interface StepUpService {
     now?: Date;
   }): Promise<{ ok: true } | { ok: false; code: StepUpFailureCode }>;
 }
+const RECOVERY_TTL_SECONDS = 10 * 60;
 
 export interface StepUpOptions {
   ttlSeconds: number;
@@ -225,10 +257,12 @@ interface StepUpAudit {
   action: string;
   reason: string;
   category?: StepUpActionCategory;
-  code?: StepUpFailureCode;
+  code?: StepUpFailureCode | RecoveryFailureCode;
+  correlationId?: string;
+  metadataRedacted?: Record<string, string | number | boolean | null>;
 }
 
-/** Append step-up evidence. Only the category and the failure code are recorded. */
+/** Append step-up evidence without ever accepting raw factor material. */
 async function appendStepUpAudit(exec: Executor, input: StepUpAudit): Promise<void> {
   await appendAuditEvent(exec, {
     actorType: "ROOT_ADMIN",
@@ -237,12 +271,29 @@ async function appendStepUpAudit(exec: Executor, input: StepUpAudit): Promise<vo
     targetType: "AdminStepUp",
     targetId: input.adminTelegramUserId,
     reason: input.reason,
-    correlationId: `admin-step-up:${input.adminTelegramUserId}`,
+    correlationId: input.correlationId ?? `admin-step-up:${input.adminTelegramUserId}`,
     metadataRedacted: {
+      ...input.metadataRedacted,
       ...(input.category === undefined ? {} : { category: input.category }),
       ...(input.code === undefined ? {} : { code: input.code }),
     },
   });
+}
+
+function buildOtpAuthUri(seed: string, issuer: string, accountLabel: string): string {
+  const label = `${encodeURIComponent(issuer)}:${encodeURIComponent(accountLabel)}`;
+  const params = new URLSearchParams({
+    secret: seed,
+    issuer,
+    algorithm: "SHA1",
+    digits: String(TOTP_DIGITS),
+    period: String(TOTP_PERIOD_SECONDS),
+  });
+  return `otpauth://totp/${label}?${params.toString()}`;
+}
+
+function asDate(value: Date | string): Date {
+  return value instanceof Date ? value : new Date(value);
 }
 
 /**
@@ -257,7 +308,7 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
   async function issueEnrollment(
     input: { adminTelegramUserId: string; issuer: string; accountLabel: string },
     action: "enrolled" | "replaced",
-  ): Promise<{ otpauthUri: string }> {
+  ): Promise<{ otpauthUri: string; vaultRef: string }> {
     const adminId = input.adminTelegramUserId.trim();
     if (!TELEGRAM_ID_SHAPE.test(adminId)) {
       throw new Error("step-up enrollment requires a numeric Telegram user id");
@@ -265,33 +316,35 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
     const seed = encodeBase32(randomBytes(SEED_BYTES));
     const vaultRef = await vault.write(seed, {
       namespace: "asset",
-      idempotencyKey: `${SECRET_KEY_PREFIX}-${adminId}`,
+      idempotencyKey:
+        action === "enrolled"
+          ? `${SECRET_KEY_PREFIX}-${adminId}`
+          : `${SECRET_KEY_PREFIX}-${adminId}-${newId()}`,
     });
     await sql`
-      insert into admin_step_up_secret (admin_telegram_user_id, vault_ref)
-      values (${adminId}, ${vaultRef})
+      insert into admin_step_up_secret
+        (admin_telegram_user_id, vault_ref, factor_version)
+      values (${adminId}, ${vaultRef}, 1)
       on conflict (admin_telegram_user_id) do update
-        set vault_ref = excluded.vault_ref, rotated_at = now()
+        set vault_ref = excluded.vault_ref,
+            rotated_at = now(),
+            factor_version = admin_step_up_secret.factor_version + 1
     `.execute(db);
     await appendStepUpAudit(db, {
       adminTelegramUserId: adminId,
       action: `admin.step_up.${action}`,
       reason: action === "enrolled" ? "TOTP factor enrolled" : "TOTP factor replaced",
     });
-    const label = `${encodeURIComponent(input.issuer)}:${encodeURIComponent(input.accountLabel)}`;
-    const params = new URLSearchParams({
-      secret: seed,
-      issuer: input.issuer,
-      algorithm: "SHA1",
-      digits: String(TOTP_DIGITS),
-      period: String(TOTP_PERIOD_SECONDS),
-    });
-    return { otpauthUri: `otpauth://totp/${label}?${params.toString()}` };
+    return {
+      vaultRef,
+      otpauthUri: buildOtpAuthUri(seed, input.issuer, input.accountLabel),
+    };
   }
 
   return {
     async enroll(input) {
-      return issueEnrollment(input, "enrolled");
+      const result = await issueEnrollment(input, "enrolled");
+      return { otpauthUri: result.otpauthUri };
     },
 
     async replace(input) {
@@ -307,7 +360,7 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
         vaultRef === undefined ? null : await vault.reveal(vaultRef).catch(() => null);
       if (
         currentSeed === null ||
-        verifyTotpCode({
+        !verifyTotpCode({
           secretBase32: currentSeed,
           code: input.currentCode,
           unixSeconds: Math.floor((input.now ?? new Date()).getTime() / 1000),
@@ -315,9 +368,309 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
       ) {
         throw new Error("current step-up code is required to replace the factor");
       }
-      return issueEnrollment(input, "replaced");
+      const result = await issueEnrollment(input, "replaced");
+      if (vaultRef !== undefined && vaultRef !== result.vaultRef) {
+        try {
+          await vault.delete(vaultRef);
+        } catch {
+          await appendStepUpAudit(db, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.replacement.cleanup_failed",
+            reason: "old factor cleanup failed after replacement",
+          }).catch(() => {});
+        }
+      }
+      return { otpauthUri: result.otpauthUri };
+    },
+    async initiateRecovery(input) {
+      const adminId = input.adminTelegramUserId.trim();
+      if (!TELEGRAM_ID_SHAPE.test(adminId)) throw new Error("invalid step-up identity");
+      const now = input.now ?? new Date();
+      const active = await sql<{ vault_ref: string; factor_version: number }>`
+        select vault_ref, factor_version
+        from admin_step_up_secret
+        where admin_telegram_user_id = ${adminId}
+        limit 1
+      `.execute(db);
+      if (!active.rows[0]) throw new Error("no active step-up factor");
+
+      const candidateId = newId();
+      const seed = encodeBase32(randomBytes(SEED_BYTES));
+      const vaultRef = await vault.write(seed, {
+        namespace: "asset",
+        idempotencyKey: `${SECRET_KEY_PREFIX}-recovery-${adminId}-${candidateId}`,
+      });
+      const expiresAt = new Date(now.getTime() + RECOVERY_TTL_SECONDS * 1000);
+      let expiredVaultRef: string | null = null;
+      try {
+        await withTransaction(db, async (trx) => {
+          const current = await sql<{ factor_version: number }>`
+            select factor_version
+            from admin_step_up_secret
+            where admin_telegram_user_id = ${adminId}
+            for update
+          `.execute(trx);
+          const currentRow = current.rows[0];
+          if (!currentRow) throw new Error("no active step-up factor");
+
+          const pending = await sql<{ vault_ref: string; expires_at: Date | string }>`
+            select vault_ref, expires_at
+            from admin_step_up_recovery_candidate
+            where admin_telegram_user_id = ${adminId}
+            for update
+          `.execute(trx);
+          const pendingRow = pending.rows[0];
+          if (pendingRow && asDate(pendingRow.expires_at) > now) {
+            throw new Error("step-up recovery is already pending");
+          }
+          if (pendingRow) {
+            expiredVaultRef = pendingRow.vault_ref;
+            await sql`
+              delete from admin_step_up_recovery_candidate
+              where admin_telegram_user_id = ${adminId}
+            `.execute(trx);
+          }
+          await sql`
+            insert into admin_step_up_recovery_candidate
+              (admin_telegram_user_id, candidate_id, vault_ref,
+               previous_factor_version, created_at, expires_at)
+            values
+              (${adminId}, ${candidateId}, ${vaultRef}, ${Number(currentRow.factor_version)},
+               ${now.toISOString()}, ${expiresAt.toISOString()})
+          `.execute(trx);
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.initiated",
+            reason: "lost authenticator recovery initiated",
+            correlationId: `admin-step-up-recovery:${candidateId}`,
+            metadataRedacted: {
+              candidateId,
+              previousFactorVersion: Number(currentRow.factor_version),
+              expiresAt: expiresAt.toISOString(),
+            },
+          });
+        });
+      } catch (error) {
+        await vault.delete(vaultRef).catch(() => {});
+        throw error;
+      }
+      if (expiredVaultRef !== null) await vault.delete(expiredVaultRef).catch(() => {});
+      return { otpauthUri: buildOtpAuthUri(seed, input.issuer, input.accountLabel), expiresAt };
     },
 
+    async confirmRecovery(input) {
+      const adminId = input.adminTelegramUserId.trim();
+      if (!TELEGRAM_ID_SHAPE.test(adminId)) {
+        return { ok: false, code: "NO_PENDING_RECOVERY" };
+      }
+      const now = input.now ?? new Date();
+      type Candidate = {
+        candidate_id: string;
+        vault_ref: string;
+        previous_factor_version: number;
+        expires_at: Date | string;
+      };
+      let retiredCandidateRef: string | null = null;
+      let oldVaultRef: string | null = null;
+
+      const result = await withTransaction(db, async (trx): Promise<RecoveryConfirmationResult> => {
+        // Lock order is active factor first, candidate second, matching
+        // initiateRecovery and preventing a recovery/confirmation deadlock.
+        const active = await sql<{ vault_ref: string; factor_version: number }>`
+          select vault_ref, factor_version
+          from admin_step_up_secret
+          where admin_telegram_user_id = ${adminId}
+          for update
+        `.execute(trx);
+        const activeRow = active.rows[0];
+        const pending = await sql<Candidate>`
+          select candidate_id, vault_ref, previous_factor_version, expires_at
+          from admin_step_up_recovery_candidate
+          where admin_telegram_user_id = ${adminId}
+          for update
+        `.execute(trx);
+        const candidate = pending.rows[0];
+        if (!candidate) {
+          const code = activeRow ? "NO_PENDING_RECOVERY" : "NO_ACTIVE_FACTOR";
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.denied",
+            reason: `denied: ${code}`,
+            code,
+          });
+          return { ok: false, code };
+        }
+        if (!activeRow) {
+          retiredCandidateRef = candidate.vault_ref;
+          await sql`
+            delete from admin_step_up_recovery_candidate
+            where admin_telegram_user_id = ${adminId}
+          `.execute(trx);
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.denied",
+            reason: "denied: NO_ACTIVE_FACTOR",
+            code: "NO_ACTIVE_FACTOR",
+            metadataRedacted: { candidateId: candidate.candidate_id },
+          });
+          return { ok: false, code: "NO_ACTIVE_FACTOR" };
+        }
+        if (asDate(candidate.expires_at) <= now) {
+          retiredCandidateRef = candidate.vault_ref;
+          await sql`
+            delete from admin_step_up_recovery_candidate
+            where admin_telegram_user_id = ${adminId}
+          `.execute(trx);
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.denied",
+            reason: "denied: RECOVERY_EXPIRED",
+            code: "RECOVERY_EXPIRED",
+            metadataRedacted: { candidateId: candidate.candidate_id },
+          });
+          return { ok: false, code: "RECOVERY_EXPIRED" };
+        }
+        if (Number(activeRow.factor_version) !== Number(candidate.previous_factor_version)) {
+          retiredCandidateRef = candidate.vault_ref;
+          await sql`
+            delete from admin_step_up_recovery_candidate
+            where admin_telegram_user_id = ${adminId}
+          `.execute(trx);
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.denied",
+            reason: "denied: STALE_RECOVERY",
+            code: "STALE_RECOVERY",
+            metadataRedacted: { candidateId: candidate.candidate_id },
+          });
+          return { ok: false, code: "STALE_RECOVERY" };
+        }
+
+        const windowStart = new Date(now.getTime() - lockoutMinutes * 60_000);
+        const failed = await sql<{ failed_attempts: number }>`
+          select count(*)::int as failed_attempts
+          from admin_step_up_attempt
+          where admin_telegram_user_id = ${adminId}
+            and purpose = 'RECOVERY'
+            and recovery_candidate_id = ${candidate.candidate_id}
+            and succeeded = false
+            and attempted_at >= ${windowStart.toISOString()}
+        `.execute(trx);
+        if ((failed.rows[0]?.failed_attempts ?? 0) >= maxAttempts) {
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.denied",
+            reason: "denied: LOCKED_OUT",
+            code: "LOCKED_OUT",
+            metadataRedacted: { candidateId: candidate.candidate_id },
+          });
+          return { ok: false, code: "LOCKED_OUT" };
+        }
+
+        const seed = await vault.reveal(candidate.vault_ref).catch(() => null);
+        if (seed === null) {
+          await sql`
+            insert into admin_step_up_attempt
+              (id, admin_telegram_user_id, attempted_at, succeeded,
+               purpose, recovery_candidate_id)
+            values
+              (${newId()}, ${adminId}, ${now.toISOString()}, false, 'RECOVERY',
+               ${candidate.candidate_id})
+          `.execute(trx);
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.denied",
+            reason: "denied: RECOVERY_UNAVAILABLE",
+            code: "RECOVERY_UNAVAILABLE",
+            metadataRedacted: { candidateId: candidate.candidate_id },
+          });
+          return { ok: false, code: "RECOVERY_UNAVAILABLE" };
+        }
+
+        const accepted = verifyTotpCode({
+          secretBase32: seed,
+          code: input.code,
+          unixSeconds: Math.floor(now.getTime() / 1000),
+        });
+        await sql`
+          insert into admin_step_up_attempt
+            (id, admin_telegram_user_id, attempted_at, succeeded,
+             purpose, recovery_candidate_id)
+          values
+            (${newId()}, ${adminId}, ${now.toISOString()}, ${accepted}, 'RECOVERY',
+             ${candidate.candidate_id})
+        `.execute(trx);
+        if (!accepted) {
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.denied",
+            reason: "denied: INVALID_CODE",
+            code: "INVALID_CODE",
+            metadataRedacted: { candidateId: candidate.candidate_id },
+          });
+          return { ok: false, code: "INVALID_CODE" };
+        }
+
+        oldVaultRef = activeRow.vault_ref;
+        const promoted = await sql<{ factor_version: number }>`
+          update admin_step_up_secret
+          set vault_ref = ${candidate.vault_ref},
+              factor_version = factor_version + 1,
+              rotated_at = ${now.toISOString()}
+          where admin_telegram_user_id = ${adminId}
+          returning factor_version
+        `.execute(trx);
+        const newFactorVersion = Number(promoted.rows[0]?.factor_version);
+        if (!Number.isInteger(newFactorVersion) || newFactorVersion <= 0) {
+          throw new Error("step-up factor promotion did not update the active row");
+        }
+        const revoked = await sql<{ id: string }>`
+          update admin_step_up_grant
+          set revoked_at = ${now.toISOString()},
+              revoke_reason = 'admin MFA factor recovered'
+          where admin_telegram_user_id = ${adminId}
+            and consumed_at is null
+            and revoked_at is null
+          returning id
+        `.execute(trx);
+        await sql`
+          delete from admin_step_up_recovery_candidate
+          where admin_telegram_user_id = ${adminId}
+        `.execute(trx);
+        await appendStepUpAudit(trx, {
+          adminTelegramUserId: adminId,
+          action: "admin.step_up.recovered",
+          reason: "lost authenticator recovered",
+          correlationId: `admin-step-up-recovery:${candidate.candidate_id}`,
+          metadataRedacted: {
+            candidateId: candidate.candidate_id,
+            previousFactorVersion: Number(candidate.previous_factor_version),
+            newFactorVersion,
+            revokedGrantCount: revoked.rows.length,
+          },
+        });
+        return {
+          ok: true,
+          factorVersion: newFactorVersion,
+          revokedGrantCount: revoked.rows.length,
+        };
+      });
+
+      if (retiredCandidateRef !== null) await vault.delete(retiredCandidateRef).catch(() => {});
+      if (result.ok && oldVaultRef !== null) {
+        try {
+          await vault.delete(oldVaultRef);
+        } catch {
+          await appendStepUpAudit(db, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.recovery.cleanup_failed",
+            reason: "old factor cleanup failed after recovery",
+            metadataRedacted: { factorVersion: result.factorVersion },
+          }).catch(() => {});
+        }
+      }
+      return result;
+    },
     async isEnrolled(adminTelegramUserId) {
       const adminId = adminTelegramUserId.trim();
       if (!TELEGRAM_ID_SHAPE.test(adminId)) return false;
@@ -369,61 +722,59 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
         return { ok: false, code: "NOT_ENROLLED" };
       }
 
-      // Durable rate limit: counted from the append-only attempt log, so a
-      // process restart or a new instance cannot clear the counter. An attempt
-      // made while locked out is refused without extending the lockout.
-      const windowStart = new Date(now.getTime() - lockoutMinutes * 60_000);
-      const failed = await sql<{ failed_attempts: number }>`
-        select count(*)::int as failed_attempts
-        from admin_step_up_attempt
-        where admin_telegram_user_id = ${adminId}
-          and succeeded = false
-          and attempted_at >= ${windowStart.toISOString()}
-      `.execute(db);
-      if ((failed.rows[0]?.failed_attempts ?? 0) >= maxAttempts) {
-        await appendStepUpAudit(db, {
-          adminTelegramUserId: adminId,
-          action: "admin.step_up.denied",
-          reason: "denied: LOCKED_OUT",
-          category: input.category,
-          code: "LOCKED_OUT",
-        });
-        return { ok: false, code: "LOCKED_OUT" };
-      }
-
-      const secret = await sql<{ vault_ref: string }>`
-        select vault_ref from admin_step_up_secret
-        where admin_telegram_user_id = ${adminId}
-        limit 1
-      `.execute(db);
-      const vaultRef = secret.rows[0]?.vault_ref;
-      let seed: string | null = null;
-      if (vaultRef !== undefined) {
-        // A vanished ref is indistinguishable from "never enrolled" by design:
-        // both deny, and neither leaks whether a seed ever existed.
-        seed = await vault.reveal(vaultRef).catch(() => null);
-      }
-      if (seed === null) {
-        await appendStepUpAudit(db, {
-          adminTelegramUserId: adminId,
-          action: "admin.step_up.denied",
-          reason: "denied: NOT_ENROLLED",
-          category: input.category,
-          code: "NOT_ENROLLED",
-        });
-        return { ok: false, code: "NOT_ENROLLED" };
-      }
-
-      const accepted = verifyTotpCode({
-        secretBase32: seed,
-        code: input.code,
-        unixSeconds: Math.floor(now.getTime() / 1000),
-      });
-
       return withTransaction(db, async (trx) => {
+        // The active-factor row is the per-admin mutex. Holding it across the
+        // count, Vault reveal, code check, and attempt insert closes the
+        // brute-force lockout TOCTOU window.
+        const secret = await sql<{ vault_ref: string }>`
+          select vault_ref
+          from admin_step_up_secret
+          where admin_telegram_user_id = ${adminId}
+          for update
+        `.execute(trx);
+        const windowStart = new Date(now.getTime() - lockoutMinutes * 60_000);
+        const failed = await sql<{ failed_attempts: number }>`
+          select count(*)::int as failed_attempts
+          from admin_step_up_attempt
+          where admin_telegram_user_id = ${adminId}
+            and purpose = 'STEP_UP'
+            and succeeded = false
+            and attempted_at >= ${windowStart.toISOString()}
+        `.execute(trx);
+        if ((failed.rows[0]?.failed_attempts ?? 0) >= maxAttempts) {
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.denied",
+            reason: "denied: LOCKED_OUT",
+            category: input.category,
+            code: "LOCKED_OUT",
+          });
+          return { ok: false, code: "LOCKED_OUT" };
+        }
+
+        const vaultRef = secret.rows[0]?.vault_ref;
+        const seed = vaultRef === undefined ? null : await vault.reveal(vaultRef).catch(() => null);
+        if (seed === null) {
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.denied",
+            reason: "denied: NOT_ENROLLED",
+            category: input.category,
+            code: "NOT_ENROLLED",
+          });
+          return { ok: false, code: "NOT_ENROLLED" };
+        }
+
+        const accepted = verifyTotpCode({
+          secretBase32: seed,
+          code: input.code,
+          unixSeconds: Math.floor(now.getTime() / 1000),
+        });
         await sql`
-          insert into admin_step_up_attempt (id, admin_telegram_user_id, attempted_at, succeeded)
-          values (${newId()}, ${adminId}, ${now.toISOString()}, ${accepted})
+          insert into admin_step_up_attempt
+            (id, admin_telegram_user_id, attempted_at, succeeded, purpose)
+          values
+            (${newId()}, ${adminId}, ${now.toISOString()}, ${accepted}, 'STEP_UP')
         `.execute(trx);
         if (!accepted) {
           await appendStepUpAudit(trx, {
