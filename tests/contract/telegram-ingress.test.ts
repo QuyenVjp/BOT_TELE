@@ -1040,6 +1040,38 @@ describe("command normalization", () => {
     }
   });
 
+  it("preserves /confirm arguments through webhook normalization", async () => {
+    let seen: TelegramCommandEnvelope | undefined;
+    const localApp = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(localApp, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          seen = input.envelope;
+          return { kind: "ACCEPTED", id: "confirm-ingress" };
+        },
+      },
+    });
+    await localApp.ready();
+    try {
+      const res = await localApp.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(602, 100, "/confirm confirmation-id challenge"),
+      });
+      expect(res.statusCode).toBe(200);
+      expect(seen).toMatchObject({
+        command: "/confirm",
+        action: "ADMIN",
+        searchQuery: "confirmation-id challenge",
+      });
+    } finally {
+      await localApp.close();
+    }
+  });
+
   it("preserves plain wallet amount text in the durable envelope", async () => {
     let seen: unknown = null;
     const localApp = Fastify({ bodyLimit: BODY_LIMIT });

@@ -601,7 +601,8 @@ function classifyAction(
     command === "/inventory" ||
     command === "/customers" ||
     command === "/broadcast" ||
-    command === "/health"
+    command === "/health" ||
+    command === "/confirm"
   )
     return "ADMIN";
   if (command === "/cancel") return "CANCEL";
@@ -645,7 +646,8 @@ function normalizeCommandArgument(command: string | undefined, value: string): s
     command !== "/search" &&
     command !== "/pay" &&
     command !== "/customer" &&
-    command !== "/message_customer"
+    command !== "/message_customer" &&
+    command !== "/confirm"
   )
     return null;
   const maxLength = command === "/message_customer" ? 1100 : 80;
