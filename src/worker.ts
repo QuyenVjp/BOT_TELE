@@ -2098,7 +2098,7 @@ async function bootstrap(): Promise<void> {
     db: dbHandle.db,
     rootConfig,
     vault,
-    stepUpEnabled: config.ADMIN_STEP_UP_REQUIRED,
+    stepUpEnabled: config.ADMIN_STEP_UP_MODE === "required",
     stepUpOptions,
   };
   /**
@@ -2169,7 +2169,7 @@ async function bootstrap(): Promise<void> {
         rootConfig,
         rootChannelIdentityId: rootIdentity.channelIdentityId,
         confirmation: createAdminConfirmation(dbHandle.db),
-        stepUpEnabled: config.ADMIN_STEP_UP_REQUIRED,
+        stepUpEnabled: config.ADMIN_STEP_UP_MODE === "required",
         stepUpOptions,
         inventoryImport: async (input) => {
           const result = await importDigitalInventory({

@@ -142,11 +142,11 @@ export const envSchema = z.object({
    */
   BROADCAST_LARGE_AUDIENCE_THRESHOLD: z.coerce.number().int().min(1).max(1_000_000).default(500),
   BROADCAST_COOLDOWN_SECONDS: z.coerce.number().int().min(0).max(86_400).default(300),
-  /** Admin step-up gating for high-risk operations. Opt-in until enrolled. */
-  ADMIN_STEP_UP_REQUIRED: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((value) => value === "true"),
+  /**
+   * Admin step-up policy. Production must set this explicitly; non-production
+   * defaults to the identity-plus-confirmation posture.
+   */
+  ADMIN_STEP_UP_MODE: z.enum(["required", "disabled"]).default("disabled"),
   ADMIN_STEP_UP_TTL_SECONDS: z.coerce.number().int().positive().max(3600).default(300),
   ADMIN_STEP_UP_LOCKOUT_MINUTES: z.coerce.number().int().min(1).max(1440).default(15),
   ADMIN_STEP_UP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(20).default(5),

@@ -147,11 +147,10 @@ export interface SensitiveActionDeps {
   db: Db;
   rootConfig: RootAdminConfig;
   /**
-   * Undefined is only legitimate while step-up is off (development/test). With
-   * step-up enabled and no vault the layer refuses: nothing could be verified.
+   * The resolved policy posture. When false, only the TOTP factor is bypassed;
+   * root identity and audit still run. When true, a vault is required.
    */
   vault: Vault | undefined;
-  /** Development/test posture when false: identity and audit still run, no step-up. */
   stepUpEnabled: boolean;
   stepUpOptions: { ttlSeconds: number; lockoutMinutes: number; maxAttempts: number };
   telemetry?: IdentityTelemetry;
