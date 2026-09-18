@@ -280,6 +280,46 @@ describe("step-up service keeps the seed inside the vault (SR-001)", () => {
     expect(stub.statements.some((parameters) => parameters.length === 4)).toBe(false);
   });
 
+  it("requires the current factor before replacing it", async () => {
+    const vault = createInMemoryVault();
+    const stub = stubDb((parameters) =>
+      parameters.length === 1 ? [{ vault_ref: SECRET_REF }] : [],
+    );
+    const service = createStepUpService(stub.db, vault, {
+      ttlSeconds: 300,
+      lockoutMinutes: 15,
+      maxAttempts: 5,
+    });
+    const enrolled = await service.enroll({
+      adminTelegramUserId: ADMIN_ID,
+      issuer: "TIER20",
+      accountLabel: "owner",
+    });
+    const seed = new URL(enrolled.otpauthUri).searchParams.get("secret")!;
+    const now = new Date("2026-01-01T00:00:59.000Z");
+    const validCode = generateTotp(seed, Math.floor(now.getTime() / 1000));
+    const invalidCode = `${validCode.slice(0, 5)}${(Number(validCode[5]) + 1) % 10}`;
+
+    await expect(
+      service.replace({
+        adminTelegramUserId: ADMIN_ID,
+        issuer: "TIER20",
+        accountLabel: "owner",
+        currentCode: invalidCode,
+        now,
+      }),
+    ).rejects.toThrow(/current step-up code/iu);
+    await expect(
+      service.replace({
+        adminTelegramUserId: ADMIN_ID,
+        issuer: "TIER20",
+        accountLabel: "owner",
+        currentCode: validCode,
+        now,
+      }),
+    ).resolves.toHaveProperty("otpauthUri");
+  });
+
   it("refuses to enrol a non-numeric identity", async () => {
     const service = createStepUpService(stubDb(() => []).db, createInMemoryVault(), {
       ttlSeconds: 300,

@@ -288,3 +288,17 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 ### Cutover contract
 
 No production publication, store opening, discrepancy resolution, or support closure is performed by code deployment alone. The owner must supply legitimate evidence and complete the normal Telegram step-up flow. Production remains non-open until those human gates are observed and verified.
+
+### Local lost-factor recovery contract
+
+- The active root-admin TOTP factor remains authoritative until a new candidate factor verifies successfully. Recovery never disables step-up, deletes the active factor first, or creates another admin.
+- `admin_step_up_recovery_candidate` stores only an opaque Vault reference for one short-lived candidate per admin. The candidate is local-operator initiated, bound to the current factor version, and never exposed through Telegram, HTTP, logs, or audit metadata.
+- Recovery is a two-phase TTY flow: explicit production/root-identity confirmation; locally rendered QR; local candidate-code verification; one transaction promotes the candidate, increments the factor version, revokes all unconsumed grants, removes the candidate row, and appends redacted audit evidence.
+- Failed or aborted recovery leaves the active factor usable. Candidate material is time-bounded and may be retried or replaced only through the same local recovery command; invalid candidate codes are durably rate-limited without changing the active factor.
+- The existing `replace` command remains current-factor gated. The external Vault remains the only secret store; PostgreSQL stores opaque references and versioned metadata only.
+
+### MFA recovery risk ledger
+
+- `invariants_preserved`: numeric root identity; private Telegram authorization; Vault-only TOTP material; append-only attempts/audits; single-use resource-bound grants; active factor continuity until verified promotion.
+- `intentional_breaks`: none to normal step-up verification or Telegram admin semantics; lost-factor recovery adds only a local operator path.
+- `risked_invariants`: candidate expiry, concurrent recovery attempts, factor promotion versus grant consumption, Vault cleanup after commit, and operator interruption between QR display and code entry. Focused tests must cover stale candidates, invalid codes, atomic promotion, grant revocation, old/new factor behavior, and abort safety.

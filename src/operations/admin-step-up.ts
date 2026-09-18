@@ -1,3 +1,9 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import QRCode from "qrcode";
 import { sql } from "kysely";
 import { createDb } from "../infrastructure/db/client.js";
 import { createVault } from "../infrastructure/vault/adapter.js";
@@ -9,7 +15,9 @@ import {
   SENSITIVE_ACTION_POLICY,
 } from "../modules/identity/sensitive-action.js";
 
-async function readHidden(prompt: string): Promise<string> {
+const execFileAsync = promisify(execFile);
+
+async function readInput(prompt: string, echo: boolean): Promise<string> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     throw new Error("operator MFA input requires a TTY");
   }
@@ -19,6 +27,11 @@ async function readHidden(prompt: string): Promise<string> {
   process.stdin.setEncoding("utf8");
   const { promise, resolve, reject } = Promise.withResolvers<string>();
   let value = "";
+  const cleanup = () => {
+    process.stdin.off("data", onData);
+    process.stdin.setRawMode(false);
+    process.stdin.pause();
+  };
   const onData = (chunk: string) => {
     for (const char of chunk) {
       if (char === "\u0003") {
@@ -32,17 +45,47 @@ async function readHidden(prompt: string): Promise<string> {
         resolve(value);
         return;
       }
-      if (char === "\u007f") value = value.slice(0, -1);
-      else if (char >= " " && char !== "\u007f") value += char;
+      if (char === "\u007f") {
+        if (value.length > 0) {
+          value = value.slice(0, -1);
+          if (echo) process.stdout.write("\b \b");
+        }
+      } else if (char >= " " && char !== "\u007f") {
+        value += char;
+        if (echo) process.stdout.write(char);
+      }
     }
-  };
-  const cleanup = () => {
-    process.stdin.off("data", onData);
-    process.stdin.setRawMode(false);
-    process.stdin.pause();
   };
   process.stdin.on("data", onData);
   return promise;
+}
+
+async function readHidden(prompt: string): Promise<string> {
+  return readInput(prompt, false);
+}
+
+async function openLocalQr(otpauthUri: string): Promise<() => Promise<void>> {
+  if (process.platform !== "darwin") {
+    throw new Error("local MFA QR display requires macOS Preview");
+  }
+  const directory = await mkdtemp(join(tmpdir(), "bot-tele-mfa-recovery-"));
+  const imagePath = join(directory, "new-factor.png");
+  try {
+    await QRCode.toFile(imagePath, otpauthUri, {
+      type: "png",
+      errorCorrectionLevel: "M",
+      margin: 4,
+    });
+    await execFileAsync("open", [imagePath], { windowsHide: true });
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true }).catch(() => {});
+    throw new Error(
+      `could not open the local MFA QR image: ${error instanceof Error ? error.message : "unknown error"}`,
+    );
+  }
+  return async () => {
+    await rm(directory, { recursive: true, force: true });
+  };
 }
 
 async function latestChallenge(
@@ -99,8 +142,16 @@ async function latestChallenge(
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
   const command = argv[0];
-  if (command !== "enroll" && command !== "replace" && command !== "verify") {
-    throw new Error("usage: admin-step-up <enroll|replace|verify>");
+  if (
+    command !== "enroll" &&
+    command !== "replace" &&
+    command !== "verify" &&
+    command !== "recover"
+  ) {
+    throw new Error("usage: admin-step-up <enroll|replace|verify|recover>");
+  }
+  if (command === "recover" && (!process.stdin.isTTY || !process.stdout.isTTY)) {
+    throw new Error("MFA recovery requires an interactive local TTY");
   }
   const config = loadConfig(process.env);
   const adminId = String(config.ADMIN_TELEGRAM_USER_ID);
@@ -144,6 +195,53 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         currentCode,
       });
       process.stdout.write(`${result.otpauthUri}\n`);
+      return;
+    }
+    if (command === "recover") {
+      if (
+        config.NODE_ENV !== "production" ||
+        !config.ADMIN_STEP_UP_REQUIRED ||
+        config.VAULT_DRIVER !== "external"
+      ) {
+        throw new Error("MFA recovery requires production with external Vault and step-up enabled");
+      }
+      const confirmationPhrase = `RECOVER TIER20 SHOP MFA ${adminId.slice(-4)}`;
+      process.stdout.write(
+        `This rotates the lost root-admin factor only after a new factor verifies.\nType ${confirmationPhrase} to continue: `,
+      );
+      if ((await readInput("", true)) !== confirmationPhrase) {
+        throw new Error("recovery confirmation did not match");
+      }
+      const initiated = await service.initiateRecovery({
+        adminTelegramUserId: adminId,
+        issuer: "TIER20 SHOP",
+        accountLabel: adminId,
+      });
+      const cleanupQr = await openLocalQr(initiated.otpauthUri);
+      try {
+        process.stdout.write("SCAN NEW MFA QR NOW\n");
+        await readInput("Press Enter after scanning: ", true);
+        for (;;) {
+          const code = await readHidden("New TOTP code: ");
+          const result = await service.confirmRecovery({
+            adminTelegramUserId: adminId,
+            code,
+          });
+          if (result.ok) {
+            process.stdout.write(
+              `MFA recovery verified; active factor rotated and ${result.revokedGrantCount} grant(s) revoked.\n`,
+            );
+            break;
+          }
+          if (result.code === "INVALID_CODE") {
+            process.stdout.write("Invalid new TOTP code; retry while the QR remains open.\n");
+            continue;
+          }
+          throw new Error(`MFA recovery failed: ${result.code}`);
+        }
+      } finally {
+        await cleanupQr();
+      }
       return;
     }
     const challenge = await latestChallenge(
