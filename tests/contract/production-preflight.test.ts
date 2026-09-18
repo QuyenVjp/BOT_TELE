@@ -73,9 +73,9 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Node
     BUY_NOW_CALLBACK_HMAC_KEY: "buy-now-callback-key-material-12345678",
     DELIVERY_SESSION_HMAC_KEY: "delivery-session-key-material-12345678",
     ADMIN_TELEGRAM_USER_ID: "123456789",
-    // An admin id means the sensitive surface exists, and production refuses to start with it
-    // single-factor. Every valid production fixture must therefore enable step-up.
-    ADMIN_STEP_UP_REQUIRED: "true",
+    // The fixture exercises the required mode; disabled mode is tested separately
+    // and deliberately skips only the factor probe.
+    ADMIN_STEP_UP_MODE: "required",
     SEPAY_WEBHOOK_HMAC_SECRET: "test-sepay-hmac-secret-do-not-use-in-prod",
     SEPAY_API_TOKEN: ["sepay", "api", "token", "material"].join("-"),
     SEPAY_MERCHANT_ACCOUNT_ID: "0123456789",
@@ -105,7 +105,7 @@ afterEach(() => {
 });
 
 describe("production preflight", () => {
-  it("fails closed when production requires MFA but the admin factor is missing", async () => {
+  it("fails closed when required mode has no usable admin factor", async () => {
     preflightTestState.factor = "missing";
     const result = await runProductionPreflight(productionEnv());
 
@@ -113,19 +113,29 @@ describe("production preflight", () => {
     expect(result.issues.join("; ")).toContain("admin step-up factor");
   });
 
-  it("fails closed when the configured MFA vault reference is dangling", async () => {
+  it("fails closed when the required-mode Vault reference is dangling", async () => {
     preflightTestState.factor = "dangling";
     const result = await runProductionPreflight(productionEnv());
 
     expect(result.ok).toBe(false);
     expect(result.issues.join("; ")).toContain("admin step-up factor");
   });
-  it("rejects plaintext MFA material stored where a vault reference is required", async () => {
+
+  it("rejects plaintext factor material in required mode", async () => {
     preflightTestState.factor = "plaintext";
     const result = await runProductionPreflight(productionEnv());
 
     expect(result.ok).toBe(false);
     expect(result.issues.join("; ")).toContain("admin step-up factor");
+    expect(JSON.stringify(result)).not.toContain(preflightTestState.seed);
+  });
+
+  it("does not probe a factor when production mode is disabled", async () => {
+    preflightTestState.factor = "missing";
+    const result = await runProductionPreflight(productionEnv({ ADMIN_STEP_UP_MODE: "disabled" }));
+
+    expect(result.ok, result.issues.join("; ")).toBe(true);
+    expect(result.fingerprint.adminStepUpMode).toBe("disabled");
     expect(JSON.stringify(result)).not.toContain(preflightTestState.seed);
   });
 
@@ -138,18 +148,18 @@ describe("production preflight", () => {
     expect(result.issues.join("; ")).toMatch(/VAULT_DRIVER/);
   });
 
-  it("accepts a current MFA factor whose secret resolves through the vault", async () => {
+  it("accepts a current factor whose secret resolves through the vault", async () => {
     const result = await runProductionPreflight(productionEnv());
 
     expect(result.ok, result.issues.join("; ")).toBe(true);
   });
 
-  it("does not add an MFA requirement outside production", async () => {
+  it("does not add a production factor requirement outside production", async () => {
     preflightTestState.factor = "missing";
     const result = await runProductionPreflight(
       productionEnv({
         NODE_ENV: "test",
-        ADMIN_STEP_UP_REQUIRED: "false",
+        ADMIN_STEP_UP_MODE: "disabled",
         VAULT_DRIVER: "memory",
         VAULT_ENDPOINT: "",
         VAULT_TOKEN: "",
@@ -164,6 +174,7 @@ describe("production preflight", () => {
   it("passes required production config and redacts secrets", async () => {
     const result = await runProductionPreflight(productionEnv());
     expect(result.ok, result.issues.join("; ")).toBe(true);
+    expect(result.fingerprint.adminStepUpMode).toBe("required");
     expect(result.fingerprint.nodeEnv).toBe("production");
     expect(result.fingerprint.appBaseUrl).toBe("https://api.tier20.click");
     expect(result.fingerprint.httpHost).toBe("127.0.0.1");

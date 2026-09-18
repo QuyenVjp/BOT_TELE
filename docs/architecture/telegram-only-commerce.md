@@ -87,7 +87,8 @@ Cancelled Mini App work is **not** a release blocker.
 
 The production preflight is the release gate for the Telegram-only service:
 
-- when a root admin is configured and `ADMIN_STEP_UP_REQUIRED=true`, the admin factor row must exist with an opaque `vault:` reference;
-- the configured external Vault must resolve that reference to a valid 20-byte RFC 4648 Base32 TOTP seed without exposing the seed;
-- `VAULT_DRIVER=memory`, a missing factor, a dangling reference, or plaintext/non-`vault:` data fails production preflight;
-- the store remains `CLOSED` until this gate and the independent payment, Telegram, fulfillment, and deployment gates pass.
+- `ADMIN_STEP_UP_MODE` is explicit and has exactly two values: `required` or `disabled`.
+- `required` verifies the configured admin factor through the external Vault; missing, dangling, plaintext/non-`vault:` data fails production preflight.
+- `disabled` skips only TOTP enrollment/verification, attempts, and grants. Numeric private-chat root-admin authentication, durable expiring confirmation, exact action/resource/version binding, audit, and idempotency remain mandatory.
+- `VAULT_DRIVER=memory` remains a production boot failure for the vault-backed application surface; existing factor/recovery rows are retained and become inert while the mode is `disabled`.
+- The store remains `CLOSED` until this gate and the independent payment, Telegram, fulfillment, and deployment gates pass.

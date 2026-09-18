@@ -148,20 +148,24 @@ async function seed(): Promise<Seeded> {
   return { rootChannelIdentityId, variantId, orderId, customerId, vault: createInMemoryVault() };
 }
 
-/** The owner's callbacks with step-up ON, plus the layer deps the worker builds once. */
+/** Build the owner's callbacks with an explicit step-up policy posture. */
 function build(
   seeded: Seeded,
-  overrides?: { supportReplacementApprove?: () => Promise<never> },
+  overrides?: {
+    supportReplacementApprove?: () => Promise<never>;
+    stepUpEnabled?: boolean;
+  },
 ): {
   callbacks: AdminCallbacks;
   sensitiveDeps: SensitiveActionDeps;
   stepUp: ReturnType<typeof createStepUpService>;
 } {
+  const stepUpEnabled = overrides?.stepUpEnabled ?? true;
   const sensitiveDeps: SensitiveActionDeps = {
     db: ctx.db,
     rootConfig: ROOT_CONFIG,
     vault: seeded.vault,
-    stepUpEnabled: true,
+    stepUpEnabled,
     stepUpOptions: STEP_UP_OPTIONS,
   };
   return {
@@ -173,7 +177,7 @@ function build(
       rootChannelIdentityId: seeded.rootChannelIdentityId,
       confirmation: createAdminConfirmation(ctx.db),
       vault: seeded.vault,
-      stepUpEnabled: true,
+      stepUpEnabled,
       stepUpOptions: STEP_UP_OPTIONS,
       ...(overrides?.supportReplacementApprove
         ? { supportReplacementApprove: overrides.supportReplacementApprove }
@@ -641,8 +645,79 @@ describe.skipIf(!hasDocker)("sensitive admin actions are step-up gated", () => {
   });
 });
 
+describe.skipIf(!hasDocker)("disabled step-up mode", () => {
+  it("keeps root auth, durable confirmation, audit and exactly-once mutation", async () => {
+    const seeded = await seed();
+    const { callbacks } = build(seeded, { stepUpEnabled: false });
+    const before = await state(seeded);
+
+    const spoofed = await callbacks.handle({
+      command: "wallet.refund",
+      actor: { numericUserId: OTHER_ADMIN_ID, chatType: "private" },
+      targetId: seeded.orderId,
+      reason: "spoofed disabled-mode refund",
+      correlationId: "disabled-spoof",
+    });
+    expect(spoofed).toMatchObject({ ok: false, code: "NOT_ROOT_ADMIN" });
+
+    const requested = await callbacks.handle({
+      command: "wallet.refund",
+      actor: ROOT_ACTOR,
+      targetId: seeded.orderId,
+      reason: "refund after policy change",
+      correlationId: "disabled-request",
+    });
+    if (!requested.ok || !requested.needsConfirmation) throw new Error("no confirmation");
+
+    const beforeConfirm = await sql<{ confirmations: number; grants: number; attempts: number }>`
+      select
+        (select count(*)::int from admin_confirmation) as confirmations,
+        (select count(*)::int from admin_step_up_grant) as grants,
+        (select count(*)::int from admin_step_up_attempt) as attempts
+    `.execute(ctx.db);
+    expect(beforeConfirm.rows[0]).toEqual({ confirmations: 1, grants: 0, attempts: 0 });
+
+    const wrongActor = await callbacks.confirm({
+      confirmationId: requested.confirmationId,
+      challenge: requested.challenge,
+      actor: { numericUserId: OTHER_ADMIN_ID, chatType: "private" },
+      correlationId: "disabled-wrong-actor",
+    });
+    expect(wrongActor).toMatchObject({ ok: false, code: "NOT_ROOT_ADMIN" });
+    expect(await state(seeded)).toEqual(before);
+
+    const confirmed = await callbacks.confirm({
+      confirmationId: requested.confirmationId,
+      challenge: requested.challenge,
+      actor: ROOT_ACTOR,
+      correlationId: "disabled-confirm",
+    });
+    expect(confirmed).toEqual({ ok: true });
+    expect((await state(seeded)).orderStatus).toBe("REFUNDED");
+    expect((await state(seeded)).refundCredits).toBe(1);
+
+    const replay = await callbacks.confirm({
+      confirmationId: requested.confirmationId,
+      challenge: requested.challenge,
+      actor: ROOT_ACTOR,
+      correlationId: "disabled-replay",
+    });
+    expect(replay).toMatchObject({ ok: true });
+    expect((await state(seeded)).refundCredits).toBe(1);
+
+    const after = await sql<{ grants: number; attempts: number; authorized: number }>`
+      select
+        (select count(*)::int from admin_step_up_grant) as grants,
+        (select count(*)::int from admin_step_up_attempt) as attempts,
+        (select count(*)::int from audit_event where action = 'admin.sensitive.authorized') as authorized
+    `.execute(ctx.db);
+    expect(after.rows[0]).toMatchObject({ grants: 0, attempts: 0 });
+    expect(after.rows[0]?.authorized).toBeGreaterThan(0);
+  });
+});
+
 describe.skipIf(!hasDocker)("broadcast execution is step-up gated", () => {
-  async function seedCampaign(seeded: Seeded, content: string): Promise<string> {
+  async function seedCampaign(_seeded: Seeded, content: string): Promise<string> {
     const campaignId = await createBroadcast(ctx.db, {
       class: "SHOP_UPDATE",
       content: "DRAFT",

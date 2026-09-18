@@ -110,11 +110,13 @@ Appendix B vectors and a "no exported result contains the seed" sweep) and
 `tests/integration/admin-step-up.test.ts` (10) — lockout across service
 instances, single-use grant, category binding, expiry, append-only attempts.
 
-Production rule: `ADMIN_STEP_UP_REQUIRED=true` with `VAULT_DRIVER=memory` is a
-startup failure (`src/config/index.ts`).
-
-Enrolment is opt-in. Until an admin enrols, `ADMIN_STEP_UP_REQUIRED` stays
-`false` — see _Remaining risk_ §3.
+Production policy is explicit: `ADMIN_STEP_UP_MODE=required` keeps the external
+Vault-backed factor and the preflight factor probe; `ADMIN_STEP_UP_MODE=disabled`
+skips only TOTP enrollment/verification, attempts, and grants. In disabled mode,
+the numeric private-chat root-admin check, durable expiring confirmation, exact
+action/resource/version binding, idempotency, replay/stale checks, and audit remain
+mandatory. Existing factor and recovery rows are retained and inert until the
+mode is changed back to `required`.
 
 ### SEC-007 — Privileged admin authorization (one gate, actually wired)
 
@@ -288,12 +290,12 @@ mutation-verified assertion set.
 
 ## 3. Remaining risk (explicit)
 
-| #   | Item                                                                                                                                                                                                                        | Severity | Status |
-| --- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ------ |
-| 1   | **Step-up is enforced and production fails closed.** `ADMIN_STEP_UP_REQUIRED` must be `true` in production whenever an admin id is configured, with a non-memory vault behind it; there is no bypass flag.                    | —        | Closed |
-| 2   | **Step-up gates the real handlers.** Warranty refunds and broadcast confirm call the layer; every `OWNER_COMMANDS` verb that moves money, permissions, supplier routing or the audience is in the policy table and proven by integration tests that assert the side effect did NOT happen on refusal. | —        | Closed |
-| 3   | **BOLA cutover is complete on the customer-facing paths.** Checkout refresh/cancel/reopen, order detail, support, replacement, warranty and preorder payment all resolve ownership inside the query; a foreign object and a missing one are the same refusal. | —        | Closed |
-| 4   | SePay's published protocol is followed as implemented; if SePay changes its signing contract, the verifier must be updated in lockstep.                                                                                     | Medium   | Monitored |
+| #   | Item                                                                                                                                                                                                                                                                                                  | Severity | Status                                     |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ------------------------------------------ |
+| 1   | **TOTP is policy-configurable.** Production explicitly selects `required` or the owner-approved `disabled` mode. Disabled mode reduces the second-factor defense but keeps root identity, durable confirmation, binding, idempotency, audit, and all payment-evidence protections.                    | High     | Accepted for current commissioning posture |
+| 2   | **Step-up gates the real handlers.** Warranty refunds and broadcast confirm call the layer; every `OWNER_COMMANDS` verb that moves money, permissions, supplier routing or the audience is in the policy table and proven by integration tests that assert the side effect did NOT happen on refusal. | —        | Closed                                     |
+| 3   | **BOLA cutover is complete on the customer-facing paths.** Checkout refresh/cancel/reopen, order detail, support, replacement, warranty and preorder payment all resolve ownership inside the query; a foreign object and a missing one are the same refusal.                                         | —        | Closed                                     |
+| 4   | SePay's published protocol is followed as implemented; if SePay changes its signing contract, the verifier must be updated in lockstep.                                                                                                                                                               | Medium   | Monitored                                  |
 
 Nothing above is marked implemented without a test. The two remaining risks are
 operational, not code-level: a provider contract change, and the repository
@@ -301,19 +303,17 @@ settings only the GitHub owner can enable (see `CI_SUPPLY_CHAIN.md`).
 
 ## 4. Operations
 
-### TOTP / step-up enrolment
+### TOTP / step-up enrolment and mode
 
-1. Set `ADMIN_STEP_UP_REQUIRED=false` while enrolling (the default).
-2. Ensure `VAULT_DRIVER=external` before enrolling — a memory vault is refused
-   in production when step-up is required.
-3. Enrol from the private admin chat; the bot returns only an `otpauth://` URI.
-   Scan it into an authenticator app. The seed is never displayed again and can
-   never be read back.
-4. Verify one successful code, then set `ADMIN_STEP_UP_REQUIRED=true` and restart.
-5. Lockout defaults: 5 failed attempts per 15 minutes → 15-minute lockout.
-   Override with `ADMIN_STEP_UP_MAX_ATTEMPTS` / `ADMIN_STEP_UP_LOCKOUT_MINUTES`.
-6. Lost authenticator: rotate the stored secret through the vault, re-enrol, and
-   review `admin_step_up_attempt` plus `audit_event` for the lockout window.
+1. For the owner-approved no-TOTP posture, set `ADMIN_STEP_UP_MODE=disabled` explicitly and restart. Preflight does not require a usable factor, but every sensitive action still requires the numeric private-chat root-admin identity and durable confirmation.
+   In production disabled mode, `admin:step-up enroll`, `replace`, `verify`, and
+   `recover` refuse before factor or database work; existing factor and recovery
+   rows are retained.
+2. To enforce TOTP, set `ADMIN_STEP_UP_MODE=required` and `VAULT_DRIVER=external`; production preflight then requires a current `vault:` factor reference whose Vault value is a valid 20-byte Base32 seed.
+3. Enrol from the private admin chat; the bot returns only an `otpauth://` URI. Scan it into an authenticator app. The seed is never displayed again and can never be read back.
+4. Verify one successful code, keep `ADMIN_STEP_UP_MODE=required`, and restart. The operator CLI reads codes only from a hidden local TTY.
+5. Lockout defaults: 5 failed attempts per 15 minutes → 15-minute lockout. Override with `ADMIN_STEP_UP_MAX_ATTEMPTS` / `ADMIN_STEP_UP_LOCKOUT_MINUTES`.
+6. Lost authenticator: rotate the stored secret through the Vault, re-enrol, and review `admin_step_up_attempt` plus `audit_event` for the lockout window. Switching to `disabled` does not delete factor or recovery data.
 
 ### Key rotation
 

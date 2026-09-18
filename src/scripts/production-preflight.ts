@@ -25,6 +25,7 @@ export interface ProductionPreflightResult {
   issues: string[];
   fingerprint: {
     nodeEnv: string | null;
+    adminStepUpMode: "required" | "disabled" | null;
     appBaseUrl: string | null;
     httpHost: string | null;
     httpPort: string | null;
@@ -56,6 +57,7 @@ export interface ProductionPreflightResult {
 function emptyFingerprint(): ProductionPreflightResult["fingerprint"] {
   return {
     nodeEnv: null,
+    adminStepUpMode: null,
     appBaseUrl: null,
     httpHost: null,
     httpPort: null,
@@ -89,6 +91,10 @@ function fillSafeFingerprint(
   fingerprint: ProductionPreflightResult["fingerprint"],
 ): void {
   fingerprint.nodeEnv = env.NODE_ENV?.trim() || null;
+  fingerprint.adminStepUpMode =
+    env.ADMIN_STEP_UP_MODE === "required" || env.ADMIN_STEP_UP_MODE === "disabled"
+      ? env.ADMIN_STEP_UP_MODE
+      : null;
   fingerprint.appBaseUrl = env.APP_BASE_URL?.trim() || null;
   fingerprint.httpHost = env.HTTP_HOST?.trim() || null;
   fingerprint.httpPort = env.HTTP_PORT?.trim() || null;
@@ -293,6 +299,7 @@ export async function runProductionPreflight(
     fingerprint.httpHost = config.HTTP_HOST;
     fingerprint.httpPort = String(config.HTTP_PORT);
     fingerprint.nodeEnv = config.NODE_ENV;
+    fingerprint.adminStepUpMode = config.ADMIN_STEP_UP_MODE;
 
     fingerprint.appBaseUrl = config.APP_BASE_URL;
   }
@@ -349,7 +356,7 @@ export async function runProductionPreflight(
       if (
         config?.NODE_ENV === "production" &&
         config.ADMIN_TELEGRAM_USER_ID > 0 &&
-        config.ADMIN_STEP_UP_REQUIRED
+        config.ADMIN_STEP_UP_MODE === "required"
       ) {
         try {
           const factorUsable = await probeAdminStepUpFactor(pool, config);

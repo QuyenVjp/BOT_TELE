@@ -35,7 +35,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   const config = parsed.data;
-  const productionIssues = productionHardeningIssues(config);
+  const productionIssues = productionHardeningIssues(config, source);
   if (productionIssues.length > 0) {
     throw new ConfigError(productionIssues);
   }
@@ -53,9 +53,12 @@ export function resetConfigCache(): void {
  * Production must fail closed when local-only stand-ins are still configured.
  * These are launch gates, not local blockers (see launch-gates.md).
  */
-function productionHardeningIssues(config: AppConfig): string[] {
+function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv): string[] {
   if (config.NODE_ENV !== "production") return [];
   const issues: string[] = [];
+  if (!source.ADMIN_STEP_UP_MODE?.trim()) {
+    issues.push("ADMIN_STEP_UP_MODE must be explicitly configured in production");
+  }
   if (config.TELEGRAM_API_ENVIRONMENT === "test") {
     issues.push("TELEGRAM_API_ENVIRONMENT must be prod in production");
   }
@@ -72,11 +75,6 @@ function productionHardeningIssues(config: AppConfig): string[] {
   if (config.VAULT_DRIVER === "memory") {
     issues.push('VAULT_DRIVER must not be "memory" in production');
   }
-  if (config.ADMIN_STEP_UP_REQUIRED && config.VAULT_DRIVER === "memory") {
-    issues.push(
-      'VAULT_DRIVER must not be "memory" while ADMIN_STEP_UP_REQUIRED is true in production',
-    );
-  }
   if (
     config.VAULT_DRIVER === "external" &&
     (config.VAULT_EGRESS_HOST_ALLOWLIST.length === 0 ||
@@ -92,17 +90,6 @@ function productionHardeningIssues(config: AppConfig): string[] {
   }
   if (config.ADMIN_TELEGRAM_USER_ID === 0) {
     issues.push("ADMIN_TELEGRAM_USER_ID must be a real numeric Telegram id in production");
-  }
-  // The sensitive admin surface (refunds, kill-switch, supplier routing,
-  // broadcast) exists as soon as an admin is configured, so step-up cannot be
-  // left off in production: `ADMIN_STEP_UP_REQUIRED` gates it.
-  if (config.ADMIN_TELEGRAM_USER_ID > 0 && !config.ADMIN_STEP_UP_REQUIRED) {
-    issues.push("ADMIN_STEP_UP_REQUIRED must be true in production when an admin is configured");
-  }
-  if (config.ADMIN_TELEGRAM_USER_ID > 0 && config.VAULT_DRIVER === "memory") {
-    issues.push(
-      'ADMIN_STEP_UP_REQUIRED cannot guard the admin surface while VAULT_DRIVER is "memory" in production',
-    );
   }
   if (config.TELEGRAM_BOT_TOKEN === "000000000:TEST_PLACEHOLDER_TOKEN_DO_NOT_USE") {
     issues.push("TELEGRAM_BOT_TOKEN must not use the documented placeholder in production");

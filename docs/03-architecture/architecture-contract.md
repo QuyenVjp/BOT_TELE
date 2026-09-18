@@ -262,7 +262,7 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 
 - A public product variant is sellable only when its product/category/variant state, price, fulfillment route, inventory/readiness, and supplier/resale evidence all satisfy the existing catalog predicates.
 - Resale evidence is a first-class immutable reference. Publication binds the selected evidence and current commercial/fulfillment versions; changing those inputs invalidates the publication until an owner republishes.
-- Store transitions are explicit, version-checked, audited, idempotent, and protected by the existing root-admin step-up policy. `TEST` is isolated from real customers; `CLOSED` rejects checkout; `OPEN` is reachable only after the existing commissioning gates pass.
+- Store transitions are explicit, version-checked, audited, idempotent, and protected by the configured root-admin policy: TOTP grants when `ADMIN_STEP_UP_MODE=required`, identity plus durable confirmation when `disabled`. `TEST` is isolated from real customers; `CLOSED` rejects checkout; `OPEN` is reachable only after the existing commissioning gates pass.
 - Bank transactions, payment evidence, discrepancies, outbox events, and delivery evidence remain append-only or status-transitioned. Resolution never deletes or rewrites provider evidence.
 - Terminal orphan handling records a reason and audit trail, stops retry churn, and keeps the original outbox payload/evidence available for review.
 - Admin screens expose safe identifiers and summaries only; no raw provider credentials, vault references, account inventory, or customer secrets are rendered.
@@ -273,7 +273,7 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 - The store-open preview and the durable `OPEN` transition read the same readiness through the same `isStoreOpenReady` predicate. The preview names every failing condition (empty public catalog, no in-stock variant, unresolved discrepancies, undisposed terminal outbox rows, `MANUAL_REVIEW` tickets) and offers no confirm button while any of them holds; the transition inside the confirmation remains the final authority.
 - Health and operations screens print actionable work apart from retained history (`outboxDeadLetteredDisposed`, `resolvedDiscrepancies`). Ordinary open/waiting tickets stay informational; only `MANUAL_REVIEW` tickets are reported as critical. Both screens use the same predicates, but they are separate reads and may differ transiently while concurrent work commits.
 - A recorded disposition request is reported as pending, not completed. Only a successful `/confirm` reports completion.
-- Publication, evidence and store transitions stay root-admin gated, step-up protected, and confined to the allowlisted callback path; the worker performs no direct SQL mutation for them. Readiness data carries safe identifiers only — never evidence secrets or vault references.
+- Publication, evidence and store transitions stay root-admin gated and protected by the configured step-up mode, with durable confirmation in both modes, and remain confined to the allowlisted callback path; the worker performs no direct SQL mutation for them. Readiness data carries safe identifiers only — never evidence secrets or vault references.
 
 ### Module seams and risk ledger
 
@@ -281,13 +281,13 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 - `commerce/store-mode` owns the state machine and optimistic version guard; `identity` owns step-up authorization and audit events.
 - `payments/admin` owns discrepancy evidence/disposition; `infrastructure/outbox` owns terminal orphan classification and replay-safe disposition.
 - Telegram admin callbacks/presenters are adapters only. They must call domain services and cannot mutate PostgreSQL directly.
-- `invariants_preserved`: Telegram-only UX; closed-loop VND accounting; verified SePay evidence; transactional outbox; idempotent admin confirmations; secret-safe diagnostics; no direct inventory or payment bypass.
-- `intentional_breaks`: none to customer-facing commerce semantics; the remediation only makes previously implicit owner controls explicit and blocks unsafe publication/opening paths.
-- `risked_invariants`: evidence version drift, concurrent store transitions, duplicate disposition/replay, and retry suppression. Focused tests must cover stale versions, idempotent repeats, authorization boundaries, rollback, and terminal-vs-retry classification.
+- `invariants_preserved`: Telegram-only UX; closed-loop VND accounting; verified SePay evidence; transactional outbox; idempotent admin confirmations; secret-safe diagnostics; no direct inventory or payment bypass; root identity and exact action/resource/version binding in both step-up modes.
+- `intentional_breaks`: the owner-approved `ADMIN_STEP_UP_MODE=disabled` posture bypasses TOTP enrollment, verification, attempts, and grants while leaving the existing factor/recovery data intact.
+- `risked_invariants`: reduced second-factor defense while disabled, evidence version drift, concurrent store transitions, duplicate disposition/replay, and retry suppression. Focused tests must cover mode selection, stale versions, idempotent repeats, authorization boundaries, rollback, and terminal-vs-retry classification.
 
 ### Cutover contract
 
-No production publication, store opening, discrepancy resolution, or support closure is performed by code deployment alone. The owner must supply legitimate evidence and complete the normal Telegram step-up flow. Production remains non-open until those human gates are observed and verified.
+- No production publication, store opening, discrepancy resolution, or support closure is performed by code deployment alone. The owner must supply legitimate evidence and complete the configured Telegram root-admin confirmation flow. Production remains non-open until those human gates are observed and verified.
 
 ### Local lost-factor recovery contract
 

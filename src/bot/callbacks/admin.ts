@@ -115,9 +115,8 @@ export interface AdminCallbackDeps {
   }) => Promise<{ ok: boolean }>;
   telemetry?: IdentityTelemetry;
   /**
-   * Step-up gating posture. Omitted means the development/test posture (no
-   * second factor), which the production config forbids: `ADMIN_STEP_UP_REQUIRED`
-   * is forced true in production whenever an admin is configured.
+   * Resolved step-up policy. `false` disables only the TOTP factor; root identity,
+   * durable confirmation, binding and audit remain active.
    */
   stepUpEnabled?: boolean;
   /** TOTP grant TTL, lockout window and attempt budget; env defaults when omitted. */

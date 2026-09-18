@@ -154,6 +154,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     throw new Error("MFA recovery requires an interactive local TTY");
   }
   const config = loadConfig(process.env);
+  if (config.NODE_ENV === "production" && config.ADMIN_STEP_UP_MODE === "disabled") {
+    throw new Error("admin step-up mode is disabled in production");
+  }
   const adminId = String(config.ADMIN_TELEGRAM_USER_ID);
   const dbHandle = createDb({ connectionString: config.DATABASE_URL });
   const vault = createVault({
@@ -200,10 +203,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     if (command === "recover") {
       if (
         config.NODE_ENV !== "production" ||
-        !config.ADMIN_STEP_UP_REQUIRED ||
+        config.ADMIN_STEP_UP_MODE !== "required" ||
         config.VAULT_DRIVER !== "external"
       ) {
-        throw new Error("MFA recovery requires production with external Vault and step-up enabled");
+        throw new Error("MFA recovery requires production with external Vault and required mode");
       }
       const confirmationPhrase = `RECOVER TIER20 SHOP MFA ${adminId.slice(-4)}`;
       process.stdout.write(
