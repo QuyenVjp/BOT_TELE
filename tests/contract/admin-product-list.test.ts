@@ -77,4 +77,31 @@ describe("presentAdminProducts", () => {
       callbackData: "admin:products:detail:prod-42",
     });
   });
+
+  it("arranges view filter buttons in 2D rows with at most 2 buttons per row", () => {
+    const message = presentAdminProducts([row()], { view: "all" });
+    // Find rows containing view filter buttons
+    const viewRows = message.buttons.filter((r) =>
+      r.some((b) => b.callbackData.startsWith("admin:products:view:")),
+    );
+    expect(viewRows.length).toBe(2);
+    for (const r of viewRows) {
+      expect(r.length).toBeLessThanOrEqual(2);
+    }
+    expect(viewRows[0]).toHaveLength(2);
+    expect(viewRows[1]).toHaveLength(2);
+  });
+
+  it("keeps product item rows full-width for readability", () => {
+    const message = presentAdminProducts([
+      row({ id: "prod-1", name: "Product 1" }),
+      row({ id: "prod-2", name: "Product 2" }),
+    ]);
+    const itemRows = message.buttons.filter((r) =>
+      r.some((b) => b.callbackData.startsWith("admin:products:detail:")),
+    );
+    expect(itemRows).toHaveLength(2);
+    expect(itemRows[0]).toHaveLength(1);
+    expect(itemRows[1]).toHaveLength(1);
+  });
 });

@@ -431,7 +431,6 @@ async function normalizeTelegramUpdate(
     "/stock": true,
     "/support": true,
     "/orders": true,
-    "/wallet": true,
     "/warranty": true,
   };
   if (isGroup && command && !GROUP_COMMANDS[command]) {
@@ -602,7 +601,9 @@ function classifyAction(
     command === "/customers" ||
     command === "/broadcast" ||
     command === "/health" ||
-    command === "/confirm"
+    command === "/confirm" ||
+    command === "/verify" ||
+    command === "/enroll_2fa"
   )
     return "ADMIN";
   if (command === "/cancel") return "CANCEL";
@@ -620,8 +621,7 @@ function classifyAction(
     command === "/settings"
   )
     return "CATALOG";
-  if (command === "/account" || command === "/wallet" || command === "/topup" || command === "/pay")
-    return "WALLET";
+  if (command === "/account") return "CATALOG";
   return "UNKNOWN";
 }
 
@@ -632,7 +632,6 @@ const SAFE_MESSAGE_TEXT: Record<string, true> = {
   [CUSTOMER_COPY.purchaseActivity]: true,
   [CUSTOMER_COPY.browse]: true,
   [CUSTOMER_COPY.account]: true,
-  [CUSTOMER_COPY.topup]: true,
   [CUSTOMER_COPY.back]: true,
   [CUSTOMER_COPY.orders]: true,
   [CUSTOMER_COPY.warranty]: true,
@@ -647,7 +646,9 @@ function normalizeCommandArgument(command: string | undefined, value: string): s
     command !== "/pay" &&
     command !== "/customer" &&
     command !== "/message_customer" &&
-    command !== "/confirm"
+    command !== "/confirm" &&
+    command !== "/verify" &&
+    command !== "/enroll_2fa"
   )
     return null;
   const maxLength = command === "/message_customer" ? 1100 : 80;

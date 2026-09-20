@@ -36,8 +36,9 @@ Customer/Reseller Order
  -> wait webhook or bounded poll
  -> validate supplier result
  -> vault credential / entitlement
- -> create one-time Delivery Bundle
- -> deliver once
+ -> create recipient-bound delivery handoff
+ -> send verified customer-visible fields in Telegram
+ -> consume delivery once after successful send
  -> reconcile cost, margin and supplier status
 ```
 
@@ -56,6 +57,5 @@ Customer/Reseller Order
 
 - Store a vault reference, not raw password/token in PostgreSQL.
 - Prefer invite/license/API key entitlement over shared username/password.
-- If credentials must be delivered, create a signed one-time link with short expiry, view-once policy, no indexing, no raw secret in logs and an explicit customer acknowledgement.
-- Do not put credentials in analytics, support transcript, exception, webhook or reseller payload.
-- Delivery retry must not reveal the same secret multiple times; support can revoke/reissue only through a controlled workflow.
+- If credentials must be delivered, send only verified `customerVisible` fields in one Telegram message to the bound customer/chat; keep raw secret out of logs, events, analytics, support, webhooks and reseller payloads.
+- Delivery retry must use the same logical asset/handoff and must not allocate or send a second asset; support can revoke/reissue only through a controlled workflow. The legacy signed link is a recovery surface, not the primary delivery path.

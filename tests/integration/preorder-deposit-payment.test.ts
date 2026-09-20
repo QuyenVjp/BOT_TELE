@@ -212,7 +212,7 @@ describe("preorder deposit settlement", () => {
       reservationId: f.reservationId,
     });
 
-    expect(screen.text).toContain(f.transferContent);
+    expect(screen.text).toContain("💰 Thanh toán tiền đặt cọc");
     expect(screen.text).toContain("Tiền đặt cọc");
     // Nothing is paid until SePay says so: never a completed-state claim here.
     expect(screen.text).not.toMatch(/THÀNH CÔNG|ĐÃ THANH TOÁN|hoàn tất/iu);

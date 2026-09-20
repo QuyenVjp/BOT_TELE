@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatCategoryLabel,
   presentProductDetail,
   presentSearchResults,
   presentVariantDetail,
@@ -124,11 +125,66 @@ describe("catalog presenter stock-policy guard", () => {
 
     expect(message.buttons).toEqual([
       [{ text: "🛒 Mua ngay", callbackData: "buy:signed-callback" }],
-      [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
-      [expect.objectContaining({ text: "👨‍💻 Liên hệ Admin" })],
-      [{ text: "⬅️ Quay lại", callbackData: "cat:view:cat-1" }],
-      [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+      [
+        { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+        expect.objectContaining({ text: "👨‍💻 Liên hệ Admin" }),
+      ],
+      [
+        { text: "⬅️ Quay lại", callbackData: "cat:view:cat-1" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
     ]);
+  });
+
+  it("renders human duration label for known codes and safe fallback for unknown/null codes", () => {
+    const p1m = presentVariantDetail({ ...variant("LOCAL_ONLY"), duration_code: "P1M" });
+    expect(p1m.text).toContain("Thời hạn: 1 tháng");
+    expect(p1m.text).not.toContain("Thời hạn: P1M");
+
+    const lifetime = presentVariantDetail({ ...variant("LOCAL_ONLY"), duration_code: "LIFETIME" });
+    expect(lifetime.text).toContain("Thời hạn: Vĩnh viễn");
+
+    const unknown = presentVariantDetail({
+      ...variant("LOCAL_ONLY"),
+      duration_code: "CUSTOM_UNKNOWN",
+    });
+    expect(unknown.text).toContain("Thời hạn: —");
+
+    const none = presentVariantDetail({ ...variant("LOCAL_ONLY"), duration_code: null });
+    expect(none.text).toContain("Thời hạn: —");
+  });
+
+  it("follows configured variant low_stock_threshold and defaults to 3", () => {
+    const customLow = presentVariantDetail({
+      ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 4),
+      low_stock_threshold: 5,
+    });
+    expect(customLow.text).toContain("🟡 Tình trạng: Sắp hết hàng");
+
+    const customInStock = presentVariantDetail({
+      ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 6),
+      low_stock_threshold: 5,
+    });
+    expect(customInStock.text).toContain("🟢 Tình trạng: Còn hàng");
+
+    const defaultLow = presentVariantDetail({
+      ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 3),
+      low_stock_threshold: null,
+    });
+    expect(defaultLow.text).toContain("🟡 Tình trạng: Sắp hết hàng");
+
+    const defaultInStock = presentVariantDetail({
+      ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 4),
+      low_stock_threshold: null,
+    });
+    expect(defaultInStock.text).toContain("🟢 Tình trạng: Còn hàng");
+  });
+});
+
+describe("catalog presenter category labels", () => {
+  it("renders a category icon once when the stored name already includes it", () => {
+    expect(formatCategoryLabel("🤖 AI", "🤖")).toBe("🤖 AI");
+    expect(formatCategoryLabel("AI", "🤖")).toBe("🤖 AI");
   });
 });
 
@@ -160,7 +216,7 @@ describe("catalog product detail copy", () => {
       [sellable.id]: "buy:signed-callback",
     });
 
-    for (const heading of ["📝 MÔ TẢ", "📦 BẠN NHẬN ĐƯỢC", "📘 HƯỚNG DẪN", "🛡 BẢO HÀNH"]) {
+    for (const heading of ["📝 Mô tả", "📦 Bạn nhận được", "📘 Hướng dẫn", "🛡 Bảo hành"]) {
       expect(message.text).toContain(heading);
     }
     expect(message.text).toContain("💰 Giá từ: ");
@@ -172,9 +228,14 @@ describe("catalog product detail copy", () => {
     expect(
       message.buttons.flat().find((button) => button.callbackData === "buy:signed-callback")?.text,
     ).toMatch(/^Gói 1 tháng · 100\.000\s₫$/u);
-    expect(message.buttons).toContainEqual([{ text: "💬 Hỗ trợ", callbackData: "supp:open" }]);
-    expect(message.buttons).toContainEqual([{ text: "⬅️ Claude", callbackData: "cat:view:cat-1" }]);
-    expect(message.buttons).toContainEqual([{ text: "🏠 Trang chủ", callbackData: "shop:home" }]);
+    expect(message.buttons).toContainEqual([
+      { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+      expect.objectContaining({ text: "👨‍💻 Liên hệ Admin" }),
+    ]);
+    expect(message.buttons).toContainEqual([
+      { text: "⬅️ Claude", callbackData: "cat:view:cat-1" },
+      { text: "🏠 Trang chủ", callbackData: "shop:home" },
+    ]);
   });
 
   it("keeps restock and, when enabled, a deposit hold on an out-of-stock variant", () => {
@@ -187,20 +248,27 @@ describe("catalog product detail copy", () => {
     expect(callbacks).toContain(`preorder:consent:${soldOut.id}`);
     expect(callbacks.some((callback) => callback.startsWith("buy:"))).toBe(false);
   });
+
+  it("does not offer restock for a ready variant without a supported buy route", () => {
+    const readyUnsupported = variant("SUPPLIER_ONLY", "STOCK_ACCOUNT", true, 1);
+    const callbacks = presentProductDetail(detailView([readyUnsupported]), {})
+      .buttons.flat()
+      .map((button) => button.callbackData);
+
+    expect(callbacks.some((callback) => callback.startsWith("rst:sub:"))).toBe(false);
+  });
 });
 
 describe("catalog search empty state", () => {
-  it("renders the exact empty copy with retry and home only", () => {
+  it("renders the exact empty copy with retry and home in one compact row", () => {
     const message = presentSearchResults([], null);
 
     expect(message.text).toBe("Không tìm thấy sản phẩm phù hợp.");
-    expect(message.buttons.flat().map((button) => button.text)).toEqual([
-      "🔎 Tìm lại",
-      "🏠 Trang chủ",
-    ]);
-    expect(message.buttons.flat().map((button) => button.callbackData)).toEqual([
-      "cat:search",
-      "menu:main",
+    expect(message.buttons).toEqual([
+      [
+        { text: "🔎 Tìm lại", callbackData: "cat:search" },
+        { text: "🏠 Trang chủ", callbackData: "menu:main" },
+      ],
     ]);
   });
 });

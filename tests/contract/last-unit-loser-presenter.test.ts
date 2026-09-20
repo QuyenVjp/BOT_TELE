@@ -38,6 +38,10 @@ describe("typed stock outcome presenter (FR-006b)", () => {
 
   it("offers only routed, semantically distinct actions", () => {
     const msg = presentStockOutcome("NO_STOCK");
+    expect(msg.buttons).toEqual([
+      [{ text: CATALOG_COPY.viewAlternatives, callbackData: "cat:list" }],
+      [{ text: CATALOG_COPY.mainMenu, callbackData: "menu:main" }],
+    ]);
     expect(buttonTexts(msg)).toEqual([CATALOG_COPY.viewAlternatives, CATALOG_COPY.mainMenu]);
     expect(buttonData(msg)).toEqual(["cat:list", "menu:main"]);
     expect(new Set(buttonData(msg)).size).toBe(buttonData(msg).length);

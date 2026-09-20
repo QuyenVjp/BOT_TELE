@@ -152,12 +152,13 @@ variant changes (→ `BULK_PRICE_CHANGE`), inventory stock adjustment
 (→ `SUPPLIER_CONFIG`), `preorder.cancel` (→ `REFUND`), and
 `broadcast.confirm` (→ `BROADCAST`).
 
-Telegram is not an MFA channel: production `/enroll_2fa` and `/verify` are
-refused without revealing a seed, URI, or OTP. The separate `npm run
-admin:step-up` operator CLI reads the TOTP only from a hidden TTY prompt and
-prints the enrollment URI only to that terminal. The CLI verifies a grant
-against the latest audited challenge; Telegram can only display the action and
-confirm after the server has derived its state.
+Telegram is not the enrolment channel: production `/enroll_2fa` refuses
+without revealing a seed or URI. Run `npm run admin:step-up enroll` on the
+local operator host; it opens the QR in macOS Preview and deletes the temporary
+image after scanning. Production `/verify <6-digit> <request-id>` accepts only the root
+admin's current authenticator code and mints a grant bound to that exact
+audited action challenge. `/confirm` remains a separate action-binding gate,
+not a second-factor substitute.
 
 Tests: `tests/security/sensitive-action-authorization.test.ts` (6) and
 `tests/integration/admin-step-up-gating.test.ts` (14). The load-bearing assertion
@@ -310,8 +311,8 @@ settings only the GitHub owner can enable (see `CI_SUPPLY_CHAIN.md`).
    `recover` refuse before factor or database work; existing factor and recovery
    rows are retained.
 2. To enforce TOTP, set `ADMIN_STEP_UP_MODE=required` and `VAULT_DRIVER=external`; production preflight then requires a current `vault:` factor reference whose Vault value is a valid 20-byte Base32 seed.
-3. Enrol from the private admin chat; the bot returns only an `otpauth://` URI. Scan it into an authenticator app. The seed is never displayed again and can never be read back.
-4. Verify one successful code, keep `ADMIN_STEP_UP_MODE=required`, and restart. The operator CLI reads codes only from a hidden local TTY.
+3. Enrol or replace from the local operator host with `npm run admin:step-up enroll` or `npm run admin:step-up replace`; the command opens a temporary QR locally. Never send the `otpauth://` URI, seed, or QR through Telegram.
+4. After an owner action is refused with `STEP_UP_REQUIRED`, send `/verify <6-digit> <request-id>` from the private admin chat using the request id shown for that exact action. The server mints an exact action-bound grant; the later `/confirm` is still the separate anti-replay/action-binding gate. Restart after changing production mode.
 5. Lockout defaults: 5 failed attempts per 15 minutes → 15-minute lockout. Override with `ADMIN_STEP_UP_MAX_ATTEMPTS` / `ADMIN_STEP_UP_LOCKOUT_MINUTES`.
 6. Lost authenticator: rotate the stored secret through the Vault, re-enrol, and review `admin_step_up_attempt` plus `audit_event` for the lockout window. Switching to `disabled` does not delete factor or recovery data.
 

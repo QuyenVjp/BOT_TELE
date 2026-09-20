@@ -47,6 +47,17 @@ export interface InlineButton {
   copyText?: string;
   style?: "primary" | "success" | "danger";
 }
+
+/**
+ * Chunks inline buttons into compact rows of at most two buttons.
+ */
+export function compactInlineRows(buttons: InlineButton[]): InlineButton[][] {
+  const rows: InlineButton[][] = [];
+  for (let i = 0; i < buttons.length; i += 2) {
+    rows.push(buttons.slice(i, i + 2));
+  }
+  return rows;
+}
 export interface ReplyKeyboardButton {
   text: string;
   requestContact?: boolean;
@@ -69,6 +80,8 @@ export interface PresentedMessage {
    * every such screen would post a redundant menu message each time.
    */
   installPersistentKeyboard?: boolean;
+  /** Protect message content from forwarding and saving (Telegram Bot API protect_content). */
+  protectContent?: boolean;
   /** Optional binary photo media, currently used only by payment QR screens. */
   photo?: Buffer;
   /** Optional document media, used for paid ZIP delivery and admin CSV templates. */
@@ -94,6 +107,19 @@ const STOCK_OUTCOME_COPY: Readonly<Record<StockOutcomeCode, string>> = Object.fr
     "Đang có nhiều người đặt sản phẩm này. Vui lòng thử lại sau vài giây. Bạn chưa bị trừ tiền và chưa có phiên thanh toán.",
 });
 
+const DEFAULT_LOW_STOCK_THRESHOLD = 3;
+
+function isLowStock(
+  availableQuantity: number | null | undefined,
+  threshold: number | null | undefined,
+): boolean {
+  return (
+    availableQuantity != null &&
+    availableQuantity > 0 &&
+    availableQuantity <= (threshold ?? DEFAULT_LOW_STOCK_THRESHOLD)
+  );
+}
+
 function adminContactButton(): InlineButton {
   return { text: CATALOG_COPY.contactAdmin, url: ADMIN_CONTACT_URL, callbackData: "" };
 }
@@ -101,11 +127,17 @@ function adminContactButton(): InlineButton {
 function homeButton(callbackData: string): InlineButton {
   return { text: CATALOG_COPY.mainMenu, callbackData };
 }
+export function formatCategoryLabel(name: string, icon?: string | null): string {
+  const label = name.trim();
+  const prefix = icon?.trim();
+  if (!prefix || label.startsWith(`${prefix} `) || label === prefix) return label;
+  return `${prefix} ${label}`;
+}
 
 export function presentSearchPrompt(): PresentedMessage {
   return {
     text: [
-      "🔎 TÌM SẢN PHẨM",
+      "🔎 Tìm sản phẩm",
       "",
       "Gửi tên sản phẩm ngay bây giờ, ví dụ:",
       "gpt • chatgpt • claude • cursor • vpn",
@@ -122,15 +154,22 @@ export function presentCategoryList(categories: CatalogCategoryRow[]): Presented
       buttons: [[homeButton("menu:main")]],
     };
   }
-  const buttons: InlineButton[][] = categories.map((c) => [
-    { text: c.name_vi, callbackData: `cat:view:${c.id}` },
-  ]);
-  buttons.push([homeButton("menu:main")]);
+  const categoryButtons = categories.map((c) => ({
+    text: formatCategoryLabel(c.name_vi, c.icon),
+    callbackData: `cat:view:${c.id}`,
+  }));
+  const buttons: InlineButton[][] = [
+    ...compactInlineRows(categoryButtons),
+    [homeButton("menu:main")],
+  ];
   return { text: "Chọn danh mục:", buttons };
 }
 
 export function presentCategoryPage(page: PublicCategoryPage): PresentedMessage {
-  const title = page.category.display_name_vi || page.category.name_vi;
+  const title = formatCategoryLabel(
+    page.category.display_name_vi || page.category.name_vi,
+    page.category.icon,
+  );
   const hasItems = page.children.length > 0 || page.products.length > 0 || page.featured.length > 0;
   const lines = [`🛒 ${SHOP_NAME}`, title];
   const buttons: InlineButton[][] = [];
@@ -154,7 +193,7 @@ export function presentCategoryPage(page: PublicCategoryPage): PresentedMessage 
   for (let i = 0; i < page.children.length; i += 2) {
     buttons.push(
       page.children.slice(i, i + 2).map((child) => ({
-        text: child.display_name_vi || child.name_vi,
+        text: formatCategoryLabel(child.display_name_vi || child.name_vi, child.icon),
         callbackData: `cat:view:${child.id}`,
       })),
     );
@@ -183,7 +222,7 @@ export function presentCategoryPage(page: PublicCategoryPage): PresentedMessage 
   }
   const back = page.parent
     ? {
-        text: `⬅️ ${page.parent.display_name_vi || page.parent.name_vi}`,
+        text: `⬅️ ${formatCategoryLabel(page.parent.display_name_vi || page.parent.name_vi, page.parent.icon)}`,
         callbackData: `cat:view:${page.parent.id}`,
       }
     : homeButton("shop:home");
@@ -200,9 +239,8 @@ export function presentProductDetail(
   const prices = detail.variants.map((v) => BigInt(v.price_vnd)).filter((p) => p > 0n);
   const minPrice = prices.length ? prices.reduce((a, b) => (a < b ? a : b)) : null;
   const anyReady = detail.variants.some((v) => v.is_ready);
-  const totalQty = detail.variants.reduce(
-    (sum, v) => sum + (v.available_quantity ?? (v.is_ready ? 1 : 0)),
-    0,
+  const lowStock = detail.variants.some((v) =>
+    isLowStock(v.available_quantity, v.low_stock_threshold),
   );
   const deliveryModes = [
     ...new Set(detail.variants.map((v) => DELIVERY_MODE_COPY[v.fulfillment_type] ?? "Tự động")),
@@ -213,19 +251,19 @@ export function presentProductDetail(
     ...(detail.short_description_vi ? [detail.short_description_vi] : []),
     "",
     ...(minPrice != null ? [`💰 Giá từ: ${formatVnd(makeVnd(minPrice))}`] : []),
-    stockStateLine(anyReady, totalQty > 0 && totalQty <= 3),
+    stockStateLine(anyReady, lowStock),
     `⚡ Giao hàng: ${deliveryModes.join(" / ") || "Tự động"}`,
     `⏱ Dự kiến: ${detail.delivery_eta_vi || "vài giây sau khi thanh toán"}`,
   ];
 
   if (detail.description_vi) {
-    lines.push("", "📝 MÔ TẢ", detail.description_vi);
+    lines.push("", "📝 Mô tả", detail.description_vi);
   }
   if (detail.what_customer_receives_vi) {
-    lines.push("", "📦 BẠN NHẬN ĐƯỢC", ...bulletLines(detail.what_customer_receives_vi));
+    lines.push("", "📦 Bạn nhận được", ...bulletLines(detail.what_customer_receives_vi));
   }
   if (detail.usage_instructions_vi) {
-    lines.push("", "📘 HƯỚNG DẪN", ...bulletLines(detail.usage_instructions_vi));
+    lines.push("", "📘 Hướng dẫn", ...bulletLines(detail.usage_instructions_vi));
   }
   // Goal §5/§62: a warranty-enabled variant gets the canonical block and a way to read the
   // structured policy; the free-text field stays as an extra note when the shop filled it in.
@@ -236,10 +274,10 @@ export function presentProductDetail(
     lines.push("", ...WARRANTY_BLOCK_LINES);
     if (detail.warranty_vi) lines.push("", detail.warranty_vi);
   } else if (detail.warranty_vi) {
-    lines.push("", "🛡 BẢO HÀNH", detail.warranty_vi);
+    lines.push("", "🛡 Bảo hành", detail.warranty_vi);
   }
 
-  lines.push("", "Chọn gói thời hạn:");
+  lines.push("", "Chọn gói phù hợp:");
   const buttons: InlineButton[][] = [];
   if (warrantyVariant) {
     buttons.push([
@@ -263,30 +301,31 @@ export function presentProductDetail(
       buttons.push([{ text: `${variant.name_vi} · ${price}`, callbackData: buyNow }]);
       continue;
     }
-    buttons.push([
-      {
-        text: `🔔 ${variant.name_vi} · Báo khi có hàng`,
-        callbackData: `rst:sub:${variant.id}`,
-      },
-    ]);
-    if (variant.preorder_enabled) {
+    if (!variant.is_ready) {
       buttons.push([
         {
-          text: `💰 ${variant.name_vi} · Đặt cọc giữ suất`,
-          callbackData: `preorder:consent:${variant.id}`,
+          text: `🔔 ${variant.name_vi} · Báo khi có hàng`,
+          callbackData: `rst:sub:${variant.id}`,
         },
       ]);
+      if (variant.preorder_enabled) {
+        buttons.push([
+          {
+            text: `💰 ${variant.name_vi} · Đặt cọc giữ suất`,
+            callbackData: `preorder:consent:${variant.id}`,
+          },
+        ]);
+      }
     }
   }
-  buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }]);
-  buttons.push([adminContactButton()]);
+  buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }, adminContactButton()]);
   buttons.push([
     {
       text: `⬅️ ${detail.category_name}`,
       callbackData: `cat:view:${detail.category_id}`,
     },
+    homeButton("shop:home"),
   ]);
-  buttons.push([homeButton("shop:home")]);
   return { text: lines.join("\n"), buttons };
 }
 
@@ -304,7 +343,7 @@ const DURATION_LABELS: Record<string, string> = {
   TRIAL: "Dùng thử",
 };
 
-function durationLabel(code: string | null | undefined): string | null {
+export function durationLabel(code: string | null | undefined): string | null {
   if (!code) return null;
   return DURATION_LABELS[code.toUpperCase()] ?? null;
 }
@@ -317,8 +356,10 @@ function presentVariantList(
     return {
       text: options.title ?? CATALOG_COPY.emptyCatalog,
       buttons: [
-        [{ text: CATALOG_COPY.back, callbackData: "cat:list" }],
-        [{ text: CATALOG_COPY.mainMenu, callbackData: "menu:main" }],
+        [
+          { text: CATALOG_COPY.back, callbackData: "cat:list" },
+          { text: CATALOG_COPY.mainMenu, callbackData: "menu:main" },
+        ],
       ],
     };
   }
@@ -341,10 +382,10 @@ function presentVariantList(
   if (options.nextCursor) {
     buttons.push([{ text: "Trang sau ›", callbackData: `var:page:${options.nextCursor}` }]);
   }
-  buttons.push(
-    [{ text: CATALOG_COPY.back, callbackData: "cat:list" }],
-    [{ text: CATALOG_COPY.mainMenu, callbackData: "menu:main" }],
-  );
+  buttons.push([
+    { text: CATALOG_COPY.back, callbackData: "cat:list" },
+    { text: CATALOG_COPY.mainMenu, callbackData: "menu:main" },
+  ]);
 
   return {
     text: (options.title ?? "Sản phẩm đang bán") + "\n\n" + lines.join("\n\n"),
@@ -372,19 +413,20 @@ export function presentVariantDetail(
     `💰 Giá: ${price}${compareAt ? ` ~~${compareAt}~~` : ""}`,
     stockStateLine(
       variant.is_ready,
-      variant.available_quantity != null && variant.available_quantity <= 2,
+      isLowStock(variant.available_quantity, variant.low_stock_threshold),
     ),
     `⚡ Giao hàng: ${DELIVERY_MODE_COPY[variant.fulfillment_type] ?? "Tự động"}`,
     `⏱ Dự kiến: ${eta}`,
   ];
-  if (variant.description_vi) textLines.push("", "📝 MÔ TẢ", variant.description_vi);
+  if (variant.description_vi) textLines.push("", "📝 Mô tả", variant.description_vi);
   if (variant.what_customer_receives_vi) {
-    textLines.push("", "📦 BẠN NHẬN ĐƯỢC", ...bulletLines(variant.what_customer_receives_vi));
+    textLines.push("", "📦 Bạn nhận được", ...bulletLines(variant.what_customer_receives_vi));
   }
   if (variant.usage_instructions_vi)
-    textLines.push("", "📘 HƯỚNG DẪN", ...bulletLines(variant.usage_instructions_vi));
-  if (variant.warranty_vi) textLines.push("", "🛡 BẢO HÀNH", variant.warranty_vi);
-  textLines.push(`Thời hạn: ${variant.duration_code ?? "—"}`, `Loại giao: ${fulfillment}`);
+    textLines.push("", "📘 Hướng dẫn", ...bulletLines(variant.usage_instructions_vi));
+  if (variant.warranty_vi) textLines.push("", "🛡 Bảo hành", variant.warranty_vi);
+  const duration = durationLabel(variant.duration_code) ?? "—";
+  textLines.push(`Thời hạn: ${duration}`, `Loại giao: ${fulfillment}`);
 
   const buttons: InlineButton[][] = [];
   if (
@@ -406,14 +448,15 @@ export function presentVariantDetail(
       { text: CATALOG_COPY.restockSubscribe, callbackData: restockSubscribeCallbackData },
     ]);
   }
-  buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }]);
-  buttons.push([adminContactButton()]);
+  buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }, adminContactButton()]);
   if (variant.category_id) {
     buttons.push([
       { text: `⬅️ ${CATALOG_COPY.back}`, callbackData: `cat:view:${variant.category_id}` },
+      homeButton("shop:home"),
     ]);
+  } else {
+    buttons.push([homeButton("shop:home")]);
   }
-  buttons.push([homeButton("shop:home")]);
   return { text: textLines.join("\n"), buttons };
 }
 
@@ -478,8 +521,7 @@ export function presentSearchResults(
     return {
       text: CATALOG_COPY.emptySearch,
       buttons: [
-        [{ text: CATALOG_COPY.searchAgain, callbackData: "cat:search" }],
-        [homeButton("menu:main")],
+        [{ text: CATALOG_COPY.searchAgain, callbackData: "cat:search" }, homeButton("menu:main")],
       ],
     };
   }

@@ -33,7 +33,7 @@ describe("product draft step 8 & preview presenter", () => {
       preorderEnabled: false,
       lowStockThreshold: 5,
     });
-    expect(message.text).toContain("Bước 8/8 — ⚙️ CÀI ĐẶT HIỂN THỊ & BÁN HÀNG");
+    expect(message.text).toContain("Bước 8/8 — ⚙️ Cài đặt hiển thị & bán hàng");
     expect(message.text).toContain("Hiển thị: Chỉ test");
     expect(message.text).toContain("Ghim nổi bật: Có");
     expect(message.text).toContain("Đặt cọc khi hết hàng: Tắt");

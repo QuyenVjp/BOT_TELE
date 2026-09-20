@@ -1247,7 +1247,7 @@ describe("notification service", () => {
       select content, class from notification_campaign where id = ${`warranty-opened:${claimId}`}
     `.execute(ctx.db);
     expect(adminCampaign.rows[0]).toMatchObject({ class: "CRITICAL_SERVICE" });
-    expect(adminCampaign.rows[0]!.content).toContain("YÊU CẦU BẢO HÀNH MỚI");
+    expect(adminCampaign.rows[0]!.content).toContain("Yêu cầu bảo hành mới");
     expect(adminCampaign.rows[0]!.content).toContain("40.000");
     expect(adminCampaign.rows[0]!.content).toContain("Còn bảo hành: 12 ngày");
     // Goal §16 words the symptom the way the customer's own screen does, and no internal code or

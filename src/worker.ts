@@ -20,6 +20,7 @@ import {
   reorderCategory,
   ensureDefaultCategories,
   getOrCreateUncategorizedCategory,
+  VARIANT_READY_SQL,
 } from "./modules/catalog/repository.js";
 import { createCatalogCache } from "./modules/catalog/cache.js";
 import { resolveCatalogAudience } from "./modules/catalog/visibility.js";
@@ -344,7 +345,7 @@ export async function presentAdminCustomerFinancialDetail(
   if (!row)
     return {
       text: "Không tìm thấy khách hàng.",
-      buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+      buttons: [[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]],
     };
   const recent = await sql<{
     order_number: string;
@@ -392,7 +393,7 @@ export async function presentAdminCustomerFinancialDetail(
       [{ text: "✉️ Nhắn khách", callbackData: `admin:customers:message:${messageStateId}` }],
       [
         { text: "👥 Khách hàng", callbackData: "admin:customers" },
-        { text: "Admin", callbackData: "admin:menu" },
+        { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
       ],
     ],
   };
@@ -441,9 +442,13 @@ export async function presentAdminCustomers(
       ],
       [{ text: "Cần soát thanh toán", callbackData: "admin:customers:filter:payment_review" }],
       ...(page.nextStateId
-        ? [[{ text: "Trang sau", callbackData: `admin:customers:page:${page.nextStateId}` }]]
-        : []),
-      [{ text: "Admin", callbackData: "admin:menu" }],
+        ? [
+            [
+              { text: "Trang sau", callbackData: `admin:customers:page:${page.nextStateId}` },
+              { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
+            ],
+          ]
+        : [[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]]),
     ],
   };
 }
@@ -787,8 +792,13 @@ export async function restockVariantLabel(db: Db, variantId: string): Promise<st
   const row = (
     await sql<{ product_name: string; variant_name: string }>`
       select p.name_vi as product_name, v.name_vi as variant_name
-      from product_variant v join product p on p.id = v.product_id
+      from product_variant v
+      join product p on p.id = v.product_id
+      left join variant_quantity_stock q on q.variant_id = v.id
       where v.id = ${variantId}
+        and v.is_active
+        and p.is_active
+        and not (${VARIANT_READY_SQL})
       limit 1
     `.execute(db)
   ).rows[0];
@@ -799,8 +809,10 @@ function adminWarrantyError(text: string): PresentedMessage {
   return {
     text,
     buttons: [
-      [{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }],
-      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+      [
+        { text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
     ],
   };
 }
@@ -1131,8 +1143,10 @@ function safeWarrantyMessage(text: string): PresentedMessage {
   return {
     text,
     buttons: [
-      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
-      [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+      [
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
     ],
   };
 }
@@ -1154,8 +1168,10 @@ function adminSupportError(text: string): PresentedMessage {
   return {
     text,
     buttons: [
-      [{ text: "🧾 Yêu cầu hỗ trợ", callbackData: "admin:support:tickets" }],
-      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+      [
+        { text: "🧾 Yêu cầu hỗ trợ", callbackData: "admin:support:tickets" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
     ],
   };
 }
@@ -1890,8 +1906,10 @@ async function bootstrap(): Promise<void> {
     bankAlias: config.VIETQR_BANK_ALIAS,
   };
   const preorderHomeButtons: PresentedMessage["buttons"] = [
-    [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
-    [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+    [
+      { text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" },
+      { text: "🛒 Về trang chủ", callbackData: "shop:home" },
+    ],
   ];
   /**
    * The QR for the leg a reservation currently owes: the deposit while the hold is
@@ -2013,7 +2031,7 @@ async function bootstrap(): Promise<void> {
     }
     return {
       text: [
-        "💰 VÍ TIER20",
+        "💰 Ví TIER20",
         "",
         `Số dư: ${formatVnd(account.balanceVnd)}`,
         "Thanh toán tức thì 1 chạm, không cần quét mã mỗi lần mua.",
@@ -2022,8 +2040,10 @@ async function bootstrap(): Promise<void> {
       buttons: [
         ...presetRows,
         [{ text: "✏️ Số tiền khác", callbackData: "wallet:topup:custom" }],
-        [{ text: "📜 Lịch sử ví", callbackData: "wallet:history" }],
-        [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+        [
+          { text: "📜 Lịch sử ví", callbackData: "wallet:history" },
+          { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        ],
       ],
     };
   }
@@ -2117,9 +2137,10 @@ async function bootstrap(): Promise<void> {
     error: unknown,
     action: string,
     category: string | null,
+    challengeId: string,
   ): PresentedMessage | null =>
     error instanceof SensitiveAuthorizationRefusedError
-      ? presentSensitiveRefusal({ code: error.code, action, category })
+      ? presentSensitiveRefusal({ code: error.code, action, category, challengeId })
       : null;
   const isSensitiveCallbackRefusal = (code: string): code is SensitiveAuthorizationRefusal =>
     code === "NOT_ROOT_ADMIN" ||
@@ -2130,6 +2151,7 @@ async function bootstrap(): Promise<void> {
   const presentAdminHandleRefusal = (
     result: Extract<HandleResult, { ok: false }>,
     action: SensitiveActionKey,
+    challengeId: string,
   ): PresentedMessage =>
     result.code === "WRONG_CONTEXT"
       ? presentAdminDenied("WRONG_CONTEXT")
@@ -2138,6 +2160,7 @@ async function bootstrap(): Promise<void> {
             code: result.code,
             action,
             category: SENSITIVE_ACTION_POLICY[action],
+            challengeId,
           })
         : presentAdminDenied("NOT_ROOT_ADMIN");
 
@@ -2462,7 +2485,7 @@ async function bootstrap(): Promise<void> {
       async settings(customerId) {
         const p = await notificationService.getNotificationPreferences(dbHandle.db, customerId);
         return {
-          text: `Cài đặt thông báo: cập nhật ${p.shopUpdates ? "BẬT" : "TẮT"}, hoạt động ${p.purchaseActivity ? "BẬT" : "TẮT"}. Bấm “🛍 Cập nhật sản phẩm” hoặc “📣 Hoạt động mua hàng” để đổi trạng thái.`,
+          text: `Cài đặt thông báo: cập nhật ${p.shopUpdates ? "bật" : "tắt"}, hoạt động ${p.purchaseActivity ? "bật" : "tắt"}. Bấm “🛍 Cập nhật sản phẩm” hoặc “📣 Hoạt động mua hàng” để đổi trạng thái.`,
           buttons: [],
         };
       },
@@ -2515,8 +2538,10 @@ async function bootstrap(): Promise<void> {
         return {
           text: opened.message,
           buttons: [
-            [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
-            [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+            [
+              { text: "🧾 Đơn hàng", callbackData: "ord:list" },
+              { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+            ],
           ],
         };
       }
@@ -2696,15 +2721,19 @@ async function bootstrap(): Promise<void> {
         ? {
             text: "Đã thanh toán bằng ví. Chúng tôi sẽ giao tài khoản ngay.",
             buttons: [
-              [{ text: "Xem đơn", callbackData: `ord:view:${orderId}` }],
-              [{ text: "Menu chính", callbackData: "menu:main" }],
+              [
+                { text: "Xem đơn", callbackData: `ord:view:${orderId}` },
+                { text: "Menu chính", callbackData: "menu:main" },
+              ],
             ],
           }
         : {
             text: result.message,
             buttons: [
-              [{ text: "Nạp ví", callbackData: "wallet:topup" }],
-              [{ text: "Đơn hàng", callbackData: "ord:list" }],
+              [
+                { text: "Nạp ví", callbackData: "wallet:topup" },
+                { text: "Đơn hàng", callbackData: "ord:list" },
+              ],
             ],
           };
     },
@@ -2954,7 +2983,12 @@ async function bootstrap(): Promise<void> {
           reason: "Replacement approval requested from Telegram admin support UI",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "support.replacement.approve");
+        if (!result.ok)
+          return presentAdminHandleRefusal(
+            result,
+            "support.replacement.approve",
+            input.correlationId,
+          );
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3103,7 +3137,12 @@ async function bootstrap(): Promise<void> {
           reason: "Manual fulfillment completion requested from Telegram admin UI",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "manual_fulfillment.complete");
+        if (!result.ok)
+          return presentAdminHandleRefusal(
+            result,
+            "manual_fulfillment.complete",
+            input.correlationId,
+          );
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3147,7 +3186,7 @@ async function bootstrap(): Promise<void> {
           reason: "Bật chế độ TEST — chỉ khách test mua được sản phẩm test",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "store.test");
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.test", input.correlationId);
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3184,7 +3223,7 @@ async function bootstrap(): Promise<void> {
           reason: "Mở bán công khai (xác nhận qua nút)",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "store.open");
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.open", input.correlationId);
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3206,7 +3245,8 @@ async function bootstrap(): Promise<void> {
           reason: "Đóng cửa hàng tạm dừng bán",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "store.close");
+        if (!result.ok)
+          return presentAdminHandleRefusal(result, "store.close", input.correlationId);
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3547,7 +3587,7 @@ async function bootstrap(): Promise<void> {
         if (!row)
           return {
             text: "Sản phẩm không còn hợp lệ.",
-            buttons: [[{ text: "Products", callbackData: "admin:products" }]],
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
           };
         const variants = await sql<{
           id: string;
@@ -3774,7 +3814,7 @@ async function bootstrap(): Promise<void> {
         });
         if (!result.ok) {
           if (result.code === "WRONG_CONTEXT" || isSensitiveCallbackRefusal(result.code))
-            return presentAdminHandleRefusal(result, "catalog.publish");
+            return presentAdminHandleRefusal(result, "catalog.publish", input.correlationId);
           return {
             text: "Không thể tạo yêu cầu xuất bản; readiness hoặc phiên bản đã thay đổi. Mở lại để kiểm tra.",
             buttons: [
@@ -3990,6 +4030,7 @@ async function bootstrap(): Promise<void> {
             error,
             "catalog.variant.price.change",
             "BULK_PRICE_CHANGE",
+            input.correlationId,
           );
           if (refusal) return refusal;
           throw error;
@@ -4560,6 +4601,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "supplier.mapping.select",
             category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
           });
         const result = await selectVariantSupplierMapping({
           db: dbHandle.db,
@@ -4593,6 +4635,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "supplier.mapping.clear",
             category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
           });
         const result = await clearVariantSupplierMapping({
           db: dbHandle.db,
@@ -4636,6 +4679,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "supplier.mapping.verify",
             category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
           });
         const result = await markSupplierSkuManuallyVerified({
           db: dbHandle.db,
@@ -4667,7 +4711,8 @@ async function bootstrap(): Promise<void> {
         });
         if (!result.ok) {
           if (result.code === "WRONG_CONTEXT") return presentAdminDenied("WRONG_CONTEXT");
-          if (isSensitiveActionKey(command)) return presentAdminHandleRefusal(result, command);
+          if (isSensitiveActionKey(command))
+            return presentAdminHandleRefusal(result, command, input.correlationId);
           return presentAdminDenied("NOT_ROOT_ADMIN");
         }
         if (result.needsConfirmation)
@@ -4702,7 +4747,7 @@ async function bootstrap(): Promise<void> {
         if (result.code === "NOT_READY" || result.code === "ACTION_REFUSED") {
           return {
             text: result.message,
-            buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+            buttons: [[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]],
           };
         }
         if (isSensitiveCallbackRefusal(result.code)) {
@@ -4713,11 +4758,12 @@ async function bootstrap(): Promise<void> {
             code: result.code,
             action: refusedAction ?? "admin.confirm",
             category: refusedAction ? SENSITIVE_ACTION_POLICY[refusedAction] : null,
+            challengeId: input.correlationId,
           });
         }
         return {
           text: "❌ Xác nhận thất bại hoặc đã hết hạn",
-          buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+          buttons: [[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]],
         };
       },
       async inventory(input) {
@@ -5202,6 +5248,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "warranty.replacement.approve",
             category: "DELIVERY_REISSUE",
+            challengeId: input.correlationId,
           });
         const result = await approveClaimReplacement({
           db: dbHandle.db,
@@ -5246,6 +5293,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "warranty.refund.approve",
             category: "REFUND",
+            challengeId: input.correlationId,
           });
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
@@ -5280,6 +5328,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "warranty.refund.approve",
             category: "REFUND",
+            challengeId: input.correlationId,
           });
         const result = await approveClaimRefund({
           db: dbHandle.db,
@@ -5863,6 +5912,7 @@ async function bootstrap(): Promise<void> {
                 code: authorization.code,
                 action: "preorder.cancel",
                 category: SENSITIVE_ACTION_POLICY["preorder.cancel"],
+                challengeId: input.correlationId,
               });
             }
             await shopCancelPreorder(dbHandle.db, {
@@ -6126,6 +6176,7 @@ async function bootstrap(): Promise<void> {
             error,
             "inventory.stock.adjust",
             "STOCK_ADJUSTMENT",
+            input.correlationId,
           );
           if (refusal) return refusal;
           throw error;
@@ -6643,6 +6694,7 @@ async function bootstrap(): Promise<void> {
             code: sent.code,
             action: "broadcast.confirm",
             category: SENSITIVE_ACTION_POLICY["broadcast.confirm"],
+            challengeId: input.correlationId,
           });
         }
         const status = await getBroadcastStatus(dbHandle.db, input.campaignId);
@@ -6778,10 +6830,10 @@ async function bootstrap(): Promise<void> {
           // so a live prompt cannot swallow the factor submission, and behind the same audited root
           // gate as every other owner entry point.
           if (input.text.startsWith("/verify") || input.text.startsWith("/enroll_2fa")) {
-            if (config.NODE_ENV === "production") {
+            if (input.text.startsWith("/enroll_2fa")) {
               return {
                 buttons: [[{ text: "⚙️ Quản trị", callbackData: "admin:menu" }]],
-                text: "Xác minh bảo mật phải thực hiện trên operator CLI, không qua Telegram.",
+                text: "Thiết lập MFA phải thực hiện trên operator host bằng `npm run admin:step-up enroll` để QR không đi qua Telegram.",
               };
             }
             const gated = await requireRootAdmin(
@@ -6792,40 +6844,17 @@ async function bootstrap(): Promise<void> {
             );
             if (gated) return presentAdminDenied(gated);
             const menu = { buttons: [[{ text: "⚙️ Quản trị", callbackData: "admin:menu" }]] };
-
-            if (input.text.startsWith("/enroll_2fa")) {
-              // A seed is revealed exactly once, at enrolment. Re-running must never print it again.
-              if (await stepUp.isEnrolled(input.telegramUserId)) {
-                return {
-                  ...menu,
-                  text: "Yếu tố bảo mật đã được thiết lập. Gửi /verify <mã 6 số> khi cần xác minh.",
-                };
-              }
-              const { otpauthUri } = await stepUp.enroll({
-                adminTelegramUserId: input.telegramUserId,
-                issuer: "TIER20 SHOP",
-                accountLabel: input.telegramUserId,
-              });
+            const parsedVerify = /^\/verify\s+(\d{6})\s+([A-Za-z0-9:_-]{1,80})$/u.exec(
+              input.text.trim(),
+            );
+            if (!parsedVerify) {
               return {
                 ...menu,
-                text: [
-                  "🔐 Thiết lập xác minh bảo mật",
-                  "",
-                  "Thêm khoá dưới đây vào ứng dụng Authenticator (Google Authenticator, Authy…):",
-                  otpauthUri,
-                  "",
-                  "Hãy lưu lại ngay — bot không hiển thị lại khoá này.",
-                ].join("\n"),
+                text: "Gửi đúng định dạng: /verify <mã 6 số> <mã yêu cầu>.",
               };
             }
-
-            const code = input.text.replace(/^\/verify\s*/u, "").trim();
-            if (!/^\d{6}$/u.test(code)) {
-              return { ...menu, text: "Gửi đúng định dạng: /verify <mã 6 số>." };
-            }
-            // The category comes from the most recent step-up refusal this layer audited, so a
-            // grant can only be minted for the action the owner actually tried to take — never for
-            // every category at once. The window is the lockout window: an older attempt is stale.
+            const code = parsedVerify[1]!;
+            const challengeId = parsedVerify[2]!;
             const requested = await sql<{
               action_key: string | null;
               category: string | null;
@@ -6842,9 +6871,21 @@ async function bootstrap(): Promise<void> {
                      metadata_redacted->>'payloadHash' as payload_hash
               from audit_event
               where actor_id = ${input.telegramUserId}
+                and correlation_id = ${challengeId}
                 and action = 'admin.sensitive.denied'
                 and metadata_redacted->>'code' = 'STEP_UP_REQUIRED'
                 and occurred_at > now() - (${config.ADMIN_STEP_UP_LOCKOUT_MINUTES} * interval '1 minute')
+                and not exists (
+                  select 1
+                  from admin_step_up_grant as issued
+                  where issued.admin_telegram_user_id = ${input.telegramUserId}
+                    and issued.issued_at >= audit_event.occurred_at
+                    and issued.action_key = audit_event.metadata_redacted->>'actionKey'
+                    and issued.resource_type = audit_event.metadata_redacted->>'resourceType'
+                    and issued.resource_id = audit_event.metadata_redacted->>'resourceId'
+                    and issued.resource_version = audit_event.metadata_redacted->>'resourceVersion'
+                    and issued.payload_hash = audit_event.metadata_redacted->>'payloadHash'
+                )
               order by occurred_at desc, id desc
               limit 1
             `.execute(dbHandle.db);
@@ -6877,6 +6918,12 @@ async function bootstrap(): Promise<void> {
             });
             if (!verified.ok) {
               // Never echo the submitted code, and never say which digit was wrong.
+              if (verified.code === "REPLAYED") {
+                return {
+                  ...menu,
+                  text: "❌ Mã xác minh này đã được sử dụng. Hãy yêu cầu mã mới cho đúng thao tác.",
+                };
+              }
               if (verified.code === "LOCKED_OUT") {
                 const oldest = await sql<{ oldest: Date | string | null }>`
                   select min(attempted_at) as oldest from admin_step_up_attempt
@@ -7065,6 +7112,7 @@ async function bootstrap(): Promise<void> {
                 code: authorization.code,
                 action: "warranty.refund.adjust",
                 category: "REFUND",
+                challengeId: input.correlationId,
               });
             await sql`
               delete from admin_callback_state
@@ -7228,10 +7276,8 @@ async function bootstrap(): Promise<void> {
                       callbackData: `admin:products:apply-sku:${proposal}`,
                     },
                   ],
-                  [
-                    { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                    { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                  ],
+                  [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+                  [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
                 ],
               };
             }
@@ -7245,10 +7291,8 @@ async function bootstrap(): Promise<void> {
             return {
               text: `⚠️ ${errorMsg}`,
               buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
+                [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+                [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
               ],
             };
           }
@@ -7274,10 +7318,8 @@ async function bootstrap(): Promise<void> {
             return {
               text: `❌ SKU "${rawSku}" đã được sử dụng. Hãy nhập SKU khác.`,
               buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
+                [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+                [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
               ],
             };
           }
@@ -7413,6 +7455,7 @@ async function bootstrap(): Promise<void> {
               error,
               "catalog.variant.price.change",
               "BULK_PRICE_CHANGE",
+              input.correlationId,
             );
             if (refusal) return refusal;
             throw error;
@@ -7522,10 +7565,8 @@ async function bootstrap(): Promise<void> {
             return {
               text: "Loại sản phẩm không hợp lệ.",
               buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
+                [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+                [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
               ],
             };
           return renderWizardStep(result.draft);
@@ -8185,7 +8226,7 @@ async function bootstrap(): Promise<void> {
                       callbackData: `shop:product:${product.id}`,
                     };
             return {
-              text: `✅ ĐÃ TẠO SẢN PHẨM\n\n${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫\nTrạng thái: ${product.active ? "Đang mở bán" : "Nháp / Chưa mở bán"}`,
+              text: `✅ Đã tạo sản phẩm\n\n${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫\nTrạng thái: ${product.active ? "Đang mở bán" : "Nháp / Chưa mở bán"}`,
               buttons: [
                 [
                   primaryButton,
@@ -8300,39 +8341,20 @@ async function bootstrap(): Promise<void> {
         vault,
         sender: {
           send: async (input) => {
-            const lines = [
-              "✅ GIAO HÀNG THÀNH CÔNG",
-              "",
-              input.product?.name ? `📦 ${input.product.name}` : "📦 Đơn hàng của bạn",
-              `Đơn: ${input.orderNumber}`,
-              `💰 ${formatMoneyVnd(makeVnd(BigInt(input.amountVnd)))}`,
-              "",
-              "Nhấn nút bên dưới để xem thông tin nhận hàng (chỉ hiện một lần, đừng chia sẻ).",
-            ];
-            if (input.product?.usageInstructionsVi)
-              lines.push("", `📘 Hướng dẫn: ${input.product.usageInstructionsVi}`);
-            if (input.product?.warrantyVi)
-              lines.push("", `🛡 Bảo hành: ${input.product.warrantyVi}`);
             await telegramResponder.send({
               chatId: input.chatId,
               messageId: null,
-              message: {
-                text: lines.join("\n"),
-                buttons: [
-                  [
-                    {
-                      text: "🔐 Nhận hàng ngay",
-                      callbackData: `delivery:open:${input.handoffId}`,
-                    },
-                  ],
-                  [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
-                  [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
-                ],
-              },
+              message: presentDeliveryReveal({
+                secret: input.secret,
+                productName: input.product?.name ?? "Đơn hàng của bạn",
+                orderNumber: input.orderNumber,
+                amountVnd: input.amountVnd,
+                usageInstructionsVi: input.product?.usageInstructionsVi ?? null,
+                warrantyVi: input.product?.warrantyVi ?? null,
+              }),
             });
-            // Own message, after the fulfilled delivery: commercial context only, never
-            // the credential (that stays view-once behind "🔐 Nhận hàng ngay"). A failure
-            // here must not fail the claim, or the delivery message would be re-sent.
+            // Keep the separate commercial thank-you best-effort; a failure here
+            // must not make the credential handoff retry and duplicate the secret.
             try {
               await telegramResponder.send({
                 chatId: input.chatId,

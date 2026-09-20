@@ -1,4 +1,4 @@
-import type { InlineButton, PresentedMessage } from "./catalog.js";
+import { compactInlineRows, type InlineButton, type PresentedMessage } from "./catalog.js";
 import { ORDER_STATUS_FALLBACK, ORDER_STATUS_LABEL } from "./history.js";
 import {
   FULFILLMENT_TYPE_LABELS,
@@ -58,7 +58,7 @@ export const ADMIN_COPY = {
   auditEmpty: "Chưa có sự kiện kiểm toán cho mục này.",
   unknownCommand: "Lệnh không được hỗ trợ.",
   mainMenu: "Menu chính",
-  adminMenu: "⚙️ TIER20 SHOP — QUẢN TRỊ",
+  adminMenu: "⚙️ TIER20 SHOP — Quản trị",
   back: "↩️ Quay lại",
   home: "⌂ Trang quản trị",
   overview: "📊 Tổng quan",
@@ -168,12 +168,7 @@ export function presentAdminMenu(
   storeMode: StoreMode = "CLOSED",
   summary?: AdminHomeSummary,
 ): PresentedMessage {
-  const storeBanner =
-    storeMode === "OPEN"
-      ? "🟢 ĐANG MỞ BÁN"
-      : storeMode === "TEST"
-        ? "🟡 CHẾ ĐỘ TEST"
-        : "🔴 CỬA HÀNG ĐANG ĐÓNG";
+  const storeBanner = STORE_MODE_BANNER[storeMode];
   const summaryLines = summary
     ? [
         "",
@@ -189,16 +184,18 @@ export function presentAdminMenu(
     text: [`${ADMIN_COPY.adminMenu}`, "", storeBanner, ...summaryLines].join("\n"),
     buttons: [
       ...visibleAdminButtons(),
-      [{ text: "⚙️ Cài đặt", callbackData: "admin:store:mode" }],
-      [{ text: "🛒 Về Shop", callbackData: "shop:home" }],
+      [
+        { text: "⚙️ Cài đặt", callbackData: "admin:store:mode" },
+        { text: "🛒 Về Shop", callbackData: "shop:home" },
+      ],
     ],
   };
 }
 
 export const STORE_MODE_BANNER: Record<StoreMode, string> = {
-  OPEN: "🟢 ĐANG MỞ BÁN",
-  TEST: "🟡 CHẾ ĐỘ TEST",
-  CLOSED: "🔴 CỬA HÀNG ĐANG ĐÓNG",
+  OPEN: "🟢 Đang mở bán",
+  TEST: "🟡 Chế độ test",
+  CLOSED: "🔴 Cửa hàng đang đóng",
 };
 
 /**
@@ -211,7 +208,7 @@ export function presentAdminStoreMode(control: StoreControl): PresentedMessage {
   const mode = control.status;
   const buttons: InlineButton[][] = [];
   if (mode === "CLOSED") {
-    buttons.push([{ text: "🧪 Chế độ TEST", callbackData: "admin:store:test" }]);
+    buttons.push([{ text: "🧪 Chế độ test", callbackData: "admin:store:test" }]);
     buttons.push([{ text: "🟢 Mở bán", callbackData: "admin:store:open" }]);
   }
   if (mode !== "CLOSED")
@@ -256,7 +253,7 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
   const { control } = input;
   return {
     text: [
-      "🛠 VẬN HÀNH / READINESS",
+      "🛠 Vận hành / Readiness",
       "",
       `${STORE_MODE_BANNER[control.status]} · phiên bản ${control.version}`,
       ...(input.database === "down"
@@ -276,10 +273,14 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
       "Không có thao tác tự động trên màn hình này; từng mutation vẫn đi qua owner confirmation.",
     ].join("\n"),
     buttons: [
-      [{ text: "💳 Thanh toán / sai lệch", callbackData: "admin:payments" }],
-      [{ text: "🛍 Readiness sản phẩm", callbackData: "admin:products" }],
-      [{ text: "🏪 Store control", callbackData: "admin:store:mode" }],
-      [{ text: "💬 Ticket hỗ trợ", callbackData: "admin:support" }],
+      [
+        { text: "💳 Thanh toán / sai lệch", callbackData: "admin:payments" },
+        { text: "🛍 Readiness sản phẩm", callbackData: "admin:products" },
+      ],
+      [
+        { text: "🏪 Store control", callbackData: "admin:store:mode" },
+        { text: "💬 Ticket hỗ trợ", callbackData: "admin:support" },
+      ],
       adminNav("admin:menu"),
     ],
   };
@@ -312,7 +313,7 @@ export function presentAdminStoreOpenBlocked(input: {
   const { readiness } = input;
   return {
     text: [
-      "⚠️ CHƯA THỂ MỞ BÁN",
+      "⚠️ Chưa thể mở bán",
       "",
       `Sản phẩm public đang hoạt động: ${readiness.activeProducts} (cần ≥ 1)`,
       `Biến thể đang còn hàng: ${readiness.inStockVariants} (cần ≥ 1)`,
@@ -333,15 +334,15 @@ export function presentAdminStoreOpenBlocked(input: {
 export function presentAdminStoreOpenConfirmation(readiness: StoreOpenReadiness): PresentedMessage {
   return {
     text: [
-      "⚠️ XÁC NHẬN MỞ BÁN",
+      "⚠️ Xác nhận mở bán",
       "",
       `Sản phẩm public đang hoạt động: ${readiness.activeProducts}`,
       `Biến thể đang còn hàng: ${readiness.inStockVariants}`,
       `Sai lệch chưa xử lý: ${readiness.openDiscrepancies} · outbox terminal chưa kết luận: ${readiness.terminalOutboxOrphans} · phiếu hỗ trợ chờ người xử lý: ${readiness.criticalSupportTickets}`,
-      "Cửa hàng chỉ mở nếu tất cả đều đạt; bấm MỞ BÁN sẽ kiểm tra lại.",
+      "Cửa hàng chỉ mở nếu tất cả đều đạt; bấm Mở bán sẽ kiểm tra lại.",
     ].join("\n"),
     buttons: [
-      [{ text: "✅ MỞ BÁN", callbackData: "admin:store:open:confirm" }],
+      [{ text: "✅ Mở bán", callbackData: "admin:store:open:confirm" }],
       [{ text: "❌ Huỷ", callbackData: "admin:store:mode" }],
     ],
   };
@@ -350,7 +351,7 @@ export function presentAdminTestCustomers(input: {
   customers: Array<{ id: string; telegramUserId: string }>;
 }): PresentedMessage {
   return {
-    text: `👥 KHÁCH TEST\n\n${input.customers.length ? input.customers.map((c) => `• ${c.telegramUserId.replace(/^(\d{2})\d+(\d{2})$/u, "$1••••$2")}`).join("\n") : "Chưa có khách test."}`,
+    text: `👥 Khách test\n\n${input.customers.length ? input.customers.map((c) => `• ${c.telegramUserId.replace(/^(\d{2})\d+(\d{2})$/u, "$1••••$2")}`).join("\n") : "Chưa có khách test."}`,
     buttons: [
       [{ text: "➕ Thêm", callbackData: "admin:testlab:testers:add" }],
       ...input.customers.map((c) => [
@@ -397,7 +398,7 @@ export function presentAdminCategories(input: {
 }): PresentedMessage {
   const categories = orderCategoryTree(input.categories);
   return {
-    text: `🏷 DANH MỤC\n\n${categories.length ? categories.map((c) => `${c.parentId ? "  ↳ " : "• "}${c.nameVi} · ${c.productCount} sản phẩm · ${c.active ? "đang bật" : "đang tắt"}`).join("\n") : "Chưa có danh mục."}`,
+    text: `🏷 Danh mục\n\n${categories.length ? categories.map((c) => `${c.parentId ? "  ↳ " : "• "}${c.nameVi} · ${c.productCount} sản phẩm · ${c.active ? "đang bật" : "đang tắt"}`).join("\n") : "Chưa có danh mục."}`,
     buttons: [
       ...categories.flatMap((c) => [
         [
@@ -456,8 +457,10 @@ export function presentAdminOrdersMenu(): PresentedMessage {
       { text: "Đang xử lý", callbackData: "admin:orders:filter:processing" },
       { text: "Cần giao hàng", callbackData: "admin:orders:filter:fulfillment_review" },
     ],
-    [{ text: "🔎 Tìm đơn/khách", callbackData: "admin:orders:search" }],
-    [{ text: "🛠 Xử lý thủ công", callbackData: "admin:manual" }],
+    [
+      { text: "🔎 Tìm đơn/khách", callbackData: "admin:orders:search" },
+      { text: "🛠 Xử lý thủ công", callbackData: "admin:manual" },
+    ],
   ]);
 }
 /**
@@ -549,8 +552,10 @@ export function presentAdminOrderDetail(order: AdminOrderDetail): PresentedMessa
     ].join("\n"),
     buttons: [
       [{ text: "✉️ Nhắn khách", callbackData: `admin:orders:message:${order.messageStateId}` }],
-      [{ text: ADMIN_COPY.orders, callbackData: "admin:orders" }],
-      [{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }],
+      [
+        { text: ADMIN_COPY.orders, callbackData: "admin:orders" },
+        { text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" },
+      ],
     ],
   };
 }
@@ -620,7 +625,7 @@ const DISCREPANCY_DISPOSITION_BUTTONS: ReadonlyArray<readonly [string, Discrepan
 export function presentAdminDiscrepancyDetail(detail: AdminDiscrepancyDetail): PresentedMessage {
   const evidence = detail.evidence;
   const lines = [
-    `⚠️ SAI LỆCH ${detail.id.slice(-6)}`,
+    `⚠️ Sai lệch ${detail.id.slice(-6)}`,
     `Phân loại: ${detail.classification}${detail.classificationKnown ? "" : " (legacy)"}`,
     `Trạng thái: ${detail.status} · phiên bản ${detail.version}`,
     `Lý do: ${detail.reason}`,
@@ -683,7 +688,7 @@ export function presentAdminOutboxOrphans(input: {
     { text: `🔎 ${row.eventType.slice(0, 28)}`, callbackData: `admin:payments:o:${row.id}` },
   ]);
   return {
-    text: `🧯 OUTBOX TREO\n\n${body}`,
+    text: `🧯 Outbox treo\n\n${body}`,
     buttons: [
       ...buttons,
       [{ text: "⬅️ Thanh toán", callbackData: "admin:payments" }],
@@ -695,7 +700,7 @@ export function presentAdminOutboxOrphans(input: {
 export function presentAdminOutboxDetail(detail: TerminalOutboxOrphanDetail): PresentedMessage {
   const row = detail.orphan;
   const lines = [
-    `🧯 OUTBOX ${row.id.slice(-6)}`,
+    `🧯 Outbox ${row.id.slice(-6)}`,
     `Event: ${row.eventType} · aggregate ${row.aggregateType}`,
     `Lỗi cuối: ${row.lastErrorCode ?? "—"} · attempts ${row.attemptCount}`,
     `Parked: ${row.deadLetteredAt} · disposition version ${row.dispositionVersion}`,
@@ -744,7 +749,7 @@ export const PUBLICATION_BLOCKER_LABEL: Record<PublicationBlocker, string> = {
 
 export const RESALE_EVIDENCE_SOURCE_LABEL: Record<ResaleEvidenceSource, string> = {
   SUPPLIER_AUTHORIZATION: "Uỷ quyền nhà cung cấp",
-  OWNER_ATTESTATION: "Chủ shop xác nhận",
+  OWNER_ATTESTATION: "Chủ shop xác nhận sở hữu",
   CONTRACT_REFERENCE: "Tham chiếu hợp đồng",
 };
 
@@ -764,7 +769,7 @@ export function presentAdminProductReadiness(input: {
   // still stops a publish separately from what publishing will change.
   const visibility = Array.from(new Set(readiness.visibilityBlockers));
   const lines = [
-    "🚀 XUẤT BẢN SẢN PHẨM",
+    "🚀 Xuất bản sản phẩm",
     "",
     `Tên: ${input.name}`,
     `Mã: ${readiness.productId}`,
@@ -829,8 +834,8 @@ export function presentAdminProductReadiness(input: {
   }
   buttons.push([
     { text: "↩️ Sản phẩm", callbackData: `admin:products:detail:${readiness.productId}` },
+    ...adminHomeOnly,
   ]);
-  buttons.push(adminHomeOnly);
   return { text: lines.join("\n"), buttons };
 }
 
@@ -845,21 +850,25 @@ export function presentAdminEvidencePrompt(input: {
 }): PresentedMessage {
   return {
     text: [
-      "🧾 ĐĂNG KÝ BẰNG CHỨNG NHẬP HÀNG",
+      "🧾 Đăng ký bằng chứng nhập hàng",
       "",
       `Biến thể: ${input.variantName}`,
       "Gửi một dòng theo dạng:",
       "NGUỒN|MÃ THAM CHIẾU|TÓM TẮT AN TOÀN",
       "",
       `NGUỒN hợp lệ: ${Object.keys(RESALE_EVIDENCE_SOURCE_LABEL).join(", ")}`,
+      "OWNER_ATTESTATION: Chủ shop xác nhận sở hữu.",
+      "OWNER_ATTESTATION chỉ ghi nhận hàng do chủ shop nắm giữ; không phải uỷ quyền resale/chuyển nhượng từ nhà cung cấp.",
       "Mã tham chiếu: chỉ chữ, số và . _ : / - (tối đa 200 ký tự).",
       "Tóm tắt: tối đa 500 ký tự, không dán mật khẩu hay khoá API.",
       "",
       "Bot không tự tạo bằng chứng: không gửi thì biến thể vẫn không thể xuất bản.",
     ].join("\n"),
     buttons: [
-      [{ text: "↩️ Quay lại", callbackData: `admin:products:ready:${input.productId}` }],
-      adminHomeOnly,
+      [
+        { text: "↩️ Quay lại", callbackData: `admin:products:ready:${input.productId}` },
+        ...adminHomeOnly,
+      ],
     ],
   };
 }
@@ -879,7 +888,7 @@ export function presentAdminEvidenceRevokePrompt(input: {
 }): PresentedMessage {
   return {
     text: [
-      "🚫 THU HỒI BẰNG CHỨNG NHẬP HÀNG",
+      "🚫 Thu hồi bằng chứng nhập hàng",
       "",
       `Biến thể: ${input.variantName}`,
       `Bằng chứng: …${input.evidenceId.slice(-6)} · ${RESALE_EVIDENCE_SOURCE_LABEL[input.source]}`,
@@ -891,8 +900,10 @@ export function presentAdminEvidenceRevokePrompt(input: {
       "Bot sẽ trả mã xác nhận; hoàn tất bằng /confirm <mã xác nhận>.",
     ].join("\n"),
     buttons: [
-      [{ text: "↩️ Readiness", callbackData: `admin:products:ready:${input.productId}` }],
-      adminHomeOnly,
+      [
+        { text: "↩️ Readiness", callbackData: `admin:products:ready:${input.productId}` },
+        ...adminHomeOnly,
+      ],
     ],
   };
 }
@@ -1057,7 +1068,7 @@ export function presentAdminSupportQueue(rows: AdminSupportReplacementRow[]): Pr
   if (rows.length === 0) {
     return {
       text: [ADMIN_COPY.support, "", "Không có yêu cầu thay thế đang chờ duyệt."].join("\n"),
-      buttons: [[entry], [{ text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }]],
+      buttons: [[entry, { text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" }]],
     };
   }
   const lines = [ADMIN_COPY.support, "", "Yêu cầu thay thế chờ duyệt:"];
@@ -1158,10 +1169,14 @@ export function presentAdminBroadcastAudience(): PresentedMessage {
   return {
     text: "Chọn nhóm nhận thông báo.",
     buttons: [
-      [{ text: "Tất cả", callbackData: "admin:marketing:audience:all" }],
-      [{ text: "🛍 Cập nhật sản phẩm", callbackData: "admin:marketing:audience:shop" }],
-      [{ text: "📣 Hoạt động mua hàng", callbackData: "admin:marketing:audience:activity" }],
-      [{ text: "🔒 Gửi thử cho chủ", callbackData: "admin:marketing:audience:root" }],
+      [
+        { text: "Tất cả", callbackData: "admin:marketing:audience:all" },
+        { text: "🔒 Gửi thử cho chủ", callbackData: "admin:marketing:audience:root" },
+      ],
+      [
+        { text: "🛍 Cập nhật sản phẩm", callbackData: "admin:marketing:audience:shop" },
+        { text: "📣 Hoạt động mua hàng", callbackData: "admin:marketing:audience:activity" },
+      ],
       adminNav("admin:marketing"),
     ],
   };
@@ -1291,10 +1306,8 @@ export function presentProductFulfillmentTypeChoices(): PresentedMessage {
           callbackData: "admin:products:type:SUPPLIER_API",
         },
       ],
-      [
-        { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-        { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-      ],
+      [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+      [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
     ],
   };
 }
@@ -1341,7 +1354,7 @@ export function presentProductDraftPreview(draft: {
               : draft.inventoryFields.map((field) => field.label).join(", ") || "Chưa cấu hình";
   return {
     text: [
-      "📋 XEM TRƯỚC SẢN PHẨM",
+      "📋 Xem trước sản phẩm",
       "",
       ...(draft.name ? [`Tên: ${draft.name}`] : []),
       `Biến thể: ${draft.variantName}`,
@@ -1374,10 +1387,14 @@ export function presentProductDraftPreview(draft: {
           callbackData: "admin:products:confirm",
         },
       ],
-      [{ text: "✏️ Chỉnh sửa", callbackData: "admin:products:back" }],
       ...(!draft.existingProductId
-        ? [[{ text: "💾 Lưu nháp", callbackData: "admin:products:draft" }]]
-        : []),
+        ? [
+            [
+              { text: "✏️ Chỉnh sửa", callbackData: "admin:products:back" },
+              { text: "💾 Lưu nháp", callbackData: "admin:products:draft" },
+            ],
+          ]
+        : [[{ text: "✏️ Chỉnh sửa", callbackData: "admin:products:back" }]]),
       [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
     ],
   };
@@ -1508,7 +1525,7 @@ export function presentAdminInventory(
   const visibleRows = rows.slice(0, 20);
   return {
     text: [
-      "📦 QUẢN LÝ KHO",
+      "📦 Quản lý kho",
       "",
       totals
         ? [
@@ -1566,18 +1583,20 @@ export function presentAdminInventoryProductPicker(
 ): PresentedMessage {
   const title =
     action === "template"
-      ? "📥 CHỌN SẢN PHẨM ĐỂ TẢI MẪU CSV"
+      ? "📥 Chọn sản phẩm để tải mẫu CSV"
       : action === "paste"
-        ? "📋 CHỌN SẢN PHẨM ĐỂ DÁN DỮ LIỆU"
-        : "➕ CHỌN SẢN PHẨM ĐỂ NHẬP KHO";
+        ? "📋 Chọn sản phẩm để dán dữ liệu"
+        : "➕ Chọn sản phẩm để nhập kho";
   return {
     text: [title, "", "Vui lòng chọn sản phẩm bên dưới:"].join("\n"),
     buttons: [
       ...products.map((p) => [
         { text: `📦 ${p.name}`, callbackData: `admin:inventory:pick_prod:${action}:${p.id}` },
       ]),
-      [{ text: "↩️ Quay lại Kho", callbackData: "admin:inventory" }],
-      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+      [
+        { text: "↩️ Quay lại kho", callbackData: "admin:inventory" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
     ],
   };
 }
@@ -1595,10 +1614,10 @@ export function presentAdminInventoryVariantPicker(
 ): PresentedMessage {
   const title =
     action === "template"
-      ? "📥 CHỌN BIẾN THỂ ĐỂ TẢI MẪU CSV"
+      ? "📥 Chọn biến thể để tải mẫu CSV"
       : action === "paste"
-        ? "📋 CHỌN BIẾN THỂ ĐỂ DÁN DỮ LIỆU"
-        : "➕ CHỌN BIẾN THỂ ĐỂ NHẬP KHO";
+        ? "📋 Chọn biến thể để dán dữ liệu"
+        : "➕ Chọn biến thể để nhập kho";
   return {
     text: [title, "", `Sản phẩm: ${product.name}`, "Vui lòng chọn biến thể:"].join("\n"),
     buttons: [
@@ -1616,8 +1635,8 @@ export function presentAdminInventoryVariantPicker(
           text: "↩️ Chọn sản phẩm khác",
           callbackData: `admin:inventory:${action === "template" ? "template_select" : action === "paste" ? "paste_select" : "add"}`,
         },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
       ],
-      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
     ],
   };
 }
@@ -1628,7 +1647,7 @@ export function presentAdminTestLab(input: {
 }): PresentedMessage {
   return {
     text: [
-      "🧪 TEST LAB (CANARY & KIỂM THỬ NỘI BỘ)",
+      "🧪 Test lab (canary & kiểm thử nội bộ)",
       "",
       "Khu vực này tách biệt hoàn toàn khỏi khách hàng.",
       "Dùng để kiểm thử giao dịch, SePay replay và Canary automated codes.",
@@ -1672,7 +1691,7 @@ export function presentAdminPreorders(input: {
   filter: string;
 }): PresentedMessage {
   const lines = [
-    "💰 ĐẶT CỌC / GIỮ HÀNG",
+    "💰 Đặt cọc / giữ hàng",
     `Bộ lọc: ${input.filter}`,
     "",
     ...(input.items.length === 0
@@ -1702,24 +1721,21 @@ export function presentAdminPreorders(input: {
       },
     ]);
 
+  const filterButtons: InlineButton[] = [
+    { text: "Tất cả", callbackData: "admin:preorders:filter:all" },
+    { text: "Chờ cọc", callbackData: "admin:preorders:filter:waiting_deposit" },
+    { text: "Đã cọc", callbackData: "admin:preorders:filter:deposit_paid" },
+    { text: "Đã giữ hàng", callbackData: "admin:preorders:filter:allocated" },
+    { text: "Chờ thanh toán", callbackData: "admin:preorders:filter:balance_due" },
+    { text: "Hoàn tất", callbackData: "admin:preorders:filter:fulfilled" },
+    { text: "Bỏ cọc", callbackData: "admin:preorders:filter:forfeited" },
+    { text: "Cần hoàn", callbackData: "admin:preorders:filter:refund_due" },
+  ];
   return {
     text: lines.join("\n"),
     buttons: [
       ...cancelButtons,
-      [
-        { text: "Tất cả", callbackData: "admin:preorders:filter:all" },
-        { text: "Chờ cọc", callbackData: "admin:preorders:filter:waiting_deposit" },
-        { text: "Đã cọc", callbackData: "admin:preorders:filter:deposit_paid" },
-      ],
-      [
-        { text: "Đã giữ hàng", callbackData: "admin:preorders:filter:allocated" },
-        { text: "Chờ thanh toán", callbackData: "admin:preorders:filter:balance_due" },
-        { text: "Hoàn tất", callbackData: "admin:preorders:filter:fulfilled" },
-      ],
-      [
-        { text: "Bỏ cọc", callbackData: "admin:preorders:filter:forfeited" },
-        { text: "Cần hoàn", callbackData: "admin:preorders:filter:refund_due" },
-      ],
+      ...compactInlineRows(filterButtons),
       [
         { text: "📦 Quản lý kho", callbackData: "admin:inventory" },
         { text: "🏠 Quản trị", callbackData: "admin:menu" },
@@ -1928,7 +1944,7 @@ export function presentAdminInventoryItemConfirm(input: {
 }): PresentedMessage {
   return {
     text: [
-      "⚠️ XÁC NHẬN THAO TÁC KHO",
+      "⚠️ Xác nhận thao tác kho",
       "",
       `Mục: ${input.ref} — ${input.statusLabel}`,
       `Biến thể: ${input.variantName}`,
@@ -1971,8 +1987,7 @@ export function presentAdminInventoryItemDone(input: {
     ].join("\n"),
     buttons: [
       [{ text: "Dữ liệu kho", callbackData: `admin:inventory:items:${input.variantId}` }],
-      [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:variant:${input.variantId}` }],
-      adminHomeOnly,
+      adminNav(`admin:inventory:variant:${input.variantId}`),
     ],
   };
 }
@@ -2224,15 +2239,17 @@ export function presentAdminProductDetail(input: {
       ...(input.description ? ["", input.description] : []),
     ].join("\n"),
     buttons: [
-      [{ text: "🚀 Readiness xuất bản", callbackData: `admin:products:ready:${input.id}` }],
-      [{ text: "✏️ Sửa nội dung", callbackData: `admin:products:content:${input.id}` }],
+      [
+        { text: "🚀 Readiness xuất bản", callbackData: `admin:products:ready:${input.id}` },
+        { text: "✏️ Sửa nội dung", callbackData: `admin:products:content:${input.id}` },
+      ],
       [
         {
           text: input.isFeatured ? "☆ Bỏ ghim nổi bật" : "⭐ Ghim nổi bật",
           callbackData: `admin:products:feature:${input.id}`,
         },
+        { text: "➕ Thêm biến thể", callbackData: `admin:products:variant-add:${input.id}` },
       ],
-      [{ text: "➕ Thêm biến thể", callbackData: `admin:products:variant-add:${input.id}` }],
       ...(input.variants ?? []).flatMap((variant) => {
         const stockBacked =
           variant.fulfillmentType === "STOCK_ACCOUNT" || variant.fulfillmentType === "STOCK_CODE";
@@ -2255,8 +2272,7 @@ export function presentAdminProductDetail(input: {
             : []),
         ];
       }),
-      [{ text: ADMIN_COPY.back, callbackData: "admin:products" }],
-      adminHomeOnly,
+      adminNav("admin:products"),
     ],
   };
 }
@@ -2288,7 +2304,7 @@ export function presentAdminVariantDraft(input: {
   const current = input.current;
   return {
     text: [
-      "✏️ SỬA BIẾN THỂ",
+      "✏️ Sửa biến thể",
       "",
       `${input.current.name} · ${input.sku}`,
       "",
@@ -2370,7 +2386,7 @@ export function presentAdminDenied(reason: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT"): 
 /** Deterministic step-up challenge copy, shared with the callback refusal message. */
 export const STEP_UP_CHALLENGE_TEXT = "🔐 Thao tác nhạy cảm cần xác minh bảo mật.";
 export const STEP_UP_CHALLENGE_INSTRUCTION =
-  "Chạy npm run admin:step-up verify trên operator host, sau đó mở lại và xác nhận hành động.";
+  "Gửi /verify <mã 6 số> <mã yêu cầu> rồi mở lại và xác nhận đúng hành động này.";
 
 export const STEP_UP_ENROLL_INSTRUCTION =
   "Chạy npm run admin:step-up enroll trên operator host, sau đó thực hiện lại hành động.";
@@ -2399,12 +2415,18 @@ export const ADMIN_MENU_BUTTON: InlineButton = {
 export function presentStepUpRequired(input: {
   action: string;
   category: string | null;
+  challengeId?: string;
 }): PresentedMessage {
   const action = input.category === null ? input.action : `${input.action} (${input.category})`;
+  const challenge = input.challengeId ? `Mã yêu cầu: ${input.challengeId}` : null;
   return {
-    text: [STEP_UP_CHALLENGE_TEXT, "", `Hành động: ${action}`, STEP_UP_CHALLENGE_INSTRUCTION].join(
-      "\n",
-    ),
+    text: [
+      STEP_UP_CHALLENGE_TEXT,
+      "",
+      `Hành động: ${action}`,
+      ...(challenge ? [challenge] : []),
+      STEP_UP_CHALLENGE_INSTRUCTION,
+    ].join("\n"),
     buttons: [[ADMIN_MENU_BUTTON]],
   };
 }
@@ -2432,9 +2454,14 @@ export function presentSensitiveRefusal(input: {
   code: SensitiveAuthorizationRefusal;
   action: string;
   category: string | null;
+  challengeId?: string;
 }): PresentedMessage {
   if (input.code === "STEP_UP_REQUIRED" || input.code === "STEP_UP_GRANT_MISSING") {
-    return presentStepUpRequired({ action: input.action, category: input.category });
+    return presentStepUpRequired({
+      action: input.action,
+      category: input.category,
+      ...(input.challengeId ? { challengeId: input.challengeId } : {}),
+    });
   }
   return {
     text: SENSITIVE_REFUSAL_TEXT[input.code],
@@ -2540,7 +2567,7 @@ export function presentAdminSystemHealth(input: AdminSystemHealthFacts): Present
   const flag = (ok: boolean) => (ok ? "🟢" : "🔴");
   return {
     text: [
-      "🩺 HỆ THỐNG",
+      "🩺 Hệ thống",
       "",
       `${flag(input.database === "ok")} Cơ sở dữ liệu: ${input.database === "ok" ? "hoạt động" : "KHÔNG truy cập được"}`,
       `🔖 Bản dựng worker: ${input.workerCommit.slice(0, 12)}`,
@@ -2583,7 +2610,7 @@ export function presentAdminNotifications(input: {
 }): PresentedMessage {
   return {
     text: [
-      "🔔 THÔNG BÁO",
+      "🔔 Thông báo",
       "",
       "Kênh gửi: chỉ chat riêng của khách.",
       "Giao dịch bắt buộc (không thể tắt):",
@@ -2628,7 +2655,7 @@ export function presentAdminProductContentMenu(input: {
   };
   return {
     text: [
-      "✏️ SỬA NỘI DUNG SẢN PHẨM",
+      "✏️ Sửa nội dung sản phẩm",
       "",
       input.name,
       "",
@@ -2644,8 +2671,10 @@ export function presentAdminProductContentMenu(input: {
           callbackData: `admin:products:cf:edit:${field.key}`,
         },
       ]),
-      [{ text: "⬅️ Quay lại", callbackData: `admin:products:detail:${input.productId}` }],
-      adminHomeOnly,
+      [
+        { text: "⬅️ Quay lại", callbackData: `admin:products:detail:${input.productId}` },
+        ...adminHomeOnly,
+      ],
     ],
   };
 }

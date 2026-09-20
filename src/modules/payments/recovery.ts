@@ -40,6 +40,23 @@ export async function recoverSePayBatch(
     if (!lock.rows[0]?.acquired) return { claimed: 0, succeeded: 0, failed: 0 };
 
     try {
+      const retryGate = await sql<{ retry_after_until: Date | string | null }>`
+        select retry_after_until
+        from sepay_reconciliation_cursor
+        where provider = 'sepay'
+        limit 1
+      `.execute(connection);
+      const retryAfterUntil = retryGate.rows[0]?.retry_after_until;
+      const retryAfterMs =
+        retryAfterUntil instanceof Date
+          ? retryAfterUntil.getTime()
+          : retryAfterUntil
+            ? new Date(retryAfterUntil).getTime()
+            : NaN;
+      if (Number.isFinite(retryAfterMs) && retryAfterMs > now.getTime()) {
+        return { claimed: 0, succeeded: 0, failed: 0 };
+      }
+
       const candidates = await sql<{ created_at: Date | string }>`
         select pi.created_at
         from payment_intent pi
@@ -85,11 +102,17 @@ export async function recoverSePayBatch(
         });
       } catch (error) {
         const errorClass = errorClassOf(error);
+        const retryAfterSeconds = error instanceof SePayApiError ? error.retryAfterSeconds : null;
+        const retryAfterUntil =
+          retryAfterSeconds == null
+            ? null
+            : new Date(now.getTime() + Math.max(0, retryAfterSeconds) * 1000).toISOString();
         await sql`
           update sepay_reconciliation_cursor
           set consecutive_failures = consecutive_failures + 1,
               last_error_class = ${errorClass},
               failed = failed + 1,
+              retry_after_until = ${retryAfterUntil}::timestamptz,
               updated_at = now()
           where provider = 'sepay'
         `.execute(connection);
@@ -104,8 +127,8 @@ export async function recoverSePayBatch(
               pages_scanned = pages_scanned + 1,
               transactions_scanned = transactions_scanned + ${summary.scanned},
               failed = failed + ${summary.errors},
+              retry_after_until = null,
               updated_at = now()
-          where provider = 'sepay'
         `.execute(connection);
         return {
           claimed: candidates.rows.length,
@@ -119,6 +142,7 @@ export async function recoverSePayBatch(
         set last_success_at = ${now.toISOString()}::timestamptz,
             consecutive_failures = 0,
             last_error_class = null,
+            retry_after_until = null,
             pages_scanned = pages_scanned + 1,
             transactions_scanned = transactions_scanned + ${summary.scanned},
             missing_found = missing_found + ${summary.recovered},

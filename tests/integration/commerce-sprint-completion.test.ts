@@ -151,14 +151,14 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
 
     it("renders customer warranty, notification preferences, and purchase thank you presenters", () => {
       const warranty = presentCustomerWarranty();
-      expect(warranty.text).toContain("CHÍNH SÁCH BẢO HÀNH & HỖ TRỢ");
+      expect(warranty.text).toContain("Chính sách bảo hành & hỗ trợ");
       expect(warranty.buttons[0]?.[0]?.callbackData).toBe("supp:open");
 
       const notifyPrefs = presentCustomerNotificationPreferences({
         marketing: true,
         socialProof: false,
       });
-      expect(notifyPrefs.text).toContain("CÀI ĐẶT THÔNG BÁO");
+      expect(notifyPrefs.text).toContain("Cài đặt thông báo");
       expect(notifyPrefs.buttons[0]?.[0]?.callbackData).toContain("cust:notify:marketing");
 
       // Goal §53 specifies title + product + order + completion line + four actions; the
@@ -167,7 +167,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         orderNumber: "ORD-2026-TEST-123",
         productName: "ChatGPT Plus",
       });
-      expect(thankYou.text).toContain("🎉 CẢM ƠN BẠN ĐÃ MUA HÀNG!");
+      expect(thankYou.text).toContain("🎉 Cảm ơn bạn đã mua hàng!");
       expect(thankYou.text).toContain("Sản phẩm: ChatGPT Plus");
       expect(thankYou.text).toContain("ORD-2026-TEST-123");
       expect(thankYou.text).toContain("✅ Đơn đã hoàn tất.");
@@ -206,7 +206,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
       );
 
       // Required Vietnamese root header & totals
-      expect(inventory.text).toContain("📦 QUẢN LÝ KHO");
+      expect(inventory.text).toContain("📦 Quản lý kho");
       expect(inventory.text).toContain("• Sản phẩm: 1");
       expect(inventory.text).toContain("• Còn hàng: 5");
 
@@ -223,7 +223,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         [{ id: "prod-1", name: "ChatGPT Plus" }],
         "import",
       );
-      expect(prodPicker.text).toContain("CHỌN SẢN PHẨM");
+      expect(prodPicker.text).toContain("Chọn sản phẩm để nhập kho");
       expect(prodPicker.buttons[0]?.[0]?.text).toBe("📦 ChatGPT Plus");
       expect(prodPicker.buttons[0]?.[0]?.callbackData).toBe(
         "admin:inventory:pick_prod:import:prod-1",
@@ -242,7 +242,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         ],
         "template",
       );
-      expect(varPicker.text).toContain("CHỌN BIẾN THỂ");
+      expect(varPicker.text).toContain("Chọn biến thể để tải mẫu CSV");
       expect(varPicker.buttons[0]?.[0]?.callbackData).toBe("admin:inventory:template:var-1");
 
       // Test Lab isolates Canary products
@@ -250,7 +250,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         testProducts: [{ id: "canary-1", name: "Canary Auto Code 2.000đ", active: false }],
         canaryOrders: [{ orderNumber: "ORD-CANARY-1", status: "PROCESSING", priceVnd: 2000 }],
       });
-      expect(testLab.text).toContain("TEST LAB (CANARY & KIỂM THỬ NỘI BỘ)");
+      expect(testLab.text).toContain("Test lab (canary & kiểm thử nội bộ)");
       expect(testLab.text).toContain("Canary Auto Code 2.000đ");
     });
   });
@@ -280,7 +280,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
       expect(balanceVnd).toBe(100000);
 
       const consent = presentPreorderConsent(config);
-      expect(consent.text).toContain("ĐIỀU KIỆN ĐẶT CỌC GIỮ SUẤT");
+      expect(consent.text).toContain("Điều kiện đặt cọc giữ suất");
       expect(consent.text).toContain("50.000 ₫");
       expect(consent.text).toContain("100.000 ₫");
       expect(consent.text).toContain("giữ hàng riêng cho bạn trong 24 giờ");
@@ -342,8 +342,9 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         filter: "all",
       });
 
-      expect(panel.text).toContain("💰 ĐẶT CỌC / GIỮ HÀNG");
+      expect(panel.text).toContain("💰 Đặt cọc / giữ hàng");
       expect(panel.text).toContain("Kiro Pro");
+      expect(panel.buttons.every((row) => row.length <= 2)).toBe(true);
       const callbacks = panel.buttons.flat().map((button) => button.callbackData);
       expect(callbacks).toContain("admin:preorders:cancel:pre-1");
       expect(callbacks).toContain("admin:preorders:filter:all");

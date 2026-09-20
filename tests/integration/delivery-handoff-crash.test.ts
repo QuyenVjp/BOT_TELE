@@ -215,6 +215,13 @@ async function liveSessionCount(bundleId: string): Promise<string> {
   `.execute(ctx.db);
   return result.rows[0]?.count ?? "0";
 }
+async function makeDue(bundleId: string): Promise<void> {
+  await sql`
+    update delivery_notification_handoff
+    set next_attempt_at = now()
+    where bundle_id = ${bundleId}
+  `.execute(ctx.db);
+}
 
 describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
   it("reconstructs one usable handoff after Bundle commit and before-handoff crash", async () => {
@@ -611,6 +618,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     const result = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault,
+      assetVault: f.assetVault,
       sender: {
         async send(input) {
           expect(input.handoffId).toBeTruthy();
@@ -630,7 +638,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       from delivery_notification_handoff h
     `.execute(ctx.db);
     expect(result).toMatchObject({ sent: 1, failed: 0 });
-    expect(proof.rows).toEqual([{ status: "SENT", live_sessions: "1" }]);
+    expect(proof.rows).toEqual([{ status: "SENT", live_sessions: "0" }]);
   });
 
   it("reuses one refresh operation key after session commit but before vault write", async () => {
@@ -650,6 +658,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     const first = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "refresh-before-write-a",
       batchSize: 1,
@@ -657,9 +666,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
+    await makeDue(f.bundleId);
     const second = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "refresh-before-write-b",
       batchSize: 1,
@@ -677,7 +688,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     expect(refreshKeys).toHaveLength(2);
     expect(new Set(refreshKeys).size).toBe(1);
     expect(new Set(refreshMaterials).size).toBe(1);
-    expect(await liveSessionCount(f.bundleId)).toBe("1");
+    expect(await liveSessionCount(f.bundleId)).toBe("0");
   });
 
   it("advances refresh generation after previous-key grace closes", async () => {
@@ -696,6 +707,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     const first = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "refresh-grace-a",
       batchSize: 1,
@@ -703,9 +715,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
+    await makeDue(f.bundleId);
     const second = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "refresh-grace-b",
       batchSize: 1,
@@ -718,7 +732,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     expect(second).toMatchObject({ failed: 0, sent: 1 });
     expect(keys).toHaveLength(2);
     expect(new Set(keys).size).toBe(2);
-    expect(await liveSessionCount(f.bundleId)).toBe("1");
+    expect(await liveSessionCount(f.bundleId)).toBe("0");
   });
 
   it("recovers a vault write before database swap with one deterministic capability", async () => {
@@ -752,6 +766,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       const first = await processDeliveryNotificationBatch({
         db: ctx.db,
         vault: controlled.vault,
+        assetVault: f.assetVault,
         sender: { async send() {} },
         owner: "refresh-swap-a",
         batchSize: 1,
@@ -772,9 +787,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     }
     controlled.setFailEveryDelete(false);
 
+    await makeDue(f.bundleId);
     const second = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "refresh-swap-b",
       batchSize: 1,
@@ -794,7 +811,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     expect(row.rows[0]).toMatchObject({ status: "SENT" });
     expect(row.rows[0]?.payload_redacted.refreshPending).toBe(false);
     expect(row.rows[0]?.payload_redacted.orphanCapabilityRefs ?? []).toEqual([]);
-    expect(await liveSessionCount(f.bundleId)).toBe("1");
+    expect(await liveSessionCount(f.bundleId)).toBe("0");
   });
 
   it("fences capability adoption while the compensation ledger owns deletion", async () => {
@@ -828,6 +845,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       const first = await processDeliveryNotificationBatch({
         db: ctx.db,
         vault: controlled.vault,
+        assetVault: f.assetVault,
         sender: { async send() {} },
         owner: "cleanup-race-a",
         batchSize: 1,
@@ -859,9 +877,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       retentionSeconds: 0,
     });
     await gate.started;
+    await makeDue(f.bundleId);
     const fenced = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "cleanup-race-b",
       batchSize: 1,
@@ -871,9 +891,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     });
     gate.release();
     const cleanup = await cleanupRun;
+    await makeDue(f.bundleId);
     const recovered = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "cleanup-race-c",
       batchSize: 1,
@@ -908,6 +930,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     const staleRun = processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "lease-owner-a",
       batchSize: 1,
@@ -923,6 +946,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     const winner = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "lease-owner-b",
       batchSize: 1,
@@ -937,7 +961,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     expect(winner).toMatchObject({ sent: 1, stale: 0 });
     expect(stale).toMatchObject({ sent: 0, stale: 1 });
     expect(refreshKeys).toHaveLength(1);
-    expect(await liveSessionCount(f.bundleId)).toBe("1");
+    expect(await liveSessionCount(f.bundleId)).toBe("0");
   });
 
   it("tombstones an old capability before delete and cleans it after delete recovery", async () => {
@@ -961,6 +985,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     const sent = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: controlled.vault,
+      assetVault: f.assetVault,
       sender: { async send() {} },
       owner: "old-ref-delete-failure",
       batchSize: 1,

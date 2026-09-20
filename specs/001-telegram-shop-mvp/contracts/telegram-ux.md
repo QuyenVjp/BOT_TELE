@@ -1,5 +1,7 @@
 # Contract: Telegram Customer and Owner UX
 
+> **HISTORICAL CONTRACT.** Current customer copy is Telegram-only `TIER20 SHOP`; use `docs/03-architecture/architecture-contract.md` and current presenters as the source of truth.
+
 ## Ingress
 
 - Accept updates only through the configured webhook path and verified Telegram secret token.
@@ -12,7 +14,7 @@
 ## Retail main menu
 
 ```text
-🛒 SHOP DIGITAL
+TIER20 SHOP
 
 [ 🛍 Danh sách sản phẩm ]
 [ 🔍 Tìm sản phẩm ] [ 📦 Đơn hàng ]

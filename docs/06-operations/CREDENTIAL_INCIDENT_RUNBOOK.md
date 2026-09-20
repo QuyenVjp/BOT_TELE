@@ -4,16 +4,16 @@
 
 - Credential-leak scan finding (CI `secret-scan` or runtime redaction tripwire).
 - Customer reports a delivered account is already in use / compromised.
-- Suspected disclosure of a vault ref or plaintext secret via log, chat, ticket, or export.
+- Suspected disclosure of a vault ref or plaintext secret via log, unbound/wrong Telegram chat, ticket, export, or replay.
 - Owner-initiated revoke of an active Delivery Bundle.
 
 ## Severity
 
-| Severity | Example | Immediate action |
-|---|---|---|
-| Critical | Raw credential in a production log, ticket, or chat | Revoke + rotate + freeze related fulfillment; open incident |
-| High | Delivery Bundle token leaked, concurrent non-owner reveal | Revoke bundle; reissue only to the owning customer |
-| Medium | Customer reports non-working account within warranty | Open replacement case; preserve original asset |
+| Severity | Example                                                                                                | Immediate action                                            |
+| -------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------- |
+| Critical | Raw credential in a production log, ticket, export, unbound/wrong chat, or duplicate/replayed delivery | Revoke + rotate + freeze related fulfillment; open incident |
+| High     | Delivery Bundle token leaked or concurrent non-owner recovery reveal                                   | Revoke bundle; reissue only to the owning customer          |
+| Medium   | Customer reports non-working account within warranty                                                   | Open replacement case; preserve original asset              |
 
 ## Procedure
 
@@ -39,13 +39,13 @@
 
 ### 4. Communicate
 
-- Customer: safe status only (`Tài khoản đã được thu hồi`, `Chúng tôi sẽ cấp tài khoản thay thế`).
+- Customer: use the bound Telegram chat for the normal delivery message; incident updates remain safe status only (`Tài khoản đã được thu hồi`, `Chúng tôi sẽ cấp tài khoản thay thế`).
 - Never ask the customer to paste a password back into chat.
 - Never forward a vault ref or plaintext secret to support, logs, or another channel.
 
 ## Safety rules
 
-- SR-001: raw secrets never enter storage, logs, events, telemetry, or tickets.
-- SR-003: reveal and reissue are ownership-scoped; foreign ids return a generic failure.
-- FR-017: first view is atomic (AVAILABLE → CONSUMED); concurrent views cannot double-reveal.
+- SR-001: raw secrets never enter storage, logs, events, telemetry, tickets, or unintended Telegram chats.
+- SR-003: automatic delivery and legacy reveal are ownership-scoped; foreign ids return a generic failure.
+- FR-017: automatic handoff consumes after a successful send; the legacy first view is atomic (`AVAILABLE → CONSUMED`) and concurrent recovery cannot double-reveal.
 - FR-020: replacement preserves the original asset and Order history.

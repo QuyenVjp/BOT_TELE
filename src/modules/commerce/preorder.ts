@@ -165,7 +165,7 @@ export function presentPreorderConsent(config: PreorderVariantConfig): Presented
   const { depositVnd, balanceVnd } = computePreorderDeposit(config);
 
   const lines = [
-    "📌 ĐIỀU KIỆN ĐẶT CỌC GIỮ SUẤT",
+    "📌 Điều kiện đặt cọc giữ suất",
     "",
     `Sản phẩm: ${config.productName} · ${config.variantName}`,
     `Giá niêm yết: ${config.priceVnd.toLocaleString("vi-VN")} ₫`,

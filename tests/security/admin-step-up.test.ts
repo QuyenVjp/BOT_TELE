@@ -174,9 +174,11 @@ describe("TOTP core (RFC 6238 / RFC 4648)", () => {
 describe("step-up service keeps the seed inside the vault (SR-001)", () => {
   it("returns only the otpauth URI and never echoes the seed or the code back", async () => {
     const vault = createInMemoryVault();
-    const stub = stubDb((parameters) =>
-      parameters.length === 1 ? [{ vault_ref: SECRET_REF }] : [],
-    );
+    const stub = stubDb((parameters) => {
+      if (parameters.length === 1) return [{ vault_ref: SECRET_REF, factor_version: 1 }];
+      if (parameters.length >= 5) return [{ id: "attempt-1" }];
+      return [];
+    });
     const service = createStepUpService(stub.db, vault, {
       ttlSeconds: 300,
       lockoutMinutes: 15,
@@ -247,6 +249,39 @@ describe("step-up service keeps the seed inside the vault (SR-001)", () => {
     // ref, the category, and the redacted audit metadata.
     expect(JSON.stringify(stub.statements)).not.toContain(seed);
     expect(JSON.stringify(stub.statements)).not.toContain(code);
+  });
+
+  it("rejects reusing the same accepted time step", async () => {
+    const vault = createInMemoryVault();
+    let acceptedInsertCount = 0;
+    const stub = stubDb((parameters) => {
+      if (parameters.length === 1) return [{ vault_ref: SECRET_REF, factor_version: 1 }];
+      if (parameters.length === 2) return [{ failed_attempts: 0 }];
+      if (parameters.length === 5 && acceptedInsertCount++ === 0) return [{ id: "attempt-1" }];
+      return [];
+    });
+    const service = createStepUpService(stub.db, vault, {
+      ttlSeconds: 300,
+      lockoutMinutes: 15,
+      maxAttempts: 5,
+    });
+    await service.enroll({
+      adminTelegramUserId: ADMIN_ID,
+      issuer: "TIER20",
+      accountLabel: "owner",
+    });
+    const seed = await vault.reveal(SECRET_REF);
+    const now = new Date("2026-01-01T00:00:59.000Z");
+    const input = {
+      ...TEST_BINDING,
+      adminTelegramUserId: ADMIN_ID,
+      category: "REFUND" as const,
+      code: generateTotp(seed, Math.floor(now.getTime() / 1000)),
+      now,
+    };
+
+    await expect(service.verify(input)).resolves.toMatchObject({ ok: true });
+    await expect(service.verify(input)).resolves.toEqual({ ok: false, code: "REPLAYED" });
   });
 
   it("refuses an enrolled admin's correct code once the failure budget is spent", async () => {

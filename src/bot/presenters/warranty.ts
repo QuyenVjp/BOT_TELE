@@ -7,17 +7,15 @@
  *  * the customer never learns an internal state, an asset id or a credential here;
  *  * money that has not moved is never described as moved.
  */
-import type { InlineButton, PresentedMessage } from "./catalog.js";
+import type { PresentedMessage } from "./catalog.js";
 import { ISSUE_TYPE_LABELS, type WarrantyIssueType } from "../../modules/warranty/claims.js";
 
 /** Canonical warranty block for a product screen (goal §5/§62). */
 export const WARRANTY_BLOCK_LINES = [
-  "🛡 BẢO HÀNH",
+  "🛡 Bảo hành",
   "Bảo hành theo thời gian sử dụng.",
   "Nếu tài khoản bị khóa hoặc mất gói do lỗi thuộc phạm vi bảo hành, shop hoàn phần tiền tương ứng với số ngày chưa sử dụng.",
 ];
-
-const BACK_HOME: InlineButton[][] = [[{ text: "🏠 Trang chủ", callbackData: "shop:home" }]];
 
 const vnd = (value: bigint) => `${value.toLocaleString("vi-VN")} ₫`;
 
@@ -38,7 +36,7 @@ export function presentWarrantyPolicy(input: {
   productId: string;
 }): PresentedMessage {
   const lines = [
-    "🛡 CHÍNH SÁCH BẢO HÀNH",
+    "🛡 Chính sách bảo hành",
     "",
     `Sản phẩm: ${input.productName}`,
     `Thời gian: ${input.warrantyDays} ngày kể từ khi giao hàng thành công`,
@@ -65,8 +63,10 @@ export function presentWarrantyPolicy(input: {
     text: lines.join("\n"),
     buttons: [
       [{ text: "🛡 Báo lỗi / Bảo hành", callbackData: `warranty:report:${input.variantId}` }],
-      [{ text: "⬅️ Quay lại", callbackData: `shop:product:${input.productId}` }],
-      ...BACK_HOME,
+      [
+        { text: "⬅️ Quay lại", callbackData: `shop:product:${input.productId}` },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
     ],
   };
 }
@@ -83,19 +83,24 @@ export function presentWarrantyOrderBlock(input: {
   if (input.expired) {
     return {
       text: [
-        "⌛ SẢN PHẨM ĐÃ HẾT THỜI HẠN BẢO HÀNH",
+        "⌛ Sản phẩm đã hết thời hạn bảo hành",
         "",
         `Đơn: ${input.orderNumber}`,
         `Bảo hành đến: ${day(input.warrantyEnd)}`,
         "",
         "Yêu cầu bảo hành sau thời hạn này không thuộc phạm vi bảo hành.",
       ].join("\n"),
-      buttons: [[{ text: "💬 Liên hệ hỗ trợ", callbackData: "sup:open" }], ...BACK_HOME],
+      buttons: [
+        [
+          { text: "💬 Liên hệ hỗ trợ", callbackData: "sup:open" },
+          { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        ],
+      ],
     };
   }
   return {
     text: [
-      "🛡 BẢO HÀNH",
+      "🛡 Bảo hành",
       "",
       `Đơn: ${input.orderNumber}`,
       `Bảo hành đến: ${day(input.warrantyEnd)}`,
@@ -106,8 +111,10 @@ export function presentWarrantyOrderBlock(input: {
     ].join("\n"),
     buttons: [
       [{ text: "🛡 Báo lỗi / Bảo hành", callbackData: `warranty:report:${input.variantId}` }],
-      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
-      ...BACK_HOME,
+      [
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
     ],
   };
 }
@@ -121,7 +128,7 @@ export function presentWarrantyIssueTypes(input: {
   const types = Object.keys(ISSUE_TYPE_LABELS) as WarrantyIssueType[];
   return {
     text: [
-      "🛡 BÁO LỖI / BẢO HÀNH",
+      "🛡 Báo lỗi / bảo hành",
       "",
       `Đơn: ${input.orderNumber}`,
       "Chọn tình trạng bạn gặp phải:",
@@ -154,7 +161,7 @@ export function presentWarrantyReportPreview(input: {
 }): PresentedMessage {
   return {
     text: [
-      "🛡 XÁC NHẬN YÊU CẦU BẢO HÀNH",
+      "🛡 Xác nhận yêu cầu bảo hành",
       "",
       `Sản phẩm: ${input.productName}`,
       `Đơn: ${input.orderNumber}`,
@@ -189,7 +196,7 @@ export function presentWarrantyClaimSubmitted(input: {
 }): PresentedMessage {
   return {
     text: [
-      "✅ ĐÃ GỬI YÊU CẦU BẢO HÀNH",
+      "✅ Đã gửi yêu cầu bảo hành",
       "",
       `Mã: ${input.claimNumber}`,
       `Còn bảo hành: ${input.remainingDays} ngày`,
@@ -199,8 +206,10 @@ export function presentWarrantyClaimSubmitted(input: {
     ].join("\n"),
     buttons: [
       [{ text: "🧾 Xem yêu cầu", callbackData: `warranty:claim:${input.claimNumber}` }],
-      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
-      ...BACK_HOME,
+      [
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
     ],
   };
 }
@@ -236,7 +245,7 @@ export function presentWarrantyClaim(input: {
   const amount = input.approvedRefundVnd ?? input.estimatedRefundVnd;
   return {
     text: [
-      `🛡 YÊU CẦU ${input.claimNumber}`,
+      `🛡 Yêu cầu ${input.claimNumber}`,
       "",
       `Sản phẩm: ${input.productName}`,
       `Còn bảo hành: ${input.remainingDays} ngày`,
@@ -249,14 +258,16 @@ export function presentWarrantyClaim(input: {
       ),
     ].join("\n"),
     buttons: [
-      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
       [
         {
           text: "💳 Cập nhật thông tin nhận tiền",
           callbackData: `warranty:payout:${input.claimNumber}`,
         },
       ],
-      ...BACK_HOME,
+      [
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
     ],
   };
 }
@@ -264,14 +275,19 @@ export function presentWarrantyClaim(input: {
 export function presentWarrantyExpired(input: { warrantyEnd: string }): PresentedMessage {
   return {
     text: [
-      "⌛ SẢN PHẨM ĐÃ HẾT THỜI HẠN BẢO HÀNH",
+      "⌛ Sản phẩm đã hết thời hạn bảo hành",
       "",
       `Bảo hành đến: ${day(input.warrantyEnd)}`,
       "",
       "Yêu cầu gửi sau thời hạn này không thuộc phạm vi bảo hành.",
       "Bạn vẫn có thể liên hệ hỗ trợ để được xem xét riêng.",
     ].join("\n"),
-    buttons: [[{ text: "💬 Liên hệ hỗ trợ", callbackData: "sup:open" }], ...BACK_HOME],
+    buttons: [
+      [
+        { text: "💬 Liên hệ hỗ trợ", callbackData: "sup:open" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
+    ],
   };
 }
 
@@ -282,6 +298,11 @@ export function presentWarrantyNotCovered(): PresentedMessage {
       "",
       "Bạn vẫn có thể liên hệ hỗ trợ nếu cần giúp đỡ.",
     ].join("\n"),
-    buttons: [[{ text: "💬 Hỗ trợ", callbackData: "sup:open" }], ...BACK_HOME],
+    buttons: [
+      [
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
+    ],
   };
 }

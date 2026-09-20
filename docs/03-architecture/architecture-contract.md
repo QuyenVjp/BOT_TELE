@@ -4,7 +4,10 @@
 
 ## 1. Scope
 
-This sprint adds customer store credit, Telegram customer profile snapshots, a persistent Telegram reply keyboard, and restock notifications. Mini App was cancelled by owner decision; commerce is Telegram-bot-only. It does not replace the existing retail order/payment/delivery core. VietQR + SePay remains the payment rail for both direct checkout and wallet top-up settlement.
+This sprint retains the closed-loop wallet domain, Telegram customer profile snapshots, a
+persistent Telegram reply keyboard, and restock notifications. Mini App was cancelled by owner
+decision; commerce is Telegram-bot-only. The retail MVP exposes catalog → VietQR → SePay →
+delivery; wallet and top-up remain backend/post-MVP lanes.
 
 Wallet is closed-loop store credit only. No withdrawal, cash-out, or P2P transfer.
 
@@ -15,7 +18,8 @@ The active scope is the complete admin product → variant → inventory → cus
 - Reuse `product` and `product_variant`; inventory, fulfillment configuration, price, supplier mapping and low-stock threshold belong to the variant.
 - Explicit fulfillment types: `STOCK_ACCOUNT`, `STOCK_CODE`, `DIGITAL_FILE`, `SUPPLIER_API`, `MANUAL_FULFILLMENT`, `QUANTITY_STOCK`, `UNLIMITED_SERVICE`. User-facing labels are Vietnamese, not enum names.
 - Discrete account/code records retain reservation, delivery and replacement lineage. A reusable file artifact is versioned content, never a one-unit stock item; file bytes stay outside PostgreSQL and Telegram identifiers are bound to artifact version/hash.
-- Payment remains VietQR/bank/verified SePay or atomic wallet checkout. Payment handlers never perform type-specific delivery; the existing durable fulfillment boundary owns routing and retries.
+- Retail payment remains VietQR/bank/verified SePay. The wallet domain stays isolated for a separately
+  approved lane; payment handlers never perform type-specific delivery.
 - Account field schemas distinguish required, secret and customer-visible fields. Import previews, audit, metrics and callbacks never contain inventory values. Existing vault protection remains mandatory.
 - Inventory home selects a product first. With no products it offers creation; it never presents a contextless global stock count or generic CSV instructions.
 - Preserve HMAC over timestamp plus exact raw body, ledger-only money changes, numeric Telegram identity, root/private admin authorization, atomic reservations and supplier UNKNOWN reconciliation before failover.
@@ -118,14 +122,14 @@ CANCELLED BY OWNER — DO NOT IMPLEMENT. No `initData`, WebApp session, or Mini 
 1. `bot/webhook.ts` verifies webhook secret and dedupes update.
 2. `telegram-inbox` stores normalized envelope.
 3. Worker resolves/refreshes customer identity snapshot.
-4. Dispatcher renders persistent reply keyboard and routes text/callbacks.
-5. Wallet actions call wallet domain service only.
-6. Verified SePay webhook credits top-up intents through wallet service.
+4. Dispatcher renders the retail reply keyboard and routes text/callbacks.
+5. Approved wallet/admin paths, when enabled, call the wallet domain service only.
+6. Verified SePay webhook credits top-up intents through the wallet service.
 7. Outbox worker sends success/restock/broadcast notifications.
 
-### Wallet purchase flow
+### Wallet purchase flow (deferred retail lane)
 
-1. Customer taps wallet purchase or direct buy.
+1. An explicitly enabled wallet lane may offer a wallet purchase.
 2. Service revalidates product, stock, and balance in one transaction where practical.
 3. If wallet is sufficient, purchase debits ledger atomically and order becomes paid.
 4. If stock or balance fails, no debit persists.
@@ -146,15 +150,15 @@ Install/show a native `ReplyKeyboardMarkup` with:
 - `resize_keyboard: true`
 - `is_persistent: true`
 
-Canonical labels:
+Canonical retail labels:
 
 - `🛒 Mua hàng`
 - `👤 Tài khoản`
-- `💰 Nạp ví`
 - `🧾 Đơn hàng`
 - `🛡 Bảo hành`
-- `🔔 Báo có hàng`
 - `💬 Hỗ trợ`
+
+Wallet/top-up and reseller controls are not customer-facing retail MVP labels.
 
 Rules:
 
@@ -181,6 +185,9 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 - Outbox remains the only durable side-effect boundary.
 - Restock and wallet notifications are emitted from durable events, not from ad hoc DB updates.
 - Broadcast pacing must stay bounded and retry-safe.
+- Credential-bearing local/supplier bundles are delivered automatically in the successful Telegram notification after verified payment. The message renders every `customerVisible` inventory field plus configured usage and warranty text; internal-only fields remain withheld.
+- `delivery_bundle` and the authenticated `/d/:token`/callback reveal path remain as retry/recovery compatibility surfaces, but a new purchase does not require a customer tap to receive its credentials.
+- Automatic delivery must remain retry-safe: the worker may read the customer-visible secret before sending, but only finalizes bundle consumption and order completion after the Telegram send succeeds.
 - Inventory correction must not masquerade as a customer-facing announcement unless explicitly toggled and derived from a real stock delta.
 - Marketing `all` is `SHOP_UPDATE` and requires `shop_updates` consent at preview, recipient creation and send time. Only genuine service-critical campaigns retain opt-out-independent delivery; marketing navigation cannot select that class.
 - Owner-triggered stock announcements from an inventory variant view are optional `SHOP_UPDATE` marketing broadcasts. The preview content is rebuilt from product/variant/stock/price tables, then confirmed through the existing broadcast campaign flow; product restock subscriptions never imply shop-update consent.
@@ -208,11 +215,12 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 
 ### Live UX P0 boundary
 
-- Wallet entry displays the real balance and an amount picker without creating a top-up intent. A durable customer-owned selection/custom-amount workflow precedes explicit VietQR confirmation; configured integer VND bounds apply once at the shared boundary.
+- Wallet entry and top-up selection remain deferred from the retail MVP; if enabled later, the
+  existing ledger, VND bounds, and VietQR confirmation invariants still apply.
 - Confirmed amount is immutable on the resulting intent and QR. Changing an unpaid amount cancels/expires the old intent before returning to selection; paid intents and verified once-only ledger credits remain unchanged.
 - Inventory entry is product-first, then variant-first. Durable root-owned import sessions bind the selected variant and configured schema; user input never requires a database variant ID. Templates, uploads and actions follow fulfillment type.
 - Inventory preview/list responses contain counts and safe metadata only. Import confirmation remains the stock mutation boundary. Per-variant restock subscriptions retain generation semantics; general shop announcements require preview/confirmation.
-- P0 local/staging API and worker restart is authorized after focused checks. Real Telegram wallet/inventory visible acceptance precedes the P0 commit and resumption of overnight release work; no production deployment or real payment is authorized by this canary.
+- P0 local/staging API and worker restart is authorized after focused checks. Real Telegram retail visible acceptance precedes the P0 commit; no production deployment or real payment is authorized by this canary.
 
 ## 9. Increment plan
 
@@ -266,6 +274,13 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 - Bank transactions, payment evidence, discrepancies, outbox events, and delivery evidence remain append-only or status-transitioned. Resolution never deletes or rewrites provider evidence.
 - Terminal orphan handling records a reason and audit trail, stops retry churn, and keeps the original outbox payload/evidence available for review.
 - Admin screens expose safe identifiers and summaries only; no raw provider credentials, vault references, account inventory, or customer secrets are rendered.
+
+### Owner-requested TOTP enforcement (2026-09-20)
+
+- Production uses `ADMIN_STEP_UP_MODE=required` with the external Vault. Every action in `SENSITIVE_ACTION_POLICY` that has a non-null category requires a current RFC 6238 TOTP grant bound to the exact action, resource, version, and payload before mutation.
+- Enrollment and factor replacement stay on the local operator host: render the `otpauth://` URI as a local QR, scan it into the owner's authenticator, and never send the seed or QR through Telegram. PostgreSQL stores only an opaque `vault:` reference.
+- The bot-generated `/confirm` challenge is an action-binding/anti-replay gate, not 2FA. It remains separate from and cannot substitute for the owner's authenticator code.
+- A failed, missing, expired, or locked-out TOTP verification must fail closed before the business mutation; attempts and authorization outcomes remain append-only redacted audit evidence.
 
 ### Owner-surface adapter rules
 

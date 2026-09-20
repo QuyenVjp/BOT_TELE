@@ -1,7 +1,5 @@
 import { createHash } from "node:crypto";
-import { sql } from "kysely";
 import type { Db, Trx } from "../../infrastructure/db/transaction.js";
-import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { appendAuditEvent } from "../../modules/identity/audit.js";
 import {
   isDurableAdminCommandRef,
@@ -48,6 +46,7 @@ import {
   type ResaleEvidenceSource,
 } from "../../modules/catalog/publication.js";
 import { isId } from "../../shared/ids/index.js";
+import { setAdminVariantActive } from "../../modules/catalog/admin-products.js";
 import {
   getStoreOpenReadiness,
   isStoreOpenReady,
@@ -457,49 +456,21 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
       }
       case "catalog.activate":
       case "catalog.deactivate": {
-        const active = command === "catalog.activate";
-        const updated = await withTransaction(db, async (trx) => {
-          if (active) {
-            const ready = await sql<{ id: string }>`
-              select v.id
-              from product_variant v
-              join variant_file_artifact a on a.variant_id = v.id and a.is_active
-              where v.id = ${input.targetId} and v.fulfillment_type = 'DIGITAL_FILE'
-              limit 1
-            `.execute(trx);
-            const digital = await sql<{ id: string }>`
-              select id from product_variant where id = ${input.targetId} and fulfillment_type = 'DIGITAL_FILE' limit 1
-            `.execute(trx);
-            if (digital.rows[0] && !ready.rows[0]) return "DIGITAL_FILE_ARTIFACT_REQUIRED" as const;
-          }
-          const res = await sql<{ id: string }>`
-            update product_variant
-            set is_active = ${active}, updated_at = now(), version = version + 1
-            where id = ${input.targetId}
-            returning id
-          `.execute(trx);
-          if (res.rows.length === 0) return false;
-          await appendAuditEvent(trx, {
-            actorType: "ROOT_ADMIN",
-            actorId: String(input.actor.numericUserId),
-            action: command,
-            targetType: "ProductVariant",
-            targetId: input.targetId,
-            reason: input.reason,
-            correlationId: input.correlationId,
-            metadataRedacted: { active },
-          });
-          return true;
+        const result = await setAdminVariantActive({
+          db,
+          actor: input.actor,
+          config: rootConfig,
+          variantId: input.targetId,
+          active: command === "catalog.activate",
+          reason: input.reason,
+          correlationId: input.correlationId,
+          ...(typeof input.expectedVersion === "number"
+            ? { expectedVersion: input.expectedVersion }
+            : {}),
+          ...(telemetry ? { telemetry } : {}),
         });
-        if (updated === "DIGITAL_FILE_ARTIFACT_REQUIRED") {
-          return {
-            ok: false,
-            code: "DIGITAL_FILE_ARTIFACT_REQUIRED",
-            message: "Cần nhập và kích hoạt tệp thật trước khi bật bán biến thể tệp số.",
-          };
-        }
-        if (!updated) {
-          return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy biến thể." };
+        if (!result.ok) {
+          return { ok: false, code: result.code, message: result.message };
         }
         return { ok: true, needsConfirmation: false };
       }

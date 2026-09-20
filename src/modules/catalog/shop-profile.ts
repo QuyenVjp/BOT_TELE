@@ -46,9 +46,25 @@ function coerceTagline(value: string | null | undefined): string {
   return value;
 }
 
-function coerceAdminContactUrl(value: string | null | undefined): string {
-  if (!value || /aicodexvn/i.test(value)) return ADMIN_CONTACT_URL;
-  return value;
+export function isValidTelegramUsernameUrl(value: string | null | undefined): boolean {
+  if (!value || typeof value !== "string") return false;
+  const trimmed = value.trim();
+  return /^https:\/\/t\.me\/[A-Za-z0-9_]+$/i.test(trimmed);
+}
+
+export function coerceAdminContactUrl(value: string | null | undefined): string {
+  if (!value) return ADMIN_CONTACT_URL;
+  const trimmed = value.trim();
+  if (/aicodexvn/i.test(trimmed)) return ADMIN_CONTACT_URL;
+  if (!isValidTelegramUsernameUrl(trimmed)) return ADMIN_CONTACT_URL;
+  return trimmed;
+}
+
+export function coerceCommunityUrl(value: string | null | undefined): string {
+  if (!value) return COMMUNITY_URL;
+  const trimmed = value.trim();
+  if (!isValidTelegramUsernameUrl(trimmed)) return COMMUNITY_URL;
+  return trimmed;
 }
 
 /**
@@ -75,7 +91,7 @@ export async function getShopProfile(exec?: Executor): Promise<ShopProfile> {
     return {
       shopName: coerceShopName(row.shop_name),
       tagline: coerceTagline(row.shop_tagline),
-      communityUrl: row.community_url || COMMUNITY_URL,
+      communityUrl: coerceCommunityUrl(row.community_url),
       communityButton: COMMUNITY_BUTTON_LABEL,
       adminContactUrl: coerceAdminContactUrl(row.admin_contact_url),
       adminDisplay: row.admin_display || ADMIN_DISPLAY,

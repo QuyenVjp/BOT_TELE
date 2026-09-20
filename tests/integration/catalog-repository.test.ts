@@ -68,14 +68,14 @@ async function seed(): Promise<SeedIds> {
   await sql`
     insert into category (id, name_vi, slug, is_active, sort_order)
     values
-      (${activeCategoryId}, 'Giải trí', 'giai-tri', true, 1),
+      (${activeCategoryId}, 'AI', 'ai', true, 1),
       (${inactiveCategoryId}, 'Ẩn', 'an', false, 2)
   `.execute(ctx.db);
 
   await sql`
     insert into product (id, category_id, name_vi, slug, is_active, sort_order)
     values
-      (${activeProductId}, ${activeCategoryId}, 'Netflix', 'netflix', true, 1),
+      (${activeProductId}, ${activeCategoryId}, 'ChatGPT', 'chatgpt', true, 1),
       (${inactiveProductId}, ${activeCategoryId}, 'Sản phẩm ẩn', 'san-pham-an', false, 2),
       (${supplierOnlyProductId}, ${activeCategoryId}, 'Chỉ nhà cung cấp', 'chi-nha-cung-cap', true, 3)
   `.execute(ctx.db);

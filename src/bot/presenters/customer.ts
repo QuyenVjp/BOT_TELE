@@ -1,5 +1,10 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
-import type { InlineButton, PresentedMessage, ReplyKeyboard } from "./catalog.js";
+import {
+  formatCategoryLabel,
+  type InlineButton,
+  type PresentedMessage,
+  type ReplyKeyboard,
+} from "./catalog.js";
 import { formatExpiryVietnam } from "./payment.js";
 import type { StorefrontProductSummary } from "../../modules/catalog/repository.js";
 import {
@@ -8,11 +13,11 @@ import {
   type PreorderStatus,
 } from "../../modules/commerce/preorder.js";
 import {
-  ADMIN_CONTACT_URL,
   COMMUNITY_BUTTON_LABEL,
-  COMMUNITY_URL,
   SHOP_NAME,
   SHOP_TAGLINE,
+  coerceAdminContactUrl,
+  coerceCommunityUrl,
 } from "../../modules/catalog/shop-profile.js";
 
 export const CUSTOMER_COPY = {
@@ -39,7 +44,7 @@ export const MAIN_REPLY_KEYBOARD: ReplyKeyboard = {
   resizeKeyboard: true,
   buttons: [
     [{ text: CUSTOMER_COPY.browse }, { text: CUSTOMER_COPY.orders }],
-    [{ text: CUSTOMER_COPY.account }, { text: CUSTOMER_COPY.topup }],
+    [{ text: CUSTOMER_COPY.account }],
     [{ text: CUSTOMER_COPY.warranty }, { text: CUSTOMER_COPY.support }],
   ],
 };
@@ -51,7 +56,6 @@ export function presentCustomerHelp(): PresentedMessage {
       "/start — Mở TIER20 SHOP",
       "/shop — Xem sản phẩm",
       "/orders — Đơn hàng của tôi",
-      "/wallet — Ví của tôi",
       "/warranty — Bảo hành",
       "/support — Hỗ trợ",
       "/settings — Cài đặt",
@@ -88,6 +92,7 @@ export interface StorefrontDisplayOptions {
   shopName?: string | undefined;
   shopTagline?: string | undefined;
   communityUrl?: string | undefined;
+  adminContactUrl?: string | undefined;
   categories?: ReadonlyArray<{ id: string; name: string; icon?: string | null }>;
   featuredProducts?: StorefrontProductSummary[];
   products?: StorefrontProductSummary[];
@@ -117,7 +122,7 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   const buttons: InlineButton[][] = [];
   const featured = options.featuredProducts ?? [];
   if (featured.length) {
-    lines.push("", "🔥 SẢN PHẨM NỔI BẬT");
+    lines.push("", "🔥 Sản phẩm nổi bật");
     for (const product of featured.slice(0, 3)) {
       buttons.push([{ text: `🔥 ${product.name_vi}`, callbackData: `shop:product:${product.id}` }]);
     }
@@ -126,15 +131,25 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   for (let i = 0; i < categories.length; i += 2) {
     buttons.push(
       categories.slice(i, i + 2).map((category) => ({
-        text: category.name,
+        text: formatCategoryLabel(category.name, category.icon),
         callbackData: `cat:view:${category.id}`,
       })),
     );
   }
   buttons.push(
     [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
-    [{ text: COMMUNITY_BUTTON_LABEL, url: COMMUNITY_URL, callbackData: "" }],
-    [{ text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
+    [
+      {
+        text: COMMUNITY_BUTTON_LABEL,
+        url: coerceCommunityUrl(options.communityUrl),
+        callbackData: "",
+      },
+      {
+        text: "👨‍💻 Liên hệ Admin",
+        url: coerceAdminContactUrl(options.adminContactUrl),
+        callbackData: "",
+      },
+    ],
   );
   if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);
   return {
@@ -147,13 +162,15 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
 export function presentCustomerWarranty(summary?: string): PresentedMessage {
   return {
     text: [
-      "🛡 CHÍNH SÁCH BẢO HÀNH & HỖ TRỢ",
+      "🛡 Chính sách bảo hành & hỗ trợ",
       "",
       summary ?? "Vui lòng liên hệ để được hỗ trợ.",
     ].join("\n"),
     buttons: [
-      [{ text: "💬 Nhắn tin hỗ trợ", callbackData: "supp:open" }],
-      [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+      [
+        { text: "💬 Nhắn tin hỗ trợ", callbackData: "supp:open" },
+        { text: "🛒 Về trang chủ", callbackData: "shop:home" },
+      ],
     ],
   };
 }
@@ -163,7 +180,7 @@ export function presentCustomerNotificationPreferences(prefs: {
 }): PresentedMessage {
   return {
     text: [
-      "CÀI ĐẶT THÔNG BÁO",
+      "Cài đặt thông báo",
       "",
       `Cập nhật sản phẩm: ${prefs.marketing ? "Bật" : "Tắt"}`,
       `Thông tin đơn hàng: ${prefs.socialProof ? "Bật" : "Tắt"}`,
@@ -212,7 +229,7 @@ const PREORDER_STATUS_LINE: Record<PreorderStatus, string> = {
 export function presentCustomerPreorders(
   preorders: readonly CustomerPreorderSummary[],
 ): PresentedMessage {
-  const lines = ["💰 ĐẶT CỌC CỦA TÔI", ""];
+  const lines = ["💰 Đặt cọc của tôi", ""];
   const buttons: InlineButton[][] = [];
   if (preorders.length === 0) {
     lines.push("Bạn chưa có suất đặt cọc nào.");
@@ -255,38 +272,43 @@ export function presentCustomerPreorders(
     }
     lines.push("");
   }
-  buttons.push([{ text: CUSTOMER_COPY.browse, callbackData: "shop:home" }]);
-  buttons.push([{ text: CUSTOMER_COPY.support, callbackData: "supp:open" }]);
+  buttons.push([
+    { text: CUSTOMER_COPY.browse, callbackData: "shop:home" },
+    { text: CUSTOMER_COPY.support, callbackData: "supp:open" },
+  ]);
   return { text: lines.join("\n").trimEnd(), buttons };
 }
 
 /**
- * Customer account home (goal §69): display name, wallet balance, completed-order
- * count and notification state. The numeric Telegram id is never rendered.
+ * Customer account home. Retail MVP keeps wallet and top-up controls out of
+ * customer-facing navigation; the wallet domain remains an internal backend lane.
  */
 export function presentCustomerAccount(input: {
   displayName: string;
-  balanceVnd: bigint;
+  /** Legacy backend input; retail MVP does not render wallet data. */
+  balanceVnd?: bigint;
   completedOrders: number;
   shopUpdates: boolean;
   purchaseActivity: boolean;
 }): PresentedMessage {
   return {
     text: [
-      "👤 TÀI KHOẢN KHÁCH HÀNG",
+      "👤 Tài khoản khách hàng",
       "",
       `👋 ${input.displayName}`,
-      `💰 Số dư ví: ${formatVnd(makeVnd(input.balanceVnd))}`,
       `🧾 Đơn đã hoàn tất: ${input.completedOrders}`,
       `🔔 Thông báo: Cập nhật sản phẩm ${input.shopUpdates ? "Bật" : "Tắt"} · Hoạt động mua hàng ${input.purchaseActivity ? "Bật" : "Tắt"}`,
     ].join("\n"),
     buttons: [
-      [{ text: "🧾 Đơn hàng của tôi", callbackData: "ord:list" }],
-      [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
-      [{ text: "💰 Nạp ví", callbackData: "wallet:topup" }],
-      [{ text: "🔔 Cài đặt thông báo", callbackData: "cust:notify" }],
-      [{ text: "🛡 Bảo hành", callbackData: "cust:warranty" }],
-      [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
+      [
+        { text: "🧾 Đơn hàng", callbackData: "ord:list" },
+        { text: "📌 Đặt cọc", callbackData: "cust:preorders" },
+      ],
+      [
+        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+        { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+      ],
+      [{ text: "🔔 Thông báo", callbackData: "cust:notify" }],
       [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
     ],
   };
@@ -300,7 +322,7 @@ export function presentCustomerAccount(input: {
 export function presentCustomerWarrantyHome(
   orders: ReadonlyArray<{ orderNumber: string; productNameVi: string }>,
 ): PresentedMessage {
-  const lines = ["🛡 BẢO HÀNH", ""];
+  const lines = ["🛡 Bảo hành", ""];
   const buttons: InlineButton[][] = [];
   if (orders.length === 0) {
     lines.push("Bạn chưa có đơn hàng nào đã hoàn tất để bảo hành.");
@@ -332,7 +354,7 @@ export function presentPurchaseThankYou(input: {
 }): PresentedMessage {
   return {
     text: [
-      "🎉 CẢM ƠN BẠN ĐÃ MUA HÀNG!",
+      "🎉 Cảm ơn bạn đã mua hàng!",
       "",
       `Sản phẩm: ${input.productName} · Đơn: ${input.orderNumber}`,
       "✅ Đơn đã hoàn tất.",
@@ -341,6 +363,8 @@ export function presentPurchaseThankYou(input: {
       [
         { text: "🧾 Xem đơn", callbackData: `ord:view:${input.orderNumber}` },
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+      ],
+      [
         { text: "🛒 Mua thêm", callbackData: "shop:home" },
         { text: "💬 Hỗ trợ", callbackData: `sup:open:${input.orderNumber}` },
       ],

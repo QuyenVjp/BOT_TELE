@@ -1,5 +1,4 @@
 import type { Db } from "../../infrastructure/db/transaction.js";
-import { randomBytes } from "node:crypto";
 import { buyNow, cancelUnpaidOrder, isStockOutcomeCode } from "../../modules/commerce/buy-now.js";
 import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
 import { presentPaymentForOrder } from "../../modules/payments/service.js";
@@ -253,8 +252,10 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       "Vui lòng mở lại sản phẩm để xem giá mới trước khi thanh toán. Bạn chưa bị trừ tiền.",
     ].join("\n"),
     buttons: [
-      [{ text: "🔄 Mở lại sản phẩm", callbackData: cancelCallbackData }],
-      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+      [
+        { text: "🔄 Mở lại sản phẩm", callbackData: cancelCallbackData },
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+      ],
     ],
   });
 
@@ -293,8 +294,10 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       return {
         text: `✅ Đơn hàng đã hoàn tất.\n\nĐơn: ${order.orderNumber}`,
         buttons: [
-          [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
-          [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+          [
+            { text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` },
+            { text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" },
+          ],
         ],
       };
     }
@@ -307,8 +310,10 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
           ? `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang chờ nhân viên xử lý thủ công. Shop sẽ thông báo qua tin nhắn khi hoàn tất.`
           : `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`,
         buttons: [
-          [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
-          [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+          [
+            { text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` },
+            { text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" },
+          ],
         ],
       };
     }
@@ -363,18 +368,8 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
         return errorMessage("Sản phẩm tạm hết hàng. Vui lòng chọn sản phẩm khác.");
       }
       const qrCallbackData = issueQrToken(telegramUserId, variant.id, Number(variant.price_vnd));
-      // One attempt id per rendered preview: it separates "the customer tapped the same button
-      // twice" from "the customer is buying this variant again", which the order idempotency key
-      // has to tell apart.
-      const walletCallbackData = choiceToken(
-        "CHECKOUT_WALLET",
-        telegramUserId,
-        variant.id,
-        Number(variant.price_vnd),
-        randomBytes(6).toString("base64url"),
-      );
       const cancelCallbackData = choiceToken("SHOP_PRODUCT", telegramUserId, variant.product_id);
-      if (!qrCallbackData || !walletCallbackData || !cancelCallbackData) {
+      if (!qrCallbackData || !cancelCallbackData) {
         return errorMessage("Không mở được xác nhận đơn hàng. Vui lòng mở lại sản phẩm.");
       }
       return presentCheckoutPreview({
@@ -384,7 +379,6 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
         deliveryLabel: DELIVERY_LABELS[variant.fulfillment_type] ?? "Tự động",
         warrantyLabel: variant.warranty_vi?.trim() || variant.delivery_eta_vi?.trim() || null,
         qrCallbackData,
-        walletCallbackData,
         cancelCallbackData,
       });
     },

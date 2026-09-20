@@ -13,6 +13,7 @@ import {
   presentDeliveryCompleted,
   presentDeliveryExpired,
   presentDeliveryUsed,
+  presentDeliveryReveal,
   presentDeliveryNeedsReview,
   DELIVERY_COPY,
 } from "../../src/bot/presenters/delivery.js";
@@ -22,10 +23,9 @@ import {
  * (SR-001, SC-007).
  *
  * Raw delivered credentials and provider secrets must never appear in domain
- * storage shapes, telemetry, events, support data, or error responses. This
- * suite walks the fixtures that US3 produces (asset envelopes, outbox payloads,
- * audit records, delivery presenters) and asserts none of them smuggle a raw
- * secret.
+ * storage shapes, telemetry, events, support data, or error responses. The
+ * only intended plaintext boundary is the recipient-bound Telegram delivery
+ * presenter after payment and asset validation.
  */
 
 const RAW_SECRET = "USER:SuperSecretPass-42";
@@ -135,7 +135,15 @@ describe("credential leak scan (SR-001 / SC-007)", () => {
     expect(hash).not.toBe(token);
   });
 
-  it("delivery presenters never render a raw secret or provider key", () => {
+  it("only the recipient delivery presenter renders the raw credential", () => {
+    const automatic = presentDeliveryReveal({
+      secret: RAW_SECRET,
+      productName: "Product",
+      usageInstructionsVi: null,
+      warrantyVi: null,
+    });
+    expect(automatic.text).toContain(RAW_SECRET);
+
     const msgs = [
       presentDeliveryProcessing("ORD-1"),
       presentDeliveryCompleted("ORD-1", "https://example.invalid/d/token"),

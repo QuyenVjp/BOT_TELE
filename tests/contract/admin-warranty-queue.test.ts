@@ -62,4 +62,25 @@ describe("presentAdminWarrantyQueue", () => {
       false,
     );
   });
+
+  it("arranges view buttons in pairs with at most 2 per row", () => {
+    const message = presentAdminWarrantyQueue({ view: "new", counts: COUNTS, rows: [row()] });
+    const viewRows = message.buttons.filter((r) =>
+      r.some((b) => b.callbackData.startsWith("admin:warranty:view:")),
+    );
+    expect(viewRows).toHaveLength(4);
+    for (const r of viewRows) {
+      expect(r.length).toBeLessThanOrEqual(2);
+    }
+  });
+
+  it("renders sentence-case header and keeps navigation paired at the bottom", () => {
+    const message = presentAdminWarrantyQueue({ view: "new", counts: COUNTS, rows: [] });
+    expect(message.text).toContain("🛡 Bảo hành / Hỗ trợ");
+    const lastRow = message.buttons.at(-1);
+    expect(lastRow).toEqual([
+      { text: "💰 Hàng chờ chi", callbackData: "admin:warranty:refunds" },
+      { text: "🏠 Quản trị", callbackData: "admin:menu" },
+    ]);
+  });
 });

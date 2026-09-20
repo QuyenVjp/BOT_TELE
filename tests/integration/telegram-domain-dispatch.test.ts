@@ -100,6 +100,7 @@ function setup() {
     buttons: [[{ text: "cancel", callbackData: `pay:cancel:${order.orderNumber}` }]],
   });
   const send = vi.fn().mockResolvedValue(undefined);
+  const deleteMessage = vi.fn().mockResolvedValue(undefined);
   const walletTopup = vi.fn().mockResolvedValue({ text: "wallet topup", buttons: [] });
   const walletTopupText = vi.fn().mockResolvedValue(null);
   const walletPay = vi.fn().mockResolvedValue({ text: "wallet pay", buttons: [] });
@@ -296,7 +297,7 @@ function setup() {
       pay: preorderPay,
       list: preorderList,
     },
-    responder: { send },
+    responder: { send, deleteMessage },
   });
 
   return {
@@ -367,6 +368,7 @@ function setup() {
     restockSubscribe,
     restockUnsubscribe,
     restockList,
+    deleteMessage,
     send,
     order,
     visibilityAction,
@@ -402,7 +404,24 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(sent.message.buttons[0]![0]!.callbackData).not.toContain(order.orderNumber);
   });
 
-  it("routes a 200k wallet preset selection", async () => {
+  it("deletes the credential message after the customer acknowledges it", async () => {
+    const { dispatcher, deleteMessage, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "42",
+      action: "UNKNOWN",
+      callbackData: "delivery:delete",
+      callbackQueryId: "delivery-delete",
+    });
+
+    expect(deleteMessage).toHaveBeenCalledWith(USER, 42);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it("blocks retired wallet preset selection from the customer dispatcher", async () => {
     const { dispatcher, walletTopup, send } = setup();
 
     await dispatcher.handle({
@@ -414,11 +433,11 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData: "wallet:topup:amount:200000",
     });
 
-    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), {
-      kind: "SELECT",
-      amountVnd: 200_000n,
-    });
+    expect(walletTopup).not.toHaveBeenCalled();
     expect(send).toHaveBeenCalledTimes(1);
+    expect((send.mock.calls[0]![0] as { message: { text: string } }).message.text).toContain(
+      "retail MVP",
+    );
   });
 
   it("routes an unclaimed customer query to catalog search instead of the home screen", async () => {
@@ -485,40 +504,27 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(send.mock.calls[0]![0].message.text).toBe("confirm 375000");
   });
 
-  it("routes wallet topup status refresh without confirming again", async () => {
+  it("blocks retired wallet topup status and cancellation callbacks", async () => {
     const { dispatcher, walletTopup, send } = setup();
 
-    await dispatcher.handle({
-      actorUserId: USER,
-      chatId: USER,
-      chatType: "private",
-      messageId: "10",
-      action: "WALLET",
-      callbackData: "wallet:topup:status",
-    });
+    for (const callbackData of ["wallet:topup:status", "wallet:topup:cancel"]) {
+      await dispatcher.handle({
+        actorUserId: USER,
+        chatId: USER,
+        chatType: "private",
+        messageId: "10",
+        action: "WALLET",
+        callbackData,
+      });
+    }
 
-    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), {
-      kind: "STATUS",
-    });
-    expect(send).toHaveBeenCalledTimes(1);
-  });
-
-  it("routes wallet topup cancellation", async () => {
-    const { dispatcher, walletTopup, send } = setup();
-
-    await dispatcher.handle({
-      actorUserId: USER,
-      chatId: USER,
-      chatType: "private",
-      messageId: "10",
-      action: "WALLET",
-      callbackData: "wallet:topup:cancel",
-    });
-
-    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), {
-      kind: "CANCEL",
-    });
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(walletTopup).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(2);
+    expect(
+      send.mock.calls.every((call) =>
+        (call[0] as { message: { text: string } }).message.text.includes("retail MVP"),
+      ),
+    ).toBe(true);
   });
 
   it("routes /start to the persistent customer home once even when admin workflow exists", async () => {
@@ -554,39 +560,22 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(sent.message.text).toContain("Chia sẻ số điện thoại");
   });
 
-  it("routes the customer topup reply keyboard label through Telegram normalization to wallet topup", async () => {
-    const { dispatcher, walletTopup, mainMenu, send } = setup();
-    const app = Fastify();
-    const inbox = {
-      accept: vi.fn(async (input: { envelope: TelegramCommandEnvelope }) => {
-        await dispatcher.handle(input.envelope);
-        return { kind: "ACCEPTED" as const, id: "memory:test" };
-      }),
-    };
-    await registerTelegramWebhook(app, { path: "/telegram", secretToken: "secret", inbox });
-    await app.ready();
+  it("does not route the retired customer topup label to wallet operations", async () => {
+    const { dispatcher, walletTopup, send } = setup();
 
-    await app.inject({
-      method: "POST",
-      url: "/telegram",
-      headers: { "x-telegram-bot-api-secret-token": "secret" },
-      payload: {
-        update_id: 504,
-        message: {
-          message_id: 504,
-          from: { id: Number(USER), is_bot: false },
-          chat: { id: Number(USER), type: "private" },
-          text: "💰 Nạp ví",
-        },
-      },
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "15",
+      action: "UNKNOWN",
+      messageText: "💰 Nạp ví",
     });
 
-    expect(walletTopup).toHaveBeenCalledTimes(1);
-    expect(mainMenu).not.toHaveBeenCalled();
-    expect(send).toHaveBeenCalledWith(
-      expect.objectContaining({ message: { text: "wallet topup", buttons: [] } }),
-    );
-    await app.close();
+    expect(walletTopup).not.toHaveBeenCalled();
+    expect(send).toHaveBeenCalledTimes(1);
+    const sent = send.mock.calls[0]![0] as { message: { text: string } };
+    expect(sent.message.text).toContain("retail MVP");
   });
   it("routes visible notification reply labels to their existing toggles", async () => {
     const { dispatcher, notificationToggle, send } = setup();
@@ -688,7 +677,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const sent = send.mock.calls[0]![0] as {
       message: { text: string; buttons: Array<Array<{ text: string }>> };
     };
-    expect(sent.message.text).toContain("QUẢN TRỊ");
+    expect(sent.message.text).toContain("Quản trị");
     const labels = sent.message.buttons.flat().map((button) => button.text);
     expect(labels).toEqual(expect.arrayContaining(["📦 Sản phẩm", "📥 Kho hàng", "🧾 Đơn hàng"]));
     expect(labels).not.toEqual(expect.arrayContaining(["Dashboard", "Products", "Inventory"]));
@@ -1950,8 +1939,8 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(send).toHaveBeenCalledTimes(7);
   });
 
-  it("routes wallet commands and leaves support routed to support", async () => {
-    const { dispatcher, walletTopup, walletPay, supportReasonMenu } = setup();
+  it("blocks wallet commands while leaving support routed to support", async () => {
+    const { dispatcher, walletTopup, walletPay, supportReasonMenu, send } = setup();
 
     await dispatcher.handle({
       actorUserId: USER,
@@ -1979,16 +1968,10 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       command: "/support",
     });
 
-    expect(walletTopup).toHaveBeenCalledWith(expect.objectContaining({ telegramUserId: USER }), {
-      kind: "PICK",
-    });
-    expect(walletPay).toHaveBeenCalledWith(
-      expect.objectContaining({ telegramUserId: USER }),
-      "ORD-1",
-    );
+    expect(walletTopup).not.toHaveBeenCalled();
+    expect(walletPay).not.toHaveBeenCalled();
     expect(supportReasonMenu).toHaveBeenCalledTimes(1);
-    expect(walletTopup).toHaveBeenCalledTimes(1);
-    expect(walletPay).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(3);
   });
 
   it("routes the marketing broadcast compose, root-safe preview, confirm, status, and cancel flow", async () => {
@@ -2219,7 +2202,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     });
 
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls[0]![0].message.text).toContain("CHÍNH SÁCH BẢO HÀNH & HỖ TRỢ");
+    expect(send.mock.calls[0]![0].message.text).toContain("Chính sách bảo hành & hỗ trợ");
   });
 
   it("routes preorder:consent:<variantId> to preorder.consent", async () => {

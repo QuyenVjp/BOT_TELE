@@ -40,15 +40,15 @@ beforeEach(async () => {
     insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
     select gen_random_uuid()::text, id, 'LOCAL', 'vault:' || id, 'fp-' || id, 'AVAILABLE'
     from product_variant
-    where sku in ('NF-1M', 'NF-3M', 'SP-1M')
+    where sku in ('CG-1M', 'CG-3M', 'CL-1M')
   `.execute(ctx.db);
   // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
-  // NF-NOAUTH (no evidence) and SP-PAUSED (paused policy) are deliberately left unpublished.
+  // CG-NOAUTH (no evidence) and CL-PAUSED (paused policy) are deliberately left unpublished.
   await sql`
     insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
     select v.resale_evidence_id, v.id, 'OWNER_ATTESTATION', 'TEST-REF-' || v.sku, 'fixture publication evidence', 'test'
     from product_variant v
-    where v.sku in ('NF-1M', 'NF-3M', 'SP-1M')
+    where v.sku in ('CG-1M', 'CG-3M', 'CL-1M')
   `.execute(ctx.db);
   await sql`
     update product_variant v
@@ -57,7 +57,7 @@ beforeEach(async () => {
            publication_variant_version = 1,
            published_at = now(),
            published_by = 'test'
-     where v.sku in ('NF-1M', 'NF-3M', 'SP-1M')
+     where v.sku in ('CG-1M', 'CG-3M', 'CL-1M')
   `.execute(ctx.db);
   callbacks = createCatalogCallbacks({
     db: ctx.db,
@@ -127,7 +127,7 @@ describe("catalog journey (US1)", () => {
   });
 
   it("deterministic search finds a seeded product and never invents one (FR-004/FR-005)", async () => {
-    const hit = await callbacks.search("netflix");
+    const hit = await callbacks.search("chatgpt");
     expect(hit.buttons.flat().some((b) => b.callbackData.startsWith("var:view:"))).toBe(true);
 
     const miss = await callbacks.search("khong-ton-tai-xyz-999");
@@ -141,7 +141,7 @@ describe("catalog journey (US1)", () => {
     await callbacks.mainMenu();
     const variantId = await callbacks.firstSellableVariantId();
     await callbacks.variantDetail(variantId, TELEGRAM_USER_ID);
-    await callbacks.search("netflix");
+    await callbacks.search("chatgpt");
     const orders = await sql<{
       count: string;
     }>`select count(*)::text as count from "order"`.execute(ctx.db);

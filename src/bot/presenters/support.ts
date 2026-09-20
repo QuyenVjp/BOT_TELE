@@ -1,4 +1,4 @@
-import type { InlineButton, PresentedMessage } from "./catalog.js";
+import { compactInlineRows, type InlineButton, type PresentedMessage } from "./catalog.js";
 import type { SupportReasonCode, SupportTicketStatus } from "../../modules/support/domain.js";
 import type { SupportTicket } from "../../modules/support/service.js";
 import { ADMIN_CONTACT_URL, COMMUNITY_URL, SHOP_NAME } from "../../modules/catalog/shop-profile.js";
@@ -12,7 +12,7 @@ import { ADMIN_CONTACT_URL, COMMUNITY_URL, SHOP_NAME } from "../../modules/catal
  */
 
 export const SUPPORT_COPY = {
-  title: `💬 HỖ TRỢ ${SHOP_NAME}`,
+  title: `💬 Hỗ trợ ${SHOP_NAME}`,
   reasonPrompt: "Vui lòng chọn chủ đề bạn cần hỗ trợ:",
   descriptionPrompt: "Mô tả ngắn gọn vấn đề (không gửi mật khẩu hay ảnh chứa thông tin đăng nhập).",
   openedTitle: "✅ Đã tạo ticket hỗ trợ",
@@ -48,7 +48,7 @@ const STATUS_LABEL: Record<SupportTicketStatus, string> = {
 export function presentSupportReasonMenu(orderNumber?: string): PresentedMessage {
   const suffix = orderNumber ? `:${orderNumber}` : "";
   return {
-    text: ["💬 HỖ TRỢ TIER20 SHOP", "", "Vui lòng chọn chủ đề bạn cần hỗ trợ:"].join("\n"),
+    text: [`💬 Hỗ trợ ${SHOP_NAME}`, "", "Vui lòng chọn chủ đề bạn cần hỗ trợ:"].join("\n"),
     buttons: [
       [
         { text: "🧾 Vấn đề đơn hàng", callbackData: `sup:reason:GENERAL_QUESTION${suffix}` },
@@ -58,8 +58,10 @@ export function presentSupportReasonMenu(orderNumber?: string): PresentedMessage
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
         { text: "📦 Sản phẩm / sử dụng", callbackData: `sup:reason:ASSET_NOT_WORKING${suffix}` },
       ],
-      [{ text: "👨‍💻 Nhắn Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
-      [{ text: "📢 Cộng đồng", url: COMMUNITY_URL, callbackData: "" }],
+      [
+        { text: "👨‍💻 Nhắn Admin", url: ADMIN_CONTACT_URL, callbackData: "" },
+        { text: "📢 Cộng đồng", url: COMMUNITY_URL, callbackData: "" },
+      ],
       [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
     ],
   };
@@ -97,11 +99,12 @@ export function presentTicketList(tickets: SupportTicket[]): PresentedMessage {
     };
   }
   const lines = [SUPPORT_COPY.listTitle, ""];
-  const buttons: InlineButton[][] = [];
+  const ticketButtons: InlineButton[] = [];
   for (const t of tickets) {
     lines.push(`• ${t.id.slice(-8)} — ${REASON_LABEL[t.reasonCode]} · ${STATUS_LABEL[t.status]}`);
-    buttons.push([{ text: t.id.slice(-8), callbackData: `sup:view:${t.id}` }]);
+    ticketButtons.push({ text: t.id.slice(-8), callbackData: `sup:view:${t.id}` });
   }
+  const buttons: InlineButton[][] = compactInlineRows(ticketButtons);
   buttons.push([{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }]);
   return { text: lines.join("\n"), buttons };
 }

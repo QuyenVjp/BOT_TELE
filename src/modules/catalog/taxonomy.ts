@@ -22,9 +22,6 @@ const ROOTS: ReadonlyArray<{
   { slug: "coding", nameVi: "💻 Coding / IDE", icon: "💻", sortOrder: 2 },
   { slug: "vpn", nameVi: "🌐 VPN", icon: "🌐", sortOrder: 3 },
   { slug: "design", nameVi: "🎨 Thiết kế / Sáng tạo", icon: "🎨", sortOrder: 4 },
-  { slug: "cloud", nameVi: "☁️ Cloud / VPS", icon: "☁️", sortOrder: 5 },
-  { slug: "license", nameVi: "🔑 Key / License", icon: "🔑", sortOrder: 6 },
-  { slug: "khac", nameVi: "📦 Khác", icon: "📦", sortOrder: 7 },
 ];
 
 const BRANDS: ReadonlyArray<{
@@ -35,7 +32,6 @@ const BRANDS: ReadonlyArray<{
 }> = [
   { slug: "chatgpt", rootSlug: "ai", nameVi: "ChatGPT", sortOrder: 1 },
   { slug: "claude", rootSlug: "ai", nameVi: "Claude", sortOrder: 2 },
-  { slug: "gemini", rootSlug: "ai", nameVi: "Gemini", sortOrder: 3 },
   { slug: "cursor", rootSlug: "coding", nameVi: "Cursor", sortOrder: 1 },
   { slug: "kiro", rootSlug: "coding", nameVi: "Kiro", sortOrder: 2 },
   { slug: "codex", rootSlug: "coding", nameVi: "Codex", sortOrder: 3 },
@@ -44,10 +40,37 @@ const BRANDS: ReadonlyArray<{
   { slug: "canva", rootSlug: "design", nameVi: "Canva", sortOrder: 1 },
 ];
 
+export const PUBLIC_ROOT_CATEGORY_SLUGS = ["ai", "coding", "vpn", "design"] as const;
+export const PUBLIC_BRAND_CATEGORY_SLUGS = [
+  "chatgpt",
+  "claude",
+  "cursor",
+  "kiro",
+  "codex",
+  "expressvpn",
+  "hma",
+  "canva",
+] as const;
+export const PUBLIC_CATEGORY_SLUGS = new Set<string>([
+  ...PUBLIC_ROOT_CATEGORY_SLUGS,
+  ...PUBLIC_BRAND_CATEGORY_SLUGS,
+]);
+
+export function isApprovedPublicCategory(slug: string): boolean {
+  return PUBLIC_CATEGORY_SLUGS.has(slug);
+}
+
+export function isApprovedPublicRoot(slug: string): boolean {
+  return PUBLIC_ROOT_CATEGORY_SLUGS.includes(slug as (typeof PUBLIC_ROOT_CATEGORY_SLUGS)[number]);
+}
+
+export function isApprovedPublicBrand(slug: string): boolean {
+  return PUBLIC_BRAND_CATEGORY_SLUGS.includes(slug as (typeof PUBLIC_BRAND_CATEGORY_SLUGS)[number]);
+}
+
 const PRODUCT_BRAND_RULES: ReadonlyArray<{ pattern: RegExp; slug: string }> = [
   { pattern: /chatgpt|chat\s*gpt|\bgpt\b/, slug: "chatgpt" },
   { pattern: /claude|\bclau\b/, slug: "claude" },
-  { pattern: /gemini/, slug: "gemini" },
   { pattern: /cursor/, slug: "cursor" },
   { pattern: /\bkiro\b/, slug: "kiro" },
   { pattern: /\bcodex\b/, slug: "codex" },
@@ -196,31 +219,6 @@ export async function ensureTaxonomy(exec: Executor): Promise<void> {
           where a.product_id = p.id and a.locale = 'vi' and a.normalized_alias = ${alias}
         )
     `.execute(exec);
-  }
-
-  const khacId = ids.get("khac");
-  if (khacId) {
-    const stranded = await sql<{
-      id: string;
-      name_vi: string;
-      slug: string;
-      cat_slug: string;
-      cat_name: string;
-    }>`
-      select p.id, p.name_vi, p.slug, c.slug as cat_slug, c.name_vi as cat_name
-      from product p
-      join category c on c.id = p.category_id
-      where not p.is_archived
-    `.execute(exec);
-    for (const product of stranded.rows) {
-      if (!looksLikeFulfillmentBucket(product.cat_slug, product.cat_name)) continue;
-      if (matchBrandSlug(product.name_vi, product.slug)) continue;
-      await sql`
-        update product
-        set category_id = ${khacId}, updated_at = now(), version = version + 1
-        where id = ${product.id}
-      `.execute(exec);
-    }
   }
 
   const leftover = await sql<{ id: string; slug: string; name_vi: string }>`

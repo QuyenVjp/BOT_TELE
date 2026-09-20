@@ -57,6 +57,10 @@ export async function sealPresentedMessageCallbacks(
         sealedRow.push(button);
         continue;
       }
+      if (button.callbackData === "delivery:delete") {
+        sealedRow.push(button);
+        continue;
+      }
       const input = await parseLegacyCallback(button.callbackData, deps.resolveOrderId);
       if (!input) continue;
       sealedRow.push({

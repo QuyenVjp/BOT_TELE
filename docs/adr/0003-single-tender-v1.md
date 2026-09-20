@@ -1,7 +1,7 @@
 ---
-status: proposed
+status: accepted
 ---
 
-# One payment tender per order in V1
+# One selected payment tender per order in V1
 
-An order is paid with one VietQR payment intent in V1; SePay checks/reconciles the bank transaction before supplier fulfillment. Split tender is deferred because it introduces partial allocation, capture, late-payment and refund states unrelated to proving the simple customer flow.
+An order in the retail MVP uses exactly one selected tender: the existing VietQR payment intent settled by SePay. The closed-loop TIER20 wallet ledger remains an isolated backend/post-MVP lane and is not exposed by the retail keyboard or checkout. Split tender is deferred because partial allocation, capture, late-payment, and refund states are unrelated to proving the simple customer flow. Wallet credit remains integer VND ledger state; it never bypasses stock, authorization, or fulfillment gates.

@@ -45,12 +45,18 @@ export function renderAdminProductList(
       [{ text: "➕ Tạo sản phẩm", callbackData: "admin:products:create" }],
       ...views
         .filter((candidate) => candidate !== view)
-        .map((candidate) => [
-          {
+        .reduce<InlineButton[][]>((rowsAcc, candidate, idx) => {
+          const button = {
             text: PRODUCT_VIEW_LABELS[candidate],
             callbackData: `admin:products:view:${candidate}`,
-          },
-        ]),
+          };
+          if (idx % 2 === 0) {
+            rowsAcc.push([button]);
+          } else {
+            rowsAcc.at(-1)?.push(button);
+          }
+          return rowsAcc;
+        }, []),
       ...rows.map((row) => [
         {
           text: `${row.featured ? "⭐ " : ""}${row.name} (${row.active ? "đang bán" : "tạm dừng"})`,

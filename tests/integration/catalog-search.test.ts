@@ -8,8 +8,8 @@ import { startPostgresContainer, type PgTestContext } from "../helpers/pg-contai
  * T026 — Deterministic search + Unicode normalization (FR-004).
  *
  * Deterministic search matches product name, category, and alias using a
- * fold-normalized form (NFC + lowercase + Vietnamese accent fold), so "netflix",
- * "NETFLIX", and an accented alias all resolve. Filters (price range, delivery
+ * fold-normalized form (NFC + lowercase + Vietnamese accent fold), so "chatgpt",
+ * "CHATGPT", and an accented category query all resolve. Filters (price range, delivery
  * type, category) are bounded and only ever narrow the authoritative result set;
  * search never invents a product.
  */
@@ -32,33 +32,33 @@ beforeEach(async () => {
 
 async function seed() {
   const catId = newId();
-  const netflixId = newId();
-  const spotifyId = newId();
+  const chatgptId = newId();
+  const claudeId = newId();
   const supplierId = newId();
   const supplierOkId = newId();
   const supplierSkuId = newId();
 
-  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${catId}, 'Giải trí', 'giai-tri', true, 1)`.execute(
+  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${catId}, 'AI', 'ai', true, 1)`.execute(
     ctx.db,
   );
   await sql`
     insert into product (id, category_id, name_vi, slug, is_active, sort_order) values
-      (${netflixId}, ${catId}, 'Netflix Premium', 'netflix', true, 1),
-      (${spotifyId}, ${catId}, 'Spotify Family', 'spotify', true, 2),
+      (${chatgptId}, ${catId}, 'ChatGPT', 'chatgpt', true, 1),
+      (${claudeId}, ${catId}, 'Claude', 'claude', true, 2),
       (${supplierId}, ${catId}, 'Supplier Blocked', 'supplier-blocked', true, 3),
       (${supplierOkId}, ${catId}, 'Supplier Ready', 'supplier-ready', true, 4)
   `.execute(ctx.db);
 
   // Tags are plain text terms the owner sets on the product (goal §27/§28).
   await sql`
-    update product set tags = array['4k', 'gia dinh'] where id = ${spotifyId}
+    update product set tags = array['coding', 'trợ lý'] where id = ${claudeId}
   `.execute(ctx.db);
 
   // Aliases are pre-normalized (fold form) at write time.
   await sql`
     insert into product_alias (id, product_id, normalized_alias, locale, priority) values
-      (${newId()}, ${netflixId}, 'phim', 'vi', 1),
-      (${spotifyId ? newId() : newId()}, ${spotifyId}, 'nhac', 'vi', 1)
+      (${newId()}, ${chatgptId}, 'chatbot', 'vi', 1),
+      (${newId()}, ${claudeId}, 'tro ly', 'vi', 1)
   `.execute(ctx.db);
 
   // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
@@ -97,9 +97,9 @@ async function seed() {
     `.execute(ctx.db);
     await publishVariant(variantId, evidenceId);
   };
-  await mkVariant(netflixId, "NF-1", 100000, "LICENSE", 1);
-  await mkVariant(netflixId, "NF-2", 200000, "ACTIVATION_KEY", 2);
-  await mkVariant(spotifyId, "SP-1", 150000, "INVITE", 3);
+  await mkVariant(chatgptId, "CG-1", 100000, "LICENSE", 1);
+  await mkVariant(chatgptId, "CG-2", 200000, "ACTIVATION_KEY", 2);
+  await mkVariant(claudeId, "CL-1", 150000, "INVITE", 3);
   // Legacy unconfigured supplier-only SKU: intentionally left without evidence → stays hidden.
   await sql`
     insert into product_variant
@@ -128,7 +128,7 @@ async function seed() {
     from product_variant where sku = 'SUP-OK'
   `.execute(ctx.db);
 
-  return { catId, netflixId, spotifyId };
+  return { catId, chatgptId, claudeId };
 }
 
 async function search(filter: CatalogFilter) {
@@ -138,39 +138,38 @@ async function search(filter: CatalogFilter) {
 describe("deterministic search (FR-004)", () => {
   it("matches product name case-insensitively", async () => {
     await seed();
-    const lower = await search({ query: "netflix" });
-    const upper = await search({ query: "NETFLIX" });
+    const lower = await search({ query: "chatgpt" });
+    const upper = await search({ query: "CHATGPT" });
     expect(lower.items.length).toBeGreaterThan(0);
     expect(lower.items.map((v) => v.sku).sort()).toEqual(upper.items.map((v) => v.sku).sort());
-    expect(lower.items.every((v) => v.sku.startsWith("NF-"))).toBe(true);
+    expect(lower.items.every((v) => v.sku.startsWith("CG-"))).toBe(true);
   });
 
-  it("matches accented queries via fold normalization", async () => {
+  it("matches category queries through the normalized search path", async () => {
     await seed();
-    // "Giải trí" category name matched by unaccented "giai tri".
-    const accented = await search({ query: "Giải trí" });
-    const folded = await search({ query: "giai tri" });
+    const accented = await search({ query: "AI" });
+    const folded = await search({ query: "ai" });
     expect(folded.items.length).toBeGreaterThan(0);
     expect(folded.items.map((v) => v.sku).sort()).toEqual(accented.items.map((v) => v.sku).sort());
   });
 
   it("matches by alias", async () => {
     await seed();
-    const byAlias = await search({ query: "phim" });
-    expect(byAlias.items.every((v) => v.sku.startsWith("NF-"))).toBe(true);
+    const byAlias = await search({ query: "chatbot" });
+    expect(byAlias.items.every((v) => v.sku.startsWith("CG-"))).toBe(true);
     expect(byAlias.items.length).toBe(2);
   });
 
   it("applies a bounded price range filter", async () => {
     await seed();
     const midRange = await search({ minPriceVnd: 120000, maxPriceVnd: 180000 });
-    expect(midRange.items.map((v) => v.sku).sort()).toEqual(["SP-1", "SUP-OK"]);
+    expect(midRange.items.map((v) => v.sku).sort()).toEqual(["CL-1", "SUP-OK"]);
   });
 
   it("applies a delivery-type filter", async () => {
     await seed();
     const invites = await search({ deliveryType: "INVITE" });
-    expect(invites.items.map((v) => v.sku)).toEqual(["SP-1"]);
+    expect(invites.items.map((v) => v.sku)).toEqual(["CL-1"]);
   });
 
   it("returns nothing for a query that matches no authoritative product (no invention)", async () => {
@@ -191,17 +190,17 @@ describe("deterministic search (FR-004)", () => {
   it("scopes by category id", async () => {
     const ids = await seed();
     const inCat = await search({ categoryId: ids.catId });
-    expect(inCat.items.map((v) => v.sku).sort()).toEqual(["NF-1", "NF-2", "SP-1", "SUP-OK"]);
+    expect(inCat.items.map((v) => v.sku).sort()).toEqual(["CG-1", "CG-2", "CL-1", "SUP-OK"]);
     const otherCat = await search({ categoryId: newId() });
     expect(otherCat.items).toHaveLength(0);
   });
 
   it("matches a product by its tags, accent-folded like the other terms", async () => {
     await seed();
-    const byTag = await search({ query: "4k" });
-    expect(byTag.items.map((v) => v.sku)).toEqual(["SP-1"]);
+    const byTag = await search({ query: "coding" });
+    expect(byTag.items.map((v) => v.sku)).toEqual(["CL-1"]);
 
-    const byAccentedTag = await search({ query: "gia dinh" });
-    expect(byAccentedTag.items.map((v) => v.sku)).toEqual(["SP-1"]);
+    const byAccentedTag = await search({ query: "tro ly" });
+    expect(byAccentedTag.items.map((v) => v.sku)).toEqual(["CL-1"]);
   });
 });

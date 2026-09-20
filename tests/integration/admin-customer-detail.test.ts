@@ -125,7 +125,7 @@ describe("admin customer wallet detail", () => {
     const detail = await presentAdminCustomerFinancialDetail(ctx.db, "missing-customer");
 
     expect(detail.text).toContain("Không tìm thấy khách hàng.");
-    expect(detail.buttons).toEqual([[{ text: "Admin", callbackData: "admin:menu" }]]);
+    expect(detail.buttons).toEqual([[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]]);
   });
 
   it("finds a customer by order number and by telegram id, which is what the search prompt promises", async () => {

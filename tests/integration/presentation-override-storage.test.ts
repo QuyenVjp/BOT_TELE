@@ -35,10 +35,10 @@ async function seedSellableVariant(): Promise<string> {
   const categoryId = newId();
   const productId = newId();
   const variantId = newId();
-  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Giải trí', 'giai-tri', true, 1)`.execute(
+  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', 'ai', true, 1)`.execute(
     ctx.db,
   );
-  await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Netflix', 'netflix', true, 1)`.execute(
+  await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'ChatGPT', 'chatgpt', true, 1)`.execute(
     ctx.db,
   );
   await sql`

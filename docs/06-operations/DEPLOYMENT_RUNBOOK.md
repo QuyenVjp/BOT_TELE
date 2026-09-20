@@ -84,22 +84,23 @@ npm run migrate:production
 
 ## Current production migration head
 
-After this remediation branch, the source tree contains **75** SQL files under
-`src/infrastructure/db/migrations/`. The expected production
-`schema_migrations` head is:
+The source tree currently contains **78** SQL files under
+`src/infrastructure/db/migrations/`. The latest source migration is:
 
-- **filename:** `076_resale_evidence_revocation.sql`
-- **count:** `75`
+- **filename:** `079_sepay_retry_after.sql`
+- **count:** `78`
 
-Migrations 072–076 add version-bound catalog publication, guarded store-mode
-transitions, payment/outbox dispositions, durable command references, and
-owner-controlled resale-evidence revocation. Keep the store `CLOSED` during
-migration and deploy. Do not edit older migration files.
+The latest read-only production preflight observed production at
+`078_admin_step_up_replay.sql` (**77** migrations). Migration 079 is a
+forward-only nullable-column change and must be applied only through the
+normal production migration procedure while the store remains `CLOSED`.
+Do not edit older migration files.
 
-The procedures below for 070 and 071 are historical. For this release, run the
-076 procedure.
+The 072–076 procedure below is historical evidence only. Do not use it as the
+current production migration target; a new release-specific procedure is
+required before applying any pending migration.
 
-## Migrations 072–076 — post-merge production procedure
+## Historical migrations 072–076 — post-merge production procedure
 
 This procedure is **not executed by review**. Run it only after this branch has
 merged, the production artifact is built from that merge, and the owner has
@@ -266,7 +267,10 @@ After rollback, re-drain the outbox and re-check health signals.
 ## Post-deploy
 
 - Confirm Telegram webhook path + secret still verify.
-- Confirm SePay webhook HMAC still verifies with a known test event (staging) or a canary.
+- Verify the Bot API webhook `allowed_updates` is exactly
+  `["message", "callback_query", "inline_query", "chosen_inline_result"]`; the application
+  registers the receiver only, so compare the deployment control-plane value rather than
+  changing production from the worker.
 - Confirm owner root-admin self-test: private chat, low-risk catalog action, audit write.
 - Watch fulfillment lag, reconciliation lag, and invalid-asset counters for one pilot window.
 

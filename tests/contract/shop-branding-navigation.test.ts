@@ -36,9 +36,54 @@ describe("customer branding presenters", () => {
     expect(buttons.find((b) => b.text.includes("Liên hệ Admin"))?.url).toBe(ADMIN_CONTACT_URL);
   });
 
+  it("accepts valid HTTPS t.me username links and falls back to canonical URLs on invalid values", () => {
+    const validHome = presentStorefront({
+      actorName: "Khách",
+      communityUrl: "https://t.me/custom_community",
+      adminContactUrl: "https://t.me/custom_admin",
+    });
+    const validButtons = validHome.buttons.flat();
+    expect(validButtons.find((b) => b.text.includes(COMMUNITY_BUTTON_LABEL))?.url).toBe(
+      "https://t.me/custom_community",
+    );
+    expect(validButtons.find((b) => b.text.includes("Liên hệ Admin"))?.url).toBe(
+      "https://t.me/custom_admin",
+    );
+
+    for (const badUrl of [
+      "http://t.me/insecure",
+      "https://evil.com/phish",
+      "javascript:alert(1)",
+      "https://t.me/too/many/paths",
+      "https://t.me/",
+      "",
+    ]) {
+      const fallbackHome = presentStorefront({
+        actorName: "Khách",
+        communityUrl: badUrl,
+        adminContactUrl: badUrl,
+      });
+      const fallbackButtons = fallbackHome.buttons.flat();
+      expect(fallbackButtons.find((b) => b.text.includes(COMMUNITY_BUTTON_LABEL))?.url).toBe(
+        COMMUNITY_URL,
+      );
+      expect(fallbackButtons.find((b) => b.text.includes("Liên hệ Admin"))?.url).toBe(
+        ADMIN_CONTACT_URL,
+      );
+    }
+
+    const aicodexContactHome = presentStorefront({
+      actorName: "Khách",
+      adminContactUrl: "https://t.me/aicodexvn",
+    });
+    expect(
+      aicodexContactHome.buttons.flat().find((b) => b.text.includes("Liên hệ Admin"))?.url,
+    ).toBe(ADMIN_CONTACT_URL);
+  });
+
   it("renders the support screen with admin and community URL buttons", () => {
     const support = presentSupportReasonMenu();
-    expect(support.text).toContain(`💬 HỖ TRỢ ${SHOP_NAME}`);
+    expect(support.text).toContain(`💬 Hỗ trợ ${SHOP_NAME}`);
     expect(support.text).toContain("chủ đề");
     expect(support.buttons.flat().find((b) => b.text.includes("Nhắn Admin"))?.url).toBe(
       ADMIN_CONTACT_URL,
@@ -311,7 +356,7 @@ describe("bot-only catalog navigation", () => {
       callbackQueryId: "cq-search",
     });
     const message = send.mock.calls[0]?.[0]?.message as { text: string };
-    expect(message.text).toContain("TÌM SẢN PHẨM");
+    expect(message.text).toContain("Tìm sản phẩm");
     expect(message.text).not.toContain("Danh sách sản phẩm");
   });
 

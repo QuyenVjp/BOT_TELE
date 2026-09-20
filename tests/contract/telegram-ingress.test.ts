@@ -1072,6 +1072,38 @@ describe("command normalization", () => {
     }
   });
 
+  it("preserves /verify arguments as an admin command", async () => {
+    let seen: TelegramCommandEnvelope | undefined;
+    const localApp = Fastify({ bodyLimit: BODY_LIMIT });
+    await registerTelegramWebhook(localApp, {
+      path: WEBHOOK_PATH,
+      secretToken: SECRET,
+      inbox: {
+        async accept(input) {
+          seen = input.envelope;
+          return { kind: "ACCEPTED", id: "verify-ingress" };
+        },
+      },
+    });
+    await localApp.ready();
+    try {
+      const res = await localApp.inject({
+        method: "POST",
+        url: WEBHOOK_PATH,
+        headers: { "x-telegram-bot-api-secret-token": SECRET },
+        payload: buildUpdate(603, 100, "/verify 123456 telegram:603"),
+      });
+      expect(res.statusCode).toBe(200);
+      expect(seen).toMatchObject({
+        command: "/verify",
+        action: "ADMIN",
+        searchQuery: "123456 telegram:603",
+      });
+    } finally {
+      await localApp.close();
+    }
+  });
+
   it("preserves plain wallet amount text in the durable envelope", async () => {
     let seen: unknown = null;
     const localApp = Fastify({ bodyLimit: BODY_LIMIT });
@@ -1105,7 +1137,7 @@ describe("command normalization", () => {
 });
 
 describe("persistent reply-keyboard allowlist", () => {
-  it("preserves current Telegram-native keyboard labels and drops cancelled Mini App shop-launch label", async () => {
+  it("preserves current Telegram-native keyboard labels and drops retired wallet and Mini App labels", async () => {
     const kept: Array<string | undefined> = [];
     const ingress = Fastify({ bodyLimit: BODY_LIMIT });
     await registerTelegramWebhook(ingress, {
@@ -1143,7 +1175,7 @@ describe("persistent reply-keyboard allowlist", () => {
         "💬 Hỗ trợ",
         "👤 Tài khoản",
         "🧾 Đơn hàng",
-        "💰 Nạp ví",
+        undefined,
         undefined,
       ]);
     } finally {

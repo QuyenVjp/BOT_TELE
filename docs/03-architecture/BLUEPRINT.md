@@ -24,8 +24,8 @@ Khuyến nghị mặc định:
 9. Happy path là `catalog/search → Buy Now → VietQR → SePay → secure delivery`, đạt QR trong 3–4 lần bấm.
 10. Wallet và Reseller API là post-MVP lanes riêng; không ảnh hưởng customer flow hoặc schema tối thiểu của retail walking skeleton.
 11. Chỉ một root admin: numeric Telegram `user_id` được cấu hình cho `@Quyenvjp`; username chỉ là nhãn kiểm tra, không có `/add-admin`.
-12. Account có thể lấy từ Supplier API nhưng chỉ từ nguồn được phép resale/transfer; supplier order idempotent, credential ở vault và giao qua one-time Delivery Bundle.
-13. Telegram/provider policy risk được ghi riêng và là launch gate; không che giấu hoặc bypass policy bằng cách đổi tên payment flow.
+12. Account có thể lấy từ Supplier API nhưng chỉ từ nguồn được phép resale/transfer; supplier order idempotent, credential giữ ở vault và chỉ gửi một lần trong message Telegram tới customer/chat đã bind sau khi payment + asset verify thành công.
+13. Telegram/provider policy risk is recorded separately and explicitly accepted by the owner for the VietQR + SePay architecture. It is not an internal technical deployment gate; never hide, disguise, or bypass the risk by renaming the payment flow.
 
 Kênh đầu tiên được chốt là **Telegram** và product wedge là authorized digital account/access. Lõi vẫn giữ channel adapter để không khóa domain vào Telegram.
 
@@ -33,19 +33,19 @@ Kênh đầu tiên được chốt là **Telegram** và product wedge là author
 
 ### 2.1 Repo nên học
 
-| Repo/nguồn | Giá trị học hỏi | Không nên bê nguyên |
-|---|---|---|
-| [payOSHQ/payos-lib-node](https://github.com/payOSHQ/payos-lib-node) | SDK chính thức, tạo payment link, đăng ký webhook và `webhooks.verify()`, ký dữ liệu bằng checksum key. Đây là nguồn tham chiếu tốt cho adapter payOS. | Không để SDK lan vào domain; bọc trong adapter. Không coi callback redirect của browser/bot là kết quả thanh toán. |
-| [vietqr/vietqr-node](https://github.com/vietqr/vietqr-node) | Tham khảo cách tạo QR/link từ bank, account, amount, memo và template. | Repo tạo QR không giải quyết xác nhận giao dịch, idempotency, đối soát hay vòng đời đơn hàng. |
-| [vietqr/vietqr-gateway-examples](https://github.com/vietqr/vietqr-gateway-examples) | Ví dụ tích hợp VietQR Gateway đa nền tảng. | Chỉ dùng như ví dụ adapter/UI; không coi sample là security architecture. |
-| [xuannghia/vietnam-qr-pay](https://github.com/xuannghia/vietnam-qr-pay) | Encode/decode VietQR, QR đa năng và VNPayQR; hữu ích cho test fixture và kiểm tra payload/CRC độc lập. | Không tự viết “payment gateway” chỉ từ QR encoder/decoder. |
-| [kentzu213/telegram-shop-bot](https://github.com/kentzu213/telegram-shop-bot) | Repo gần bài toán nhất: bot Telegram, QR VietQR, stock, SQLite, Google Sheet; cấu trúc command/handler/service dễ đọc để học luồng UX. | Tại thời điểm kiểm tra repo chỉ có 4 commit và chưa có release. Google Sheet “publish to web”, SQLite và cấu hình đơn giản phù hợp demo, không phải nền production bảo mật cao. Không fork rồi deploy thẳng. |
-| [vendure-ecommerce/vendure](https://github.com/vendure-ecommerce/vendure) | State machine tường minh cho order/payment; hook transition; module commerce trưởng thành. | Không cần mang cả nền tảng về cho một bot nhỏ. Học state/invariant, không copy độ phức tạp. |
-| [medusajs/medusa](https://github.com/medusajs/medusa) | Phân module order/payment, workflow có bước bù/rollback, provider abstraction, return/exchange/claim. | Không triển khai tất cả module ngay từ MVP nếu sản phẩm chỉ có luồng bán đơn giản. |
-| [saleor/saleor](https://github.com/saleor/saleor) | Payment orchestration, webhook HMAC, async/sync events, tách extension khỏi core. | Không chọn microservices chỉ vì Saleor có hệ sinh thái extension; modular monolith vẫn hợp lý hơn ở giai đoạn đầu. |
-| [grammyjs/grammY](https://github.com/grammyjs/grammY) / [telegraf/telegraf](https://github.com/telegraf/telegraf) | Framework adapter Telegram trưởng thành; middleware, command/callback routing. | Không đặt business logic trong handler/middleware bot. Handler chỉ xác thực, normalize và gửi command vào application layer. |
-| [chatwoot/chatwoot](https://github.com/chatwoot/chatwoot) | Conversation/inbox, phân quyền, audit và omnichannel support; hữu ích nếu cần agent hỗ trợ người thật. | Không kéo cả CRM/helpdesk vào payment core; tích hợp qua event/API khi thật sự cần. |
-| [animir/node-rate-limiter-flexible](https://github.com/animir/node-rate-limiter-flexible) | Atomic counter, penalty/block và store Redis/Valkey/Postgres; phù hợp học anti-abuse đa instance. | Không dùng một limiter chung cho mọi hành vi và không dùng Redis counter làm sổ nghiệp vụ. |
+| Repo/nguồn                                                                                                        | Giá trị học hỏi                                                                                                                                        | Không nên bê nguyên                                                                                                                                                                                          |
+| ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| [payOSHQ/payos-lib-node](https://github.com/payOSHQ/payos-lib-node)                                               | SDK chính thức, tạo payment link, đăng ký webhook và `webhooks.verify()`, ký dữ liệu bằng checksum key. Đây là nguồn tham chiếu tốt cho adapter payOS. | Không để SDK lan vào domain; bọc trong adapter. Không coi callback redirect của browser/bot là kết quả thanh toán.                                                                                           |
+| [vietqr/vietqr-node](https://github.com/vietqr/vietqr-node)                                                       | Tham khảo cách tạo QR/link từ bank, account, amount, memo và template.                                                                                 | Repo tạo QR không giải quyết xác nhận giao dịch, idempotency, đối soát hay vòng đời đơn hàng.                                                                                                                |
+| [vietqr/vietqr-gateway-examples](https://github.com/vietqr/vietqr-gateway-examples)                               | Ví dụ tích hợp VietQR Gateway đa nền tảng.                                                                                                             | Chỉ dùng như ví dụ adapter/UI; không coi sample là security architecture.                                                                                                                                    |
+| [xuannghia/vietnam-qr-pay](https://github.com/xuannghia/vietnam-qr-pay)                                           | Encode/decode VietQR, QR đa năng và VNPayQR; hữu ích cho test fixture và kiểm tra payload/CRC độc lập.                                                 | Không tự viết “payment gateway” chỉ từ QR encoder/decoder.                                                                                                                                                   |
+| [kentzu213/telegram-shop-bot](https://github.com/kentzu213/telegram-shop-bot)                                     | Repo gần bài toán nhất: bot Telegram, QR VietQR, stock, SQLite, Google Sheet; cấu trúc command/handler/service dễ đọc để học luồng UX.                 | Tại thời điểm kiểm tra repo chỉ có 4 commit và chưa có release. Google Sheet “publish to web”, SQLite và cấu hình đơn giản phù hợp demo, không phải nền production bảo mật cao. Không fork rồi deploy thẳng. |
+| [vendure-ecommerce/vendure](https://github.com/vendure-ecommerce/vendure)                                         | State machine tường minh cho order/payment; hook transition; module commerce trưởng thành.                                                             | Không cần mang cả nền tảng về cho một bot nhỏ. Học state/invariant, không copy độ phức tạp.                                                                                                                  |
+| [medusajs/medusa](https://github.com/medusajs/medusa)                                                             | Phân module order/payment, workflow có bước bù/rollback, provider abstraction, return/exchange/claim.                                                  | Không triển khai tất cả module ngay từ MVP nếu sản phẩm chỉ có luồng bán đơn giản.                                                                                                                           |
+| [saleor/saleor](https://github.com/saleor/saleor)                                                                 | Payment orchestration, webhook HMAC, async/sync events, tách extension khỏi core.                                                                      | Không chọn microservices chỉ vì Saleor có hệ sinh thái extension; modular monolith vẫn hợp lý hơn ở giai đoạn đầu.                                                                                           |
+| [grammyjs/grammY](https://github.com/grammyjs/grammY) / [telegraf/telegraf](https://github.com/telegraf/telegraf) | Framework adapter Telegram trưởng thành; middleware, command/callback routing.                                                                         | Không đặt business logic trong handler/middleware bot. Handler chỉ xác thực, normalize và gửi command vào application layer.                                                                                 |
+| [chatwoot/chatwoot](https://github.com/chatwoot/chatwoot)                                                         | Conversation/inbox, phân quyền, audit và omnichannel support; hữu ích nếu cần agent hỗ trợ người thật.                                                 | Không kéo cả CRM/helpdesk vào payment core; tích hợp qua event/API khi thật sự cần.                                                                                                                          |
+| [animir/node-rate-limiter-flexible](https://github.com/animir/node-rate-limiter-flexible)                         | Atomic counter, penalty/block và store Redis/Valkey/Postgres; phù hợp học anti-abuse đa instance.                                                      | Không dùng một limiter chung cho mọi hành vi và không dùng Redis counter làm sổ nghiệp vụ.                                                                                                                   |
 
 ### 2.2 Kết luận từ nguồn chính thức
 
@@ -64,21 +64,21 @@ Kênh đầu tiên được chốt là **Telegram** và product wedge là author
 
 ## 3. Ubiquitous language: từ vựng phải chốt
 
-| Thuật ngữ chuẩn | Nghĩa nghiệp vụ | Không được hiểu là |
-|---|---|---|
-| Customer | Người mua; có thể ánh xạ một hoặc nhiều Channel Identity sau khi xác minh. | Telegram user ID hoặc số điện thoại riêng lẻ. |
-| Channel Identity | Danh tính do Telegram/Zalo/web cấp, ví dụ `telegram:user_id`. | Customer đã KYC. |
-| Cart | Tập lựa chọn có thể thay đổi, chưa tạo nghĩa vụ thanh toán. | Order. |
-| Checkout | Snapshot bất biến của giá, hàng, phí và địa chỉ dùng để tạo Order. | Một màn hình UI. |
-| Order | Cam kết mua bán đã snapshot line item/giá; không phụ thuộc catalog thay đổi sau đó. | Payment. |
-| Payment Intent | Ý định thu đúng một tổng tiền cho một Order, có thời hạn và provider mapping. | QR image. |
-| Payment Attempt | Một lần tạo link/QR hoặc thử thanh toán cụ thể tại provider. | Toàn bộ lịch sử payment. |
-| Bank Transaction | Dòng tiền được provider/bank quan sát, có reference duy nhất. | Webhook request. |
-| Payment Evidence | Dữ liệu provider đã xác minh chữ ký và được đối chiếu amount/order/reference. | Ảnh chụp biên lai hoặc nút “Tôi đã trả”. |
-| Inventory Reservation | Giữ tạm số lượng cho checkout/order đến một thời điểm. | Trừ kho vĩnh viễn. |
-| Fulfillment | Quá trình giao hàng/giao quyền truy cập sau khi order được phép thực hiện. | Payment success. |
-| Reconciliation | So khớp sổ nội bộ với giao dịch provider/bank để phát hiện thiếu, trùng, lệch tiền. | Chạy lại webhook mù quáng. |
-| Manual Review | Trạng thái buộc nhân viên xử lý do thiếu/thừa tiền, trả muộn, trùng nội dung hoặc dữ liệu mâu thuẫn. | Cho phép admin tự sửa DB. |
+| Thuật ngữ chuẩn       | Nghĩa nghiệp vụ                                                                                      | Không được hiểu là                            |
+| --------------------- | ---------------------------------------------------------------------------------------------------- | --------------------------------------------- |
+| Customer              | Người mua; có thể ánh xạ một hoặc nhiều Channel Identity sau khi xác minh.                           | Telegram user ID hoặc số điện thoại riêng lẻ. |
+| Channel Identity      | Danh tính do Telegram/Zalo/web cấp, ví dụ `telegram:user_id`.                                        | Customer đã KYC.                              |
+| Cart                  | Tập lựa chọn có thể thay đổi, chưa tạo nghĩa vụ thanh toán.                                          | Order.                                        |
+| Checkout              | Snapshot bất biến của giá, hàng, phí và địa chỉ dùng để tạo Order.                                   | Một màn hình UI.                              |
+| Order                 | Cam kết mua bán đã snapshot line item/giá; không phụ thuộc catalog thay đổi sau đó.                  | Payment.                                      |
+| Payment Intent        | Ý định thu đúng một tổng tiền cho một Order, có thời hạn và provider mapping.                        | QR image.                                     |
+| Payment Attempt       | Một lần tạo link/QR hoặc thử thanh toán cụ thể tại provider.                                         | Toàn bộ lịch sử payment.                      |
+| Bank Transaction      | Dòng tiền được provider/bank quan sát, có reference duy nhất.                                        | Webhook request.                              |
+| Payment Evidence      | Dữ liệu provider đã xác minh chữ ký và được đối chiếu amount/order/reference.                        | Ảnh chụp biên lai hoặc nút “Tôi đã trả”.      |
+| Inventory Reservation | Giữ tạm số lượng cho checkout/order đến một thời điểm.                                               | Trừ kho vĩnh viễn.                            |
+| Fulfillment           | Quá trình giao hàng/giao quyền truy cập sau khi order được phép thực hiện.                           | Payment success.                              |
+| Reconciliation        | So khớp sổ nội bộ với giao dịch provider/bank để phát hiện thiếu, trùng, lệch tiền.                  | Chạy lại webhook mù quáng.                    |
+| Manual Review         | Trạng thái buộc nhân viên xử lý do thiếu/thừa tiền, trả muộn, trùng nội dung hoặc dữ liệu mâu thuẫn. | Cho phép admin tự sửa DB.                     |
 
 ## 4. Kiến trúc mục tiêu
 
@@ -113,34 +113,34 @@ flowchart LR
 
 ### 4.2 Module boundaries
 
-| Module | Sở hữu dữ liệu | Được phép làm | Không được làm |
-|---|---|---|---|
-| Identity & Access | customer, channel identity, admin, role, session | Link identity, authenticate, authorize | Tạo order/payment |
-| Channel Ingress | inbound update, dedupe key, normalized command | Verify channel secret, normalize input | Ghi trực tiếp order/stock |
-| Catalog/Search | category, product, variant, alias, search index | Publish database-authoritative facts; parse bounded search filters | Để AI bịa product fact hoặc gọi domain command |
-| Pricing | price list, promotion, quote | Tính quote bất biến | Đọc số tiền từ tin nhắn khách rồi tin luôn |
-| Buy Now/Order | order, line snapshot, transition | Revalidate variant và tạo một Order | Tin giá/stock từ callback hoặc gọi SDK provider trực tiếp |
-| Inventory | stock ledger, reservation | Reserve/commit/release atomically | Dựa vào cache để quyết định stock |
-| Payment | intent, attempt, provider mapping, transaction | Tạo QR/link, verify/match payment | Giao hàng |
-| Fulfillment | shipment/digital grant | Giao sau policy cho phép | Tự suy đoán payment |
-| Digital Goods | account asset, entitlement, credential reference, delivery bundle | Reserve/validate/deliver authorized digital access exactly once | Lưu/gửi raw credential trong log/event/chat history |
-| Supplier Integration | supplier, SKU mapping, supplier order, cost/margin, health | Call authorized upstream adapters idempotently and reconcile | Blind retry, scrape/login/captcha, trust HTTP 200 as valid delivery |
-| Reconciliation | recon run, discrepancy, resolution | So sánh provider với ledger | Sửa lịch sử âm thầm |
-| Support | ticket, conversation link, SLA, escalation | FAQ, human handoff, manual-review context | Mark-paid hoặc sửa ledger trực tiếp |
-| Wallet/Ledger (post-MVP) | ledger accounts, double-entry transactions, holds | Tách riêng khi được duyệt | Xuất hiện trong retail MVP |
-| Reseller/API (post-MVP) | tenant, credential, scope, plan, usage, endpoint | Public `/v1` contract trong lane riêng | Xuất hiện trong customer menu hoặc làm phức tạp Buy Now |
-| Risk/Abuse | counters, bans, challenges, risk decision | Allow/challenge/block | Quyết định order/payment thay domain |
-| Notifications | template, delivery attempt | Gửi thông báo từ outbox | Tạo side effect nghiệp vụ |
-| Admin/Audit | admin action, reason, approval, audit event | Manual workflow có kiểm soát | Direct DB edit |
+| Module                   | Sở hữu dữ liệu                                                    | Được phép làm                                                                                                                        | Không được làm                                                       |
+| ------------------------ | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| Identity & Access        | customer, channel identity, admin, role, session                  | Link identity, authenticate, authorize                                                                                               | Tạo order/payment                                                    |
+| Channel Ingress          | inbound update, dedupe key, normalized command                    | Verify channel secret, normalize input                                                                                               | Ghi trực tiếp order/stock                                            |
+| Catalog/Search           | category, product, variant, alias, search index                   | Publish database-authoritative facts; parse bounded search filters                                                                   | Để AI bịa product fact hoặc gọi domain command                       |
+| Pricing                  | price list, promotion, quote                                      | Tính quote bất biến                                                                                                                  | Đọc số tiền từ tin nhắn khách rồi tin luôn                           |
+| Buy Now/Order            | order, line snapshot, transition                                  | Revalidate variant và tạo một Order                                                                                                  | Tin giá/stock từ callback hoặc gọi SDK provider trực tiếp            |
+| Inventory                | stock ledger, reservation                                         | Reserve/commit/release atomically                                                                                                    | Dựa vào cache để quyết định stock                                    |
+| Payment                  | intent, attempt, provider mapping, transaction                    | Tạo QR/link, verify/match payment                                                                                                    | Giao hàng                                                            |
+| Fulfillment              | shipment/digital grant                                            | Giao sau policy cho phép                                                                                                             | Tự suy đoán payment                                                  |
+| Digital Goods            | account asset, entitlement, credential reference, delivery bundle | Reserve/validate/deliver authorized digital access exactly once; send customer-visible fields in the bound Telegram delivery message | Lưu raw credential trong DB/log/event/webhook hoặc gửi sang kênh phụ |
+| Supplier Integration     | supplier, SKU mapping, supplier order, cost/margin, health        | Call authorized upstream adapters idempotently and reconcile                                                                         | Blind retry, scrape/login/captcha, trust HTTP 200 as valid delivery  |
+| Reconciliation           | recon run, discrepancy, resolution                                | So sánh provider với ledger                                                                                                          | Sửa lịch sử âm thầm                                                  |
+| Support                  | ticket, conversation link, SLA, escalation                        | FAQ, human handoff, manual-review context                                                                                            | Mark-paid hoặc sửa ledger trực tiếp                                  |
+| Wallet/Ledger (post-MVP) | ledger accounts, double-entry transactions, holds                 | Tách riêng khi được duyệt                                                                                                            | Xuất hiện trong retail MVP                                           |
+| Reseller/API (post-MVP)  | tenant, credential, scope, plan, usage, endpoint                  | Public `/v1` contract trong lane riêng                                                                                               | Xuất hiện trong customer menu hoặc làm phức tạp Buy Now              |
+| Risk/Abuse               | counters, bans, challenges, risk decision                         | Allow/challenge/block                                                                                                                | Quyết định order/payment thay domain                                 |
+| Notifications            | template, delivery attempt                                        | Gửi thông báo từ outbox                                                                                                              | Tạo side effect nghiệp vụ                                            |
+| Admin/Audit              | admin action, reason, approval, audit event                       | Manual workflow có kiểm soát                                                                                                         | Direct DB edit                                                       |
 
 ### 4.3 VietQR + SePay payment/check flow
 
-| Phương án | Khi phù hợp | Gánh nặng tự vận hành | Khuyến nghị |
-|---|---|---|---|
-| VietQR Quick Link/Generate API | Tạo dynamic QR với exact amount + unique `addInfo` | QR chỉ là payment initiation; không có settlement proof | Bắt buộc cho retail Order flow |
-| SePay signed webhook/check | Kiểm tra giao dịch tiền vào và đối soát | Raw-body HMAC/timestamp, inbound account, amount, content/reference, unique transaction ID, retry/DLQ | Source of truth cho payment evidence |
-| VietQR Quick Link đơn thuần | Chỉ cần hiển thị QR, có người xác nhận thủ công | Không có settlement proof tự động | Không dùng cho auto-fulfillment |
-| Unofficial bank login/scraping | Không có trường hợp production an toàn được khuyến nghị | Credential/captcha/session/fraud/ToS risk rất cao | Cấm |
+| Phương án                      | Khi phù hợp                                             | Gánh nặng tự vận hành                                                                                 | Khuyến nghị                          |
+| ------------------------------ | ------------------------------------------------------- | ----------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| VietQR Quick Link/Generate API | Tạo dynamic QR với exact amount + unique `addInfo`      | QR chỉ là payment initiation; không có settlement proof                                               | Bắt buộc cho retail Order flow       |
+| SePay signed webhook/check     | Kiểm tra giao dịch tiền vào và đối soát                 | Raw-body HMAC/timestamp, inbound account, amount, content/reference, unique transaction ID, retry/DLQ | Source of truth cho payment evidence |
+| VietQR Quick Link đơn thuần    | Chỉ cần hiển thị QR, có người xác nhận thủ công         | Không có settlement proof tự động                                                                     | Không dùng cho auto-fulfillment      |
+| Unofficial bank login/scraping | Không có trường hợp production an toàn được khuyến nghị | Credential/captcha/session/fraud/ToS risk rất cao                                                     | Cấm                                  |
 
 ## 5. State machine đề xuất
 
@@ -247,8 +247,8 @@ stateDiagram-v2
 - BR-INV-001: Digital asset/local stock reserve khi order tạo; TTL cấu hình theo thời gian payment thực tế.
 - BR-INV-002: Khi payment thành công đúng hạn, reservation chuyển commit atomically.
 - BR-INV-003: Payment thành công nhưng reservation đã hết là exception; không oversell im lặng, chuyển manual recovery/substitution/refund.
-- BR-FUL-001: Hàng số dùng entitlement token một lần, có expiry và audit download; không gửi secret vĩnh viễn trong chat.
-- BR-FUL-002: Delivery Bundle bind customer/order, TTL và view-once; reissue phải revoke bundle cũ và audit.
+- BR-FUL-001: Hàng số được gửi tự động trong message Telegram đã bind sau khi verify payment/asset; đường khôi phục cũ có expiry và audit, không cấp asset lần hai.
+- BR-FUL-002: Delivery Bundle bind customer/order; automatic handoff consumes it after successful send, còn `/d/:token` và callback cũ giữ view-once; reissue phải revoke bundle cũ và audit.
 
 ### 6.6 Admin và hỗ trợ
 
@@ -265,7 +265,7 @@ stateDiagram-v2
 - BR-DIG-002: Ưu tiên invite/license/seat/API entitlement; shared credential chỉ khi upstream cho phép.
 - BR-DIG-003: Mỗi Digital Account Asset chỉ được allocate cho tối đa một active Order.
 - BR-DIG-004: Raw credential không xuất hiện trong PostgreSQL domain, log, analytics, support transcript, event hoặc reseller webhook.
-- BR-DIG-005: Delivery dùng vault-backed signed one-time link, expiry và view-once audit; không gửi password vĩnh viễn trong chat.
+- BR-DIG-005: Delivery đọc field `customerVisible` từ Vault-backed asset và gửi một lần tới đúng Telegram chat/customer đã bind; không gửi sang kênh phụ. `/d/:token` và callback cũ là recovery view-once.
 - BR-DIG-006: Supplier HTTP 200 không phải fulfillment truth; asset phải validate về SKU, uniqueness, expiry, region và usability.
 - BR-SUP-001: Supplier create-order dùng idempotency key; timeout-unknown phải query/reconcile trước retry.
 - BR-SUP-002: Supplier cost, sell price, margin và supplier reference được snapshot trong Order.
@@ -323,14 +323,14 @@ Schema tối thiểu cho `webhook_inbox`:
 
 Baseline ban đầu để load-test, không phải con số bất biến:
 
-| Hành động | Soft limit đề xuất | Khi vượt |
-|---|---:|---|
-| Tin nhắn/command thường | 6/10 giây, burst 10/user | Trả cooldown, không gọi DB nặng |
-| Tạo checkout/QR | 3/phút và 10/giờ/user | Challenge hoặc cooldown |
-| “Kiểm tra thanh toán” | 1/5 giây và 30/giờ/user | Dùng trạng thái cache/read model, không poll provider mỗi click |
-| Thử coupon | 10/giờ/customer/device | Tăng risk score, ẩn chi tiết lỗi |
-| OTP/login admin | 5/15 phút/account + IP | Lock có TTL, cảnh báo audit |
-| Payload webhook | 64 KiB mặc định | 413 trước parse; điều chỉnh theo provider fixture |
+| Hành động               |       Soft limit đề xuất | Khi vượt                                                        |
+| ----------------------- | -----------------------: | --------------------------------------------------------------- |
+| Tin nhắn/command thường | 6/10 giây, burst 10/user | Trả cooldown, không gọi DB nặng                                 |
+| Tạo checkout/QR         |    3/phút và 10/giờ/user | Challenge hoặc cooldown                                         |
+| “Kiểm tra thanh toán”   |  1/5 giây và 30/giờ/user | Dùng trạng thái cache/read model, không poll provider mỗi click |
+| Thử coupon              |   10/giờ/customer/device | Tăng risk score, ẩn chi tiết lỗi                                |
+| OTP/login admin         |   5/15 phút/account + IP | Lock có TTL, cảnh báo audit                                     |
+| Payload webhook         |          64 KiB mặc định | 413 trước parse; điều chỉnh theo provider fixture               |
 
 Control bổ sung:
 
@@ -342,30 +342,30 @@ Control bổ sung:
 
 ## 9. Threat model STRIDE rút gọn
 
-| ID | STRIDE / OWASP | Kịch bản | Control bắt buộc |
-|---|---|---|---|
-| T01 | Spoofing / Broken Auth | Giả webhook provider hoặc Telegram | HMAC/SDK verify, channel secret, TLS, replay window, secret rotation |
-| T02 | Tampering | Sửa amount/order ID trong callback | Server-side pricing, opaque ID, schema allowlist, domain invariant |
-| T03 | Repudiation | Admin nói không hề mark-paid/refund | MFA/step-up, immutable audit, actor/reason, explicit confirmation/cooldown |
-| T04 | Information Disclosure | Lộ token bot, checksum key, PII trong log | Secret manager, redaction, least privilege, encryption, log review |
-| T05 | DoS / Resource Consumption | Spam tạo QR, poll payment, gửi payload lớn | Layered quota, body limit, queue, timeout, circuit breaker |
-| T06 | Elevation / BOLA | Customer đọc order người khác bằng ID | Object-level authorization trên mọi read/write, UUID không thay auth |
-| T07 | Replay | Gửi lại webhook/callback để giao hàng lần hai | Unique dedupe key, idempotent transition, inbox ledger |
-| T08 | Race | Hai checkout cuối cùng cùng mua một món | DB row/version lock, atomic reservation, concurrency test |
-| T09 | Supply chain | SDK/repo mẫu bị cài package độc | Lockfile, provenance, SBOM, audit, update policy, signed artifact |
-| T10 | SSRF | Admin nhập callback/image URL nội bộ | Egress allowlist, URL parser, block private/link-local IP, timeout |
-| T11 | Prompt injection | Khách ép AI gọi tool mark-paid/refund | LLM không có quyền trực tiếp; typed commands, policy gate, human approval |
-| T12 | Fraud | Ảnh biên lai giả hoặc transfer content trùng | Không dùng ảnh làm evidence; match provider reference/amount/order |
-| T13 | Tampering / wallet | Race giữa hai lệnh debit làm âm số dư hoặc double-spend | Immutable double-entry ledger, hold trước capture, transaction/lock, rebuildable projection |
-| T14 | Elevation / reseller | Credential có scope đọc tenant khác hoặc tạo order ngoài plan | Tenant isolation server-side, scope matrix, object authorization, quota/plan guard |
-| T15 | SSRF / reseller webhook | Đối tác đăng endpoint nội bộ để nhận secret hoặc dò mạng | HTTPS challenge, DNS/IP/port allowlist, egress policy, re-check lúc delivery |
-| T16 | Repudiation / finance | Manual adjustment không thể chứng minh ai làm | Sole-owner step-up, explicit confirmation/cooldown, reason, before/after, append-only ledger/audit |
-| T17 | DoS / API | Reseller retry không có idempotency tạo hàng nghìn order | `Idempotency-Key`, request fingerprint, quota, backoff, 429/Retry-After |
-| T18 | Information disclosure | Lộ balance/order/payment qua enumeration hoặc export không giới hạn | Opaque IDs, BOLA checks, cursor caps, export permission/audit, field minimization |
-| T19 | Spoofing / admin | Attacker takes/changes `@Quyenvjp` username | Authorize only configured numeric Telegram ID; no username fallback/add-admin |
-| T20 | Disclosure / credential | Supplier/account password leaks in DB/log/chat/webhook | Vault reference, one-time delivery, redaction tests, least privilege |
-| T21 | Supply chain / supplier | Upstream sells revoked/stolen/unauthorized account | Authorization evidence, asset validation/quarantine, warranty/refund workflow |
-| T22 | Insecure design / platform | Requested VietQR digital-account flow conflicts with Telegram/provider policy | Explicit launch risk gate, approval/channel review, never conceal or bypass policy |
+| ID  | STRIDE / OWASP             | Kịch bản                                                                                                  | Control bắt buộc                                                                                          |
+| --- | -------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- |
+| T01 | Spoofing / Broken Auth     | Giả webhook provider hoặc Telegram                                                                        | HMAC/SDK verify, channel secret, TLS, replay window, secret rotation                                      |
+| T02 | Tampering                  | Sửa amount/order ID trong callback                                                                        | Server-side pricing, opaque ID, schema allowlist, domain invariant                                        |
+| T03 | Repudiation                | Admin nói không hề mark-paid/refund                                                                       | MFA/step-up, immutable audit, actor/reason, explicit confirmation/cooldown                                |
+| T04 | Information Disclosure     | Lộ token bot, checksum key, PII trong log                                                                 | Secret manager, redaction, least privilege, encryption, log review                                        |
+| T05 | DoS / Resource Consumption | Spam tạo QR, poll payment, gửi payload lớn                                                                | Layered quota, body limit, queue, timeout, circuit breaker                                                |
+| T06 | Elevation / BOLA           | Customer đọc order người khác bằng ID                                                                     | Object-level authorization trên mọi read/write, UUID không thay auth                                      |
+| T07 | Replay                     | Gửi lại webhook/callback để giao hàng lần hai                                                             | Unique dedupe key, idempotent transition, inbox ledger                                                    |
+| T08 | Race                       | Hai checkout cuối cùng cùng mua một món                                                                   | DB row/version lock, atomic reservation, concurrency test                                                 |
+| T09 | Supply chain               | SDK/repo mẫu bị cài package độc                                                                           | Lockfile, provenance, SBOM, audit, update policy, signed artifact                                         |
+| T10 | SSRF                       | Admin nhập callback/image URL nội bộ                                                                      | Egress allowlist, URL parser, block private/link-local IP, timeout                                        |
+| T11 | Prompt injection           | Khách ép AI gọi tool mark-paid/refund                                                                     | LLM không có quyền trực tiếp; typed commands, policy gate, human approval                                 |
+| T12 | Fraud                      | Ảnh biên lai giả hoặc transfer content trùng                                                              | Không dùng ảnh làm evidence; match provider reference/amount/order                                        |
+| T13 | Tampering / wallet         | Race giữa hai lệnh debit làm âm số dư hoặc double-spend                                                   | Immutable double-entry ledger, hold trước capture, transaction/lock, rebuildable projection               |
+| T14 | Elevation / reseller       | Credential có scope đọc tenant khác hoặc tạo order ngoài plan                                             | Tenant isolation server-side, scope matrix, object authorization, quota/plan guard                        |
+| T15 | SSRF / reseller webhook    | Đối tác đăng endpoint nội bộ để nhận secret hoặc dò mạng                                                  | HTTPS challenge, DNS/IP/port allowlist, egress policy, re-check lúc delivery                              |
+| T16 | Repudiation / finance      | Manual adjustment không thể chứng minh ai làm                                                             | Sole-owner step-up, explicit confirmation/cooldown, reason, before/after, append-only ledger/audit        |
+| T17 | DoS / API                  | Reseller retry không có idempotency tạo hàng nghìn order                                                  | `Idempotency-Key`, request fingerprint, quota, backoff, 429/Retry-After                                   |
+| T18 | Information disclosure     | Lộ balance/order/payment qua enumeration hoặc export không giới hạn                                       | Opaque IDs, BOLA checks, cursor caps, export permission/audit, field minimization                         |
+| T19 | Spoofing / admin           | Attacker takes/changes `@Quyenvjp` username                                                               | Authorize only configured numeric Telegram ID; no username fallback/add-admin                             |
+| T20 | Disclosure / credential    | Supplier/account password leaks outside the intended bound Telegram delivery or is sent to the wrong chat | Vault reference, recipient-bound handoff, redaction tests, least privilege, legacy recovery authorization |
+| T21 | Supply chain / supplier    | Upstream sells revoked/stolen/unauthorized account                                                        | Authorization evidence, asset validation/quarantine, warranty/refund workflow                             |
+| T22 | Insecure design / platform | Requested VietQR digital-account flow conflicts with Telegram/provider policy                             | Explicit launch risk gate, approval/channel review, never conceal or bypass policy                        |
 
 ## 10. Security engineering baseline
 
@@ -409,52 +409,52 @@ Mọi bảng tiền dùng integer VND; mọi aggregate có `version` để optim
 
 Đây là design system cho **quy tắc và logic**, không chỉ màu/font UI:
 
-| Artifact | Nội dung phải chốt | Gate |
-|---|---|---|
-| `MVP-CUSTOMER-FLOW.md` | Menu, browse/search, product, QR, delivery, history, support và UX targets | Owner ký |
-| `CONTEXT.md` | Ubiquitous language, không có chi tiết implementation | Không còn thuật ngữ mơ hồ |
-| `CONTEXT-MAP.md` | Bounded contexts và quan hệ upstream/downstream | Không có shared-table ownership mơ hồ |
-| `BUSINESS-RULES.md` | Rule ID, input, decision, exception, owner | Rule có test scenario |
-| `STATE-MACHINES.md` | State, transition, guard, side effect, terminal state | Không có transition ngầm |
-| `MODULE-CONTRACTS.md` | Command/event/API ownership, idempotency | Consumer/provider cùng hiểu |
-| `PAYMENT-CONTRACT.md` | Provider mapping, signature, dedupe, late/partial/overpay/refund | Finance + engineering ký |
-| `WALLET-LEDGER.md` | Post-MVP only: double-entry, hold/capture/release/refund, compliance | Không block retail MVP |
-| `RESELLER-API.md` | Post-MVP only: `/v1` resources, scopes, idempotency, errors, quotas, signed webhooks | Không block retail MVP |
-| `SUPPLIER-API.md` | Upstream catalog/order/refund/reconcile adapter, cost/margin, timeout-unknown states | Owner + supplier contract ký |
-| `PAYMENT-POLICY-BY-PRODUCT.md` | VietQR + SePay flow, unsupported SKU blocking and platform-risk gate | Product + platform policy ký |
-| `ADMIN-IDENTITY.md` | One root admin numeric ID mapped to `@Quyenvjp`, no username fallback | Owner verifies bootstrap |
-| `TELEGRAM-POLICY-RISK.md` | Platform policy risk for requested VietQR digital-account flow | Launch gate before production |
-| `DIGITAL-DELIVERY.md` | Asset states, vault, one-time delivery, replacement/warranty | Security + operations ký |
-| `BOT-UX-FLOWS.md` | Main menu, callback/token rules, pagination, loading/error/cancel, history/support flows | Product + channel owner ký |
-| `THREAT-MODEL.md` | Assets, trust boundaries, STRIDE, abuse cases | Critical/high có control |
-| `DATA-POLICY.md` | Classification, consent, retention, deletion, backup | Legal/privacy review |
-| `ADRs/` | Chỉ quyết định khó đảo ngược và có trade-off thật | Accepted trước implementation |
-| `TEST-MATRIX.md` | Happy path, race, retry, replay, outage, fraud | Acceptance executable |
-| `RUNBOOKS/` | Reconciliation, provider outage, leaked secret, restore | Có drill evidence |
-| `DESIGN.md` | Nếu có UI: tokens, component states, Vietnamese copy, a11y | Chốt sau kênh đầu tiên |
+| Artifact                       | Nội dung phải chốt                                                                       | Gate                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `MVP-CUSTOMER-FLOW.md`         | Menu, browse/search, product, QR, delivery, history, support và UX targets               | Owner ký                                              |
+| `CONTEXT.md`                   | Ubiquitous language, không có chi tiết implementation                                    | Không còn thuật ngữ mơ hồ                             |
+| `CONTEXT-MAP.md`               | Bounded contexts và quan hệ upstream/downstream                                          | Không có shared-table ownership mơ hồ                 |
+| `BUSINESS-RULES.md`            | Rule ID, input, decision, exception, owner                                               | Rule có test scenario                                 |
+| `STATE-MACHINES.md`            | State, transition, guard, side effect, terminal state                                    | Không có transition ngầm                              |
+| `MODULE-CONTRACTS.md`          | Command/event/API ownership, idempotency                                                 | Consumer/provider cùng hiểu                           |
+| `PAYMENT-CONTRACT.md`          | Provider mapping, signature, dedupe, late/partial/overpay/refund                         | Finance + engineering ký                              |
+| `WALLET-LEDGER.md`             | Post-MVP only: double-entry, hold/capture/release/refund, compliance                     | Không block retail MVP                                |
+| `RESELLER-API.md`              | Post-MVP only: `/v1` resources, scopes, idempotency, errors, quotas, signed webhooks     | Không block retail MVP                                |
+| `SUPPLIER-API.md`              | Upstream catalog/order/refund/reconcile adapter, cost/margin, timeout-unknown states     | Owner + supplier contract ký                          |
+| `PAYMENT-POLICY-BY-PRODUCT.md` | VietQR + SePay flow, unsupported SKU blocking and explicit external-policy risk          | Product decision recorded; no platform-approval claim |
+| `ADMIN-IDENTITY.md`            | One root admin numeric ID mapped to `@Quyenvjp`, no username fallback                    | Owner verifies bootstrap                              |
+| `TELEGRAM-POLICY-RISK.md`      | Accepted external policy risk for the requested VietQR digital-account flow              | Risk documented; not a technical deployment gate      |
+| `DIGITAL-DELIVERY.md`          | Asset states, vault, automatic Telegram delivery, recovery and replacement/warranty      | Security + operations ký                              |
+| `BOT-UX-FLOWS.md`              | Main menu, callback/token rules, pagination, loading/error/cancel, history/support flows | Product + channel owner ký                            |
+| `THREAT-MODEL.md`              | Assets, trust boundaries, STRIDE, abuse cases                                            | Critical/high có control                              |
+| `DATA-POLICY.md`               | Classification, consent, retention, deletion, backup                                     | Legal/privacy review                                  |
+| `ADRs/`                        | Chỉ quyết định khó đảo ngược và có trade-off thật                                        | Accepted trước implementation                         |
+| `TEST-MATRIX.md`               | Happy path, race, retry, replay, outage, fraud                                           | Acceptance executable                                 |
+| `RUNBOOKS/`                    | Reconciliation, provider outage, leaked secret, restore                                  | Có drill evidence                                     |
+| `DESIGN.md`                    | Nếu có UI: tokens, component states, Vietnamese copy, a11y                               | Chốt sau kênh đầu tiên                                |
 
 ## 13. ADR đề xuất cần chốt
 
-| ADR | Đề xuất mặc định | Trạng thái |
-|---|---|---|
-| ADR-001 Kênh đầu tiên | Telegram; core vẫn channel-adapter based | Đã chốt |
-| ADR-002 Loại hàng | Authorized digital account/access | Đã chốt, từng SKU cần resale policy |
-| ADR-003 Payment provider | VietQR dynamic QR + SePay check/reconciliation | Đề xuất bắt buộc |
-| ADR-004 QR mode | Dynamic QR mỗi order, amount + unique content | Đề xuất accept |
-| ADR-005 Architecture | Modular monolith + worker + Postgres + Redis ephemeral | Đề xuất accept |
-| ADR-006 Payment truth | Verified webhook + reconciliation; không dùng ảnh/redirect | Đề xuất bắt buộc |
-| ADR-007 Inventory | Reservation TTL 15 phút, recovery cho late payment | Cần tune theo sản phẩm |
-| ADR-008 Admin auth | Sole root admin ID + private context + passkey/MFA/step-up, no fake dual approval | Đề xuất bắt buộc |
-| ADR-009 AI boundary | AI không có quyền payment/order/inventory trực tiếp | Đề xuất bắt buộc |
-| ADR-010 Data retention | Chốt retention theo nghĩa vụ kế toán/pháp lý và data minimization | Cần legal/accounting review |
-| ADR-011 Wallet scope | Customer wallet/top-up deferred khỏi retail MVP | Đề xuất accept |
-| ADR-012 Tender scope | Retail MVP chỉ VietQR + SePay cho mỗi Order | Đề xuất accept |
-| ADR-013 Reseller scope | Reseller API là post-MVP lane, không xuất hiện trong customer UX | Đề xuất accept |
-| ADR-014 Support boundary | Ticket/manual review không được bypass payment/ledger domain commands | Đề xuất bắt buộc |
-| ADR-015 Root admin | Numeric Telegram ID mapped to `@Quyenvjp`; no add-admin/username fallback | Đã chốt về policy, cần numeric ID |
-| ADR-016 Digital payment | VietQR dynamic QR + SePay signed webhook/check trước giao account | Đề xuất bắt buộc |
-| ADR-017 Supplier adapter | Authorized upstream API, idempotency, circuit/reconcile, cost snapshot | Đề xuất accept |
-| ADR-018 Secret delivery | Vault reference + one-time Delivery Bundle; no raw credential in chat/log | Đề xuất bắt buộc |
+| ADR                      | Đề xuất mặc định                                                                                            | Trạng thái                          |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------- | ----------------------------------- |
+| ADR-001 Kênh đầu tiên    | Telegram; core vẫn channel-adapter based                                                                    | Đã chốt                             |
+| ADR-002 Loại hàng        | Authorized digital account/access                                                                           | Đã chốt, từng SKU cần resale policy |
+| ADR-003 Payment provider | VietQR dynamic QR + SePay check/reconciliation                                                              | Đề xuất bắt buộc                    |
+| ADR-004 QR mode          | Dynamic QR mỗi order, amount + unique content                                                               | Đề xuất accept                      |
+| ADR-005 Architecture     | Modular monolith + worker + Postgres + Redis ephemeral                                                      | Đề xuất accept                      |
+| ADR-006 Payment truth    | Verified webhook + reconciliation; không dùng ảnh/redirect                                                  | Đề xuất bắt buộc                    |
+| ADR-007 Inventory        | Reservation TTL 15 phút, recovery cho late payment                                                          | Cần tune theo sản phẩm              |
+| ADR-008 Admin auth       | Sole root admin ID + private context + passkey/MFA/step-up, no fake dual approval                           | Đề xuất bắt buộc                    |
+| ADR-009 AI boundary      | AI không có quyền payment/order/inventory trực tiếp                                                         | Đề xuất bắt buộc                    |
+| ADR-010 Data retention   | Chốt retention theo nghĩa vụ kế toán/pháp lý và data minimization                                           | Cần legal/accounting review         |
+| ADR-011 Wallet scope     | Customer wallet/top-up deferred khỏi retail MVP                                                             | Đề xuất accept                      |
+| ADR-012 Tender scope     | Retail MVP chỉ VietQR + SePay cho mỗi Order                                                                 | Đề xuất accept                      |
+| ADR-013 Reseller scope   | Reseller API là post-MVP lane, không xuất hiện trong customer UX                                            | Đề xuất accept                      |
+| ADR-014 Support boundary | Ticket/manual review không được bypass payment/ledger domain commands                                       | Đề xuất bắt buộc                    |
+| ADR-015 Root admin       | Numeric Telegram ID mapped to `@Quyenvjp`; no add-admin/username fallback                                   | Đã chốt về policy, cần numeric ID   |
+| ADR-016 Digital payment  | VietQR dynamic QR + SePay signed webhook/check trước giao account                                           | Đề xuất bắt buộc                    |
+| ADR-017 Supplier adapter | Authorized upstream API, idempotency, circuit/reconcile, cost snapshot                                      | Đề xuất accept                      |
+| ADR-018 Secret delivery  | Vault reference + recipient-bound Telegram delivery; no raw credential in DB/log/event or secondary channel | Đề xuất bắt buộc                    |
 
 ## 14. Test matrix tối thiểu trước production
 
@@ -506,7 +506,7 @@ Chỉ bắt đầu implementation khi:
 2. **Phase 1 — Admin + walking skeleton:** bootstrap numeric ID cho `@Quyenvjp`, Telegram adapter -> command -> DB -> outbox -> reply.
 3. **Phase 2 — Digital commerce core:** category/product/variant, deterministic + bounded AI search, Buy Now, order snapshot, digital asset reservation.
 4. **Phase 3 — VietQR + SePay + Supplier sandbox:** QR generation, signed SePay webhook/check, supplier adapter, idempotency, unknown-state reconciliation.
-5. **Phase 4 — Secure delivery/support:** vault, one-time Delivery Bundle, invalid-account replacement, audit/manual review.
+5. **Phase 4 — Secure delivery/support:** vault, automatic Telegram delivery, legacy recovery, invalid-account replacement, audit/manual review.
 6. **Phase 5 — Hardening:** WAF/rate limit, SAST/DAST, load/chaos, restore drill, independent review.
 7. **Phase 6 — Limited pilot:** giới hạn sản phẩm/khách/giá trị, manual reconciliation song song, rồi mới tăng tải.
 8. **Post-MVP:** Reseller API, reseller prepaid ledger, customer wallet/top-up và growth features chỉ theo quyết định riêng.
@@ -521,31 +521,31 @@ Chỉ bắt đầu implementation khi:
 
 ## 18. Nguồn tham khảo
 
-- VietQR Quick Link: https://www.vietqr.io/danh-sach-api/link-tao-ma-nhanh/
-- VietQR repositories: https://github.com/vietqr
-- payOS API: https://payos.vn/docs/api/
-- payOS signature verification: https://payos.vn/docs/tich-hop-webhook/kiem-tra-du-lieu-voi-signature/
-- payOS Node SDK: https://github.com/payOSHQ/payos-lib-node
-- SePay Developer: https://developer.sepay.vn/
-- SePay Webhooks: https://developer.sepay.vn/vi/sepay-webhooks
-- SePay webhook authentication: https://developer.sepay.vn/vi/sepay-webhooks/xac-thuc
-- SePay webhook security: https://developer.sepay.vn/vi/sepay-webhooks/bao-mat
-- SePay retry/error handling: https://developer.sepay.vn/vi/sepay-webhooks/xu-ly-loi
-- SePay reconciliation: https://developer.sepay.vn/vi/sepay-webhooks/doi-soat-giao-dich
+- VietQR Quick Link: <https://www.vietqr.io/danh-sach-api/link-tao-ma-nhanh/>
+- VietQR repositories: <https://github.com/vietqr>
+- payOS API: <https://payos.vn/docs/api/>
+- payOS signature verification: <https://payos.vn/docs/tich-hop-webhook/kiem-tra-du-lieu-voi-signature/>
+- payOS Node SDK: <https://github.com/payOSHQ/payos-lib-node>
+- SePay Developer: <https://developer.sepay.vn/>
+- SePay Webhooks: <https://developer.sepay.vn/vi/sepay-webhooks>
+- SePay webhook authentication: <https://developer.sepay.vn/vi/sepay-webhooks/xac-thuc>
+- SePay webhook security: <https://developer.sepay.vn/vi/sepay-webhooks/bao-mat>
+- SePay retry/error handling: <https://developer.sepay.vn/vi/sepay-webhooks/xu-ly-loi>
+- SePay reconciliation: <https://developer.sepay.vn/vi/sepay-webhooks/doi-soat-giao-dich>
 - Internal research addendum: ../01-research/VIETQR_SEPAY_CHECK_FLOW.md
-- Casso Webhook V2: https://docs.casso.vn/tich-hop/webhook_v2
-- Casso sample webhook handler: https://github.com/CassoHQ/casso-webhook-handler-sample
-- Telegram Bot API: https://core.telegram.org/bots/api#setwebhook
+- Casso Webhook V2: <https://docs.casso.vn/tich-hop/webhook_v2>
+- Casso sample webhook handler: <https://github.com/CassoHQ/casso-webhook-handler-sample>
+- Telegram Bot API: <https://core.telegram.org/bots/api#setwebhook>
 - Telegram policy risk note: ../04-security/TELEGRAM_POLICY_RISK.md
-- VietQR Generate API: https://www.vietqr.io/danh-sach-api/link-tao-ma-nhanh/api-tao-ma-qr
-- SePay webhook authentication: https://developer.sepay.vn/vi/sepay-webhooks/xac-thuc
-- SePay webhook security: https://developer.sepay.vn/vi/sepay-webhooks/bao-mat
-- SePay retry/error handling: https://developer.sepay.vn/vi/sepay-webhooks/xu-ly-loi
-- SePay reconciliation: https://developer.sepay.vn/vi/sepay-webhooks/doi-soat-giao-dich
-- grammY conversations: https://grammy.dev/plugins/conversations
-- Vendure: https://github.com/vendure-ecommerce/vendure
-- Medusa: https://github.com/medusajs/medusa
-- Saleor: https://github.com/saleor/saleor
-- OWASP API Security Top 10 2023: https://owasp.org/API-Security/editions/2023/en/0x11-t10/
-- OWASP ASVS: https://owasp.org/www-project-application-security-verification-standard/
-- EMVCo QR Codes: https://www.emvco.com/emv-technologies/qr-codes/
+- VietQR Generate API: <https://www.vietqr.io/danh-sach-api/link-tao-ma-nhanh/api-tao-ma-qr>
+- SePay webhook authentication: <https://developer.sepay.vn/vi/sepay-webhooks/xac-thuc>
+- SePay webhook security: <https://developer.sepay.vn/vi/sepay-webhooks/bao-mat>
+- SePay retry/error handling: <https://developer.sepay.vn/vi/sepay-webhooks/xu-ly-loi>
+- SePay reconciliation: <https://developer.sepay.vn/vi/sepay-webhooks/doi-soat-giao-dich>
+- grammY conversations: <https://grammy.dev/plugins/conversations>
+- Vendure: <https://github.com/vendure-ecommerce/vendure>
+- Medusa: <https://github.com/medusajs/medusa>
+- Saleor: <https://github.com/saleor/saleor>
+- OWASP API Security Top 10 2023: <https://owasp.org/API-Security/editions/2023/en/0x11-t10/>
+- OWASP ASVS: <https://owasp.org/www-project-application-security-verification-standard/>
+- EMVCo QR Codes: <https://www.emvco.com/emv-technologies/qr-codes/>
