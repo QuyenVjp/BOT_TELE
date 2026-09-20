@@ -1,5 +1,10 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
-import type { InlineButton, PresentedMessage, ReplyKeyboard } from "./catalog.js";
+import {
+  formatCategoryLabel,
+  type InlineButton,
+  type PresentedMessage,
+  type ReplyKeyboard,
+} from "./catalog.js";
 import { formatExpiryVietnam } from "./payment.js";
 import type { StorefrontProductSummary } from "../../modules/catalog/repository.js";
 import {
@@ -8,11 +13,11 @@ import {
   type PreorderStatus,
 } from "../../modules/commerce/preorder.js";
 import {
-  ADMIN_CONTACT_URL,
   COMMUNITY_BUTTON_LABEL,
-  COMMUNITY_URL,
   SHOP_NAME,
   SHOP_TAGLINE,
+  coerceAdminContactUrl,
+  coerceCommunityUrl,
 } from "../../modules/catalog/shop-profile.js";
 
 export const CUSTOMER_COPY = {
@@ -39,7 +44,7 @@ export const MAIN_REPLY_KEYBOARD: ReplyKeyboard = {
   resizeKeyboard: true,
   buttons: [
     [{ text: CUSTOMER_COPY.browse }, { text: CUSTOMER_COPY.orders }],
-    [{ text: CUSTOMER_COPY.account }, { text: CUSTOMER_COPY.topup }],
+    [{ text: CUSTOMER_COPY.account }],
     [{ text: CUSTOMER_COPY.warranty }, { text: CUSTOMER_COPY.support }],
   ],
 };
@@ -51,7 +56,6 @@ export function presentCustomerHelp(): PresentedMessage {
       "/start — Mở TIER20 SHOP",
       "/shop — Xem sản phẩm",
       "/orders — Đơn hàng của tôi",
-      "/wallet — Ví của tôi",
       "/warranty — Bảo hành",
       "/support — Hỗ trợ",
       "/settings — Cài đặt",
@@ -88,6 +92,7 @@ export interface StorefrontDisplayOptions {
   shopName?: string | undefined;
   shopTagline?: string | undefined;
   communityUrl?: string | undefined;
+  adminContactUrl?: string | undefined;
   categories?: ReadonlyArray<{ id: string; name: string; icon?: string | null }>;
   featuredProducts?: StorefrontProductSummary[];
   products?: StorefrontProductSummary[];
@@ -126,7 +131,7 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   for (let i = 0; i < categories.length; i += 2) {
     buttons.push(
       categories.slice(i, i + 2).map((category) => ({
-        text: category.name,
+        text: formatCategoryLabel(category.name, category.icon),
         callbackData: `cat:view:${category.id}`,
       })),
     );
@@ -134,8 +139,16 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   buttons.push(
     [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
     [
-      { text: COMMUNITY_BUTTON_LABEL, url: COMMUNITY_URL, callbackData: "" },
-      { text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" },
+      {
+        text: COMMUNITY_BUTTON_LABEL,
+        url: coerceCommunityUrl(options.communityUrl),
+        callbackData: "",
+      },
+      {
+        text: "👨‍💻 Liên hệ Admin",
+        url: coerceAdminContactUrl(options.adminContactUrl),
+        callbackData: "",
+      },
     ],
   );
   if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);
@@ -267,12 +280,13 @@ export function presentCustomerPreorders(
 }
 
 /**
- * Customer account home (goal §69): display name, wallet balance, completed-order
- * count and notification state. The numeric Telegram id is never rendered.
+ * Customer account home. Retail MVP keeps wallet and top-up controls out of
+ * customer-facing navigation; the wallet domain remains an internal backend lane.
  */
 export function presentCustomerAccount(input: {
   displayName: string;
-  balanceVnd: bigint;
+  /** Legacy backend input; retail MVP does not render wallet data. */
+  balanceVnd?: bigint;
   completedOrders: number;
   shopUpdates: boolean;
   purchaseActivity: boolean;
@@ -282,7 +296,6 @@ export function presentCustomerAccount(input: {
       "👤 Tài khoản khách hàng",
       "",
       `👋 ${input.displayName}`,
-      `💰 Số dư ví: ${formatVnd(makeVnd(input.balanceVnd))}`,
       `🧾 Đơn đã hoàn tất: ${input.completedOrders}`,
       `🔔 Thông báo: Cập nhật sản phẩm ${input.shopUpdates ? "Bật" : "Tắt"} · Hoạt động mua hàng ${input.purchaseActivity ? "Bật" : "Tắt"}`,
     ].join("\n"),
@@ -292,13 +305,10 @@ export function presentCustomerAccount(input: {
         { text: "📌 Đặt cọc", callbackData: "cust:preorders" },
       ],
       [
-        { text: "💰 Nạp ví", callbackData: "wallet:topup" },
-        { text: "🔔 Thông báo", callbackData: "cust:notify" },
-      ],
-      [
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
         { text: "💬 Hỗ trợ", callbackData: "supp:open" },
       ],
+      [{ text: "🔔 Thông báo", callbackData: "cust:notify" }],
       [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
     ],
   };

@@ -229,4 +229,16 @@ describe("callback sealing", () => {
       }),
     });
   });
+
+  it("keeps acknowledged delivery deletion readable", async () => {
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "delivery",
+        buttons: [[{ text: "delete", callbackData: "delivery:delete" }]],
+      },
+      { codec: codec(), telegramUserId: "123456789", resolveOrderId: async () => null },
+    );
+
+    expect(sealed.buttons[0]![0]!.callbackData).toBe("delivery:delete");
+  });
 });

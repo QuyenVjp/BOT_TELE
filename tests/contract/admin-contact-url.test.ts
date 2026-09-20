@@ -18,6 +18,7 @@ const URL_LITERAL_ALLOWLIST = new Set([
   "src/modules/catalog/shop-profile.ts",
   "tests/contract/admin-contact-url.test.ts",
   "src/infrastructure/db/migrations/049_catalog_taxonomy.sql",
+  "tests/contract/shop-profile.test.ts",
 ]);
 
 const SCAN_ROOTS = ["src", "tests", "scripts"] as const;

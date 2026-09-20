@@ -54,11 +54,11 @@ async function seedCatalog(
 ): Promise<{ categoryId: string; variantIds: string[] }> {
   const categoryId = newId();
   const productId = newId();
-  const slug = categoryId.slice(-8);
+  const slug = "ai";
   await sql`insert into customer (id, status, locale) values (${newId()}, 'ACTIVE', 'vi')`.execute(
     ctx.db,
   );
-  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Giải trí', ${slug}, true, 1)`.execute(
+  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', ${slug}, true, 1)`.execute(
     ctx.db,
   );
   await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Netflix', ${"nf-" + slug}, true, 1)`.execute(

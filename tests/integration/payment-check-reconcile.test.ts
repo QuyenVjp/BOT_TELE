@@ -292,11 +292,28 @@ describe("payment check (S3)", () => {
     expect(await countDiscrepancies()).toBe(0);
     expect(await lastStartedAtMs()).toBe(now.getTime());
 
-    // Immediately after, the cooldown bounds the damage instead of retrying the provider.
-    expect((await reconcileForPaymentCheck(ctx.db, { port, now })).reason).toBe("COOLDOWN");
+    // The provider deadline still gates a retry even when the manual cooldown is disabled.
+    expect(
+      (
+        await reconcileForPaymentCheck(ctx.db, {
+          port,
+          now: new Date(now.getTime() + 1_000),
+          cooldownSeconds: 0,
+        })
+      ).reason,
+    ).toBe("COOLDOWN");
     expect(calls).toBe(1);
+    expect(
+      (
+        await reconcileForPaymentCheck(ctx.db, {
+          port,
+          now: new Date(now.getTime() + 6_000),
+          cooldownSeconds: 0,
+        })
+      ).reason,
+    ).toBe("FAILED");
+    expect(calls).toBe(2);
   });
-
   it("collapses simultaneous clicks into a single provider call", async () => {
     const f = await seedPayableOrder();
     const txn = providerTxn(f);

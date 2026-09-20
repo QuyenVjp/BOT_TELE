@@ -15,28 +15,28 @@ import { newId } from "../../../shared/ids/index.js";
  */
 
 export async function seedCatalog(exec: Executor): Promise<void> {
-  const entertainment = newId();
+  const aiCategory = newId();
   const hidden = newId();
 
   await sql`
     insert into category (id, name_vi, slug, is_active, sort_order) values
-      (${entertainment}, 'Giải trí', 'giai-tri', true, 1),
+      (${aiCategory}, 'AI', 'ai', true, 1),
       (${hidden}, 'Danh mục ẩn', 'an', false, 2)
   `.execute(exec);
 
-  const netflix = newId();
-  const spotify = newId();
+  const chatgpt = newId();
+  const claude = newId();
 
   await sql`
     insert into product (id, category_id, name_vi, slug, short_description_vi, is_active, sort_order) values
-      (${netflix}, ${entertainment}, 'Netflix', 'netflix', 'Xem phim bản quyền', true, 1),
-      (${spotify}, ${entertainment}, 'Spotify', 'spotify', 'Nghe nhạc không quảng cáo', true, 2)
+      (${chatgpt}, ${aiCategory}, 'ChatGPT', 'chatgpt', 'Trợ lý AI hội thoại', true, 1),
+      (${claude}, ${aiCategory}, 'Claude', 'claude', 'Trợ lý AI viết và phân tích', true, 2)
   `.execute(exec);
 
   await sql`
     insert into product_alias (id, product_id, normalized_alias, locale, priority) values
-      (${newId()}, ${netflix}, 'phim', 'vi', 1),
-      (${newId()}, ${spotify}, 'nhac', 'vi', 1)
+      (${newId()}, ${chatgpt}, 'chatgpt', 'vi', 1),
+      (${newId()}, ${claude}, 'claude', 'vi', 1)
   `.execute(exec);
 
   const mkVariant = (
@@ -61,56 +61,56 @@ export async function seedCatalog(exec: Executor): Promise<void> {
 
   // Sellable variants.
   await mkVariant(
-    netflix,
-    "NF-1M",
+    chatgpt,
+    "CG-1M",
     "Gói 1 tháng",
     120000,
     "CREDENTIAL",
     "LOCAL_ONLY",
-    "RES-NF1",
+    "RES-CG1",
     true,
     1,
   ).execute(exec);
   await mkVariant(
-    netflix,
-    "NF-3M",
+    chatgpt,
+    "CG-3M",
     "Gói 3 tháng",
     320000,
     "CREDENTIAL",
     "LOCAL_THEN_SUPPLIER",
-    "RES-NF3",
+    "RES-CG3",
     true,
     2,
   ).execute(exec);
   await mkVariant(
-    spotify,
-    "SP-1M",
+    claude,
+    "CL-1M",
     "Gói 1 tháng",
     59000,
     "INVITE",
     "LOCAL_ONLY",
-    "RES-SP1",
+    "RES-CL1",
     true,
     3,
   ).execute(exec);
 
   // Hidden: PAUSED variant (valid otherwise).
   await mkVariant(
-    spotify,
-    "SP-PAUSED",
+    claude,
+    "CL-PAUSED",
     "Gói tạm dừng",
     59000,
     "INVITE",
     "PAUSED",
-    "RES-SPP",
+    "RES-CLP",
     true,
     4,
   ).execute(exec);
 
   // UNAUTHORIZED SKU: no resale evidence — must never surface (SR-007).
   await mkVariant(
-    netflix,
-    "NF-NOAUTH",
+    chatgpt,
+    "CG-NOAUTH",
     "Chưa được phép bán",
     99000,
     "LICENSE",

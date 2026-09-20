@@ -25,7 +25,7 @@ Khuyến nghị mặc định:
 10. Wallet và Reseller API là post-MVP lanes riêng; không ảnh hưởng customer flow hoặc schema tối thiểu của retail walking skeleton.
 11. Chỉ một root admin: numeric Telegram `user_id` được cấu hình cho `@Quyenvjp`; username chỉ là nhãn kiểm tra, không có `/add-admin`.
 12. Account có thể lấy từ Supplier API nhưng chỉ từ nguồn được phép resale/transfer; supplier order idempotent, credential giữ ở vault và chỉ gửi một lần trong message Telegram tới customer/chat đã bind sau khi payment + asset verify thành công.
-13. Telegram/provider policy risk được ghi riêng và là launch gate; không che giấu hoặc bypass policy bằng cách đổi tên payment flow.
+13. Telegram/provider policy risk is recorded separately and explicitly accepted by the owner for the VietQR + SePay architecture. It is not an internal technical deployment gate; never hide, disguise, or bypass the risk by renaming the payment flow.
 
 Kênh đầu tiên được chốt là **Telegram** và product wedge là authorized digital account/access. Lõi vẫn giữ channel adapter để không khóa domain vào Telegram.
 
@@ -409,29 +409,29 @@ Mọi bảng tiền dùng integer VND; mọi aggregate có `version` để optim
 
 Đây là design system cho **quy tắc và logic**, không chỉ màu/font UI:
 
-| Artifact                       | Nội dung phải chốt                                                                       | Gate                                  |
-| ------------------------------ | ---------------------------------------------------------------------------------------- | ------------------------------------- |
-| `MVP-CUSTOMER-FLOW.md`         | Menu, browse/search, product, QR, delivery, history, support và UX targets               | Owner ký                              |
-| `CONTEXT.md`                   | Ubiquitous language, không có chi tiết implementation                                    | Không còn thuật ngữ mơ hồ             |
-| `CONTEXT-MAP.md`               | Bounded contexts và quan hệ upstream/downstream                                          | Không có shared-table ownership mơ hồ |
-| `BUSINESS-RULES.md`            | Rule ID, input, decision, exception, owner                                               | Rule có test scenario                 |
-| `STATE-MACHINES.md`            | State, transition, guard, side effect, terminal state                                    | Không có transition ngầm              |
-| `MODULE-CONTRACTS.md`          | Command/event/API ownership, idempotency                                                 | Consumer/provider cùng hiểu           |
-| `PAYMENT-CONTRACT.md`          | Provider mapping, signature, dedupe, late/partial/overpay/refund                         | Finance + engineering ký              |
-| `WALLET-LEDGER.md`             | Post-MVP only: double-entry, hold/capture/release/refund, compliance                     | Không block retail MVP                |
-| `RESELLER-API.md`              | Post-MVP only: `/v1` resources, scopes, idempotency, errors, quotas, signed webhooks     | Không block retail MVP                |
-| `SUPPLIER-API.md`              | Upstream catalog/order/refund/reconcile adapter, cost/margin, timeout-unknown states     | Owner + supplier contract ký          |
-| `PAYMENT-POLICY-BY-PRODUCT.md` | VietQR + SePay flow, unsupported SKU blocking and platform-risk gate                     | Product + platform policy ký          |
-| `ADMIN-IDENTITY.md`            | One root admin numeric ID mapped to `@Quyenvjp`, no username fallback                    | Owner verifies bootstrap              |
-| `TELEGRAM-POLICY-RISK.md`      | Platform policy risk for requested VietQR digital-account flow                           | Launch gate before production         |
-| `DIGITAL-DELIVERY.md`          | Asset states, vault, automatic Telegram delivery, recovery and replacement/warranty      | Security + operations ký              |
-| `BOT-UX-FLOWS.md`              | Main menu, callback/token rules, pagination, loading/error/cancel, history/support flows | Product + channel owner ký            |
-| `THREAT-MODEL.md`              | Assets, trust boundaries, STRIDE, abuse cases                                            | Critical/high có control              |
-| `DATA-POLICY.md`               | Classification, consent, retention, deletion, backup                                     | Legal/privacy review                  |
-| `ADRs/`                        | Chỉ quyết định khó đảo ngược và có trade-off thật                                        | Accepted trước implementation         |
-| `TEST-MATRIX.md`               | Happy path, race, retry, replay, outage, fraud                                           | Acceptance executable                 |
-| `RUNBOOKS/`                    | Reconciliation, provider outage, leaked secret, restore                                  | Có drill evidence                     |
-| `DESIGN.md`                    | Nếu có UI: tokens, component states, Vietnamese copy, a11y                               | Chốt sau kênh đầu tiên                |
+| Artifact                       | Nội dung phải chốt                                                                       | Gate                                                  |
+| ------------------------------ | ---------------------------------------------------------------------------------------- | ----------------------------------------------------- |
+| `MVP-CUSTOMER-FLOW.md`         | Menu, browse/search, product, QR, delivery, history, support và UX targets               | Owner ký                                              |
+| `CONTEXT.md`                   | Ubiquitous language, không có chi tiết implementation                                    | Không còn thuật ngữ mơ hồ                             |
+| `CONTEXT-MAP.md`               | Bounded contexts và quan hệ upstream/downstream                                          | Không có shared-table ownership mơ hồ                 |
+| `BUSINESS-RULES.md`            | Rule ID, input, decision, exception, owner                                               | Rule có test scenario                                 |
+| `STATE-MACHINES.md`            | State, transition, guard, side effect, terminal state                                    | Không có transition ngầm                              |
+| `MODULE-CONTRACTS.md`          | Command/event/API ownership, idempotency                                                 | Consumer/provider cùng hiểu                           |
+| `PAYMENT-CONTRACT.md`          | Provider mapping, signature, dedupe, late/partial/overpay/refund                         | Finance + engineering ký                              |
+| `WALLET-LEDGER.md`             | Post-MVP only: double-entry, hold/capture/release/refund, compliance                     | Không block retail MVP                                |
+| `RESELLER-API.md`              | Post-MVP only: `/v1` resources, scopes, idempotency, errors, quotas, signed webhooks     | Không block retail MVP                                |
+| `SUPPLIER-API.md`              | Upstream catalog/order/refund/reconcile adapter, cost/margin, timeout-unknown states     | Owner + supplier contract ký                          |
+| `PAYMENT-POLICY-BY-PRODUCT.md` | VietQR + SePay flow, unsupported SKU blocking and explicit external-policy risk          | Product decision recorded; no platform-approval claim |
+| `ADMIN-IDENTITY.md`            | One root admin numeric ID mapped to `@Quyenvjp`, no username fallback                    | Owner verifies bootstrap                              |
+| `TELEGRAM-POLICY-RISK.md`      | Accepted external policy risk for the requested VietQR digital-account flow              | Risk documented; not a technical deployment gate      |
+| `DIGITAL-DELIVERY.md`          | Asset states, vault, automatic Telegram delivery, recovery and replacement/warranty      | Security + operations ký                              |
+| `BOT-UX-FLOWS.md`              | Main menu, callback/token rules, pagination, loading/error/cancel, history/support flows | Product + channel owner ký                            |
+| `THREAT-MODEL.md`              | Assets, trust boundaries, STRIDE, abuse cases                                            | Critical/high có control                              |
+| `DATA-POLICY.md`               | Classification, consent, retention, deletion, backup                                     | Legal/privacy review                                  |
+| `ADRs/`                        | Chỉ quyết định khó đảo ngược và có trade-off thật                                        | Accepted trước implementation                         |
+| `TEST-MATRIX.md`               | Happy path, race, retry, replay, outage, fraud                                           | Acceptance executable                                 |
+| `RUNBOOKS/`                    | Reconciliation, provider outage, leaked secret, restore                                  | Có drill evidence                                     |
+| `DESIGN.md`                    | Nếu có UI: tokens, component states, Vietnamese copy, a11y                               | Chốt sau kênh đầu tiên                                |
 
 ## 13. ADR đề xuất cần chốt
 

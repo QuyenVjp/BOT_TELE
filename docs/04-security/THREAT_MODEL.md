@@ -70,10 +70,10 @@ control spans several, the named ones are the load-bearing evidence.
 | SEC-012 | `src/infrastructure/vault/`, `src/modules/digital-goods/`                                                           | `tests/security/delivery-bundle.test.ts`, `tests/security/credential-leak.test.ts`                                                                                                                                                                                                                                            |
 | SEC-013 | `src/modules/supplier/`, `src/modules/digital-goods/recovery.ts`                                                    | `tests/integration/supplier-service.test.ts`, `tests/integration/supplier-fulfillment.test.ts`                                                                                                                                                                                                                                |
 | SEC-014 | `src/modules/digital-goods/asset-validation.ts`                                                                     | `tests/contract/asset-validation.test.ts`, `.github/workflows/security.yml`                                                                                                                                                                                                                                                   |
-| SEC-015 | `docs/04-security/TELEGRAM_POLICY_RISK.md`                                                                          | Launch gate (operational, not automated)                                                                                                                                                                                                                                                                                      |
+| SEC-015 | `docs/04-security/TELEGRAM_POLICY_RISK.md`                                                                          | Owner-accepted external policy risk; factual documentation, not an internal technical gate                                                                                                                                                                                                                                    |
 | SEC-016 | `src/modules/identity/step-up.ts`, `src/modules/notification/service.ts`                                            | `tests/integration/broadcast-confirmation.test.ts` (12)                                                                                                                                                                                                                                                                       |
 
-All three rows above are enforced on the live path, not merely present:
+All controls listed above are enforced on the live path, not merely present:
 
 - **SEC-007 / SEC-016**: `authorizeSensitiveAdminAction` is called by `handle()`
   (it proves a usable v2 grant for the exact action/resource/version/payload
@@ -81,9 +81,7 @@ All three rows above are enforced on the live path, not merely present:
   exact single-use grant immediately before the mutation, so a refused or stale
   step-up can never reach the business change). The consumption is intentionally
   not rolled back if the later business transaction fails.
-  Broadcast confirmation runs the same gate with a `BROADCAST` grant, and
-  production refuses to start when an admin id is configured with step-up
-  disabled.
+  Broadcast confirmation runs the same exact-action/resource/version grant gate. The current owner policy keeps `ADMIN_STEP_UP_MODE=disabled`; root identity, private-chat requirement, durable confirmation, exact binding, replay rejection, and audit remain mandatory. When step-up mode is `required`, production additionally requires a usable factor.
 - **SEC-004**: every customer-facing entry point (checkout refresh / cancel /
   reopen, order detail, support, replacement, warranty, preorder payment)
   resolves ownership inside the query, so a foreign object and a missing one are

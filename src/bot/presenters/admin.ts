@@ -749,7 +749,7 @@ export const PUBLICATION_BLOCKER_LABEL: Record<PublicationBlocker, string> = {
 
 export const RESALE_EVIDENCE_SOURCE_LABEL: Record<ResaleEvidenceSource, string> = {
   SUPPLIER_AUTHORIZATION: "Uỷ quyền nhà cung cấp",
-  OWNER_ATTESTATION: "Chủ shop xác nhận",
+  OWNER_ATTESTATION: "Chủ shop xác nhận sở hữu",
   CONTRACT_REFERENCE: "Tham chiếu hợp đồng",
 };
 
@@ -857,6 +857,8 @@ export function presentAdminEvidencePrompt(input: {
       "NGUỒN|MÃ THAM CHIẾU|TÓM TẮT AN TOÀN",
       "",
       `NGUỒN hợp lệ: ${Object.keys(RESALE_EVIDENCE_SOURCE_LABEL).join(", ")}`,
+      "OWNER_ATTESTATION: Chủ shop xác nhận sở hữu.",
+      "OWNER_ATTESTATION chỉ ghi nhận hàng do chủ shop nắm giữ; không phải uỷ quyền resale/chuyển nhượng từ nhà cung cấp.",
       "Mã tham chiếu: chỉ chữ, số và . _ : / - (tối đa 200 ký tự).",
       "Tóm tắt: tối đa 500 ký tự, không dán mật khẩu hay khoá API.",
       "",

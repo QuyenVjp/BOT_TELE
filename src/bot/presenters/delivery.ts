@@ -1,6 +1,12 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import type { InlineButton, PresentedMessage } from "./catalog.js";
 
+declare module "./catalog.js" {
+  interface PresentedMessage {
+    protectContent?: boolean;
+  }
+}
+
 /**
  * Vietnamese processing/completed/expired/used/needs-review presenters (T075,
  * FR-017, telegram-ux.md).
@@ -32,6 +38,7 @@ export const DELIVERY_COPY = {
   support: "💬 Hỗ trợ",
   mainMenu: "Menu chính",
   viewOrder: "📦 Xem đơn",
+  deleteAfterSave: "🗑 Đã lưu, xóa tin nhắn",
 } as const;
 
 function nav(orderNumber: string): InlineButton[][] {
@@ -100,7 +107,9 @@ export function presentDeliveryCompleted(
   lines.push("", deliveryUrl);
   return {
     text: lines.join("\n"),
+    protectContent: true,
     buttons: [
+      [{ text: DELIVERY_COPY.deleteAfterSave, callbackData: "delivery:delete" }],
       [{ text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` }],
       [
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
@@ -145,6 +154,7 @@ export function presentDeliveryReveal(input: {
   if (input.warrantyVi) lines.push("", `🛡 Bảo hành: ${input.warrantyVi}`);
   return {
     text: lines.join("\n"),
+    protectContent: true,
     buttons: [
       [
         {
@@ -152,6 +162,7 @@ export function presentDeliveryReveal(input: {
           callbackData: input.orderNumber ? `ord:view:${input.orderNumber}` : "ord:list",
         },
       ],
+      [{ text: DELIVERY_COPY.deleteAfterSave, callbackData: "delivery:delete" }],
       [
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
         {

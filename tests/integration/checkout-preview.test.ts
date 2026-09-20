@@ -9,11 +9,10 @@ import { createCheckoutCallbacks } from "../../src/bot/callbacks/checkout.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
- * Checkout confirmation (goal §32) and wallet choice (§41/§42).
+ * Checkout confirmation (goal §32).
  *
  * Opening the confirmation screen must create NO financial state; the VietQR button must
- * still drive the original, proven order+intent path; and the wallet button must debit at
- * most once per purchase intent, with a human shortfall screen when the balance is short.
+ * still drive the original, proven order+intent path.
  */
 
 let ctx: PgTestContext;
@@ -41,12 +40,12 @@ async function seedCatalog(): Promise<Catalog> {
   const productId = newId();
   const variantId = newId();
   const price = "199000";
-  const slug = categoryId.slice(-8);
+  const slug = "ai";
 
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
     ctx.db,
   );
-  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Claude', ${slug}, true, 1)`.execute(
+  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', ${slug}, true, 1)`.execute(
     ctx.db,
   );
   await sql`
@@ -174,38 +173,48 @@ beforeEach(async () => {
 
 describe("checkout confirmation screen", () => {
   // A customer must be able to buy the same variant twice, while a double tap of ONE confirmation
-  // screen must still produce one order. The order idempotency key therefore comes from the
-  // attempt bound into the wallet token the preview emitted, not from customer+variant — keying it
-  // on customer+variant made every repeat purchase return the first, already completed order.
+  // screen must still produce one order.
   it("allows a repeat purchase but collapses a double tap of the same screen", async () => {
     const catalog = await seedCatalog();
-    const { preview, previewToken, wallet } = build(catalog, 1_000_000n);
+    const { preview, previewToken, adapter } = build(catalog, 1_000_000n);
 
     const firstScreen = await preview(previewToken());
-    const firstWalletToken = firstScreen.buttons
+    const firstQrToken = firstScreen.buttons
       .flat()
-      .find((button) => button.text === "👛 Ví TIER20")?.callbackData;
-    expect(firstWalletToken).toBeTruthy();
+      .find((button) => button.text === "🏦 VietQR")?.callbackData;
+    expect(firstQrToken).toBeTruthy();
 
-    await wallet(firstWalletToken!);
+    await adapter.buyNowFromCallback({
+      callbackData: firstQrToken!,
+      telegramUserId: TELEGRAM_USER_ID,
+      correlationId: "t-qr-repeat",
+    });
     expect(await orderCount()).toBe(1);
     const firstOrder = await sql<{ id: string }>`select id from "order"`.execute(ctx.db);
 
     // Same screen, same token: the second tap is the same attempt, so nothing new is created.
-    await wallet(firstWalletToken!);
+    await adapter.buyNowFromCallback({
+      callbackData: firstQrToken!,
+      telegramUserId: TELEGRAM_USER_ID,
+      correlationId: "t-qr-repeat",
+    });
     expect(await orderCount()).toBe(1);
     const sameOrder = await sql<{ id: string }>`select id from "order"`.execute(ctx.db);
     expect(sameOrder.rows.map((row) => row.id)).toEqual(firstOrder.rows.map((row) => row.id));
 
     // A newly rendered confirmation is a new attempt, so the customer can buy again.
     const secondScreen = await preview(previewToken());
-    const secondWalletToken = secondScreen.buttons
+    const secondQrToken = secondScreen.buttons
       .flat()
-      .find((button) => button.text === "👛 Ví TIER20")?.callbackData;
-    expect(secondWalletToken).toBeTruthy();
-    expect(secondWalletToken).not.toBe(firstWalletToken);
+      .find((button) => button.text === "🏦 VietQR")?.callbackData;
+    expect(secondQrToken).toBeTruthy();
+    expect(secondQrToken).not.toBe(firstQrToken);
 
-    await wallet(secondWalletToken!);
+    await adapter.buyNowFromCallback({
+      callbackData: secondQrToken!,
+      telegramUserId: TELEGRAM_USER_ID,
+      correlationId: "t-qr-repeat-2",
+    });
     expect(await orderCount()).toBe(2);
   });
 
@@ -219,11 +228,7 @@ describe("checkout confirmation screen", () => {
     expect(message.text).toContain("Claude Pro");
     expect(message.text).toContain("1 tháng");
     expect(message.text).toContain("199.000");
-    expect(message.buttons.flat().map((b) => b.text)).toEqual([
-      "🏦 VietQR",
-      "👛 Ví TIER20",
-      "❌ Huỷ",
-    ]);
+    expect(message.buttons.flat().map((b) => b.text)).toEqual(["🏦 VietQR", "❌ Huỷ"]);
     expect(await orderCount()).toBe(0);
     expect(await intentCount()).toBe(0);
   });

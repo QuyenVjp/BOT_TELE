@@ -3,6 +3,7 @@ import type { Executor } from "../../infrastructure/db/transaction.js";
 import type { CatalogVariantRow, Page } from "./repository.js";
 import type { DeliveryType } from "./domain.js";
 import { catalogVisibilitySql, type CatalogAudience } from "./visibility.js";
+import { PUBLIC_BRAND_CATEGORY_SLUGS, PUBLIC_ROOT_CATEGORY_SLUGS } from "./taxonomy.js";
 
 /**
  * Deterministic catalog search (FR-004).
@@ -145,6 +146,16 @@ export async function searchCatalog(
     : sql``;
 
   const categoryFilter = filter.categoryId ? sql`and c.id = ${filter.categoryId}` : sql``;
+  const publicTaxonomyFilter =
+    (options.audience ?? "public") === "public"
+      ? sql`and c.slug in (${sql.join(
+          [...PUBLIC_ROOT_CATEGORY_SLUGS, ...PUBLIC_BRAND_CATEGORY_SLUGS].map(
+            (slug) => sql`${slug}`,
+          ),
+          sql`, `,
+        )})`
+      : sql``;
+
   const minPriceFilter =
     filter.minPriceVnd !== undefined ? sql`and v.price_vnd >= ${filter.minPriceVnd}` : sql``;
   const maxPriceFilter =
@@ -190,6 +201,7 @@ export async function searchCatalog(
       and v.is_active
       and v.price_vnd > 0
       ${catalogVisibilitySql(options.audience ?? "public")}
+      ${publicTaxonomyFilter}
       and (
         (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
         or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (

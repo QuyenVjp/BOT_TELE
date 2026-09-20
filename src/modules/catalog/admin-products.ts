@@ -3,6 +3,7 @@ import type { Db } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
+import type { IdentityTelemetry } from "../identity/telemetry.js";
 import { guardRootAction } from "../../bot/middleware/root-admin.js";
 import {
   authorizeSensitiveAdminAction,
@@ -314,6 +315,16 @@ function validate(input: AdminProductInput): void {
   if (input.fulfillmentType === "SUPPLIER_API" && !input.supplierConfig)
     throw new Error("INVALID_SUPPLIER_CONFIG");
 }
+function activeForVariantCreate(
+  fulfillmentType: FulfillmentType,
+  requestedActive: boolean | undefined,
+): boolean {
+  if (fulfillmentType === "DIGITAL_FILE") {
+    if (requestedActive === true) throw new Error("DIGITAL_FILE_ARTIFACT_REQUIRED");
+    return false;
+  }
+  return requestedActive ?? true;
+}
 
 function legacyRoutingFor(type: FulfillmentType): {
   deliveryType: "CREDENTIAL" | "ACTIVATION_KEY";
@@ -338,6 +349,7 @@ async function authorize(input: AdminProductInput): Promise<void> {
 
 export async function createAdminProduct(input: AdminProductInput): Promise<AdminProductSummary> {
   validate(input);
+  const active = activeForVariantCreate(input.fulfillmentType, input.active);
   await authorize(input);
   return withTransaction(input.db, async (trx) => {
     const productId = newId();
@@ -349,7 +361,7 @@ export async function createAdminProduct(input: AdminProductInput): Promise<Admi
     );
     if (!product.rows[0]) throw new Error("CATEGORY_NOT_FOUND");
     const routing = legacyRoutingFor(input.fulfillmentType);
-    await sql`insert into product_variant (id, product_id, sku, name_vi, price_vnd, compare_at_price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields, low_stock_threshold, preorder_enabled, is_active, warranty_enabled, warranty_days, warranty_proration_enabled, warranty_replacement_allowed, warranty_refund_allowed, warranty_replacement_behavior, warranty_coverage_vi, warranty_exclusions_vi) values (${variantId}, ${productId}, ${input.sku}, ${input.variantName.trim()}, ${input.priceVnd.toString()}, ${input.compareAtPriceVnd?.toString() ?? null}, 'CUSTOM', ${routing.deliveryType}, ${routing.stockPolicy}, ${input.fulfillmentType}, ${JSON.stringify(input.inventoryFields)}::jsonb, ${input.lowStockThreshold}, ${input.preorderEnabled ?? false}, ${input.active ?? true}, ${input.warrantyEnabled ?? false}, ${input.warrantyEnabled ? (input.warrantyDays ?? 0) : 0}, ${input.warrantyProrationEnabled ?? true}, ${input.warrantyReplacementAllowed ?? true}, ${input.warrantyRefundAllowed ?? true}, ${input.warrantyReplacementBehavior ?? "CONTINUE_ORIGINAL_END"}, ${input.warrantyCoverageVi ?? null}, ${input.warrantyExclusionsVi ?? null})`.execute(
+    await sql`insert into product_variant (id, product_id, sku, name_vi, price_vnd, compare_at_price_vnd, duration_code, delivery_type, stock_policy, fulfillment_type, inventory_fields, low_stock_threshold, preorder_enabled, is_active, warranty_enabled, warranty_days, warranty_proration_enabled, warranty_replacement_allowed, warranty_refund_allowed, warranty_replacement_behavior, warranty_coverage_vi, warranty_exclusions_vi) values (${variantId}, ${productId}, ${input.sku}, ${input.variantName.trim()}, ${input.priceVnd.toString()}, ${input.compareAtPriceVnd?.toString() ?? null}, 'CUSTOM', ${routing.deliveryType}, ${routing.stockPolicy}, ${input.fulfillmentType}, ${JSON.stringify(input.inventoryFields)}::jsonb, ${input.lowStockThreshold}, ${input.preorderEnabled ?? false}, ${active}, ${input.warrantyEnabled ?? false}, ${input.warrantyDays ?? 0}, ${input.warrantyProrationEnabled ?? false}, ${input.warrantyReplacementAllowed ?? false}, ${input.warrantyRefundAllowed ?? false}, ${input.warrantyReplacementBehavior ?? "CONTINUE_ORIGINAL_END"}, ${input.warrantyCoverageVi ?? null}, ${input.warrantyExclusionsVi ?? null})`.execute(
       trx,
     );
     if (
@@ -414,7 +426,7 @@ export async function createAdminProduct(input: AdminProductInput): Promise<Admi
       name: input.name.trim(),
       sku: input.sku,
       priceVnd: input.priceVnd,
-      active: input.active ?? true,
+      active,
       fulfillmentType: input.fulfillmentType,
       lowStockThreshold: input.lowStockThreshold,
     };
@@ -537,6 +549,7 @@ export async function createAdminVariant(
   input: AdminVariantCreateInput,
 ): Promise<AdminProductSummary> {
   validateVariantCreate(input);
+  const active = activeForVariantCreate(input.fulfillmentType, input.active);
   await authorizeVariant(input, "product.variant_created");
   return withTransaction(input.db, async (trx) => {
     const product = await sql<{
@@ -544,7 +557,7 @@ export async function createAdminVariant(
     }>`select name_vi as name from product where id = ${input.productId} for update`.execute(trx);
     if (!product.rows[0]) throw new Error("PRODUCT_NOT_FOUND");
     const routing = legacyRoutingFor(input.fulfillmentType);
-    await sql`insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, warranty_days, delivery_type, stock_policy, fulfillment_type, inventory_fields, low_stock_threshold, is_active) values (${input.variantId}, ${input.productId}, ${input.sku.trim()}, ${input.name.trim()}, ${input.priceVnd.toString()}, ${input.durationCode?.trim() ?? "CUSTOM"}, ${input.warrantyDays ?? 0}, ${routing.deliveryType}, ${routing.stockPolicy}, ${input.fulfillmentType}, ${JSON.stringify(input.inventoryFields)}::jsonb, ${input.lowStockThreshold}, ${input.active ?? true})`.execute(
+    await sql`insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, warranty_days, delivery_type, stock_policy, fulfillment_type, inventory_fields, low_stock_threshold, is_active) values (${input.variantId}, ${input.productId}, ${input.sku.trim()}, ${input.name.trim()}, ${input.priceVnd.toString()}, ${input.durationCode?.trim() ?? "CUSTOM"}, ${input.warrantyDays ?? 0}, ${routing.deliveryType}, ${routing.stockPolicy}, ${input.fulfillmentType}, ${JSON.stringify(input.inventoryFields)}::jsonb, ${input.lowStockThreshold}, ${active})`.execute(
       trx,
     );
     if (
@@ -608,7 +621,7 @@ export async function createAdminVariant(
       name: product.rows[0].name,
       sku: input.sku.trim(),
       priceVnd: input.priceVnd,
-      active: input.active ?? true,
+      active,
       fulfillmentType: input.fulfillmentType,
       lowStockThreshold: input.lowStockThreshold,
     };
@@ -620,6 +633,24 @@ export async function updateAdminVariant(input: AdminVariantUpdateInput): Promis
   await authorizeVariant(input, "product.variant_updated");
   await authorizeVariantMoneyFields(input);
   return withTransaction(input.db, async (trx) => {
+    if (input.active === true) {
+      const variant = await sql<{ fulfillment_type: string }>`
+        select fulfillment_type
+        from product_variant
+        where id = ${input.variantId} and product_id = ${input.productId}
+        for update
+      `.execute(trx);
+      if (!variant.rows[0]) return false;
+      if (variant.rows[0].fulfillment_type === "DIGITAL_FILE") {
+        const artifact = await sql<{ id: string }>`
+          select id
+          from variant_file_artifact
+          where variant_id = ${input.variantId} and is_active
+          limit 1
+        `.execute(trx);
+        if (!artifact.rows[0]) throw new Error("DIGITAL_FILE_ARTIFACT_REQUIRED");
+      }
+    }
     const result = await sql<{ id: string }>`
       update product_variant
       set name_vi = coalesce(${input.name?.trim() ?? null}, name_vi),
@@ -774,5 +805,108 @@ export async function updateAdminProductContent(
       metadataRedacted: { field: input.field, cleared: value.length === 0 },
     });
     return true;
+  });
+}
+
+export interface SetAdminVariantActiveInput {
+  db: Db;
+  actor: RootActor;
+  config: RootAdminConfig;
+  variantId: string;
+  active: boolean;
+  reason: string;
+  correlationId: string;
+  expectedVersion?: number | undefined;
+  telemetry?: IdentityTelemetry | undefined;
+}
+
+export type SetAdminVariantActiveResult =
+  | { ok: true }
+  | {
+      ok: false;
+      code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "DIGITAL_FILE_ARTIFACT_REQUIRED" | "NOT_FOUND";
+      message: string;
+    };
+
+export async function setAdminVariantActive(
+  input: SetAdminVariantActiveInput,
+): Promise<SetAdminVariantActiveResult> {
+  const action = input.active ? "catalog.activate" : "catalog.deactivate";
+  const gate = await guardRootAction(
+    input.db,
+    {
+      actor: input.actor,
+      config: input.config,
+      correlationId: input.correlationId,
+      action,
+      targetType: "ProductVariant",
+      targetId: input.variantId,
+    },
+    input.telemetry,
+  );
+  if (!gate.ok) {
+    return { ok: false, code: gate.reason, message: "Không được phép." };
+  }
+
+  return withTransaction(input.db, async (trx) => {
+    const existing = await sql<{
+      id: string;
+      fulfillment_type: string;
+      version: number;
+    }>`
+      select id, fulfillment_type, version
+      from product_variant
+      where id = ${input.variantId}
+      for update
+    `.execute(trx);
+
+    const variant = existing.rows[0];
+    if (!variant) {
+      return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy biến thể." };
+    }
+
+    if (input.expectedVersion !== undefined && variant.version !== input.expectedVersion) {
+      return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy biến thể." };
+    }
+
+    if (input.active && variant.fulfillment_type === "DIGITAL_FILE") {
+      const ready = await sql<{ id: string }>`
+        select v.id
+        from product_variant v
+        join variant_file_artifact a on a.variant_id = v.id and a.is_active
+        where v.id = ${input.variantId} and v.fulfillment_type = 'DIGITAL_FILE'
+        limit 1
+      `.execute(trx);
+      if (!ready.rows[0]) {
+        return {
+          ok: false,
+          code: "DIGITAL_FILE_ARTIFACT_REQUIRED",
+          message: "Cần nhập và kích hoạt tệp thật trước khi bật bán biến thể tệp số.",
+        };
+      }
+    }
+
+    const res = await sql<{ id: string }>`
+      update product_variant
+      set is_active = ${input.active}, updated_at = now(), version = version + 1
+      where id = ${input.variantId}
+      returning id
+    `.execute(trx);
+    if (res.rows.length === 0) {
+      return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy biến thể." };
+    }
+
+    await appendAuditEvent(trx, {
+      actorType: "ROOT_ADMIN",
+      actorId: String(input.actor.numericUserId),
+      action,
+      targetType: "ProductVariant",
+      targetId: input.variantId,
+      reason: input.reason,
+      correlationId: input.correlationId,
+      metadataRedacted: { active: input.active },
+    });
+
+    return { ok: true };
   });
 }

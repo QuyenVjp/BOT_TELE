@@ -1137,7 +1137,7 @@ describe("command normalization", () => {
 });
 
 describe("persistent reply-keyboard allowlist", () => {
-  it("preserves current Telegram-native keyboard labels and drops cancelled Mini App shop-launch label", async () => {
+  it("preserves current Telegram-native keyboard labels and drops retired wallet and Mini App labels", async () => {
     const kept: Array<string | undefined> = [];
     const ingress = Fastify({ bodyLimit: BODY_LIMIT });
     await registerTelegramWebhook(ingress, {
@@ -1175,7 +1175,7 @@ describe("persistent reply-keyboard allowlist", () => {
         "💬 Hỗ trợ",
         "👤 Tài khoản",
         "🧾 Đơn hàng",
-        "💰 Nạp ví",
+        undefined,
         undefined,
       ]);
     } finally {

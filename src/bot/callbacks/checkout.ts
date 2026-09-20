@@ -1,5 +1,4 @@
 import type { Db } from "../../infrastructure/db/transaction.js";
-import { randomBytes } from "node:crypto";
 import { buyNow, cancelUnpaidOrder, isStockOutcomeCode } from "../../modules/commerce/buy-now.js";
 import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
 import { presentPaymentForOrder } from "../../modules/payments/service.js";
@@ -369,18 +368,8 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
         return errorMessage("Sản phẩm tạm hết hàng. Vui lòng chọn sản phẩm khác.");
       }
       const qrCallbackData = issueQrToken(telegramUserId, variant.id, Number(variant.price_vnd));
-      // One attempt id per rendered preview: it separates "the customer tapped the same button
-      // twice" from "the customer is buying this variant again", which the order idempotency key
-      // has to tell apart.
-      const walletCallbackData = choiceToken(
-        "CHECKOUT_WALLET",
-        telegramUserId,
-        variant.id,
-        Number(variant.price_vnd),
-        randomBytes(6).toString("base64url"),
-      );
       const cancelCallbackData = choiceToken("SHOP_PRODUCT", telegramUserId, variant.product_id);
-      if (!qrCallbackData || !walletCallbackData || !cancelCallbackData) {
+      if (!qrCallbackData || !cancelCallbackData) {
         return errorMessage("Không mở được xác nhận đơn hàng. Vui lòng mở lại sản phẩm.");
       }
       return presentCheckoutPreview({
@@ -390,7 +379,6 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
         deliveryLabel: DELIVERY_LABELS[variant.fulfillment_type] ?? "Tự động",
         warrantyLabel: variant.warranty_vi?.trim() || variant.delivery_eta_vi?.trim() || null,
         qrCallbackData,
-        walletCallbackData,
         cancelCallbackData,
       });
     },

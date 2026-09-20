@@ -54,12 +54,12 @@ describe("category management repository", () => {
     expect(slugs).toEqual(
       expect.arrayContaining(["ai", "vpn", "claude", "chatgpt", "expressvpn", "hma"]),
     );
-    expect(first.length).toBeGreaterThanOrEqual(16);
+    expect(first.length).toBe(12);
     await ensureDefaultCategories(ctx.db);
     expect(await listAdminCategories(ctx.db)).toHaveLength(first.length);
     const adminSlugs = first.map((c) => c.slug);
     for (const slug of ["gemini", "cloud", "license", "khac"]) {
-      expect(adminSlugs).toContain(slug);
+      expect(adminSlugs).not.toContain(slug);
     }
     expect(await listPublicRootCategories(ctx.db)).toEqual([]);
   });
@@ -135,7 +135,7 @@ describe("category management repository", () => {
         select c.slug from product p join category c on c.id = p.category_id where p.id = ${randomId}
       `.execute(ctx.db)
     ).rows[0];
-    expect(leftover?.slug).toBe("khac");
+    expect(leftover?.slug).toBe("tai-khoan-ai");
     const aliases = (
       await sql<{ normalized_alias: string }>`select normalized_alias from product_alias`.execute(
         ctx.db,
@@ -161,11 +161,11 @@ describe("category management repository", () => {
     }
     const adminSlugs = (await listAdminCategories(ctx.db)).map((c) => c.slug);
     for (const slug of ["gemini", "cloud", "license", "khac"]) {
-      expect(adminSlugs).toContain(slug);
+      expect(adminSlugs).not.toContain(slug);
     }
-    const gemini = (await listAdminCategories(ctx.db)).find((c) => c.slug === "gemini");
-    expect(gemini).toBeDefined();
-    expect(await listPublicCategoryPage(ctx.db, gemini!.id)).toBeNull();
+    const taiKhoanAi = (await listAdminCategories(ctx.db)).find((c) => c.slug === "tai-khoan-ai");
+    expect(taiKhoanAi).toBeDefined();
+    expect(await listPublicCategoryPage(ctx.db, taiKhoanAi!.id)).toBeNull();
   });
   it("creates and reuses an active uncategorized category", async () => {
     const first = await getOrCreateUncategorizedCategory(ctx.db);

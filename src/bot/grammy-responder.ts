@@ -15,6 +15,12 @@ import type {
   ReplyKeyboardRemove,
 } from "grammy/types";
 import type { PresentedMessage } from "./presenters/catalog.js";
+
+declare module "./presenters/catalog.js" {
+  interface PresentedMessage {
+    protectContent?: boolean;
+  }
+}
 import type { TelegramDocumentSender } from "../modules/digital-goods/file-delivery.js";
 
 export interface InlineQueryResultArticle {
@@ -325,7 +331,6 @@ export const TELEGRAM_CUSTOMER_BOT_COMMANDS = [
   { command: "start", description: "Mở TIER20 SHOP" },
   { command: "shop", description: "Xem sản phẩm" },
   { command: "orders", description: "Đơn hàng của tôi" },
-  { command: "wallet", description: "Ví của tôi" },
   { command: "warranty", description: "Bảo hành" },
   { command: "support", description: "Hỗ trợ" },
   { command: "settings", description: "Cài đặt" },
@@ -462,7 +467,12 @@ export function createGrammyResponder(
       await callTelegram("pinChatMessage", () => telegramApi.pinChatMessage(chatId, messageId));
     },
     async deleteMessage(chatId, messageId) {
-      await callTelegram("deleteMessage", () => telegramApi.deleteMessage(chatId, messageId));
+      try {
+        await callTelegram("deleteMessage", () => telegramApi.deleteMessage(chatId, messageId));
+      } catch (error) {
+        if (classifyTelegramError(error) === "non-editable-or-missing") return;
+        throw error;
+      }
     },
     async send(input) {
       if (input.callbackQueryId) {
@@ -494,6 +504,7 @@ export function createGrammyResponder(
           telegramApi.sendDocument(input.chatId, resolveDocument(input.message.document), {
             caption: input.message.text,
             reply_markup: replyMarkup,
+            ...(input.message.protectContent ? { protect_content: true } : {}),
           }),
         );
         traceTelegram(trace, { method: "sendDocument", ...summarizeTelegramResult(result) });
@@ -501,7 +512,7 @@ export function createGrammyResponder(
           await sendPersistentKeyboard(input, pendingKeyboard, telegramApi, trace);
         return sentMessage(input.chatId, result);
       }
-      if (input.message.photo && input.messageId) {
+      if (input.message.photo && input.messageId && !input.message.protectContent) {
         try {
           const result = await callTelegram("editMessageMedia", () =>
             telegramApi.editMessageMedia(
@@ -526,6 +537,7 @@ export function createGrammyResponder(
             telegramApi.sendPhoto(input.chatId, new InputFile(input.message.photo!), {
               caption: input.message.text,
               reply_markup: replyMarkup,
+              ...(input.message.protectContent ? { protect_content: true } : {}),
             }),
           );
           traceTelegram(trace, { method: "sendPhoto", ...summarizeTelegramResult(result) });
@@ -552,7 +564,7 @@ export function createGrammyResponder(
           });
         }
       }
-      if (input.messageId) {
+      if (input.messageId && !input.message.protectContent) {
         try {
           const result = await callTelegram("editMessageText", () =>
             telegramApi.editMessageText(input.chatId, Number(input.messageId), input.message.text, {
@@ -589,6 +601,7 @@ export function createGrammyResponder(
         telegramApi.sendMessage(input.chatId, input.message.text, {
           reply_markup: replyMarkup,
           ...(input.messageThreadId ? { message_thread_id: input.messageThreadId } : {}),
+          ...(input.message.protectContent ? { protect_content: true } : {}),
         }),
       );
       traceTelegram(trace, { method: "sendMessage", ...summarizeTelegramResult(result) });

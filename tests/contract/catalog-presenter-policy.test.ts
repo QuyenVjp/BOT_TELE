@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatCategoryLabel,
   presentProductDetail,
   presentSearchResults,
   presentVariantDetail,
@@ -134,6 +135,57 @@ describe("catalog presenter stock-policy guard", () => {
       ],
     ]);
   });
+
+  it("renders human duration label for known codes and safe fallback for unknown/null codes", () => {
+    const p1m = presentVariantDetail({ ...variant("LOCAL_ONLY"), duration_code: "P1M" });
+    expect(p1m.text).toContain("Thời hạn: 1 tháng");
+    expect(p1m.text).not.toContain("Thời hạn: P1M");
+
+    const lifetime = presentVariantDetail({ ...variant("LOCAL_ONLY"), duration_code: "LIFETIME" });
+    expect(lifetime.text).toContain("Thời hạn: Vĩnh viễn");
+
+    const unknown = presentVariantDetail({
+      ...variant("LOCAL_ONLY"),
+      duration_code: "CUSTOM_UNKNOWN",
+    });
+    expect(unknown.text).toContain("Thời hạn: —");
+
+    const none = presentVariantDetail({ ...variant("LOCAL_ONLY"), duration_code: null });
+    expect(none.text).toContain("Thời hạn: —");
+  });
+
+  it("follows configured variant low_stock_threshold and defaults to 3", () => {
+    const customLow = presentVariantDetail({
+      ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 4),
+      low_stock_threshold: 5,
+    });
+    expect(customLow.text).toContain("🟡 Tình trạng: Sắp hết hàng");
+
+    const customInStock = presentVariantDetail({
+      ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 6),
+      low_stock_threshold: 5,
+    });
+    expect(customInStock.text).toContain("🟢 Tình trạng: Còn hàng");
+
+    const defaultLow = presentVariantDetail({
+      ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 3),
+      low_stock_threshold: null,
+    });
+    expect(defaultLow.text).toContain("🟡 Tình trạng: Sắp hết hàng");
+
+    const defaultInStock = presentVariantDetail({
+      ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 4),
+      low_stock_threshold: null,
+    });
+    expect(defaultInStock.text).toContain("🟢 Tình trạng: Còn hàng");
+  });
+});
+
+describe("catalog presenter category labels", () => {
+  it("renders a category icon once when the stored name already includes it", () => {
+    expect(formatCategoryLabel("🤖 AI", "🤖")).toBe("🤖 AI");
+    expect(formatCategoryLabel("AI", "🤖")).toBe("🤖 AI");
+  });
 });
 
 function detailView(variants: CatalogVariantRow[]): ProductDetailView {
@@ -195,6 +247,15 @@ describe("catalog product detail copy", () => {
     expect(callbacks).toContain(`rst:sub:${soldOut.id}`);
     expect(callbacks).toContain(`preorder:consent:${soldOut.id}`);
     expect(callbacks.some((callback) => callback.startsWith("buy:"))).toBe(false);
+  });
+
+  it("does not offer restock for a ready variant without a supported buy route", () => {
+    const readyUnsupported = variant("SUPPLIER_ONLY", "STOCK_ACCOUNT", true, 1);
+    const callbacks = presentProductDetail(detailView([readyUnsupported]), {})
+      .buttons.flat()
+      .map((button) => button.callbackData);
+
+    expect(callbacks.some((callback) => callback.startsWith("rst:sub:"))).toBe(false);
   });
 });
 

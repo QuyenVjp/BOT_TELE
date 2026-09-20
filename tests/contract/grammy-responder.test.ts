@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { GrammyError } from "grammy";
-import { createGrammyResponder, TelegramRetryableError } from "../../src/bot/grammy-responder.js";
+import {
+  createGrammyResponder,
+  TELEGRAM_CUSTOMER_BOT_COMMANDS,
+  TELEGRAM_GROUP_BOT_COMMANDS,
+  TELEGRAM_OWNER_BOT_COMMANDS,
+  TelegramRetryableError,
+} from "../../src/bot/grammy-responder.js";
 import { presentAdminMenu } from "../../src/bot/presenters/admin.js";
 import {
   presentCustomerAccountPrompt,
@@ -53,7 +59,7 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(buttons.every((button) => button.callback_data.length <= 64)).toBe(true);
   });
 
-  it("renders the persistent reply keyboard for the customer home screen", async () => {
+  it("renders the persistent retail reply keyboard without wallet entry points", async () => {
     const calls: unknown[][] = [];
     const api = {
       sendMessage: vi.fn(async (...args: unknown[]) => {
@@ -82,8 +88,33 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(options.reply_markup?.is_persistent).toBe(true);
     expect(options.reply_markup?.resize_keyboard).toBe(true);
     expect(options.reply_markup?.keyboard?.flat().map((button) => button.text)).toEqual(
-      expect.arrayContaining(["🛒 Mua hàng", "👤 Tài khoản", "🧾 Đơn hàng", "💰 Nạp ví"]),
+      expect.arrayContaining(["🛒 Mua hàng", "👤 Tài khoản", "🧾 Đơn hàng"]),
     );
+    expect(options.reply_markup?.keyboard?.flat().map((button) => button.text)).not.toContain(
+      "💰 Nạp ví",
+    );
+  });
+
+  describe("Telegram command scopes", () => {
+    it("keeps retail commands private and leaves wallet/Mini App commands absent", () => {
+      const customerCommands = TELEGRAM_CUSTOMER_BOT_COMMANDS.map((entry) => entry.command);
+      const ownerCommands = TELEGRAM_OWNER_BOT_COMMANDS.map((entry) => entry.command);
+
+      expect(customerCommands).toEqual([
+        "start",
+        "shop",
+        "orders",
+        "warranty",
+        "support",
+        "settings",
+        "help",
+      ]);
+      expect(customerCommands).not.toContain("wallet");
+      expect(customerCommands).not.toContain("topup");
+      expect(customerCommands).not.toContain("webapp");
+      expect(TELEGRAM_GROUP_BOT_COMMANDS).toEqual([]);
+      expect(ownerCommands).toContain("admin");
+    });
   });
 
   it("keeps /start URL buttons when storefront also has a reply keyboard", async () => {
@@ -169,7 +200,6 @@ describe("createGrammyResponder admin keyboards", () => {
       "🛒 Mua hàng",
       "🧾 Đơn hàng",
       "👤 Tài khoản",
-      "💰 Nạp ví",
       "🛡 Bảo hành",
       "💬 Hỗ trợ",
     ]);
@@ -181,7 +211,7 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(deliveryText as string).not.toBe(".");
     expect((deliveryText as string).length).toBeGreaterThan(0);
     expect((deliveryText as string).length).toBeLessThanOrEqual(60);
-    for (const label of ["Mua hàng", "Đơn hàng", "Tài khoản", "Nạp ví", "Bảo hành", "Hỗ trợ"]) {
+    for (const label of ["Mua hàng", "Đơn hàng", "Tài khoản", "Bảo hành", "Hỗ trợ"]) {
       expect(deliveryText as string).not.toContain(label);
     }
 
@@ -683,5 +713,162 @@ describe("createGrammyResponder payment copy_text", () => {
     expect(api.sendPhoto).toHaveBeenCalledTimes(1);
     expect(api.sendMessage).not.toHaveBeenCalled();
     expect(result).toEqual({ chatId: "customer-chat", messageId: "55" });
+  });
+});
+
+describe("createGrammyResponder content protection & safe deletion", () => {
+  it("propagates protect_content: true to sendMessage when protectContent is set", async () => {
+    const calls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return { message_id: 10 };
+      }),
+      editMessageText: vi.fn(),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: {
+        text: "Sensitive credentials",
+        buttons: [],
+        protectContent: true,
+      },
+    });
+
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    const options = calls[0]?.at(-1) as { protect_content?: boolean };
+    expect(options.protect_content).toBe(true);
+  });
+
+  it("sends protected secrets as a new message instead of editing an unprotected message", async () => {
+    const calls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return { message_id: 14 };
+      }),
+      editMessageText: vi.fn(),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: "42",
+      message: { text: "Sensitive credentials", buttons: [], protectContent: true },
+    });
+
+    expect(api.editMessageText).not.toHaveBeenCalled();
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    expect((calls[0]?.at(-1) as { protect_content?: boolean }).protect_content).toBe(true);
+  });
+
+  it("omits protect_content on regular sendMessage when protectContent is not set", async () => {
+    const calls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return { message_id: 11 };
+      }),
+      editMessageText: vi.fn(),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: {
+        text: "Public message",
+        buttons: [],
+      },
+    });
+
+    expect(api.sendMessage).toHaveBeenCalledTimes(1);
+    const options = calls[0]?.at(-1) as { protect_content?: boolean };
+    expect(options.protect_content).toBeUndefined();
+  });
+
+  it("propagates protect_content: true to sendPhoto when protectContent is set", async () => {
+    const calls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(),
+      sendPhoto: vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return { message_id: 12 };
+      }),
+      editMessageText: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: {
+        text: "Sensitive photo",
+        photo: Buffer.from("image"),
+        buttons: [],
+        protectContent: true,
+      },
+    });
+
+    expect(api.sendPhoto).toHaveBeenCalledTimes(1);
+    const options = calls[0]?.at(-1) as { protect_content?: boolean };
+    expect(options.protect_content).toBe(true);
+  });
+
+  it("propagates protect_content: true to sendDocument when protectContent is set", async () => {
+    const calls: unknown[][] = [];
+    const api = {
+      sendMessage: vi.fn(),
+      sendPhoto: vi.fn(),
+      sendDocument: vi.fn(async (...args: unknown[]) => {
+        calls.push(args);
+        return { message_id: 13 };
+      }),
+      editMessageText: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    await responder.send({
+      chatId: "customer-chat",
+      messageId: null,
+      message: {
+        text: "Sensitive document",
+        document: "file-id-123",
+        buttons: [],
+        protectContent: true,
+      },
+    });
+
+    expect(api.sendDocument).toHaveBeenCalledTimes(1);
+    const options = calls[0]?.at(-1) as { protect_content?: boolean };
+    expect(options.protect_content).toBe(true);
+  });
+
+  it("safely handles non-editable-or-missing error in deleteMessage without throwing", async () => {
+    const api = {
+      deleteMessage: vi.fn(async () => {
+        throw new GrammyError(
+          "Call to 'deleteMessage' failed!",
+          { ok: false, error_code: 400, description: "Bad Request: message to delete not found" },
+          "deleteMessage",
+          {},
+        );
+      }),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    await expect(responder.deleteMessage!("chat-1", 99)).resolves.toBeUndefined();
+    expect(api.deleteMessage).toHaveBeenCalledWith("chat-1", 99);
   });
 });

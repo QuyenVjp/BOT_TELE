@@ -37,7 +37,7 @@ beforeEach(async () => {
   `.execute(ctx.db);
 });
 
-async function seedProduct(options: { isTest?: boolean } = {}): Promise<{
+async function seedProduct(options: { isTest?: boolean; categorySlug?: string } = {}): Promise<{
   productId: string;
   variantId: string;
 }> {
@@ -46,7 +46,7 @@ async function seedProduct(options: { isTest?: boolean } = {}): Promise<{
   const variantId = newId();
   await sql`
     insert into category (id, name_vi, slug, is_active, sort_order)
-    values (${categoryId}, 'AI', ${`ai-${categoryId}`}, true, 1)
+    values (${categoryId}, 'AI', ${options.categorySlug ?? "ai"}, true, 1)
   `.execute(ctx.db);
   await sql`
     insert into product (id, category_id, name_vi, slug, is_active, sort_order, is_test, is_archived)
@@ -516,7 +516,7 @@ describe("protected catalog publication", () => {
 
   it("replays a revocation request and refuses reuse on another record", async () => {
     const first = await seedProduct();
-    const second = await seedProduct();
+    const second = await seedProduct({ categorySlug: "coding" });
     const firstRegistration = await registerEvidence(first.variantId, "revoke-register-a");
     const secondRegistration = await registerEvidence(second.variantId, "revoke-register-b");
     const firstVersion = (await readVariant(first.variantId)).version;

@@ -133,7 +133,7 @@ describe("customer order screens", () => {
     expect(reopenBtn?.text).toBe("🛒 Tạo lại thanh toán");
   });
 
-  it("shows the account screen without any numeric Telegram id", () => {
+  it("shows the retail account screen without wallet surfaces or numeric Telegram id", () => {
     const message = presentCustomerAccount({
       displayName: "Chính",
       balanceVnd: 150000n,
@@ -144,31 +144,23 @@ describe("customer order screens", () => {
     const text = plain(message.text);
     expect(text).toContain("👤 Tài khoản khách hàng");
     expect(text).toContain("👋 Chính");
-    expect(text).toContain("💰 Số dư ví: 150.000 ₫");
+    expect(text).toContain("🧾 Đơn đã hoàn tất: 3");
+    expect(text).not.toContain("Số dư ví");
+    expect(text).not.toContain("150.000");
     expect(message.buttons).toEqual([
       [
         { text: "🧾 Đơn hàng", callbackData: "ord:list" },
         { text: "📌 Đặt cọc", callbackData: "cust:preorders" },
       ],
       [
-        { text: "💰 Nạp ví", callbackData: "wallet:topup" },
-        { text: "🔔 Thông báo", callbackData: "cust:notify" },
-      ],
-      [
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
         { text: "💬 Hỗ trợ", callbackData: "supp:open" },
       ],
+      [{ text: "🔔 Thông báo", callbackData: "cust:notify" }],
       [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
     ]);
-    expect(message.buttons.flat().map((b) => b.callbackData)).toEqual([
-      "ord:list",
-      "cust:preorders",
-      "wallet:topup",
-      "cust:notify",
-      "cust:warranty",
-      "supp:open",
-      "shop:home",
-    ]);
+    expect(message.buttons.flat().map((b) => b.callbackData)).not.toContain("wallet:topup");
+    expect(message.buttons.flat().map((b) => b.callbackData)).not.toContain("wallet:history");
   });
 
   it("offers warranty per completed order through the existing support flow", () => {

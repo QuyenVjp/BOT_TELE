@@ -56,8 +56,11 @@ export async function reconcileForPaymentCheck(
       ? requested
       : PAYMENT_CHECK_COOLDOWN_SECONDS;
 
-  const cursor = await sql<{ last_started_at: Date | string | null }>`
-    select last_started_at
+  const cursor = await sql<{
+    last_started_at: Date | string | null;
+    retry_after_until: Date | string | null;
+  }>`
+    select last_started_at, retry_after_until
     from sepay_reconciliation_cursor
     where provider = 'sepay'
   `.execute(db);
@@ -68,6 +71,16 @@ export async function reconcileForPaymentCheck(
     if (Number.isFinite(startedMs) && now.getTime() - startedMs < cooldownSeconds * 1000) {
       return { reason: "COOLDOWN" };
     }
+  }
+  const retryAfterUntil = cursor.rows[0]?.retry_after_until;
+  const retryAfterMs =
+    retryAfterUntil instanceof Date
+      ? retryAfterUntil.getTime()
+      : retryAfterUntil
+        ? new Date(retryAfterUntil).getTime()
+        : NaN;
+  if (Number.isFinite(retryAfterMs) && retryAfterMs > now.getTime()) {
+    return { reason: "COOLDOWN" };
   }
 
   // Unexpected database errors are intentionally NOT caught: the caller decides.

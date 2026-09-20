@@ -532,7 +532,6 @@ export interface CheckoutPreviewInput {
   deliveryLabel: string;
   warrantyLabel: string | null;
   qrCallbackData: string;
-  walletCallbackData: string;
   cancelCallbackData: string;
 }
 
@@ -546,12 +545,11 @@ export function presentCheckoutPreview(input: CheckoutPreviewInput): PresentedMe
     `⚡ Giao hàng: ${input.deliveryLabel}`,
   ];
   if (input.warrantyLabel) lines.push(`🛡 Bảo hành: ${input.warrantyLabel}`);
-  lines.push("", "Chọn cách thanh toán:");
+  lines.push("", "Thanh toán bằng VietQR:");
   return {
     text: lines.join("\n"),
     buttons: [
       [{ text: "🏦 VietQR", callbackData: input.qrCallbackData }],
-      [{ text: "👛 Ví TIER20", callbackData: input.walletCallbackData }],
       [{ text: "❌ Huỷ", callbackData: input.cancelCallbackData }],
     ],
   };

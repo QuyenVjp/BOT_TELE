@@ -4,7 +4,25 @@ import type { DeliveryType, StockPolicy } from "./domain.js";
 import type { FulfillmentType } from "./fulfillment-type.js";
 import { newId } from "../../shared/ids/index.js";
 import { catalogVisibilitySql, currentPublicationSql, type CatalogAudience } from "./visibility.js";
-import { ensureTaxonomy, isFulfillmentTaxonomyNode } from "./taxonomy.js";
+import {
+  ensureTaxonomy,
+  isFulfillmentTaxonomyNode,
+  PUBLIC_BRAND_CATEGORY_SLUGS,
+  PUBLIC_ROOT_CATEGORY_SLUGS,
+} from "./taxonomy.js";
+
+const PUBLIC_BRAND_SLUG_SQL = sql.join(
+  PUBLIC_BRAND_CATEGORY_SLUGS.map((slug) => sql`${slug}`),
+  sql`, `,
+);
+const PUBLIC_ROOT_SLUG_SQL = sql.join(
+  PUBLIC_ROOT_CATEGORY_SLUGS.map((slug) => sql`${slug}`),
+  sql`, `,
+);
+const PUBLIC_CATEGORY_SLUG_SQL = sql.join(
+  [...PUBLIC_ROOT_CATEGORY_SLUGS, ...PUBLIC_BRAND_CATEGORY_SLUGS].map((slug) => sql`${slug}`),
+  sql`, `,
+);
 
 /**
  * Catalog persistence + cursor queries (FR-002).
@@ -53,6 +71,7 @@ export interface CatalogVariantRow {
   category_id?: string;
   preorder_enabled?: boolean;
   warranty_enabled?: boolean;
+  low_stock_threshold?: number | null;
   /** Raw presentation-only override; validated by the zod schema at the app edge. */
   presentation_profile?: unknown;
 }
@@ -318,6 +337,7 @@ export async function listSellableVariants(
       v.id, v.product_id, p.name_vi as product_name_vi, v.sku, v.name_vi,
       v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
       v.stock_policy, v.sort_order, v.fulfillment_type, v.warranty_enabled,
+      v.low_stock_threshold,
       q.available_quantity::int as available_quantity,
       ${VARIANT_READY_SQL} as is_ready,
       coalesce(v.preorder_enabled, false) as preorder_enabled,
@@ -331,6 +351,7 @@ export async function listSellableVariants(
       and v.is_active
       and v.price_vnd > 0
       ${catalogVisibilitySql(options.audience ?? "public")}
+      ${options.audience === "public" ? sql`and c.slug in (${PUBLIC_CATEGORY_SLUG_SQL})` : sql``}
       and ${SELLABLE_ROUTE_SQL}
       ${productFilter}
       ${categoryFilter}
@@ -364,6 +385,7 @@ export async function getVariantById(
       v.id, v.product_id, p.name_vi as product_name_vi, v.sku, v.name_vi,
       v.price_vnd, v.duration_code, v.delivery_type, v.warranty_days,
       v.stock_policy, v.sort_order, v.fulfillment_type, v.warranty_enabled,
+      v.low_stock_threshold,
       q.available_quantity::int as available_quantity,
       ${VARIANT_READY_SQL} as is_ready,
       p.description_vi, p.what_customer_receives_vi, p.usage_instructions_vi,
@@ -380,6 +402,7 @@ export async function getVariantById(
       and p.is_active
       and v.is_active
       and v.price_vnd > 0
+      ${audience === "public" ? sql`and c.slug in (${PUBLIC_CATEGORY_SLUG_SQL})` : sql``}
       ${catalogVisibilitySql(audience)}
       and ${SELLABLE_ROUTE_SQL}
   `.execute(exec);
@@ -575,6 +598,9 @@ function subtreeProductCountSql(audience: CatalogAudience) {
     left join variant_quantity_stock q on q.variant_id = v.id
     join category leaf on leaf.id = p.category_id
     where (leaf.id = c.id or leaf.parent_id = c.id)
+      ${audience === "public" ? sql`and leaf.slug in (${PUBLIC_CATEGORY_SLUG_SQL})` : sql``}
+
+
       and leaf.is_active
       and p.is_active
       and v.is_active
@@ -596,9 +622,12 @@ export async function listPublicRootCategories(
   const result = await sql<CatalogCategoryNode>`
     select ${CATEGORY_NODE_COLUMNS},
       (select count(*)::int from category x where x.parent_id = c.id and x.is_active) as child_count,
+
       ${subtreeProductCountSql(audience)} as public_product_count
     from category c
     where c.parent_id is null and c.is_active
+      ${audience === "public" ? sql`and c.slug in (${PUBLIC_ROOT_SLUG_SQL})` : sql``}
+
     order by c.sort_order asc, c.id asc
   `.execute(exec);
   return result.rows.filter(
@@ -635,6 +664,7 @@ async function listScopedProducts(
       ? sql`and (p.category_id = ${options.categoryId} or c.parent_id = ${options.categoryId})`
       : sql`and p.category_id = ${options.categoryId}`
     : sql``;
+
   const featuredFilter = options.featuredOnly ? sql`and p.is_featured` : sql``;
   const orderBy = options.categoryFeaturedFirst
     ? sql`p.is_category_featured desc, p.category_featured_rank nulls last, p.sort_order asc, p.id asc`
@@ -655,6 +685,9 @@ async function listScopedProducts(
     join product_variant v on v.product_id = p.id
     left join variant_quantity_stock q on q.variant_id = v.id
     where c.is_active
+      ${audience === "public" ? sql`and c.slug in (${PUBLIC_CATEGORY_SLUG_SQL})` : sql``}
+
+
       and p.is_active
       and v.is_active
       and v.price_vnd > 0
@@ -689,9 +722,12 @@ async function loadCategoryNode(
   const result = await sql<CatalogCategoryNode>`
     select ${CATEGORY_NODE_COLUMNS},
       (select count(*)::int from category x where x.parent_id = c.id and x.is_active) as child_count,
+
       ${subtreeProductCountSql(audience)} as public_product_count
     from category c
     where c.id = ${categoryId} and c.is_active
+      ${audience === "public" ? sql`and c.slug in (${PUBLIC_CATEGORY_SLUG_SQL})` : sql``}
+
     limit 1
   `.execute(exec);
   return result.rows[0] ?? null;
@@ -714,9 +750,11 @@ export async function listPublicCategoryPage(
   const childResult = await sql<CatalogCategoryNode>`
     select ${CATEGORY_NODE_COLUMNS},
       (select count(*)::int from category x where x.parent_id = c.id and x.is_active) as child_count,
+
       ${subtreeProductCountSql(audience)} as public_product_count
     from category c
     where c.parent_id = ${categoryId} and c.is_active
+      ${audience === "public" ? sql`and c.slug in (${PUBLIC_BRAND_SLUG_SQL})` : sql``}
     order by c.sort_order asc, c.id asc
   `.execute(exec);
   const visibleChildren = childResult.rows.filter(
@@ -759,6 +797,8 @@ export async function listPublicCategoryPage(
     left join variant_quantity_stock q on q.variant_id = v.id
     where p.category_id = ${categoryId}
       and c.is_active and p.is_active and v.is_active and v.price_vnd > 0
+      ${audience === "public" ? sql`and c.slug in (${PUBLIC_CATEGORY_SLUG_SQL})` : sql``}
+
       ${catalogVisibilitySql(audience)}
       and ${SELLABLE_ROUTE_SQL}
   `.execute(exec);
@@ -827,6 +867,7 @@ export async function getProductDetail(
     join product_variant v on v.product_id = p.id
     where p.id = ${productId}
       and c.is_active and p.is_active
+      ${audience === "public" ? sql`and c.slug in (${PUBLIC_CATEGORY_SLUG_SQL})` : sql``}
       ${catalogVisibilitySql(audience)}
     limit 1
   `.execute(exec);

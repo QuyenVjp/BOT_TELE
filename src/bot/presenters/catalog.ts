@@ -80,6 +80,8 @@ export interface PresentedMessage {
    * every such screen would post a redundant menu message each time.
    */
   installPersistentKeyboard?: boolean;
+  /** Protect message content from forwarding and saving (Telegram Bot API protect_content). */
+  protectContent?: boolean;
   /** Optional binary photo media, currently used only by payment QR screens. */
   photo?: Buffer;
   /** Optional document media, used for paid ZIP delivery and admin CSV templates. */
@@ -105,12 +107,31 @@ const STOCK_OUTCOME_COPY: Readonly<Record<StockOutcomeCode, string>> = Object.fr
     "Đang có nhiều người đặt sản phẩm này. Vui lòng thử lại sau vài giây. Bạn chưa bị trừ tiền và chưa có phiên thanh toán.",
 });
 
+const DEFAULT_LOW_STOCK_THRESHOLD = 3;
+
+function isLowStock(
+  availableQuantity: number | null | undefined,
+  threshold: number | null | undefined,
+): boolean {
+  return (
+    availableQuantity != null &&
+    availableQuantity > 0 &&
+    availableQuantity <= (threshold ?? DEFAULT_LOW_STOCK_THRESHOLD)
+  );
+}
+
 function adminContactButton(): InlineButton {
   return { text: CATALOG_COPY.contactAdmin, url: ADMIN_CONTACT_URL, callbackData: "" };
 }
 
 function homeButton(callbackData: string): InlineButton {
   return { text: CATALOG_COPY.mainMenu, callbackData };
+}
+export function formatCategoryLabel(name: string, icon?: string | null): string {
+  const label = name.trim();
+  const prefix = icon?.trim();
+  if (!prefix || label.startsWith(`${prefix} `) || label === prefix) return label;
+  return `${prefix} ${label}`;
 }
 
 export function presentSearchPrompt(): PresentedMessage {
@@ -134,7 +155,7 @@ export function presentCategoryList(categories: CatalogCategoryRow[]): Presented
     };
   }
   const categoryButtons = categories.map((c) => ({
-    text: c.name_vi,
+    text: formatCategoryLabel(c.name_vi, c.icon),
     callbackData: `cat:view:${c.id}`,
   }));
   const buttons: InlineButton[][] = [
@@ -145,7 +166,10 @@ export function presentCategoryList(categories: CatalogCategoryRow[]): Presented
 }
 
 export function presentCategoryPage(page: PublicCategoryPage): PresentedMessage {
-  const title = page.category.display_name_vi || page.category.name_vi;
+  const title = formatCategoryLabel(
+    page.category.display_name_vi || page.category.name_vi,
+    page.category.icon,
+  );
   const hasItems = page.children.length > 0 || page.products.length > 0 || page.featured.length > 0;
   const lines = [`🛒 ${SHOP_NAME}`, title];
   const buttons: InlineButton[][] = [];
@@ -169,7 +193,7 @@ export function presentCategoryPage(page: PublicCategoryPage): PresentedMessage 
   for (let i = 0; i < page.children.length; i += 2) {
     buttons.push(
       page.children.slice(i, i + 2).map((child) => ({
-        text: child.display_name_vi || child.name_vi,
+        text: formatCategoryLabel(child.display_name_vi || child.name_vi, child.icon),
         callbackData: `cat:view:${child.id}`,
       })),
     );
@@ -198,7 +222,7 @@ export function presentCategoryPage(page: PublicCategoryPage): PresentedMessage 
   }
   const back = page.parent
     ? {
-        text: `⬅️ ${page.parent.display_name_vi || page.parent.name_vi}`,
+        text: `⬅️ ${formatCategoryLabel(page.parent.display_name_vi || page.parent.name_vi, page.parent.icon)}`,
         callbackData: `cat:view:${page.parent.id}`,
       }
     : homeButton("shop:home");
@@ -215,9 +239,8 @@ export function presentProductDetail(
   const prices = detail.variants.map((v) => BigInt(v.price_vnd)).filter((p) => p > 0n);
   const minPrice = prices.length ? prices.reduce((a, b) => (a < b ? a : b)) : null;
   const anyReady = detail.variants.some((v) => v.is_ready);
-  const totalQty = detail.variants.reduce(
-    (sum, v) => sum + (v.available_quantity ?? (v.is_ready ? 1 : 0)),
-    0,
+  const lowStock = detail.variants.some((v) =>
+    isLowStock(v.available_quantity, v.low_stock_threshold),
   );
   const deliveryModes = [
     ...new Set(detail.variants.map((v) => DELIVERY_MODE_COPY[v.fulfillment_type] ?? "Tự động")),
@@ -228,7 +251,7 @@ export function presentProductDetail(
     ...(detail.short_description_vi ? [detail.short_description_vi] : []),
     "",
     ...(minPrice != null ? [`💰 Giá từ: ${formatVnd(makeVnd(minPrice))}`] : []),
-    stockStateLine(anyReady, totalQty > 0 && totalQty <= 3),
+    stockStateLine(anyReady, lowStock),
     `⚡ Giao hàng: ${deliveryModes.join(" / ") || "Tự động"}`,
     `⏱ Dự kiến: ${detail.delivery_eta_vi || "vài giây sau khi thanh toán"}`,
   ];
@@ -278,19 +301,21 @@ export function presentProductDetail(
       buttons.push([{ text: `${variant.name_vi} · ${price}`, callbackData: buyNow }]);
       continue;
     }
-    buttons.push([
-      {
-        text: `🔔 ${variant.name_vi} · Báo khi có hàng`,
-        callbackData: `rst:sub:${variant.id}`,
-      },
-    ]);
-    if (variant.preorder_enabled) {
+    if (!variant.is_ready) {
       buttons.push([
         {
-          text: `💰 ${variant.name_vi} · Đặt cọc giữ suất`,
-          callbackData: `preorder:consent:${variant.id}`,
+          text: `🔔 ${variant.name_vi} · Báo khi có hàng`,
+          callbackData: `rst:sub:${variant.id}`,
         },
       ]);
+      if (variant.preorder_enabled) {
+        buttons.push([
+          {
+            text: `💰 ${variant.name_vi} · Đặt cọc giữ suất`,
+            callbackData: `preorder:consent:${variant.id}`,
+          },
+        ]);
+      }
     }
   }
   buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }, adminContactButton()]);
@@ -318,7 +343,7 @@ const DURATION_LABELS: Record<string, string> = {
   TRIAL: "Dùng thử",
 };
 
-function durationLabel(code: string | null | undefined): string | null {
+export function durationLabel(code: string | null | undefined): string | null {
   if (!code) return null;
   return DURATION_LABELS[code.toUpperCase()] ?? null;
 }
@@ -388,7 +413,7 @@ export function presentVariantDetail(
     `💰 Giá: ${price}${compareAt ? ` ~~${compareAt}~~` : ""}`,
     stockStateLine(
       variant.is_ready,
-      variant.available_quantity != null && variant.available_quantity <= 2,
+      isLowStock(variant.available_quantity, variant.low_stock_threshold),
     ),
     `⚡ Giao hàng: ${DELIVERY_MODE_COPY[variant.fulfillment_type] ?? "Tự động"}`,
     `⏱ Dự kiến: ${eta}`,
@@ -400,7 +425,8 @@ export function presentVariantDetail(
   if (variant.usage_instructions_vi)
     textLines.push("", "📘 Hướng dẫn", ...bulletLines(variant.usage_instructions_vi));
   if (variant.warranty_vi) textLines.push("", "🛡 Bảo hành", variant.warranty_vi);
-  textLines.push(`Thời hạn: ${variant.duration_code ?? "—"}`, `Loại giao: ${fulfillment}`);
+  const duration = durationLabel(variant.duration_code) ?? "—";
+  textLines.push(`Thời hạn: ${duration}`, `Loại giao: ${fulfillment}`);
 
   const buttons: InlineButton[][] = [];
   if (

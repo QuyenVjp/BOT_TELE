@@ -11,12 +11,12 @@ import {
 } from "../../src/modules/digital-goods/recovery.js";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import type { SePayReconciliationPort } from "../../src/modules/payments/reconciliation.js";
+import { SePayApiError } from "../../src/modules/payments/sepay-api.js";
 import { createInMemoryRateLimiter } from "../../src/modules/risk/service.js";
 import type { SupplierPort } from "../../src/modules/supplier/port.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
 import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
-
 /**
  * T167 — bounded crash-recovery jobs.
  *
@@ -359,6 +359,39 @@ describe("bounded recovery jobs (T167/T168)", () => {
     expect(seenSince).toEqual([undefined, undefined]);
     expect(replayed).toMatchObject({ succeeded: 1, failed: 0 });
     expect(afterReplay).toMatchObject({ page: 2, generation: 2 });
+  });
+
+  it("defers SePay polling until the provider Retry-After deadline", async () => {
+    const seed = await seedCommerce();
+    await seedOrder(seed, { createdAt: new Date("2026-01-01T00:00:00.000Z") });
+    const firstNow = new Date("2026-01-01T00:10:00.000Z");
+    let calls = 0;
+    const port: SePayReconciliationPort = {
+      listTransactions() {
+        calls += 1;
+        if (calls === 1) {
+          throw new SePayApiError("RATE_LIMITED", "provider backoff", 120);
+        }
+        return Promise.resolve([]);
+      },
+    };
+
+    const failed = await recoverSePayBatch(ctx.db, { batchSize: 1, now: firstNow, port });
+    const gated = await recoverSePayBatch(ctx.db, {
+      batchSize: 1,
+      now: new Date(firstNow.getTime() + 60_000),
+      port,
+    });
+    const released = await recoverSePayBatch(ctx.db, {
+      batchSize: 1,
+      now: new Date(firstNow.getTime() + 121_000),
+      port,
+    });
+
+    expect(failed).toMatchObject({ claimed: 1, failed: 1 });
+    expect(gated).toMatchObject({ claimed: 0, failed: 0 });
+    expect(released).toMatchObject({ claimed: 1, failed: 0 });
+    expect(calls).toBe(2);
   });
 
   it("advances the SePay cursor only after all rows in the page succeed", async () => {

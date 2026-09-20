@@ -759,7 +759,7 @@ describe("customer payment auxiliary screens layout and copy", () => {
     expect(screen.buttons).toEqual([[{ text: "🏠 Trang chủ", callbackData: "shop:home" }]]);
   });
 
-  it("checkout preview keeps payment methods and cancel full-width", () => {
+  it("checkout preview exposes only the VietQR path", () => {
     const screen = presentCheckoutPreview({
       productName: "Claude Pro",
       variantName: "1 tháng",
@@ -767,14 +767,13 @@ describe("customer payment auxiliary screens layout and copy", () => {
       deliveryLabel: "Tự động",
       warrantyLabel: "30 ngày",
       qrCallbackData: "buy:qr:tok1",
-      walletCallbackData: "buy:wallet:tok1",
       cancelCallbackData: "buy:cancel:tok1",
     });
 
     expect(screen.text.split("\n")[0]).toBe("🛒 Xác nhận mua hàng");
+    expect(screen.text).toContain("Thanh toán bằng VietQR:");
     expect(screen.buttons).toEqual([
       [{ text: "🏦 VietQR", callbackData: "buy:qr:tok1" }],
-      [{ text: "👛 Ví TIER20", callbackData: "buy:wallet:tok1" }],
       [{ text: "❌ Huỷ", callbackData: "buy:cancel:tok1" }],
     ]);
   });

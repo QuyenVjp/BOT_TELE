@@ -1022,6 +1022,7 @@ export interface TelegramDomainDispatcherDeps {
   };
   responder: {
     ack?(callbackQueryId: string): Promise<void>;
+    deleteMessage?(chatId: string | number, messageId: number): Promise<void>;
     send(input: {
       chatId: string;
       messageId: string | null;
@@ -1246,6 +1247,25 @@ export function createTelegramDomainDispatcher(
         message = deps.admin?.warrantyQueue
           ? await routeAdminWarranty(deps.admin, route, envelope, correlationId)
           : safeError("Bảo hành không khả dụng.");
+      } else if (envelope.callbackData === "delivery:delete") {
+        await ackIfNeeded();
+        const messageId = Number(envelope.messageId);
+        if (deps.responder.deleteMessage && Number.isSafeInteger(messageId) && messageId > 0) {
+          await deps.responder.deleteMessage(envelope.chatId, messageId);
+          if (envelope.callbackQueryId) {
+            const observedAt = Date.now();
+            deps.observeCallback?.({
+              ackMs,
+              serverIssueAckMs,
+              telegramRttMs,
+              serverRenderMs: observedAt - startedAt,
+              renderMs: observedAt - startedAt,
+              action: "delivery:delete",
+            });
+          }
+          return;
+        }
+        message = safeError("Không thể xóa tin nhắn này.");
       } else if (
         envelope.callbackData === "delivery:open" ||
         envelope.callbackData?.startsWith("delivery:open:")
@@ -2537,22 +2557,13 @@ export function createTelegramDomainDispatcher(
           ? await deps.walletAccount(ctx)
           : presentCustomerAccountPrompt();
       } else if (command === "/topup" || envelope.messageText === CUSTOMER_COPY.topup) {
-        message = deps.walletTopup
-          ? await deps.walletTopup(ctx, { kind: "PICK" })
-          : safeError("Nạp ví không khả dụng.");
+        message = safeError("Nạp ví chưa nằm trong retail MVP.");
       } else if (envelope.callbackData === "wallet:history") {
-        message = deps.walletHistory
-          ? await deps.walletHistory(ctx)
-          : safeError("Lịch sử ví không khả dụng.");
+        message = safeError("Lịch sử ví chưa nằm trong retail MVP.");
       } else if (envelope.callbackData?.startsWith("wallet:topup")) {
-        message = deps.walletTopup
-          ? await deps.walletTopup(ctx, parseWalletTopupAction(envelope.callbackData))
-          : safeError("Nạp ví không khả dụng.");
+        message = safeError("Nạp ví chưa nằm trong retail MVP.");
       } else if (command === "/pay") {
-        message =
-          deps.walletPay && envelope.searchQuery
-            ? await deps.walletPay(ctx, envelope.searchQuery)
-            : safeError("Dùng /pay kèm mã đơn hàng.");
+        message = safeError("Thanh toán ví chưa nằm trong retail MVP.");
       } else if (command === "/search") {
         if (envelope.searchQuery) {
           message = await deps.catalog.search(
@@ -2921,16 +2932,6 @@ function actionContext(
     correlationId,
   };
 }
-function parseWalletTopupAction(callbackData: string): WalletTopupAction {
-  if (callbackData === "wallet:topup") return { kind: "PICK" };
-  if (callbackData === "wallet:topup:custom") return { kind: "CUSTOM" };
-  if (callbackData === "wallet:topup:confirm") return { kind: "CONFIRM" };
-  if (callbackData === "wallet:topup:status") return { kind: "STATUS" };
-  if (callbackData === "wallet:topup:change") return { kind: "CHANGE" };
-  if (callbackData === "wallet:topup:cancel") return { kind: "CANCEL" };
-  const selected = callbackData.match(/^wallet:topup:amount:([1-9][0-9]{0,12})$/u);
-  return selected ? { kind: "SELECT", amountVnd: BigInt(selected[1]!) } : { kind: "PICK" };
-}
 
 function parseAdminConfirm(
   input?: string | null,
@@ -3119,13 +3120,7 @@ async function dispatchVerified(
           })
         : safeError("Không mở được xác nhận đơn hàng.");
     case "CHECKOUT_WALLET":
-      return token.resourceId && customerId && deps.checkout.payWithWalletFromCallback
-        ? deps.checkout.payWithWalletFromCallback({
-            callbackData: envelope.callbackData ?? "",
-            telegramUserId: envelope.actorUserId,
-            correlationId,
-          })
-        : safeError("Không xác minh được khách hàng.");
+      return safeError("Thanh toán ví chưa nằm trong retail MVP.");
     case "PREORDER_CONSENT":
       return deps.preorder && token.resourceId
         ? deps.preorder.consent(token.resourceId)
@@ -3141,7 +3136,11 @@ async function dispatchVerified(
         : safeError("Không xác minh được khách hàng.");
     case "PREORDER_PAY":
       return customerId && deps.preorder && token.resourceId
-        ? deps.preorder.pay({ customerId, reservationId: token.resourceId, correlationId })
+        ? deps.preorder.pay({
+            customerId,
+            reservationId: token.resourceId,
+            correlationId,
+          })
         : safeError("Không xác minh được khách hàng.");
     case "PREORDER_LIST":
       return customerId && deps.preorder

@@ -19,6 +19,7 @@ import {
   presentAdminPaymentsMenu,
   presentAdminProductDetail,
   presentAdminProductReadiness,
+  presentAdminEvidencePrompt,
   presentAdminProducts,
   presentAdminProductsMenu,
   presentAdminSupplierVariant,
@@ -265,6 +266,17 @@ describe("admin operational presenters", () => {
 
     // The evidence id names the record; nothing on the screen carries a vault reference.
     expect(`${testOnly.text}${JSON.stringify(testOnly.buttons)}`).not.toMatch(/vault:|secret/i);
+  });
+
+  it("distinguishes owner-held provenance from upstream authorization", () => {
+    const message = presentAdminEvidencePrompt({
+      productId: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      variantId: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+      variantName: "GPT Plus",
+    });
+
+    expect(message.text).toContain("OWNER_ATTESTATION: Chủ shop xác nhận sở hữu");
+    expect(message.text).toContain("không phải uỷ quyền resale/chuyển nhượng từ nhà cung cấp");
   });
 
   // The preview and the durable transition read the same readiness, so a blocked preview must

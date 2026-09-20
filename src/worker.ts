@@ -20,6 +20,7 @@ import {
   reorderCategory,
   ensureDefaultCategories,
   getOrCreateUncategorizedCategory,
+  VARIANT_READY_SQL,
 } from "./modules/catalog/repository.js";
 import { createCatalogCache } from "./modules/catalog/cache.js";
 import { resolveCatalogAudience } from "./modules/catalog/visibility.js";
@@ -791,8 +792,13 @@ export async function restockVariantLabel(db: Db, variantId: string): Promise<st
   const row = (
     await sql<{ product_name: string; variant_name: string }>`
       select p.name_vi as product_name, v.name_vi as variant_name
-      from product_variant v join product p on p.id = v.product_id
+      from product_variant v
+      join product p on p.id = v.product_id
+      left join variant_quantity_stock q on q.variant_id = v.id
       where v.id = ${variantId}
+        and v.is_active
+        and p.is_active
+        and not (${VARIANT_READY_SQL})
       limit 1
     `.execute(db)
   ).rows[0];
