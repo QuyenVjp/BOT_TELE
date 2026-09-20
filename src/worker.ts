@@ -2131,9 +2131,10 @@ async function bootstrap(): Promise<void> {
     error: unknown,
     action: string,
     category: string | null,
+    challengeId: string,
   ): PresentedMessage | null =>
     error instanceof SensitiveAuthorizationRefusedError
-      ? presentSensitiveRefusal({ code: error.code, action, category })
+      ? presentSensitiveRefusal({ code: error.code, action, category, challengeId })
       : null;
   const isSensitiveCallbackRefusal = (code: string): code is SensitiveAuthorizationRefusal =>
     code === "NOT_ROOT_ADMIN" ||
@@ -2144,6 +2145,7 @@ async function bootstrap(): Promise<void> {
   const presentAdminHandleRefusal = (
     result: Extract<HandleResult, { ok: false }>,
     action: SensitiveActionKey,
+    challengeId: string,
   ): PresentedMessage =>
     result.code === "WRONG_CONTEXT"
       ? presentAdminDenied("WRONG_CONTEXT")
@@ -2152,6 +2154,7 @@ async function bootstrap(): Promise<void> {
             code: result.code,
             action,
             category: SENSITIVE_ACTION_POLICY[action],
+            challengeId,
           })
         : presentAdminDenied("NOT_ROOT_ADMIN");
 
@@ -2974,7 +2977,12 @@ async function bootstrap(): Promise<void> {
           reason: "Replacement approval requested from Telegram admin support UI",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "support.replacement.approve");
+        if (!result.ok)
+          return presentAdminHandleRefusal(
+            result,
+            "support.replacement.approve",
+            input.correlationId,
+          );
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3123,7 +3131,12 @@ async function bootstrap(): Promise<void> {
           reason: "Manual fulfillment completion requested from Telegram admin UI",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "manual_fulfillment.complete");
+        if (!result.ok)
+          return presentAdminHandleRefusal(
+            result,
+            "manual_fulfillment.complete",
+            input.correlationId,
+          );
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3167,7 +3180,7 @@ async function bootstrap(): Promise<void> {
           reason: "Bật chế độ TEST — chỉ khách test mua được sản phẩm test",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "store.test");
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.test", input.correlationId);
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3204,7 +3217,7 @@ async function bootstrap(): Promise<void> {
           reason: "Mở bán công khai (xác nhận qua nút)",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "store.open");
+        if (!result.ok) return presentAdminHandleRefusal(result, "store.open", input.correlationId);
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3226,7 +3239,8 @@ async function bootstrap(): Promise<void> {
           reason: "Đóng cửa hàng tạm dừng bán",
           correlationId: input.correlationId,
         });
-        if (!result.ok) return presentAdminHandleRefusal(result, "store.close");
+        if (!result.ok)
+          return presentAdminHandleRefusal(result, "store.close", input.correlationId);
         return result.needsConfirmation
           ? presentHighRiskChallenge({
               confirmationId: result.confirmationId,
@@ -3794,7 +3808,7 @@ async function bootstrap(): Promise<void> {
         });
         if (!result.ok) {
           if (result.code === "WRONG_CONTEXT" || isSensitiveCallbackRefusal(result.code))
-            return presentAdminHandleRefusal(result, "catalog.publish");
+            return presentAdminHandleRefusal(result, "catalog.publish", input.correlationId);
           return {
             text: "Không thể tạo yêu cầu xuất bản; readiness hoặc phiên bản đã thay đổi. Mở lại để kiểm tra.",
             buttons: [
@@ -4010,6 +4024,7 @@ async function bootstrap(): Promise<void> {
             error,
             "catalog.variant.price.change",
             "BULK_PRICE_CHANGE",
+            input.correlationId,
           );
           if (refusal) return refusal;
           throw error;
@@ -4580,6 +4595,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "supplier.mapping.select",
             category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
           });
         const result = await selectVariantSupplierMapping({
           db: dbHandle.db,
@@ -4613,6 +4629,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "supplier.mapping.clear",
             category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
           });
         const result = await clearVariantSupplierMapping({
           db: dbHandle.db,
@@ -4656,6 +4673,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "supplier.mapping.verify",
             category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
           });
         const result = await markSupplierSkuManuallyVerified({
           db: dbHandle.db,
@@ -4687,7 +4705,8 @@ async function bootstrap(): Promise<void> {
         });
         if (!result.ok) {
           if (result.code === "WRONG_CONTEXT") return presentAdminDenied("WRONG_CONTEXT");
-          if (isSensitiveActionKey(command)) return presentAdminHandleRefusal(result, command);
+          if (isSensitiveActionKey(command))
+            return presentAdminHandleRefusal(result, command, input.correlationId);
           return presentAdminDenied("NOT_ROOT_ADMIN");
         }
         if (result.needsConfirmation)
@@ -4733,6 +4752,7 @@ async function bootstrap(): Promise<void> {
             code: result.code,
             action: refusedAction ?? "admin.confirm",
             category: refusedAction ? SENSITIVE_ACTION_POLICY[refusedAction] : null,
+            challengeId: input.correlationId,
           });
         }
         return {
@@ -5222,6 +5242,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "warranty.replacement.approve",
             category: "DELIVERY_REISSUE",
+            challengeId: input.correlationId,
           });
         const result = await approveClaimReplacement({
           db: dbHandle.db,
@@ -5266,6 +5287,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "warranty.refund.approve",
             category: "REFUND",
+            challengeId: input.correlationId,
           });
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
@@ -5300,6 +5322,7 @@ async function bootstrap(): Promise<void> {
             code: authorization.code,
             action: "warranty.refund.approve",
             category: "REFUND",
+            challengeId: input.correlationId,
           });
         const result = await approveClaimRefund({
           db: dbHandle.db,
@@ -5883,6 +5906,7 @@ async function bootstrap(): Promise<void> {
                 code: authorization.code,
                 action: "preorder.cancel",
                 category: SENSITIVE_ACTION_POLICY["preorder.cancel"],
+                challengeId: input.correlationId,
               });
             }
             await shopCancelPreorder(dbHandle.db, {
@@ -6146,6 +6170,7 @@ async function bootstrap(): Promise<void> {
             error,
             "inventory.stock.adjust",
             "STOCK_ADJUSTMENT",
+            input.correlationId,
           );
           if (refusal) return refusal;
           throw error;
@@ -6663,6 +6688,7 @@ async function bootstrap(): Promise<void> {
             code: sent.code,
             action: "broadcast.confirm",
             category: SENSITIVE_ACTION_POLICY["broadcast.confirm"],
+            challengeId: input.correlationId,
           });
         }
         const status = await getBroadcastStatus(dbHandle.db, input.campaignId);
@@ -6798,10 +6824,10 @@ async function bootstrap(): Promise<void> {
           // so a live prompt cannot swallow the factor submission, and behind the same audited root
           // gate as every other owner entry point.
           if (input.text.startsWith("/verify") || input.text.startsWith("/enroll_2fa")) {
-            if (config.NODE_ENV === "production") {
+            if (input.text.startsWith("/enroll_2fa")) {
               return {
                 buttons: [[{ text: "⚙️ Quản trị", callbackData: "admin:menu" }]],
-                text: "Xác minh bảo mật phải thực hiện trên operator CLI, không qua Telegram.",
+                text: "Thiết lập MFA phải thực hiện trên operator host bằng `npm run admin:step-up enroll` để QR không đi qua Telegram.",
               };
             }
             const gated = await requireRootAdmin(
@@ -6812,40 +6838,17 @@ async function bootstrap(): Promise<void> {
             );
             if (gated) return presentAdminDenied(gated);
             const menu = { buttons: [[{ text: "⚙️ Quản trị", callbackData: "admin:menu" }]] };
-
-            if (input.text.startsWith("/enroll_2fa")) {
-              // A seed is revealed exactly once, at enrolment. Re-running must never print it again.
-              if (await stepUp.isEnrolled(input.telegramUserId)) {
-                return {
-                  ...menu,
-                  text: "Yếu tố bảo mật đã được thiết lập. Gửi /verify <mã 6 số> khi cần xác minh.",
-                };
-              }
-              const { otpauthUri } = await stepUp.enroll({
-                adminTelegramUserId: input.telegramUserId,
-                issuer: "TIER20 SHOP",
-                accountLabel: input.telegramUserId,
-              });
+            const parsedVerify = /^\/verify\s+(\d{6})\s+([A-Za-z0-9:_-]{1,80})$/u.exec(
+              input.text.trim(),
+            );
+            if (!parsedVerify) {
               return {
                 ...menu,
-                text: [
-                  "🔐 Thiết lập xác minh bảo mật",
-                  "",
-                  "Thêm khoá dưới đây vào ứng dụng Authenticator (Google Authenticator, Authy…):",
-                  otpauthUri,
-                  "",
-                  "Hãy lưu lại ngay — bot không hiển thị lại khoá này.",
-                ].join("\n"),
+                text: "Gửi đúng định dạng: /verify <mã 6 số> <mã yêu cầu>.",
               };
             }
-
-            const code = input.text.replace(/^\/verify\s*/u, "").trim();
-            if (!/^\d{6}$/u.test(code)) {
-              return { ...menu, text: "Gửi đúng định dạng: /verify <mã 6 số>." };
-            }
-            // The category comes from the most recent step-up refusal this layer audited, so a
-            // grant can only be minted for the action the owner actually tried to take — never for
-            // every category at once. The window is the lockout window: an older attempt is stale.
+            const code = parsedVerify[1]!;
+            const challengeId = parsedVerify[2]!;
             const requested = await sql<{
               action_key: string | null;
               category: string | null;
@@ -6862,9 +6865,21 @@ async function bootstrap(): Promise<void> {
                      metadata_redacted->>'payloadHash' as payload_hash
               from audit_event
               where actor_id = ${input.telegramUserId}
+                and correlation_id = ${challengeId}
                 and action = 'admin.sensitive.denied'
                 and metadata_redacted->>'code' = 'STEP_UP_REQUIRED'
                 and occurred_at > now() - (${config.ADMIN_STEP_UP_LOCKOUT_MINUTES} * interval '1 minute')
+                and not exists (
+                  select 1
+                  from admin_step_up_grant as issued
+                  where issued.admin_telegram_user_id = ${input.telegramUserId}
+                    and issued.issued_at >= audit_event.occurred_at
+                    and issued.action_key = audit_event.metadata_redacted->>'actionKey'
+                    and issued.resource_type = audit_event.metadata_redacted->>'resourceType'
+                    and issued.resource_id = audit_event.metadata_redacted->>'resourceId'
+                    and issued.resource_version = audit_event.metadata_redacted->>'resourceVersion'
+                    and issued.payload_hash = audit_event.metadata_redacted->>'payloadHash'
+                )
               order by occurred_at desc, id desc
               limit 1
             `.execute(dbHandle.db);
@@ -6897,6 +6912,12 @@ async function bootstrap(): Promise<void> {
             });
             if (!verified.ok) {
               // Never echo the submitted code, and never say which digit was wrong.
+              if (verified.code === "REPLAYED") {
+                return {
+                  ...menu,
+                  text: "❌ Mã xác minh này đã được sử dụng. Hãy yêu cầu mã mới cho đúng thao tác.",
+                };
+              }
               if (verified.code === "LOCKED_OUT") {
                 const oldest = await sql<{ oldest: Date | string | null }>`
                   select min(attempted_at) as oldest from admin_step_up_attempt
@@ -7085,6 +7106,7 @@ async function bootstrap(): Promise<void> {
                 code: authorization.code,
                 action: "warranty.refund.adjust",
                 category: "REFUND",
+                challengeId: input.correlationId,
               });
             await sql`
               delete from admin_callback_state
@@ -7427,6 +7449,7 @@ async function bootstrap(): Promise<void> {
               error,
               "catalog.variant.price.change",
               "BULK_PRICE_CHANGE",
+              input.correlationId,
             );
             if (refusal) return refusal;
             throw error;
@@ -8312,39 +8335,20 @@ async function bootstrap(): Promise<void> {
         vault,
         sender: {
           send: async (input) => {
-            const lines = [
-              "✅ Giao hàng thành công",
-              "",
-              input.product?.name ? `📦 ${input.product.name}` : "📦 Đơn hàng của bạn",
-              `Đơn: ${input.orderNumber}`,
-              `💰 ${formatMoneyVnd(makeVnd(BigInt(input.amountVnd)))}`,
-              "",
-              "Nhấn nút bên dưới để xem thông tin nhận hàng (chỉ hiện một lần, đừng chia sẻ).",
-            ];
-            if (input.product?.usageInstructionsVi)
-              lines.push("", `📘 Hướng dẫn: ${input.product.usageInstructionsVi}`);
-            if (input.product?.warrantyVi)
-              lines.push("", `🛡 Bảo hành: ${input.product.warrantyVi}`);
             await telegramResponder.send({
               chatId: input.chatId,
               messageId: null,
-              message: {
-                text: lines.join("\n"),
-                buttons: [
-                  [
-                    {
-                      text: "🔐 Nhận hàng ngay",
-                      callbackData: `delivery:open:${input.handoffId}`,
-                    },
-                  ],
-                  [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
-                  [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
-                ],
-              },
+              message: presentDeliveryReveal({
+                secret: input.secret,
+                productName: input.product?.name ?? "Đơn hàng của bạn",
+                orderNumber: input.orderNumber,
+                amountVnd: input.amountVnd,
+                usageInstructionsVi: input.product?.usageInstructionsVi ?? null,
+                warrantyVi: input.product?.warrantyVi ?? null,
+              }),
             });
-            // Own message, after the fulfilled delivery: commercial context only, never
-            // the credential (that stays view-once behind "🔐 Nhận hàng ngay"). A failure
-            // here must not fail the claim, or the delivery message would be re-sent.
+            // Keep the separate commercial thank-you best-effort; a failure here
+            // must not make the credential handoff retry and duplicate the secret.
             try {
               await telegramResponder.send({
                 chatId: input.chatId,

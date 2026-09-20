@@ -602,7 +602,9 @@ function classifyAction(
     command === "/customers" ||
     command === "/broadcast" ||
     command === "/health" ||
-    command === "/confirm"
+    command === "/confirm" ||
+    command === "/verify" ||
+    command === "/enroll_2fa"
   )
     return "ADMIN";
   if (command === "/cancel") return "CANCEL";
@@ -647,7 +649,9 @@ function normalizeCommandArgument(command: string | undefined, value: string): s
     command !== "/pay" &&
     command !== "/customer" &&
     command !== "/message_customer" &&
-    command !== "/confirm"
+    command !== "/confirm" &&
+    command !== "/verify" &&
+    command !== "/enroll_2fa"
   )
     return null;
   const maxLength = command === "/message_customer" ? 1100 : 80;

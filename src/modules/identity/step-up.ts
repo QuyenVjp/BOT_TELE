@@ -40,7 +40,7 @@ export type StepUpActionCategory =
   | "BROADCAST";
 
 export type StepUpFailureCode =
-  "NOT_ENROLLED" | "INVALID_CODE" | "LOCKED_OUT" | "NOT_GRANTED" | "GRANT_EXPIRED";
+  "NOT_ENROLLED" | "INVALID_CODE" | "REPLAYED" | "LOCKED_OUT" | "NOT_GRANTED" | "GRANT_EXPIRED";
 
 export type RecoveryFailureCode =
   | "NO_ACTIVE_FACTOR"
@@ -230,26 +230,43 @@ export function generateTotp(secretBase32: string, unixSeconds: number): string 
  * candidate is compared with `timingSafeEqual`; a malformed code is rejected
  * before any HMAC work.
  */
+function matchedTotpTimeStep(input: {
+  secretBase32: string;
+  code: string;
+  unixSeconds: number;
+  driftSteps?: number;
+}): number | null {
+  if (!CODE_SHAPE.test(input.code)) return null;
+  const key = decodeBase32(input.secretBase32);
+  if (key === null || !Number.isFinite(input.unixSeconds)) return null;
+  const drift = Math.max(0, Math.trunc(input.driftSteps ?? 1));
+  const step = Math.floor(input.unixSeconds / TOTP_PERIOD_SECONDS);
+  const presented = Buffer.from(input.code, "utf8");
+  let matchedStep: number | null = null;
+  for (let delta = -drift; delta <= drift; delta += 1) {
+    const candidateStep = step + delta;
+    if (candidateStep < 0) continue;
+    const candidate = Buffer.from(hotp(key, candidateStep), "utf8");
+    // No early exit: a match must not be detectable from the work performed.
+    if (timingSafeEqual(candidate, presented) && matchedStep === null) {
+      matchedStep = candidateStep;
+    }
+  }
+  return matchedStep;
+}
+
+/**
+ * Pure verifier. `driftSteps` defaults to 1 (±1 period of clock drift). Every
+ * candidate is compared with `timingSafeEqual`; a malformed code is rejected
+ * before any HMAC work.
+ */
 export function verifyTotpCode(input: {
   secretBase32: string;
   code: string;
   unixSeconds: number;
   driftSteps?: number;
 }): boolean {
-  if (!CODE_SHAPE.test(input.code)) return false;
-  const key = decodeBase32(input.secretBase32);
-  if (key === null || !Number.isFinite(input.unixSeconds)) return false;
-  const drift = Math.max(0, Math.trunc(input.driftSteps ?? 1));
-  const step = Math.floor(input.unixSeconds / TOTP_PERIOD_SECONDS);
-  const presented = Buffer.from(input.code, "utf8");
-  let matched = false;
-  for (let delta = -drift; delta <= drift; delta += 1) {
-    if (step + delta < 0) continue;
-    const candidate = Buffer.from(hotp(key, step + delta), "utf8");
-    // No early exit: a match must not be detectable from the work performed.
-    if (timingSafeEqual(candidate, presented)) matched = true;
-  }
-  return matched;
+  return matchedTotpTimeStep(input) !== null;
 }
 
 interface StepUpAudit {
@@ -726,8 +743,8 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
         // The active-factor row is the per-admin mutex. Holding it across the
         // count, Vault reveal, code check, and attempt insert closes the
         // brute-force lockout TOCTOU window.
-        const secret = await sql<{ vault_ref: string }>`
-          select vault_ref
+        const secret = await sql<{ vault_ref: string; factor_version: number }>`
+          select vault_ref, factor_version
           from admin_step_up_secret
           where admin_telegram_user_id = ${adminId}
           for update
@@ -765,18 +782,18 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
           return { ok: false, code: "NOT_ENROLLED" };
         }
 
-        const accepted = verifyTotpCode({
+        const matchedStep = matchedTotpTimeStep({
           secretBase32: seed,
           code: input.code,
           unixSeconds: Math.floor(now.getTime() / 1000),
         });
-        await sql`
-          insert into admin_step_up_attempt
-            (id, admin_telegram_user_id, attempted_at, succeeded, purpose)
-          values
-            (${newId()}, ${adminId}, ${now.toISOString()}, ${accepted}, 'STEP_UP')
-        `.execute(trx);
-        if (!accepted) {
+        if (matchedStep === null) {
+          await sql`
+            insert into admin_step_up_attempt
+              (id, admin_telegram_user_id, attempted_at, succeeded, purpose)
+            values
+              (${newId()}, ${adminId}, ${now.toISOString()}, false, 'STEP_UP')
+          `.execute(trx);
           await appendStepUpAudit(trx, {
             adminTelegramUserId: adminId,
             action: "admin.step_up.denied",
@@ -785,6 +802,26 @@ export function createStepUpService(db: Db, vault: Vault, options: StepUpOptions
             code: "INVALID_CODE",
           });
           return { ok: false, code: "INVALID_CODE" as const };
+        }
+        const acceptedAttempt = await sql<{ id: string }>`
+          insert into admin_step_up_attempt
+            (id, admin_telegram_user_id, attempted_at, succeeded, purpose,
+             factor_version, totp_time_step)
+          values
+            (${newId()}, ${adminId}, ${now.toISOString()}, true, 'STEP_UP',
+             ${Number(secret.rows[0]?.factor_version)}, ${matchedStep})
+          on conflict do nothing
+          returning id
+        `.execute(trx);
+        if (acceptedAttempt.rows.length === 0) {
+          await appendStepUpAudit(trx, {
+            adminTelegramUserId: adminId,
+            action: "admin.step_up.denied",
+            reason: "denied: REPLAYED",
+            category: input.category,
+            code: "REPLAYED",
+          });
+          return { ok: false, code: "REPLAYED" as const };
         }
         const expiresAt = new Date(now.getTime() + ttlSeconds * 1000);
         await sql`

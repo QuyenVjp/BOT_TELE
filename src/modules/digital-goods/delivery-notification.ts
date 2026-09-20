@@ -3,7 +3,7 @@ import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
 import { isId, newId } from "../../shared/ids/index.js";
-import { revealDeliveryBundle } from "./delivery.js";
+import { consumeDeliveryBundle, revealDeliveryBundle } from "./delivery.js";
 import {
   ageSeconds,
   validateRecoveryBatchSize,
@@ -63,6 +63,7 @@ async function sendDeliveryNotificationWithTimeout(
       signal: AbortSignal;
       orderNumber: string;
       amountVnd: string;
+      secret: string;
     }): Promise<void>;
   },
   input: {
@@ -71,6 +72,7 @@ async function sendDeliveryNotificationWithTimeout(
     idempotencyKey: string;
     orderNumber: string;
     amountVnd: string;
+    secret: string;
     product?: {
       name: string | null;
       usageInstructionsVi: string | null;
@@ -1031,9 +1033,31 @@ async function refreshDeliveryNotificationCapability(input: {
   return next;
 }
 
+async function markDeliveryNotificationSent(
+  db: Db,
+  claim: DeliveryNotificationClaim,
+): Promise<boolean> {
+  const result = await sql`
+    update delivery_notification_handoff
+    set status = 'SENT', sent_at = coalesce(sent_at, now()), claimed_by = null,
+        claim_expires_at = null
+    where id = ${claim.id} and status = 'PROCESSING'
+      and claimed_by = ${claim.owner} and claim_generation = ${claim.generation}
+      and claim_expires_at > now()
+      and bundle_id = ${claim.bundleId}
+      and customer_id = ${claim.customerId}
+      and telegram_chat_id = ${claim.telegramChatId}
+      and capability_ref = ${claim.capabilityRef}
+    returning id
+  `.execute(db);
+  return Boolean(result.rows[0]);
+}
+
 export async function processDeliveryNotificationBatch(input: {
   db: Db;
   vault: Vault;
+  /** Optional separate credential Vault for tests/deployments with split stores. */
+  assetVault?: Vault;
   sender: {
     send(input: {
       chatId: string;
@@ -1042,6 +1066,7 @@ export async function processDeliveryNotificationBatch(input: {
       signal: AbortSignal;
       orderNumber: string;
       amountVnd: string;
+      secret: string;
       product?: {
         name: string | null;
         usageInstructionsVi: string | null;
@@ -1082,6 +1107,20 @@ export async function processDeliveryNotificationBatch(input: {
   let stale = 0;
   for (const claim of claims) {
     try {
+      const bundle = await sql<{ status: string }>`
+        select status
+        from delivery_bundle
+        where id = ${claim.bundleId} and customer_id = ${claim.customerId}
+      `.execute(input.db);
+      if (!bundle.rows[0]) throw new Error("DELIVERY_SECRET_UNAVAILABLE");
+      if (bundle.rows[0].status === "CONSUMED") {
+        if (await markDeliveryNotificationSent(input.db, claim)) {
+          sent += 1;
+          continue;
+        }
+        throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
+      }
+
       let capability = await loadDeliveryNotificationCapability(input.vault, claim);
       let sessionClaims = verifyDeliverySessionToken(capability.sessionToken, input.sessionConfig);
       const matchesClaim = () =>
@@ -1115,6 +1154,18 @@ export async function processDeliveryNotificationBatch(input: {
         returning id
       `.execute(input.db);
       if (!sendLease.rows[0]) throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
+      if (!sessionClaims) throw new Error("Invalid delivery session capability");
+      const token = deliveryTokenFromUrl(capability.deliveryUrl);
+      if (!token) throw new Error("Invalid delivery URL capability");
+      const prepared = await revealDeliveryBundle(input.db, {
+        token,
+        session: sessionClaims,
+        correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
+        vault: input.assetVault ?? input.vault,
+        consume: false,
+      });
+      if (!prepared.ok) throw new Error("DELIVERY_SECRET_UNAVAILABLE");
+
       await sendDeliveryNotificationWithTimeout(
         input.sender,
         {
@@ -1123,6 +1174,7 @@ export async function processDeliveryNotificationBatch(input: {
           idempotencyKey: claim.id,
           orderNumber: claim.orderNumber,
           amountVnd: claim.amountVnd,
+          secret: prepared.secret,
           product: {
             name: claim.productName,
             usageInstructionsVi: claim.usageInstructionsVi,
@@ -1131,9 +1183,10 @@ export async function processDeliveryNotificationBatch(input: {
         },
         sendTimeoutMs,
       );
-      const result = await sql`
+      const finalizationLease = await sql`
         update delivery_notification_handoff
-        set status = 'SENT', sent_at = now(), claimed_by = null, claim_expires_at = null
+        set claim_expires_at = now() +
+          (${DELIVERY_NOTIFICATION_LEASE_SECONDS} * interval '1 second')
         where id = ${claim.id} and status = 'PROCESSING'
           and claimed_by = ${claim.owner} and claim_generation = ${claim.generation}
           and claim_expires_at > now()
@@ -1141,20 +1194,51 @@ export async function processDeliveryNotificationBatch(input: {
           and customer_id = ${claim.customerId}
           and telegram_chat_id = ${claim.telegramChatId}
           and capability_ref = ${claim.capabilityRef}
-          and capability_expires_at > now()
         returning id
       `.execute(input.db);
-      if (result.rows[0]) sent += 1;
-      else stale += 1;
+      if (!finalizationLease.rows[0]) throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
+      const consumed = await consumeDeliveryBundle(input.db, {
+        bundleId: claim.bundleId,
+        customerId: claim.customerId,
+        session: sessionClaims,
+        allowExpiredSession: true,
+        correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
+      });
+      if (!consumed.ok) throw new Error("DELIVERY_BUNDLE_FINALIZATION_FAILED");
+      if (!(await markDeliveryNotificationSent(input.db, claim))) {
+        throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
+      }
+      sent += 1;
     } catch (error) {
-      const code = error instanceof Error ? error.name.slice(0, 128) : "UNKNOWN_ERROR";
+      const rawCode =
+        error instanceof Error ? (error.name !== "Error" ? error.name : error.message) : "";
+      const code = /^[A-Za-z][A-Za-z0-9_]{0,127}$/u.test(rawCode)
+        ? rawCode
+        : "DELIVERY_NOTIFICATION_FAILED";
       const terminal =
         claim.attemptCount >= input.maxAttempts ||
         AMBIGUOUS_DELIVERY_NOTIFICATION_SEND_ERRORS[code] === true;
+      let retryAfterSeconds: number | null = null;
+      if (error && typeof error === "object" && "retryAfterSeconds" in error) {
+        const candidate = error.retryAfterSeconds;
+        if (typeof candidate === "number" && Number.isFinite(candidate)) {
+          retryAfterSeconds = candidate;
+        }
+      }
+      const retryDelaySeconds = Math.min(
+        300,
+        Math.max(
+          1,
+          Math.ceil(retryAfterSeconds ?? 2 ** Math.min(8, Math.max(0, claim.attemptCount - 1))),
+        ),
+      );
       const result = await sql`
         update delivery_notification_handoff
         set status = ${terminal ? "DEAD" : "RETRY"},
-            next_attempt_at = now(),
+            next_attempt_at = case when ${terminal}
+              then now()
+              else now() + make_interval(secs => ${retryDelaySeconds})
+            end,
             last_error_code = ${code},
             claimed_by = null,
             claim_expires_at = null
@@ -1188,6 +1272,8 @@ function deliveryTokenFromUrl(deliveryUrl: string): string | null {
 export async function openTelegramDeliveryHandoff(input: {
   db: Db;
   vault: Vault;
+  /** Optional separate credential Vault for legacy recovery in split-store deployments. */
+  assetVault?: Vault;
   sessionConfig: DeliverySessionCodecConfig;
   telegramUserId: string;
   handoffId: string;
@@ -1197,6 +1283,8 @@ export async function openTelegramDeliveryHandoff(input: {
       ok: true;
       secret: string;
       productName: string | null;
+      orderNumber: string | null;
+      amountVnd: string | null;
       usageInstructionsVi: string | null;
       warrantyVi: string | null;
     }
@@ -1270,13 +1358,15 @@ export async function openTelegramDeliveryHandoff(input: {
     token,
     session,
     correlationId: input.correlationId,
-    vault: input.vault,
+    vault: input.assetVault ?? input.vault,
   });
   if (!revealed.ok) return { ok: false, message: SAFE_TELEGRAM_DELIVERY_OPEN_ERROR };
   return {
     ok: true,
     secret: revealed.secret,
     productName: handoff.product_name,
+    orderNumber: handoff.order_number,
+    amountVnd: handoff.amount_vnd,
     usageInstructionsVi: handoff.usage_instructions_vi,
     warrantyVi: handoff.warranty_vi,
   };

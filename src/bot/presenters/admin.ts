@@ -2384,7 +2384,7 @@ export function presentAdminDenied(reason: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT"): 
 /** Deterministic step-up challenge copy, shared with the callback refusal message. */
 export const STEP_UP_CHALLENGE_TEXT = "🔐 Thao tác nhạy cảm cần xác minh bảo mật.";
 export const STEP_UP_CHALLENGE_INSTRUCTION =
-  "Chạy npm run admin:step-up verify trên operator host, sau đó mở lại và xác nhận hành động.";
+  "Gửi /verify <mã 6 số> <mã yêu cầu> rồi mở lại và xác nhận đúng hành động này.";
 
 export const STEP_UP_ENROLL_INSTRUCTION =
   "Chạy npm run admin:step-up enroll trên operator host, sau đó thực hiện lại hành động.";
@@ -2413,12 +2413,18 @@ export const ADMIN_MENU_BUTTON: InlineButton = {
 export function presentStepUpRequired(input: {
   action: string;
   category: string | null;
+  challengeId?: string;
 }): PresentedMessage {
   const action = input.category === null ? input.action : `${input.action} (${input.category})`;
+  const challenge = input.challengeId ? `Mã yêu cầu: ${input.challengeId}` : null;
   return {
-    text: [STEP_UP_CHALLENGE_TEXT, "", `Hành động: ${action}`, STEP_UP_CHALLENGE_INSTRUCTION].join(
-      "\n",
-    ),
+    text: [
+      STEP_UP_CHALLENGE_TEXT,
+      "",
+      `Hành động: ${action}`,
+      ...(challenge ? [challenge] : []),
+      STEP_UP_CHALLENGE_INSTRUCTION,
+    ].join("\n"),
     buttons: [[ADMIN_MENU_BUTTON]],
   };
 }
@@ -2446,9 +2452,14 @@ export function presentSensitiveRefusal(input: {
   code: SensitiveAuthorizationRefusal;
   action: string;
   category: string | null;
+  challengeId?: string;
 }): PresentedMessage {
   if (input.code === "STEP_UP_REQUIRED" || input.code === "STEP_UP_GRANT_MISSING") {
-    return presentStepUpRequired({ action: input.action, category: input.category });
+    return presentStepUpRequired({
+      action: input.action,
+      category: input.category,
+      ...(input.challengeId ? { challengeId: input.challengeId } : {}),
+    });
   }
   return {
     text: SENSITIVE_REFUSAL_TEXT[input.code],

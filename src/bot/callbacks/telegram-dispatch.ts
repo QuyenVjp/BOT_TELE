@@ -2424,6 +2424,14 @@ export function createTelegramDomainDispatcher(
           : deps.admin
             ? presentAdminMenu()
             : safeError("Lệnh quản trị không khả dụng.");
+      } else if ((command === "/verify" || command === "/enroll_2fa") && deps.admin?.workflow) {
+        message =
+          (await deps.admin.workflow.messageText({
+            telegramUserId: envelope.actorUserId,
+            text: `${command}${envelope.searchQuery ? ` ${envelope.searchQuery}` : ""}`,
+            chatType: envelope.chatType,
+            correlationId,
+          })) ?? safeError("Lệnh MFA không khả dụng.");
       } else if (command === "/confirm") {
         const parsed = parseAdminConfirm(envelope.searchQuery);
         message =

@@ -41,9 +41,17 @@ vault material; it MUST NOT send different material under the same vault operati
 ## Notification handoff
 
 The worker stores only a redacted capability reference and the authoritative Telegram chat/customer
-mapping. It never stores raw credential material in outbox or notification payloads. Failed or
-ambiguous Telegram sends retain the same capability until retry/reconciliation; crash after send
-must not create a second usable capability or address orderId as a customer/chat recipient.
+mapping. It never stores raw credential material in outbox or notification payloads. Automatic
+Telegram delivery reads the customer-visible secret from Vault only at send time, holds it in the
+bounded worker call, and finalizes bundle consumption/order completion only after the send succeeds.
+The session/recipient binding is verified before send; fenced finalization may mark that verified
+session used after its short TTL so a slow Telegram send cannot strand a paid delivery.
+Failed or ambiguous Telegram sends retain the same handoff for retry; a retry may send the same
+customer-owned credential again, but never mints a second asset or capability.
+
+The existing PREPARED -> STORED -> READY capability lifecycle remains the durable retry/recovery
+boundary for the authenticated `/d/:token` and legacy Telegram callback surfaces. Bundle/session
+ownership, recipient mapping, key rotation, lease fencing and orphan cleanup remain unchanged.
 
 Bundle commit first creates or reconstructs a deterministic PREPARED handoff intent. Its session is
 inactive and cannot redeem until capability adoption activates it in the same database transaction. The source
@@ -69,10 +77,15 @@ key before a later create/send attempt.
 
 ## Telegram customer transport
 
-The notification opens a Telegram Mini App. The backend verifies bounded Telegram `initData`, binds
-the numeric user/chat to the handoff, and performs one-time audience-bound redemption before reveal.
-A normal Telegram URL button is never assumed to attach an Authorization header. The notifier owns
-durable send/edit/photo dedupe, 429 `retry_after`, and ambiguous-send reconciliation.
+After verified payment and successful fulfillment, the worker sends one Telegram message containing
+the product's customer-visible credential fields, order context, usage instructions and warranty
+text. It does not require a "Nhận hàng" button or a second customer interaction. Internal-only
+inventory fields remain withheld.
+
+The authenticated `/d/:token` route and legacy `delivery:open:<handoffId>` callback remain
+owner-bound compatibility/recovery surfaces. They retain signed Telegram-bound session checks,
+no-cache headers, one-time bundle semantics and durable send/edit/photo dedupe. A Telegram URL
+button is never treated as the primary delivery mechanism for a new purchase.
 
 ## Migration compatibility
 

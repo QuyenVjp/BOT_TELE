@@ -16,7 +16,7 @@ Shop cần tự động hóa luồng này mà không đánh đổi tính đúng 
 - không giao hàng từ ảnh biên lai, chat text hoặc nút `đã chuyển khoản`;
 - không giao một asset cho hai khách;
 - không gọi supplier create-order trùng khi timeout/retry;
-- không để raw credential trong database domain, log hoặc lịch sử chat;
+- không để raw credential trong database domain, log, event, telemetry, ticket hoặc kênh không phải Telegram message đã bind customer;
 - không để AI bịa giá/tồn kho/chính sách hay tác động trực tiếp tới order/payment;
 - chỉ bán SKU có quyền resale/transfer rõ ràng;
 - chỉ numeric Telegram `user_id` cấu hình cho `@Quyenvjp` có quyền root admin.
@@ -41,15 +41,15 @@ MVP dùng inline keyboard và edit-in-place message. AI chỉ là query parser c
 
 ## Actors and permissions
 
-| Actor | Năng lực trong phạm vi này |
-|---|---|
-| Customer | Browse/search, xem product, mua ngay, thanh toán VietQR, xem order, nhận hàng, mở ticket |
-| Root Admin | Duy nhất numeric Telegram ID mapped với `@Quyenvjp`; quản lý catalog/stock/discrepancy theo private hardened flow |
-| Support capability | Xem dữ liệu tối thiểu của ticket/order và trả lời; không mark paid hoặc đọc raw credential |
-| SePay | Cung cấp transaction evidence và reconciliation data; không tự quyết định Order state |
-| VietQR | Encode/render thông tin chuyển khoản; không xác nhận đã nhận tiền |
-| Supplier | Cung cấp availability/order/asset/refund qua adapter; không đọc customer data ngoài reference cần thiết |
-| Search parser | Chuyển câu tự nhiên thành bounded filters; không có domain command/tool |
+| Actor              | Năng lực trong phạm vi này                                                                                        |
+| ------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Customer           | Browse/search, xem product, mua ngay, thanh toán VietQR, xem order, nhận hàng, mở ticket                          |
+| Root Admin         | Duy nhất numeric Telegram ID mapped với `@Quyenvjp`; quản lý catalog/stock/discrepancy theo private hardened flow |
+| Support capability | Xem dữ liệu tối thiểu của ticket/order và trả lời; không mark paid hoặc đọc raw credential                        |
+| SePay              | Cung cấp transaction evidence và reconciliation data; không tự quyết định Order state                             |
+| VietQR             | Encode/render thông tin chuyển khoản; không xác nhận đã nhận tiền                                                 |
+| Supplier           | Cung cấp availability/order/asset/refund qua adapter; không đọc customer data ngoài reference cần thiết           |
+| Search parser      | Chuyển câu tự nhiên thành bounded filters; không có domain command/tool                                           |
 
 ## User Stories
 
@@ -64,92 +64,92 @@ MVP dùng inline keyboard và edit-in-place message. AI chỉ là query parser c
 
 ### B. Browse catalog
 
-7. As a Customer, I want to browse active categories, so that I can narrow the catalog quickly.
-8. As a Customer, I want paginated product lists with visible starting prices, so that I can compare without opening every card.
-9. As a Customer, I want inactive/out-of-stock products hidden or clearly unavailable, so that I do not enter a dead checkout.
-10. As a Customer, I want stable pagination and sorting, so that items do not jump while I browse.
-11. As a Customer, I want product detail to show price, duration, stock, delivery type, expected delivery and warranty, so that I can decide before paying.
-12. As a Customer, I want to choose a duration/variant using buttons, so that I cannot mistype a SKU.
-13. As a Customer, I want a visible usage condition and warranty summary, so that expectations are explicit.
-14. As an Owner, I want a product/variant kill switch, so that an unsafe or unauthorized SKU disappears immediately without deleting history.
+1. As a Customer, I want to browse active categories, so that I can narrow the catalog quickly.
+2. As a Customer, I want paginated product lists with visible starting prices, so that I can compare without opening every card.
+3. As a Customer, I want inactive/out-of-stock products hidden or clearly unavailable, so that I do not enter a dead checkout.
+4. As a Customer, I want stable pagination and sorting, so that items do not jump while I browse.
+5. As a Customer, I want product detail to show price, duration, stock, delivery type, expected delivery and warranty, so that I can decide before paying.
+6. As a Customer, I want to choose a duration/variant using buttons, so that I cannot mistype a SKU.
+7. As a Customer, I want a visible usage condition and warranty summary, so that expectations are explicit.
+8. As an Owner, I want a product/variant kill switch, so that an unsafe or unauthorized SKU disappears immediately without deleting history.
 
 ### C. Search
 
-15. As a Customer, I want keyword search by product, category and alias, so that common searches are fast and deterministic.
-16. As a Customer, I want to type `gói 1 tháng dưới 200k`, so that natural language can become catalog filters.
-17. As a Customer, I want result cards to use the shop's real price, stock and warranty, so that AI cannot fabricate an offer.
-18. As a Customer, I want a clear no-result state with reset filters, so that I can continue browsing.
-19. As a Customer, I want a useful fallback when the model is unavailable, so that search still works by keyword.
-20. As an Owner, I want model output validated against an allowlist, so that prompt injection cannot produce a domain action.
-21. As an Owner, I want search input length, Unicode and rate controls, so that model/DB resources cannot be abused.
+ 1. As a Customer, I want keyword search by product, category and alias, so that common searches are fast and deterministic.
+ 2. As a Customer, I want to type `gói 1 tháng dưới 200k`, so that natural language can become catalog filters.
+ 3. As a Customer, I want result cards to use the shop's real price, stock and warranty, so that AI cannot fabricate an offer.
+ 4. As a Customer, I want a clear no-result state with reset filters, so that I can continue browsing.
+ 5. As a Customer, I want a useful fallback when the model is unavailable, so that search still works by keyword.
+ 6. As an Owner, I want model output validated against an allowlist, so that prompt injection cannot produce a domain action.
+ 7. As an Owner, I want search input length, Unicode and rate controls, so that model/DB resources cannot be abused.
 
 ### D. Buy now and create Order
 
-22. As a Customer, I want a single `Mua ngay — <price>` button, so that checkout is short.
-23. As a Customer, I want the server to revalidate price, active state, stock and resale eligibility, so that stale cards cannot create an invalid order.
-24. As a Customer, I want price/warranty/product facts snapshot on my Order, so that later catalog changes do not rewrite my purchase.
-25. As a Customer, I want no unnecessary address, name or phone form for digital delivery, so that checkout remains private and fast.
-26. As a Customer, I want a price change shown for confirmation before QR creation, so that I am never charged a silent new price.
-27. As a Customer, I want an out-of-stock result before payment when possible, so that money is not taken for unavailable inventory.
-28. As an Owner, I want concurrent last-item purchases serialized, so that one asset cannot be promised twice.
+ 1. As a Customer, I want a single `Mua ngay — <price>` button, so that checkout is short.
+ 2. As a Customer, I want the server to revalidate price, active state, stock and resale eligibility, so that stale cards cannot create an invalid order.
+ 3. As a Customer, I want price/warranty/product facts snapshot on my Order, so that later catalog changes do not rewrite my purchase.
+ 4. As a Customer, I want no unnecessary address, name or phone form for digital delivery, so that checkout remains private and fast.
+ 5. As a Customer, I want a price change shown for confirmation before QR creation, so that I am never charged a silent new price.
+ 6. As a Customer, I want an out-of-stock result before payment when possible, so that money is not taken for unavailable inventory.
+ 7. As an Owner, I want concurrent last-item purchases serialized, so that one asset cannot be promised twice.
 
 ### E. VietQR and SePay payment
 
-29. As a Customer, I want a VietQR with exact amount and a short unique order content, so that my transfer can be matched automatically.
-30. As a Customer, I want QR expiry displayed in Vietnam time, so that I know when to pay.
-31. As a Customer, I want a copyable amount/content fallback, so that I can pay when QR scanning is inconvenient.
-32. As a Customer, I want the bot to say I do not need a receipt screenshot, so that I do not expose bank information.
-33. As a Customer, I want `Kiểm tra trạng thái` to refresh safely, so that I can see progress without falsely marking paid.
-34. As a Customer, I want verified payment to update automatically without polling manually, so that delivery starts promptly.
-35. As a Customer, I want a late, short, overpaid or wrong-content transfer to enter review with a reference, so that money is not lost silently.
-36. As an Owner, I want SePay raw-body HMAC, timestamp/replay window and unique transaction ID verified before parsing effects, so that forged/replayed webhooks cannot settle orders.
-37. As an Owner, I want account, inbound direction, amount and order content/reference matched, so that unrelated deposits cannot buy goods.
-38. As an Owner, I want duplicate/reordered SePay events idempotent, so that payment and fulfillment happen exactly once.
-39. As an Owner, I want periodic reconciliation, so that missing webhooks are recovered.
-40. As an Owner, I want webhook acknowledgement decoupled from slow fulfillment, so that SePay retry behavior does not duplicate work.
+ 1. As a Customer, I want a VietQR with exact amount and a short unique order content, so that my transfer can be matched automatically.
+ 2. As a Customer, I want QR expiry displayed in Vietnam time, so that I know when to pay.
+ 3. As a Customer, I want a copyable amount/content fallback, so that I can pay when QR scanning is inconvenient.
+ 4. As a Customer, I want the bot to say I do not need a receipt screenshot, so that I do not expose bank information.
+ 5. As a Customer, I want `Kiểm tra trạng thái` to refresh safely, so that I can see progress without falsely marking paid.
+ 6. As a Customer, I want verified payment to update automatically without polling manually, so that delivery starts promptly.
+ 7. As a Customer, I want a late, short, overpaid or wrong-content transfer to enter review with a reference, so that money is not lost silently.
+ 8. As an Owner, I want SePay raw-body HMAC, timestamp/replay window and unique transaction ID verified before parsing effects, so that forged/replayed webhooks cannot settle orders.
+ 9. As an Owner, I want account, inbound direction, amount and order content/reference matched, so that unrelated deposits cannot buy goods.
+10. As an Owner, I want duplicate/reordered SePay events idempotent, so that payment and fulfillment happen exactly once.
+11. As an Owner, I want periodic reconciliation, so that missing webhooks are recovered.
+12. As an Owner, I want webhook acknowledgement decoupled from slow fulfillment, so that SePay retry behavior does not duplicate work.
 
 ### F. Fulfillment and Supplier API
 
-41. As a Customer, I want fulfillment to start only after verified payment, so that order status is trustworthy.
-42. As a Customer, I want local stock delivered first when policy selects it, so that delivery is fast.
-43. As a Customer, I want supplier-sourced products provisioned automatically, so that the shop can sell authorized upstream stock.
-44. As a Customer, I want `Đang chuẩn bị sản phẩm` when fulfillment is slow, so that paid orders do not look lost.
-45. As an Owner, I want supplier create-order idempotent, so that retries cannot buy duplicate upstream assets.
-46. As an Owner, I want timeout-unknown supplier results queried/reconciled before retry, so that uncertain outcomes do not create duplicates.
-47. As an Owner, I want supplier responses validated beyond HTTP 200, so that malformed/revoked assets are quarantined.
-48. As an Owner, I want supplier cost, sale price, margin and reference snapshot, so that each order can be audited.
-49. As an Owner, I want a configured fallback decision rather than silent supplier switching, so that product promises remain accurate.
+ 1. As a Customer, I want fulfillment to start only after verified payment, so that order status is trustworthy.
+ 2. As a Customer, I want local stock delivered first when policy selects it, so that delivery is fast.
+ 3. As a Customer, I want supplier-sourced products provisioned automatically, so that the shop can sell authorized upstream stock.
+ 4. As a Customer, I want `Đang chuẩn bị sản phẩm` when fulfillment is slow, so that paid orders do not look lost.
+ 5. As an Owner, I want supplier create-order idempotent, so that retries cannot buy duplicate upstream assets.
+ 6. As an Owner, I want timeout-unknown supplier results queried/reconciled before retry, so that uncertain outcomes do not create duplicates.
+ 7. As an Owner, I want supplier responses validated beyond HTTP 200, so that malformed/revoked assets are quarantined.
+ 8. As an Owner, I want supplier cost, sale price, margin and reference snapshot, so that each order can be audited.
+ 9. As an Owner, I want a configured fallback decision rather than silent supplier switching, so that product promises remain accurate.
 
 ### G. Secure delivery and warranty
 
-50. As a Customer, I want a `Nhận sản phẩm` link bound to my order, so that another Telegram user cannot claim it.
-51. As a Customer, I want the link to be view-once and time-limited, so that secrets do not remain exposed.
-52. As a Customer, I want a clear used/expired state, so that I know to use the support path.
-53. As a Customer, I want usage instructions and warranty expiry on the completed card, so that onboarding is easy.
-54. As a Customer, I want to report invalid/revoked/incorrect delivery from the Order, so that support has context.
-55. As an Owner, I want raw credentials stored only in a vault, so that domain DB, logs, analytics, events and support transcripts remain secret-free.
-56. As an Owner, I want delivery exactly once under replay/crash, so that a second asset is not accidentally issued.
-57. As an Owner, I want replacement/refund follow a recorded warranty policy, so that a compromised asset is not handled by direct DB edits.
+ 1. As a Customer, I want all `customerVisible` delivery fields sent automatically in the Telegram message bound to my order, so that I receive the product without another reveal action.
+ 2. As a Customer, I want the automatic delivery to be retried safely after a send failure, so that I receive the same asset without a duplicate allocation.
+ 3. As a Customer, I want a clear delivery failure/recovery state, so that I know when to contact support; the legacy reveal link remains a controlled recovery surface.
+ 4. As a Customer, I want usage instructions and warranty expiry on the completed message, so that onboarding is easy.
+ 5. As a Customer, I want to report invalid/revoked/incorrect delivery from the Order, so that support has context.
+ 6. As an Owner, I want raw credentials stored only in a vault except for the intended bound Telegram delivery message, so that domain DB, logs, analytics, events and support transcripts remain secret-free.
+ 7. As an Owner, I want delivery exactly once under replay/crash, so that a second asset is not accidentally issued.
+ 8. As an Owner, I want replacement/refund follow a recorded warranty policy, so that a compromised asset is not handled by direct DB edits.
 
 ### H. Order history and support
 
-58. As a Customer, I want a paginated list of my own orders, so that I can find recent purchases quickly.
-59. As a Customer, I want order detail to show immutable product/price, payment, fulfillment, delivery and support states, so that current progress is clear.
-60. As a Customer, I want an unpaid unexpired order to reopen its QR, so that I can finish payment.
-61. As a Customer, I want cancellation allowed only before the payment race is resolved, so that a paid order is not silently discarded.
-62. As a Customer, I want structured support reasons linked to an Order, so that I do not repeat context.
-63. As a Customer, I want ticket state and next action, so that I know whether the shop or I must respond.
-64. As an Owner, I want support unable to mark payment paid or reveal secrets, so that assistance cannot bypass domain rules.
-65. As an Owner, I want all manual review outcomes audited with actor, reason and evidence, so that financial/delivery decisions are explainable.
+ 1. As a Customer, I want a paginated list of my own orders, so that I can find recent purchases quickly.
+ 2. As a Customer, I want order detail to show immutable product/price, payment, fulfillment, delivery and support states, so that current progress is clear.
+ 3. As a Customer, I want an unpaid unexpired order to reopen its QR, so that I can finish payment.
+ 4. As a Customer, I want cancellation allowed only before the payment race is resolved, so that a paid order is not silently discarded.
+ 5. As a Customer, I want structured support reasons linked to an Order, so that I do not repeat context.
+ 6. As a Customer, I want ticket state and next action, so that I know whether the shop or I must respond.
+ 7. As an Owner, I want support unable to mark payment paid or reveal secrets, so that assistance cannot bypass domain rules.
+ 8. As an Owner, I want all manual review outcomes audited with actor, reason and evidence, so that financial/delivery decisions are explainable.
 
 ### I. Admin identity and abuse controls
 
-66. As the Owner, I want only configured numeric Telegram `user_id` for `@Quyenvjp` authorized as root, so that username changes cannot grant access.
-67. As the Owner, I want no `/add-admin` or username fallback, so that no second admin can be created through the bot.
-68. As the Owner, I want high-risk actions limited to private chat with step-up and explicit confirmation, so that stolen sessions are contained.
-69. As the Owner, I want rate limits by Telegram user and action, so that catalog remains responsive during spam.
-70. As a legitimate Customer, I want cooldowns to preserve access to order history/support, so that anti-abuse does not erase paid-order recovery.
-71. As the Owner, I want callback/update/webhook dedupe and bounded payloads, so that replay/resource-exhaustion cannot multiply side effects.
+ 1. As the Owner, I want only configured numeric Telegram `user_id` for `@Quyenvjp` authorized as root, so that username changes cannot grant access.
+ 2. As the Owner, I want no `/add-admin` or username fallback, so that no second admin can be created through the bot.
+ 3. As the Owner, I want high-risk actions limited to private chat with step-up and explicit confirmation, so that stolen sessions are contained.
+ 4. As the Owner, I want rate limits by Telegram user and action, so that catalog remains responsive during spam.
+ 5. As a legitimate Customer, I want cooldowns to preserve access to order history/support, so that anti-abuse does not erase paid-order recovery.
+ 6. As the Owner, I want callback/update/webhook dedupe and bounded payloads, so that replay/resource-exhaustion cannot multiply side effects.
 
 ## Implementation Decisions
 
@@ -180,8 +180,8 @@ MVP dùng inline keyboard và edit-in-place message. AI chỉ là query parser c
 
 - A paid Order atomically claims a local asset or creates an idempotent supplier request.
 - Supplier `Unknown` is a first-class state after uncertain timeout; query/reconcile precedes retry.
-- Raw credentials are vault-only. Domain records contain asset/vault references and redacted metadata.
-- Delivery Bundle has customer/order binding, TTL, view-once semantics and auditable reissue rules.
+- Raw credentials are vault-only except for the recipient-bound Telegram delivery message. Domain records contain asset/vault references and redacted metadata.
+- The automatic delivery handoff sends verified `customerVisible` fields, then consumes the Delivery Bundle only after Telegram send succeeds. The legacy `/d/:token` route and `delivery:open` callback retain customer/order binding, TTL and view-once semantics for recovery.
 - Invite/license/seat/key is preferred to shared credentials.
 
 ### 5. Identity and security
@@ -214,7 +214,7 @@ Tests assert external behavior at the highest useful seam: Telegram update/callb
 - Checkout: stale price, inactive SKU, last-item concurrency, duplicate tap idempotency, forged callback amount.
 - SePay: valid/invalid HMAC, timestamp replay, wrong account/direction/amount/content, duplicate event, event order, missing webhook reconciliation.
 - Supplier: success, rejection, timeout-unknown, query recovery, malformed asset, no-stock after payment, idempotent create.
-- Delivery: view once, expiry, wrong customer, replay, worker crash, controlled reissue, secret-redaction tests.
+- Delivery: automatic customer-visible disclosure, send failure/retry, wrong customer, legacy view once, replay, worker crash, controlled reissue, secret-redaction tests.
 - Authorization/abuse: BOLA on Order/Delivery Bundle, sole-admin checks, callback replay, QR churn, search spam and payload limits.
 
 ### Acceptance gates
@@ -271,4 +271,3 @@ Tests assert external behavior at the highest useful seam: Telegram update/callb
 8. Support/replacement/refund manual-review path.
 9. Hardening, load/concurrency/security tests and limited pilot.
 10. Reseller API/wallet/growth only as separately approved post-MVP work.
-

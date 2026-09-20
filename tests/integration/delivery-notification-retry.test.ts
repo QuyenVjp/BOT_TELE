@@ -4,17 +4,21 @@ import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adap
 import {
   claimDeliveryNotifications,
   createDeliveryNotificationHandoff,
+  openTelegramDeliveryHandoff,
   processDeliveryNotificationBatch,
 } from "../../src/modules/digital-goods/delivery-notification.js";
-import { issueDeliveryBundle } from "../../src/modules/digital-goods/delivery.js";
+import {
+  consumeDeliveryBundle,
+  issueDeliveryBundle,
+} from "../../src/modules/digital-goods/delivery.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
-
 const SESSION_CONFIG = {
   key: "test-only-notification-session-key-material-123456",
   keyVersion: 2,
   audience: "delivery-reveal",
 };
+const expectedDeliveryValue = "RAW-CREDENTIAL-MUST-NOT-BE-IN-HANDOFF";
 
 let ctx: PgTestContext;
 
@@ -43,7 +47,7 @@ async function seedBundle() {
   const orderId = newId();
   const assetId = newId();
   const vault = createInMemoryVault();
-  const vaultRef = await vault.write("RAW-CREDENTIAL-MUST-NOT-BE-IN-HANDOFF");
+  const vaultRef = await vault.write(expectedDeliveryValue);
   const slug = categoryId.slice(-8);
   await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'C', ${slug}, true, 1)`.execute(
     ctx.db,
@@ -66,7 +70,7 @@ async function seedBundle() {
     insert into "order" (id, order_number, customer_id, variant_id, product_name_vi,
       variant_name_vi, price_vnd, duration_code, delivery_type, status, paid_at)
     values (${orderId}, ${"ORD-" + orderId}, ${customerId}, ${variantId}, 'P', 'V',
-      100000, 'P1M', 'CREDENTIAL', 'PAID', now())
+      100000, 'P1M', 'CREDENTIAL', 'PROCESSING', now())
   `.execute(ctx.db);
   await sql`
     insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash,
@@ -127,6 +131,7 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       orderNumber: string;
       amountVnd: string;
       productName: string | null | undefined;
+      secret: string;
     }> = [];
     const result = await processDeliveryNotificationBatch({
       db: ctx.db,
@@ -137,6 +142,7 @@ describe("durable delivery notification handoff (T139/T145)", () => {
             orderNumber: input.orderNumber,
             amountVnd: input.amountVnd,
             productName: input.product?.name,
+            secret: input.secret,
           });
         },
       },
@@ -147,7 +153,138 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       sessionTtlSeconds: 300,
     });
     expect(result).toMatchObject({ sent: 1, failed: 0 });
-    expect(seen).toEqual([{ orderNumber: f.orderNumber, amountVnd: "100000", productName: "P" }]);
+    expect(seen).toEqual([
+      {
+        orderNumber: f.orderNumber,
+        amountVnd: "100000",
+        productName: "P",
+        secret: expectedDeliveryValue,
+      },
+    ]);
+    const state = await sql<{
+      bundle_status: string;
+      asset_status: string;
+      order_status: string;
+      session_used: boolean;
+    }>`
+      select b.status as bundle_status, a.status as asset_status, o.status as order_status,
+        exists (
+          select 1 from delivery_session s
+          where s.bundle_id = b.id and s.used_at is not null
+        ) as session_used
+      from delivery_bundle b
+      join digital_asset a on a.id = b.asset_id
+      join "order" o on o.id = b.order_id
+      where b.id = ${f.bundleId}
+    `.execute(ctx.db);
+    expect(state.rows[0]).toEqual({
+      bundle_status: "CONSUMED",
+      asset_status: "DELIVERED",
+      order_status: "COMPLETED",
+      session_used: true,
+    });
+  });
+  it("finalizes after the verified session expires during Telegram send", async () => {
+    const f = await seedBundle();
+    await createDeliveryNotificationHandoff(ctx.db, {
+      vault: f.vault,
+      bundleId: f.bundleId,
+      customerId: f.customerId,
+      deliveryUrl: `https://shop.example/d/${f.token}`,
+      sessionTtlSeconds: 2,
+      sessionConfig: SESSION_CONFIG,
+    });
+    const result = await processDeliveryNotificationBatch({
+      db: ctx.db,
+      vault: f.vault,
+      sender: {
+        async send() {
+          await new Promise<void>((resolve) => setTimeout(resolve, 2_200));
+        },
+      },
+      owner: "notify-expired-session",
+      batchSize: 1,
+      maxAttempts: 1,
+      sendTimeoutMs: 5_000,
+      sessionConfig: SESSION_CONFIG,
+      sessionTtlSeconds: 2,
+    });
+    const state = await sql<{ bundle_status: string; session_used: boolean }>`
+      select b.status as bundle_status,
+        exists (
+          select 1 from delivery_session s
+          where s.bundle_id = b.id and s.used_at is not null
+        ) as session_used
+      from delivery_bundle b
+      where b.id = ${f.bundleId}
+    `.execute(ctx.db);
+    expect(result).toMatchObject({ sent: 1, failed: 0 });
+    expect(state.rows[0]).toEqual({ bundle_status: "CONSUMED", session_used: true });
+  });
+
+  it("reconciles a consumed bundle before loading the delivery capability", async () => {
+    const f = await seedBundle();
+    await createDeliveryNotificationHandoff(ctx.db, {
+      vault: f.vault,
+      bundleId: f.bundleId,
+      customerId: f.customerId,
+      deliveryUrl: `https://shop.example/d/${f.token}`,
+      sessionTtlSeconds: 300,
+      sessionConfig: SESSION_CONFIG,
+    });
+    const consumed = await consumeDeliveryBundle(ctx.db, {
+      bundleId: f.bundleId,
+      customerId: f.customerId,
+      correlationId: "legacy-consume-before-notification",
+    });
+    expect(consumed).toMatchObject({ ok: true });
+
+    let sends = 0;
+    const result = await processDeliveryNotificationBatch({
+      db: ctx.db,
+      vault: f.vault,
+      sender: {
+        async send() {
+          sends += 1;
+        },
+      },
+      owner: "notify-recovery",
+      batchSize: 1,
+      maxAttempts: 1,
+      sessionConfig: SESSION_CONFIG,
+      sessionTtlSeconds: 300,
+    });
+    const handoff = await sql<{ status: string }>`
+      select status from delivery_notification_handoff where bundle_id = ${f.bundleId}
+    `.execute(ctx.db);
+    expect(result).toMatchObject({ sent: 1, failed: 0 });
+    expect(sends).toBe(0);
+    expect(handoff.rows[0]?.status).toBe("SENT");
+  });
+
+  it("keeps order context on the legacy recovery presenter input", async () => {
+    const f = await seedBundle();
+    const handoff = await createDeliveryNotificationHandoff(ctx.db, {
+      vault: f.vault,
+      bundleId: f.bundleId,
+      customerId: f.customerId,
+      deliveryUrl: `https://shop.example/d/${f.token}`,
+      sessionTtlSeconds: 300,
+      sessionConfig: SESSION_CONFIG,
+    });
+    const opened = await openTelegramDeliveryHandoff({
+      db: ctx.db,
+      vault: f.vault,
+      sessionConfig: SESSION_CONFIG,
+      telegramUserId: "7788990011",
+      handoffId: handoff.id,
+      correlationId: "legacy-context",
+    });
+    expect(opened).toMatchObject({
+      ok: true,
+      orderNumber: f.orderNumber,
+      amountVnd: "100000",
+    });
   });
 
   it("retries a send failure with the same capability and correct recipient", async () => {
@@ -160,10 +297,20 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       sessionTtlSeconds: 300,
       sessionConfig: SESSION_CONFIG,
     });
-    const seen: Array<{ chatId: string; handoffId: string; idempotencyKey: string }> = [];
+    const seen: Array<{
+      chatId: string;
+      handoffId: string;
+      idempotencyKey: string;
+      secret: string;
+    }> = [];
     let fail = true;
     const sender = {
-      async send(input: { chatId: string; handoffId: string; idempotencyKey: string }) {
+      async send(input: {
+        chatId: string;
+        handoffId: string;
+        idempotencyKey: string;
+        secret: string;
+      }) {
         seen.push(input);
         if (fail) {
           fail = false;
@@ -181,6 +328,17 @@ describe("durable delivery notification handoff (T139/T145)", () => {
       sessionConfig: SESSION_CONFIG,
       sessionTtlSeconds: 300,
     });
+    const retryRow = await sql<{ next_attempt_at: Date }>`
+      select next_attempt_at
+      from delivery_notification_handoff
+      where bundle_id = ${f.bundleId}
+    `.execute(ctx.db);
+    expect(retryRow.rows[0]?.next_attempt_at.getTime()).toBeGreaterThan(Date.now());
+    await sql`
+      update delivery_notification_handoff
+      set next_attempt_at = now()
+      where bundle_id = ${f.bundleId}
+    `.execute(ctx.db);
     const second = await processDeliveryNotificationBatch({
       db: ctx.db,
       vault: f.vault,
@@ -194,6 +352,7 @@ describe("durable delivery notification handoff (T139/T145)", () => {
     expect(first).toMatchObject({ failed: 1, sent: 0 });
     expect(second).toMatchObject({ failed: 0, sent: 1 });
     expect(seen.map((item) => item.chatId)).toEqual(["7788990011", "7788990011"]);
+    expect(seen.map((item) => item.secret)).toEqual([expectedDeliveryValue, expectedDeliveryValue]);
     expect(new Set(seen.map((item) => item.handoffId)).size).toBe(1);
     expect(seen[0]?.handoffId).toBeTruthy();
     expect(new Set(seen.map((item) => item.idempotencyKey)).size).toBe(1);

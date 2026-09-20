@@ -17,15 +17,14 @@ import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfill
  * Secure Delivery Bundle issue / reveal / reissue (T073, FR-017, SR-003,
  * contracts/delivery.md).
  *
- * A bundle binds one asset to one customer+order with a HASHED reveal token, an
- * expiry, and view-once semantics:
+ * A bundle binds one asset to one customer+order with a HASHED reveal token,
+ * expiry, and single-delivery semantics:
  *  - `issueDeliveryBundle` mints a high-entropy token, stores only its hash, and
  *    returns the plaintext once. Issuing twice for the same order returns the
  *    existing active bundle (the unique active-per-order index is the backstop).
- *  - `revealDeliveryBundle` atomically flips AVAILABLE → CONSUMED under a version
- *    guard, so exactly one concurrent/replayed reveal wins; the rest get a stable
- *    safe error with NO existence oracle. Ownership (customer + order) is checked
- *    before any state change so an attacker can never burn the view.
+ *  - `revealDeliveryBundle` keeps legacy recovery one-time under a version guard.
+ *    Automatic Telegram delivery prepares the secret, sends it, then calls
+ *    `consumeDeliveryBundle` to finalize the bundle and order.
  *  - `reissueDeliveryBundle` is allowed only when no live bundle exists (e.g. the
  *    prior expired before first view); it revokes the prior bundle in the same
  *    transaction. A CONSUMED bundle is never silently reset.
@@ -118,6 +117,8 @@ export interface RevealInput {
   session?: DeliverySessionClaims;
   correlationId: string;
   vault: RevealVault;
+  /** Automatic notification reads the secret first and consumes after Telegram send. */
+  consume?: boolean;
 }
 
 export interface ReissueInput {
@@ -132,6 +133,17 @@ export interface ReissueInput {
 const SAFE_REVEAL_ERROR = "Liên kết không khả dụng hoặc đã được sử dụng.";
 
 class AssetDeliveryConflict extends Error {}
+export interface ConsumeInput {
+  bundleId: string;
+  customerId: string;
+  session?: DeliverySessionClaims;
+  /** Automatic handoff finalization may outlive the already-verified session TTL. */
+  allowExpiredSession?: boolean;
+  correlationId: string;
+}
+
+export type ConsumeResult =
+  { ok: true; alreadyConsumed: boolean } | { ok: false; code: "UNAVAILABLE"; message: string };
 
 /** Hash a plaintext token; only the hash is ever persisted. */
 function hashToken(token: string): string {
@@ -352,6 +364,117 @@ export async function issueDeliveryBundle(db: Db, input: IssueInput): Promise<Is
 }
 
 /**
+ * Consume a prepared bundle and finalize asset/order delivery.
+ *
+ * Automatic Telegram notification calls this only after the message send
+ * succeeds. A consumed bundle is an idempotent success for retry recovery.
+ */
+export async function consumeDeliveryBundle(db: Db, input: ConsumeInput): Promise<ConsumeResult> {
+  try {
+    const result = await withTransaction(db, async (trx) => {
+      const bundleResult = await sql<BundleRow>`
+        select id, order_id, customer_id, asset_id, status, expires_at, token_hash, version
+        from delivery_bundle
+        where id = ${input.bundleId} and customer_id = ${input.customerId}
+        for update
+      `.execute(trx);
+      const bundle = bundleResult.rows[0];
+      if (!bundle) return null;
+      if (bundle.status === "CONSUMED") return { ok: true as const, alreadyConsumed: true };
+      if (!["AVAILABLE", "VIEWED"].includes(bundle.status)) return null;
+
+      if (input.session) {
+        const session = await sql<{ one: number }>`
+          select 1 as one
+          from delivery_session
+          where id = ${input.session.sessionId}
+            and bundle_id = ${bundle.id}
+            and customer_id = ${bundle.customer_id}
+            and telegram_user_id = ${input.session.telegramUserId}
+            and audience = ${input.session.audience}
+            and nonce_hash = ${hashDeliverySessionNonce(input.session.nonce)}
+            and key_version = ${input.session.keyVersion}
+            and (${input.allowExpiredSession ?? false} or expires_at > now())
+            and activated_at is not null
+            and used_at is null
+            and revoked_at is null
+          for update
+        `.execute(trx);
+        if (!session.rows[0]) throw new AssetDeliveryConflict();
+      }
+
+      const flip = await sql<{
+        id: string;
+        order_id: string;
+        customer_id: string;
+        asset_id: string;
+        version: number;
+      }>`
+        update delivery_bundle
+        set status = 'CONSUMED', consumed_at = now(), version = version + 1
+        where id = ${bundle.id} and customer_id = ${bundle.customer_id}
+          and version = ${bundle.version} and status in ('AVAILABLE','VIEWED')
+        returning id, order_id, customer_id, asset_id, version
+      `.execute(trx);
+      const row = flip.rows[0];
+      if (!row) throw new AssetDeliveryConflict();
+
+      if (input.session) {
+        const sessionUse = await sql`
+          update delivery_session
+          set used_at = now()
+          where id = ${input.session.sessionId}
+            and bundle_id = ${row.id}
+            and customer_id = ${row.customer_id}
+            and used_at is null and revoked_at is null
+          returning id
+        `.execute(trx);
+        if (!sessionUse.rows[0]) throw new AssetDeliveryConflict();
+      }
+
+      const assetRow = await sql<{ version: number }>`
+        select version from digital_asset where id = ${row.asset_id}
+      `.execute(trx);
+      const assetVersion = assetRow.rows[0]?.version;
+      if (assetVersion === undefined) throw new AssetDeliveryConflict();
+      const delivered = await markAssetDelivered(trx, row.asset_id, row.order_id, assetVersion);
+      if (!delivered) throw new AssetDeliveryConflict();
+
+      await enqueueOutboxEvent(trx, {
+        id: newId(),
+        aggregateType: "DeliveryBundle",
+        aggregateId: row.id,
+        aggregateVersion: row.version,
+        eventType: "DigitalAssetDelivered",
+        payloadRedacted: {
+          bundleId: row.id,
+          orderId: row.order_id,
+          customerId: row.customer_id,
+          assetId: row.asset_id,
+          correlationId: input.correlationId,
+        },
+      });
+
+      const order = await findOrderById(trx, row.order_id);
+      if (order && order.status === "PROCESSING") {
+        await transitionOrder(trx, order, "COMPLETED", "DELIVERY_REVEALED", input.correlationId, {
+          type: "SYSTEM",
+          id: "delivery",
+        });
+      }
+
+      return { ok: true as const, alreadyConsumed: false };
+    });
+    return result ?? { ok: false, code: "UNAVAILABLE", message: SAFE_REVEAL_ERROR };
+  } catch (error) {
+    if (error instanceof AssetDeliveryConflict) {
+      return { ok: false, code: "UNAVAILABLE", message: SAFE_REVEAL_ERROR };
+    }
+    throw error;
+  }
+}
+
+/**
  * Atomically reveal a bundle's secret exactly once to its owner. The state
  * transition AVAILABLE → CONSUMED is version-guarded, so under concurrency
  * exactly one caller flips the row and reads the vault; the rest get the safe
@@ -454,84 +577,19 @@ export async function revealDeliveryBundle(db: Db, input: RevealInput): Promise<
     return { ok: false, code: "UNAVAILABLE", message: SAFE_REVEAL_ERROR };
   }
 
-  // Phase 2: consume the link + mark asset delivered atomically. If a concurrent
-  // reveal already consumed it, the guarded update affects 0 rows and we return
-  // the safe single-use error.
-  // the secret we already fetched (the winning caller also returns it) — the
-  // link is single-use and the customer who holds the token gets the secret.
-  let consumed: boolean;
-  try {
-    consumed = await withTransaction(db, async (trx) => {
-      const flip = await sql`
-      update delivery_bundle
-      set status = 'CONSUMED', consumed_at = now(), version = version + 1
-      where token_hash = ${tokenHash} and status in ('AVAILABLE','VIEWED')
-      returning id, order_id, customer_id, asset_id, version
-    `.execute(trx);
-      const row = flip.rows[0] as
-        | { id: string; order_id: string; customer_id: string; asset_id: string; version: number }
-        | undefined;
-      if (!row) throw new AssetDeliveryConflict();
-
-      if (input.session) {
-        const sessionUse = await sql`
-          update delivery_session
-          set used_at = now()
-          where id = ${input.session.sessionId}
-            and activated_at is not null
-            and used_at is null and revoked_at is null and expires_at > now()
-          returning id
-        `.execute(trx);
-        if (!sessionUse.rows[0]) throw new AssetDeliveryConflict();
-      }
-
-      const assetRow = await sql<{ version: number }>`
-      select version from digital_asset where id = ${row.asset_id}
-    `.execute(trx);
-      const assetVersion = assetRow.rows[0]?.version;
-      if (assetVersion === undefined) throw new AssetDeliveryConflict();
-      const delivered = await markAssetDelivered(trx, row.asset_id, row.order_id, assetVersion);
-      if (!delivered) throw new AssetDeliveryConflict();
-
-      await enqueueOutboxEvent(trx, {
-        id: newId(),
-        aggregateType: "DeliveryBundle",
-        aggregateId: row.id,
-        aggregateVersion: row.version,
-        eventType: "DigitalAssetDelivered",
-        payloadRedacted: {
-          bundleId: row.id,
-          orderId: row.order_id,
-          customerId: row.customer_id,
-          assetId: row.asset_id,
-          correlationId: input.correlationId,
-        },
-      });
-
-      // Order → COMPLETED atomically with the first successful reveal (T147).
-      // Prior code left the Order at PROCESSING forever; tests incorrectly accepted
-      // PROCESSING as success. Only PROCESSING → COMPLETED is legal here.
-      const order = await findOrderById(trx, row.order_id);
-      if (order && order.status === "PROCESSING") {
-        await transitionOrder(trx, order, "COMPLETED", "DELIVERY_REVEALED", input.correlationId, {
-          type: "SYSTEM",
-          id: "delivery",
-        });
-      }
-
-      return true;
-    });
-  } catch (error) {
-    if (error instanceof AssetDeliveryConflict) {
-      consumed = false;
-    } else {
-      throw error;
-    }
+  if (input.consume === false) {
+    return { ok: true, secret: visibleSecret, bundleId: prepared.bundleId };
   }
 
-  if (!consumed) {
-    // Someone else consumed between our read and write. The link is single-use;
-    // return the safe error so we do not imply a second valid delivery.
+  const consumed = await consumeDeliveryBundle(db, {
+    bundleId: prepared.bundleId,
+    customerId: prepared.customerId,
+    ...(input.session ? { session: input.session } : {}),
+    correlationId: input.correlationId,
+  });
+  if (!consumed.ok || consumed.alreadyConsumed) {
+    // A legacy reveal remains strictly one-time even if another caller won the
+    // finalization race after this caller read from Vault.
     return { ok: false, code: "UNAVAILABLE", message: SAFE_REVEAL_ERROR };
   }
 

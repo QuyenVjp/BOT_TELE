@@ -150,8 +150,8 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   ) {
     throw new Error("usage: admin-step-up <enroll|replace|verify|recover>");
   }
-  if (command === "recover" && (!process.stdin.isTTY || !process.stdout.isTTY)) {
-    throw new Error("MFA recovery requires an interactive local TTY");
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    throw new Error("operator MFA commands require an interactive local TTY");
   }
   const config = loadConfig(process.env);
   if (config.NODE_ENV === "production" && config.ADMIN_STEP_UP_MODE === "disabled") {
@@ -186,7 +186,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         issuer: "TIER20 SHOP",
         accountLabel: adminId,
       });
-      process.stdout.write(`${result.otpauthUri}\n`);
+      const cleanupQr = await openLocalQr(result.otpauthUri);
+      try {
+        process.stdout.write("SCAN MFA QR NOW\n");
+        await readInput("Press Enter after scanning: ", true);
+      } finally {
+        await cleanupQr();
+      }
       return;
     }
     if (command === "replace") {
@@ -197,7 +203,13 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         accountLabel: adminId,
         currentCode,
       });
-      process.stdout.write(`${result.otpauthUri}\n`);
+      const cleanupQr = await openLocalQr(result.otpauthUri);
+      try {
+        process.stdout.write("SCAN MFA QR NOW\n");
+        await readInput("Press Enter after scanning: ", true);
+      } finally {
+        await cleanupQr();
+      }
       return;
     }
     if (command === "recover") {

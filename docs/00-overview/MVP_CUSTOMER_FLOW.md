@@ -47,7 +47,7 @@ Sản phẩm là account/access số chỉ khi supplier hoặc provider cho phé
 8. Tạo VietQR đúng số tiền, nội dung duy nhất và thời hạn.
 9. SePay webhook/check/reconciliation xác minh tiền vào.
 10. Lấy asset từ kho nội bộ hoặc Supplier API.
-11. Giao hàng bằng Delivery Bundle xem một lần, có thời hạn.
+11. Gửi tự động trong Telegram message đã bind customer sau khi Vault/asset validation hoàn tất.
 12. Lịch sử và chi tiết đơn hàng.
 13. Báo sản phẩm lỗi và hỗ trợ gắn với đơn.
 
@@ -164,18 +164,22 @@ Nếu kho/supplier chậm, bot hiển thị trạng thái đang xử lý và th�
 ### 5.7 Giao thành công
 
 ```text
-🎉 MUA HÀNG THÀNH CÔNG
+✅ GIAO HÀNG THÀNH CÔNG
 
 Sản phẩm: Sản phẩm A — 1 tháng
 Mã đơn: DH8K2P9
-Bảo hành đến: 23/07/2026
+💰 149.000đ
 
-[ 🔐 Nhận sản phẩm ]
+🔐 Thông tin nhận hàng:
+<các field customer-visible>
+
 [ 📖 Hướng dẫn sử dụng ]
 [ 🛠 Báo sản phẩm lỗi ]
 ```
 
-`Nhận sản phẩm` mở Delivery Bundle có TTL, xem một lần và ràng buộc đúng customer/order. Bot không gửi raw password tồn tại lâu trong lịch sử chat.
+Sau khi SePay và asset được verify, worker gửi trực tiếp toàn bộ field `customerVisible` trong
+Telegram message tới đúng chat/customer. Không cần nút “Nhận sản phẩm”. `/d/:token` và callback
+cũ chỉ là đường khôi phục có xác thực; message tự động là đường giao hàng chính.
 
 ### 5.8 Lịch sử đơn
 
@@ -209,41 +213,41 @@ Ticket nên gắn sẵn `order_id`; không yêu cầu khách gửi lại passwor
 
 ### Category
 
-| Field | Quy tắc |
-|---|---|
-| `id` | Opaque immutable ID |
-| `name` | Tên tiếng Việt hiển thị cho khách |
-| `slug` | Unique, dùng nội bộ/deep link |
-| `is_active` | Chỉ active mới được browse |
-| `sort_order` | Sắp xếp ổn định |
+| Field        | Quy tắc                           |
+| ------------ | --------------------------------- |
+| `id`         | Opaque immutable ID               |
+| `name`       | Tên tiếng Việt hiển thị cho khách |
+| `slug`       | Unique, dùng nội bộ/deep link     |
+| `is_active`  | Chỉ active mới được browse        |
+| `sort_order` | Sắp xếp ổn định                   |
 
 ### Product
 
-| Field | Quy tắc |
-|---|---|
-| `id` | Opaque immutable ID |
-| `name` | Tên authoritative từ database |
-| `category_id` | Category hợp lệ |
-| `short_description` | Text đã sanitize, giới hạn độ dài |
-| `image_url` | Asset do shop kiểm soát; không fetch URL tùy ý lúc render |
-| `is_active` | Kill switch bán hàng |
-| `sort_order` | Sắp xếp ổn định |
+| Field               | Quy tắc                                                   |
+| ------------------- | --------------------------------------------------------- |
+| `id`                | Opaque immutable ID                                       |
+| `name`              | Tên authoritative từ database                             |
+| `category_id`       | Category hợp lệ                                           |
+| `short_description` | Text đã sanitize, giới hạn độ dài                         |
+| `image_url`         | Asset do shop kiểm soát; không fetch URL tùy ý lúc render |
+| `is_active`         | Kill switch bán hàng                                      |
+| `sort_order`        | Sắp xếp ổn định                                           |
 
 ### Product Variant
 
-| Field | Quy tắc |
-|---|---|
-| `id` | Opaque immutable ID |
-| `product_id` | Product cha |
-| `name` | Ví dụ `1 tháng`, `3 tháng` |
-| `price_vnd` | Integer VND lớn hơn 0 |
-| `duration` | Enum/normalized duration |
+| Field           | Quy tắc                                                              |
+| --------------- | -------------------------------------------------------------------- |
+| `id`            | Opaque immutable ID                                                  |
+| `product_id`    | Product cha                                                          |
+| `name`          | Ví dụ `1 tháng`, `3 tháng`                                           |
+| `price_vnd`     | Integer VND lớn hơn 0                                                |
+| `duration`      | Enum/normalized duration                                             |
 | `delivery_type` | `invite`, `license`, `activation_key`, `credential`, `manual_review` |
-| `warranty_days` | Integer không âm; snapshot vào Order |
-| `stock_status` | Projection: `available`, `low`, `out`, `supplier_only`, `paused` |
-| `supplier_sku` | Nullable; không lộ ra customer UI |
-| `is_active` | Variant kill switch |
-| `sort_order` | Sắp xếp ổn định |
+| `warranty_days` | Integer không âm; snapshot vào Order                                 |
+| `stock_status`  | Projection: `available`, `low`, `out`, `supplier_only`, `paused`     |
+| `supplier_sku`  | Nullable; không lộ ra customer UI                                    |
+| `is_active`     | Variant kill switch                                                  |
+| `sort_order`    | Sắp xếp ổn định                                                      |
 
 Tên, giá, stock, warranty, delivery type và policy hiển thị cho khách luôn lấy từ database/read model, không lấy từ text do AI sinh.
 
@@ -308,24 +312,24 @@ AI không được phép:
 2. Kho nội bộ reserve asset nguyên tử; hai order không thể nhận cùng asset.
 3. Supplier create-order dùng idempotency key. Timeout có kết quả không chắc chắn phải vào `Unknown` và query/reconcile trước retry.
 4. HTTP 200 từ supplier chưa đủ; asset phải qua validation theo loại sản phẩm.
-5. Raw credential chỉ tồn tại ở vault; domain DB, log, event, analytics, support và reseller webhook chỉ giữ vault reference/redacted metadata.
-6. Delivery Bundle ràng buộc một customer, một order, TTL và số lần xem; replay không cấp asset mới.
+5. Raw credential chỉ tồn tại ở Vault ngoài đúng Telegram message gửi tới chat/customer đã bind; domain DB, log, event, analytics, support và reseller webhook chỉ giữ vault reference/redacted metadata.
+6. Delivery Bundle ràng buộc một customer, một order, TTL và single-delivery audit; message thất bại giữ bundle retryable, replay không cấp asset mới.
 7. Asset invalid/revoked đi replacement hoặc refund workflow theo warranty snapshot, không sửa lịch sử Order.
 
 ## 10. Loading, error và recovery copy
 
-| Tình huống | Khách thấy | Hành vi hệ thống |
-|---|---|---|
-| Hết hàng trước khi mua | `Sản phẩm vừa hết hàng` | Không tạo payment; gợi ý quay lại catalog |
-| Giá thay đổi | Hiện giá cũ và mới, yêu cầu xác nhận | Không dùng callback amount cũ |
-| QR tạo lỗi | `Chưa thể tạo QR, đơn vẫn được giữ` | Retry có backoff; không tạo order trùng |
-| SePay chưa báo tiền | `Chưa thấy giao dịch, vui lòng chờ` | Đọc local state; reconciliation theo lịch |
-| Thanh toán thiếu/thừa/trễ | `Giao dịch cần đối chiếu` | Tạo discrepancy/ticket; không giao tự động |
-| Supplier chậm | `Đã nhận tiền, đang chuẩn bị sản phẩm` | Poll/reconcile bounded; không create lại mù quáng |
-| Supplier hết hàng sau payment | `Đơn cần hỗ trợ` | Fallback có policy hoặc refund/replacement |
-| Link giao hết hạn chưa xem | Cho phép reissue có kiểm soát | Revoke bundle cũ; asset không bị cấp hai lần |
-| Link đã xem | `Liên kết đã được sử dụng` | Yêu cầu step-up/support trước reissue |
-| Bot/worker restart | Trạng thái phục hồi từ DB | Outbox replay idempotent |
+| Tình huống                    | Khách thấy                             | Hành vi hệ thống                                  |
+| ----------------------------- | -------------------------------------- | ------------------------------------------------- |
+| Hết hàng trước khi mua        | `Sản phẩm vừa hết hàng`                | Không tạo payment; gợi ý quay lại catalog         |
+| Giá thay đổi                  | Hiện giá cũ và mới, yêu cầu xác nhận   | Không dùng callback amount cũ                     |
+| QR tạo lỗi                    | `Chưa thể tạo QR, đơn vẫn được giữ`    | Retry có backoff; không tạo order trùng           |
+| SePay chưa báo tiền           | `Chưa thấy giao dịch, vui lòng chờ`    | Đọc local state; reconciliation theo lịch         |
+| Thanh toán thiếu/thừa/trễ     | `Giao dịch cần đối chiếu`              | Tạo discrepancy/ticket; không giao tự động        |
+| Supplier chậm                 | `Đã nhận tiền, đang chuẩn bị sản phẩm` | Poll/reconcile bounded; không create lại mù quáng |
+| Supplier hết hàng sau payment | `Đơn cần hỗ trợ`                       | Fallback có policy hoặc refund/replacement        |
+| Link giao hết hạn chưa xem    | Cho phép reissue có kiểm soát          | Revoke bundle cũ; asset không bị cấp hai lần      |
+| Link đã xem                   | `Liên kết đã được sử dụng`             | Yêu cầu step-up/support trước reissue             |
+| Bot/worker restart            | Trạng thái phục hồi từ DB              | Outbox replay idempotent                          |
 
 ## 11. Acceptance seam
 
@@ -366,4 +370,3 @@ Sau khi retail flow có số liệu ổn định mới cân nhắc theo thứ t�
 5. Reorder, reminder có consent.
 6. Loyalty, referral, campaign và A/B testing.
 7. Recommendation nâng cao; AI vẫn chỉ đề xuất, không trực tiếp hành động.
-

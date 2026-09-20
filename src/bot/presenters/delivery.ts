@@ -1,23 +1,25 @@
+import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import type { InlineButton, PresentedMessage } from "./catalog.js";
 
 /**
  * Vietnamese processing/completed/expired/used/needs-review presenters (T075,
  * FR-017, telegram-ux.md).
  *
- * Delivery presenters never render secrets in unsolicited notifications.
- * After the customer taps "Nhận hàng" in Telegram, `presentDeliveryReveal`
- * shows the one-time credential in chat. Mini App / WebApp reveal is cancelled.
- * Support paths surface a safe correlation reference, never a mark-paid prompt.
+ * New fulfilled credential bundles are rendered directly in the successful
+ * Telegram notification. The legacy `/d/:token` and callback reveal paths
+ * remain one-time compatibility/recovery surfaces. Mini App / WebApp reveal is
+ * cancelled. Support paths surface a safe correlation reference, never a
+ * mark-paid prompt.
  */
 
 export const DELIVERY_COPY = {
   processingTitle: "⏳ Đang xử lý đơn hàng",
   processingBody:
-    "Thanh toán đã xác nhận. Hệ thống đang chuẩn bị tài khoản. Bạn sẽ nhận liên kết giao hàng ngay khi sẵn sàng.",
+    "Thanh toán đã xác nhận. Hệ thống đang chuẩn bị tài khoản. Bạn sẽ nhận thông tin nhận hàng trực tiếp trong Telegram khi sẵn sàng.",
   completedTitle: "✅ Tài khoản đã sẵn sàng",
   completedBody:
-    "Nhấn nút bên dưới để xem tài khoản (chỉ xem được một lần, có thời hạn). Không chia sẻ liên kết với người khác.",
-  openDelivery: "🔑 Xem tài khoản",
+    "Thông tin nhận hàng được gửi trực tiếp trong tin nhắn xác nhận. Nếu cần khôi phục liên kết cũ, vui lòng liên hệ hỗ trợ.",
+  openDelivery: "🔐 Mở liên kết cũ",
   expiredTitle: "⏰ Liên kết giao hàng đã hết hạn",
   expiredBody:
     "Liên kết đã quá thời hạn trước khi được mở. Vui lòng liên hệ hỗ trợ để được cấp lại (nếu đủ điều kiện).",
@@ -56,9 +58,10 @@ export function presentDeliveryProcessing(orderNumber: string): PresentedMessage
 }
 
 /**
- * Delivery Bundle is AVAILABLE. The reveal URL is the authenticated delivery
- * surface — the secret itself is never embedded in the message body as a
- * credential, only as a time-limited link the customer can open once.
+ * Legacy Delivery Bundle URL presenter. New handoffs use
+ * `presentDeliveryReveal` after the worker has sent customer-visible fields.
+ * This compatibility presenter never embeds a credential, only a time-limited
+ * link the customer can open once.
  */
 export interface DeliveryCredentialField {
   name: string;
@@ -125,30 +128,36 @@ export function presentDeliveryUsed(orderNumber: string): PresentedMessage {
   };
 }
 
-/** One-time Telegram-native credential reveal after the customer taps Nhận hàng. */
+/** Customer-visible credential fields for automatic or legacy Telegram delivery. */
 export function presentDeliveryReveal(input: {
   secret: string;
   productName: string | null;
+  orderNumber?: string | null;
+  amountVnd?: string | null;
   usageInstructionsVi: string | null;
   warrantyVi: string | null;
 }): PresentedMessage {
-  const lines = [
-    "✅ Giao hàng thành công",
-    "",
-    input.productName ?? "Sản phẩm",
-    "",
-    "🔐 Thông tin nhận hàng (chỉ hiện một lần, đừng chia sẻ):",
-    input.secret,
-  ];
+  const lines = ["✅ Giao hàng thành công", "", input.productName ?? "Sản phẩm"];
+  if (input.orderNumber) lines.push(`Đơn: ${input.orderNumber}`);
+  if (input.amountVnd) lines.push(`💰 ${formatVnd(makeVnd(BigInt(input.amountVnd)))}`);
+  lines.push("", "🔐 Thông tin nhận hàng:", input.secret);
   if (input.usageInstructionsVi) lines.push("", `📘 Hướng dẫn: ${input.usageInstructionsVi}`);
   if (input.warrantyVi) lines.push("", `🛡 Bảo hành: ${input.warrantyVi}`);
   return {
     text: lines.join("\n"),
     buttons: [
-      [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
+      [
+        {
+          text: "🧾 Đơn hàng",
+          callbackData: input.orderNumber ? `ord:view:${input.orderNumber}` : "ord:list",
+        },
+      ],
       [
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
-        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+        {
+          text: "💬 Hỗ trợ",
+          callbackData: input.orderNumber ? `sup:open:${input.orderNumber}` : "sup:open",
+        },
       ],
     ],
   };

@@ -181,6 +181,9 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 - Outbox remains the only durable side-effect boundary.
 - Restock and wallet notifications are emitted from durable events, not from ad hoc DB updates.
 - Broadcast pacing must stay bounded and retry-safe.
+- Credential-bearing local/supplier bundles are delivered automatically in the successful Telegram notification after verified payment. The message renders every `customerVisible` inventory field plus configured usage and warranty text; internal-only fields remain withheld.
+- `delivery_bundle` and the authenticated `/d/:token`/callback reveal path remain as retry/recovery compatibility surfaces, but a new purchase does not require a customer tap to receive its credentials.
+- Automatic delivery must remain retry-safe: the worker may read the customer-visible secret before sending, but only finalizes bundle consumption and order completion after the Telegram send succeeds.
 - Inventory correction must not masquerade as a customer-facing announcement unless explicitly toggled and derived from a real stock delta.
 - Marketing `all` is `SHOP_UPDATE` and requires `shop_updates` consent at preview, recipient creation and send time. Only genuine service-critical campaigns retain opt-out-independent delivery; marketing navigation cannot select that class.
 - Owner-triggered stock announcements from an inventory variant view are optional `SHOP_UPDATE` marketing broadcasts. The preview content is rebuilt from product/variant/stock/price tables, then confirmed through the existing broadcast campaign flow; product restock subscriptions never imply shop-update consent.
@@ -266,6 +269,13 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 - Bank transactions, payment evidence, discrepancies, outbox events, and delivery evidence remain append-only or status-transitioned. Resolution never deletes or rewrites provider evidence.
 - Terminal orphan handling records a reason and audit trail, stops retry churn, and keeps the original outbox payload/evidence available for review.
 - Admin screens expose safe identifiers and summaries only; no raw provider credentials, vault references, account inventory, or customer secrets are rendered.
+
+### Owner-requested TOTP enforcement (2026-09-20)
+
+- Production uses `ADMIN_STEP_UP_MODE=required` with the external Vault. Every action in `SENSITIVE_ACTION_POLICY` that has a non-null category requires a current RFC 6238 TOTP grant bound to the exact action, resource, version, and payload before mutation.
+- Enrollment and factor replacement stay on the local operator host: render the `otpauth://` URI as a local QR, scan it into the owner's authenticator, and never send the seed or QR through Telegram. PostgreSQL stores only an opaque `vault:` reference.
+- The bot-generated `/confirm` challenge is an action-binding/anti-replay gate, not 2FA. It remains separate from and cannot substitute for the owner's authenticator code.
+- A failed, missing, expired, or locked-out TOTP verification must fail closed before the business mutation; attempts and authorization outcomes remain append-only redacted audit evidence.
 
 ### Owner-surface adapter rules
 

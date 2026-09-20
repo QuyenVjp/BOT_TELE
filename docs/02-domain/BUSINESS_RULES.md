@@ -57,9 +57,9 @@ Các rule này là lane post-MVP, không phải customer UX.
 - `DIG-002`: digital-account order dùng VietQR dynamic QR và chỉ settle sau SePay evidence đã verify; Telegram/provider policy risk phải được sign-off trước production.
 - `DIG-003`: provider invite/license/seat được ưu tiên hơn shared credentials.
 - `DIG-004`: mỗi Digital Account Asset được allocate tối đa một active Order.
-- `DIG-005`: raw credential không xuất hiện trong DB domain, log, analytics, support, event hoặc webhook.
-- `DIG-006`: delivery dùng vault-backed one-time bundle và chỉ sau verified payment + validated supplier asset.
-- `DIG-007`: Delivery Bundle bind đúng customer/order, có TTL và view-once; reissue phải revoke bundle cũ và audit.
+- `DIG-005`: raw credential không xuất hiện trong DB domain, log, analytics, support transcript, event hoặc webhook. Sau khi payment/asset đã verify, credential được phép xuất hiện trong đúng message Telegram gửi cho customer/Telegram chat đã bind để khách nhận hàng; không lặp lại credential sang kênh phụ.
+- `DIG-006`: delivery dùng vault-backed bundle sau verified payment + validated supplier asset; worker đọc các field `customerVisible` tại thời điểm gửi và chỉ hoàn tất bundle sau khi Telegram send thành công.
+- `DIG-007`: Delivery Bundle bind đúng customer/order, có TTL và single-delivery audit; `/d/:token` và callback cũ vẫn view-once, còn notification mới không yêu cầu nút “Nhận hàng”. Reissue phải revoke bundle cũ và audit.
 - `SUPR-001`: supplier create-order dùng idempotency key; timeout-unknown phải query/reconcile trước retry.
 - `SUPR-002`: supplier cost, sell price và margin được snapshot trên Order.
 - `SUPR-003`: supplier HTTP 200 không đồng nghĩa fulfillment hợp lệ.
