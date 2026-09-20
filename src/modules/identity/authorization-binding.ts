@@ -71,6 +71,16 @@ export async function loadSensitiveAuthorizationBinding(
     current = value
       ? { version: value.version, availableQuantity: value.available_quantity }
       : null;
+  } else if (input.actionKey === "inventory.ready.release") {
+    const row = await sql<{ version: string; status: string; reserved_order_id: string | null }>`
+      select version::text, status, reserved_order_id
+      from digital_asset where id = ${input.resourceId} limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value?.version ?? "missing";
+    current = value
+      ? { version: value.version, status: value.status, reservedOrderId: value.reserved_order_id }
+      : null;
   } else if (input.actionKey.startsWith("supplier.mapping.")) {
     const variantId = requestedString(requested, "variantId");
     const candidateBinding =

@@ -38,6 +38,7 @@ export type SensitiveActionKey =
   | "wallet.refund"
   | "manual_fulfillment.complete"
   | "support.replacement.approve"
+  | "inventory.ready.release"
   | "discrepancy.resolve"
   | "outbox.orphan.dispose"
   | "store.open"
@@ -66,6 +67,7 @@ export const SENSITIVE_ACTION_POLICY: Record<SensitiveActionKey, StepUpActionCat
   "wallet.refund": "REFUND",
   "manual_fulfillment.complete": "REFUND",
   "support.replacement.approve": "REFUND",
+  "inventory.ready.release": "STOCK_ADJUSTMENT",
   "warranty.refund.approve": "REFUND",
   "warranty.refund.adjust": "REFUND",
   "warranty.replacement.approve": "DELIVERY_REISSUE",

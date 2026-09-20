@@ -751,6 +751,7 @@ describe("admin operational presenters", () => {
         { action: "RESTORE", label: "♻️ Phục hồi" },
         { action: "REVOKE", label: "🗑 Thu hồi" },
       ],
+      readyRecovery: { version: 7 },
     });
     const confirm = presentAdminInventoryItemConfirm({
       variantId,
@@ -772,6 +773,7 @@ describe("admin operational presenters", () => {
       .map((button) => button.callbackData);
     expect(callbacks).toContain(`admin:inventory:items:${variantId}`);
     expect(callbacks).toContain(`admin:inventory:item:${ref}`);
+    expect(callbacks).toContain(`admin:inventory:item-act:${ref}:READY_RELEASE`);
     expect(callbacks).toContain(`admin:inventory:item-act:${ref}:REVOKE`);
     expect(callbacks).toContain(`admin:inventory:item-confirm:${ref}:QUARANTINE`);
     for (const callback of callbacks) {
