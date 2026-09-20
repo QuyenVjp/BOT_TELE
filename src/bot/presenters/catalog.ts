@@ -47,6 +47,17 @@ export interface InlineButton {
   copyText?: string;
   style?: "primary" | "success" | "danger";
 }
+
+/**
+ * Chunks inline buttons into compact rows of at most two buttons.
+ */
+export function compactInlineRows(buttons: InlineButton[]): InlineButton[][] {
+  const rows: InlineButton[][] = [];
+  for (let i = 0; i < buttons.length; i += 2) {
+    rows.push(buttons.slice(i, i + 2));
+  }
+  return rows;
+}
 export interface ReplyKeyboardButton {
   text: string;
   requestContact?: boolean;
@@ -105,7 +116,7 @@ function homeButton(callbackData: string): InlineButton {
 export function presentSearchPrompt(): PresentedMessage {
   return {
     text: [
-      "🔎 TÌM SẢN PHẨM",
+      "🔎 Tìm sản phẩm",
       "",
       "Gửi tên sản phẩm ngay bây giờ, ví dụ:",
       "gpt • chatgpt • claude • cursor • vpn",
@@ -122,10 +133,14 @@ export function presentCategoryList(categories: CatalogCategoryRow[]): Presented
       buttons: [[homeButton("menu:main")]],
     };
   }
-  const buttons: InlineButton[][] = categories.map((c) => [
-    { text: c.name_vi, callbackData: `cat:view:${c.id}` },
-  ]);
-  buttons.push([homeButton("menu:main")]);
+  const categoryButtons = categories.map((c) => ({
+    text: c.name_vi,
+    callbackData: `cat:view:${c.id}`,
+  }));
+  const buttons: InlineButton[][] = [
+    ...compactInlineRows(categoryButtons),
+    [homeButton("menu:main")],
+  ];
   return { text: "Chọn danh mục:", buttons };
 }
 
@@ -219,13 +234,13 @@ export function presentProductDetail(
   ];
 
   if (detail.description_vi) {
-    lines.push("", "📝 MÔ TẢ", detail.description_vi);
+    lines.push("", "📝 Mô tả", detail.description_vi);
   }
   if (detail.what_customer_receives_vi) {
-    lines.push("", "📦 BẠN NHẬN ĐƯỢC", ...bulletLines(detail.what_customer_receives_vi));
+    lines.push("", "📦 Bạn nhận được", ...bulletLines(detail.what_customer_receives_vi));
   }
   if (detail.usage_instructions_vi) {
-    lines.push("", "📘 HƯỚNG DẪN", ...bulletLines(detail.usage_instructions_vi));
+    lines.push("", "📘 Hướng dẫn", ...bulletLines(detail.usage_instructions_vi));
   }
   // Goal §5/§62: a warranty-enabled variant gets the canonical block and a way to read the
   // structured policy; the free-text field stays as an extra note when the shop filled it in.
@@ -236,10 +251,10 @@ export function presentProductDetail(
     lines.push("", ...WARRANTY_BLOCK_LINES);
     if (detail.warranty_vi) lines.push("", detail.warranty_vi);
   } else if (detail.warranty_vi) {
-    lines.push("", "🛡 BẢO HÀNH", detail.warranty_vi);
+    lines.push("", "🛡 Bảo hành", detail.warranty_vi);
   }
 
-  lines.push("", "Chọn gói thời hạn:");
+  lines.push("", "Chọn gói phù hợp:");
   const buttons: InlineButton[][] = [];
   if (warrantyVariant) {
     buttons.push([
@@ -278,15 +293,14 @@ export function presentProductDetail(
       ]);
     }
   }
-  buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }]);
-  buttons.push([adminContactButton()]);
+  buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }, adminContactButton()]);
   buttons.push([
     {
       text: `⬅️ ${detail.category_name}`,
       callbackData: `cat:view:${detail.category_id}`,
     },
+    homeButton("shop:home"),
   ]);
-  buttons.push([homeButton("shop:home")]);
   return { text: lines.join("\n"), buttons };
 }
 
@@ -317,8 +331,10 @@ function presentVariantList(
     return {
       text: options.title ?? CATALOG_COPY.emptyCatalog,
       buttons: [
-        [{ text: CATALOG_COPY.back, callbackData: "cat:list" }],
-        [{ text: CATALOG_COPY.mainMenu, callbackData: "menu:main" }],
+        [
+          { text: CATALOG_COPY.back, callbackData: "cat:list" },
+          { text: CATALOG_COPY.mainMenu, callbackData: "menu:main" },
+        ],
       ],
     };
   }
@@ -341,10 +357,10 @@ function presentVariantList(
   if (options.nextCursor) {
     buttons.push([{ text: "Trang sau ›", callbackData: `var:page:${options.nextCursor}` }]);
   }
-  buttons.push(
-    [{ text: CATALOG_COPY.back, callbackData: "cat:list" }],
-    [{ text: CATALOG_COPY.mainMenu, callbackData: "menu:main" }],
-  );
+  buttons.push([
+    { text: CATALOG_COPY.back, callbackData: "cat:list" },
+    { text: CATALOG_COPY.mainMenu, callbackData: "menu:main" },
+  ]);
 
   return {
     text: (options.title ?? "Sản phẩm đang bán") + "\n\n" + lines.join("\n\n"),
@@ -377,13 +393,13 @@ export function presentVariantDetail(
     `⚡ Giao hàng: ${DELIVERY_MODE_COPY[variant.fulfillment_type] ?? "Tự động"}`,
     `⏱ Dự kiến: ${eta}`,
   ];
-  if (variant.description_vi) textLines.push("", "📝 MÔ TẢ", variant.description_vi);
+  if (variant.description_vi) textLines.push("", "📝 Mô tả", variant.description_vi);
   if (variant.what_customer_receives_vi) {
-    textLines.push("", "📦 BẠN NHẬN ĐƯỢC", ...bulletLines(variant.what_customer_receives_vi));
+    textLines.push("", "📦 Bạn nhận được", ...bulletLines(variant.what_customer_receives_vi));
   }
   if (variant.usage_instructions_vi)
-    textLines.push("", "📘 HƯỚNG DẪN", ...bulletLines(variant.usage_instructions_vi));
-  if (variant.warranty_vi) textLines.push("", "🛡 BẢO HÀNH", variant.warranty_vi);
+    textLines.push("", "📘 Hướng dẫn", ...bulletLines(variant.usage_instructions_vi));
+  if (variant.warranty_vi) textLines.push("", "🛡 Bảo hành", variant.warranty_vi);
   textLines.push(`Thời hạn: ${variant.duration_code ?? "—"}`, `Loại giao: ${fulfillment}`);
 
   const buttons: InlineButton[][] = [];
@@ -406,14 +422,15 @@ export function presentVariantDetail(
       { text: CATALOG_COPY.restockSubscribe, callbackData: restockSubscribeCallbackData },
     ]);
   }
-  buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }]);
-  buttons.push([adminContactButton()]);
+  buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }, adminContactButton()]);
   if (variant.category_id) {
     buttons.push([
       { text: `⬅️ ${CATALOG_COPY.back}`, callbackData: `cat:view:${variant.category_id}` },
+      homeButton("shop:home"),
     ]);
+  } else {
+    buttons.push([homeButton("shop:home")]);
   }
-  buttons.push([homeButton("shop:home")]);
   return { text: textLines.join("\n"), buttons };
 }
 
@@ -478,8 +495,7 @@ export function presentSearchResults(
     return {
       text: CATALOG_COPY.emptySearch,
       buttons: [
-        [{ text: CATALOG_COPY.searchAgain, callbackData: "cat:search" }],
-        [homeButton("menu:main")],
+        [{ text: CATALOG_COPY.searchAgain, callbackData: "cat:search" }, homeButton("menu:main")],
       ],
     };
   }

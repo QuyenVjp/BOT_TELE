@@ -21,7 +21,7 @@ export function presentAdminManualTasks(tasks: ManualFulfillmentTask[]): Present
           callbackData: `admin:manual:view:${task.id}`,
         },
       ]),
-      [{ text: "Admin", callbackData: "admin:menu" }],
+      [{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }],
     ],
   };
 }
@@ -52,8 +52,10 @@ export function presentAdminManualTaskDetail(input: {
             ],
           ]
         : []),
-      [{ text: "↩️ Danh sách", callbackData: "admin:manual" }],
-      [{ text: "Admin", callbackData: "admin:menu" }],
+      [
+        { text: "↩️ Danh sách", callbackData: "admin:manual" },
+        { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
+      ],
     ],
   };
 }

@@ -344,7 +344,7 @@ export async function presentAdminCustomerFinancialDetail(
   if (!row)
     return {
       text: "Không tìm thấy khách hàng.",
-      buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+      buttons: [[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]],
     };
   const recent = await sql<{
     order_number: string;
@@ -392,7 +392,7 @@ export async function presentAdminCustomerFinancialDetail(
       [{ text: "✉️ Nhắn khách", callbackData: `admin:customers:message:${messageStateId}` }],
       [
         { text: "👥 Khách hàng", callbackData: "admin:customers" },
-        { text: "Admin", callbackData: "admin:menu" },
+        { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
       ],
     ],
   };
@@ -441,9 +441,13 @@ export async function presentAdminCustomers(
       ],
       [{ text: "Cần soát thanh toán", callbackData: "admin:customers:filter:payment_review" }],
       ...(page.nextStateId
-        ? [[{ text: "Trang sau", callbackData: `admin:customers:page:${page.nextStateId}` }]]
-        : []),
-      [{ text: "Admin", callbackData: "admin:menu" }],
+        ? [
+            [
+              { text: "Trang sau", callbackData: `admin:customers:page:${page.nextStateId}` },
+              { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
+            ],
+          ]
+        : [[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]]),
     ],
   };
 }
@@ -799,8 +803,10 @@ function adminWarrantyError(text: string): PresentedMessage {
   return {
     text,
     buttons: [
-      [{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }],
-      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+      [
+        { text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
     ],
   };
 }
@@ -1131,8 +1137,10 @@ function safeWarrantyMessage(text: string): PresentedMessage {
   return {
     text,
     buttons: [
-      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
-      [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+      [
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
     ],
   };
 }
@@ -1154,8 +1162,10 @@ function adminSupportError(text: string): PresentedMessage {
   return {
     text,
     buttons: [
-      [{ text: "🧾 Yêu cầu hỗ trợ", callbackData: "admin:support:tickets" }],
-      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+      [
+        { text: "🧾 Yêu cầu hỗ trợ", callbackData: "admin:support:tickets" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
     ],
   };
 }
@@ -1890,8 +1900,10 @@ async function bootstrap(): Promise<void> {
     bankAlias: config.VIETQR_BANK_ALIAS,
   };
   const preorderHomeButtons: PresentedMessage["buttons"] = [
-    [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
-    [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+    [
+      { text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" },
+      { text: "🛒 Về trang chủ", callbackData: "shop:home" },
+    ],
   ];
   /**
    * The QR for the leg a reservation currently owes: the deposit while the hold is
@@ -2013,7 +2025,7 @@ async function bootstrap(): Promise<void> {
     }
     return {
       text: [
-        "💰 VÍ TIER20",
+        "💰 Ví TIER20",
         "",
         `Số dư: ${formatVnd(account.balanceVnd)}`,
         "Thanh toán tức thì 1 chạm, không cần quét mã mỗi lần mua.",
@@ -2022,8 +2034,10 @@ async function bootstrap(): Promise<void> {
       buttons: [
         ...presetRows,
         [{ text: "✏️ Số tiền khác", callbackData: "wallet:topup:custom" }],
-        [{ text: "📜 Lịch sử ví", callbackData: "wallet:history" }],
-        [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+        [
+          { text: "📜 Lịch sử ví", callbackData: "wallet:history" },
+          { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        ],
       ],
     };
   }
@@ -2462,7 +2476,7 @@ async function bootstrap(): Promise<void> {
       async settings(customerId) {
         const p = await notificationService.getNotificationPreferences(dbHandle.db, customerId);
         return {
-          text: `Cài đặt thông báo: cập nhật ${p.shopUpdates ? "BẬT" : "TẮT"}, hoạt động ${p.purchaseActivity ? "BẬT" : "TẮT"}. Bấm “🛍 Cập nhật sản phẩm” hoặc “📣 Hoạt động mua hàng” để đổi trạng thái.`,
+          text: `Cài đặt thông báo: cập nhật ${p.shopUpdates ? "bật" : "tắt"}, hoạt động ${p.purchaseActivity ? "bật" : "tắt"}. Bấm “🛍 Cập nhật sản phẩm” hoặc “📣 Hoạt động mua hàng” để đổi trạng thái.`,
           buttons: [],
         };
       },
@@ -2515,8 +2529,10 @@ async function bootstrap(): Promise<void> {
         return {
           text: opened.message,
           buttons: [
-            [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
-            [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+            [
+              { text: "🧾 Đơn hàng", callbackData: "ord:list" },
+              { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+            ],
           ],
         };
       }
@@ -2696,15 +2712,19 @@ async function bootstrap(): Promise<void> {
         ? {
             text: "Đã thanh toán bằng ví. Chúng tôi sẽ giao tài khoản ngay.",
             buttons: [
-              [{ text: "Xem đơn", callbackData: `ord:view:${orderId}` }],
-              [{ text: "Menu chính", callbackData: "menu:main" }],
+              [
+                { text: "Xem đơn", callbackData: `ord:view:${orderId}` },
+                { text: "Menu chính", callbackData: "menu:main" },
+              ],
             ],
           }
         : {
             text: result.message,
             buttons: [
-              [{ text: "Nạp ví", callbackData: "wallet:topup" }],
-              [{ text: "Đơn hàng", callbackData: "ord:list" }],
+              [
+                { text: "Nạp ví", callbackData: "wallet:topup" },
+                { text: "Đơn hàng", callbackData: "ord:list" },
+              ],
             ],
           };
     },
@@ -3547,7 +3567,7 @@ async function bootstrap(): Promise<void> {
         if (!row)
           return {
             text: "Sản phẩm không còn hợp lệ.",
-            buttons: [[{ text: "Products", callbackData: "admin:products" }]],
+            buttons: [[{ text: "🛍 Sản phẩm", callbackData: "admin:products" }]],
           };
         const variants = await sql<{
           id: string;
@@ -4702,7 +4722,7 @@ async function bootstrap(): Promise<void> {
         if (result.code === "NOT_READY" || result.code === "ACTION_REFUSED") {
           return {
             text: result.message,
-            buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+            buttons: [[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]],
           };
         }
         if (isSensitiveCallbackRefusal(result.code)) {
@@ -4717,7 +4737,7 @@ async function bootstrap(): Promise<void> {
         }
         return {
           text: "❌ Xác nhận thất bại hoặc đã hết hạn",
-          buttons: [[{ text: "Admin", callbackData: "admin:menu" }]],
+          buttons: [[{ text: "⌂ Trang quản trị", callbackData: "admin:menu" }]],
         };
       },
       async inventory(input) {
@@ -7228,10 +7248,8 @@ async function bootstrap(): Promise<void> {
                       callbackData: `admin:products:apply-sku:${proposal}`,
                     },
                   ],
-                  [
-                    { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                    { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                  ],
+                  [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+                  [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
                 ],
               };
             }
@@ -7245,10 +7263,8 @@ async function bootstrap(): Promise<void> {
             return {
               text: `⚠️ ${errorMsg}`,
               buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
+                [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+                [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
               ],
             };
           }
@@ -7274,10 +7290,8 @@ async function bootstrap(): Promise<void> {
             return {
               text: `❌ SKU "${rawSku}" đã được sử dụng. Hãy nhập SKU khác.`,
               buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
+                [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+                [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
               ],
             };
           }
@@ -7522,10 +7536,8 @@ async function bootstrap(): Promise<void> {
             return {
               text: "Loại sản phẩm không hợp lệ.",
               buttons: [
-                [
-                  { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-                  { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-                ],
+                [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+                [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
               ],
             };
           return renderWizardStep(result.draft);
@@ -8185,7 +8197,7 @@ async function bootstrap(): Promise<void> {
                       callbackData: `shop:product:${product.id}`,
                     };
             return {
-              text: `✅ ĐÃ TẠO SẢN PHẨM\n\n${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫\nTrạng thái: ${product.active ? "Đang mở bán" : "Nháp / Chưa mở bán"}`,
+              text: `✅ Đã tạo sản phẩm\n\n${product.name}\nBiến thể: ${draft.variantName}\nSKU: ${product.sku}\nGiá: ${product.priceVnd.toLocaleString("vi-VN")} ₫\nTrạng thái: ${product.active ? "Đang mở bán" : "Nháp / Chưa mở bán"}`,
               buttons: [
                 [
                   primaryButton,
@@ -8301,7 +8313,7 @@ async function bootstrap(): Promise<void> {
         sender: {
           send: async (input) => {
             const lines = [
-              "✅ GIAO HÀNG THÀNH CÔNG",
+              "✅ Giao hàng thành công",
               "",
               input.product?.name ? `📦 ${input.product.name}` : "📦 Đơn hàng của bạn",
               `Đơn: ${input.orderNumber}`,

@@ -1126,7 +1126,7 @@ function ticketOpenedAdminAlert(
   return {
     campaignId: `ticket-opened:${event.aggregateId}`,
     content: [
-      "🛡 YÊU CẦU HỖ TRỢ MỚI",
+      "🛡 Yêu cầu hỗ trợ mới",
       "",
       `Khách: ${p.customerId.slice(-4).padStart(8, "•")}`,
       `Loại: ${SUPPORT_REASON_ADMIN_LABELS[reason] ?? "Khác"}`,
@@ -1143,7 +1143,7 @@ function warrantyAdminAlert(event: OutboxEvent): { campaignId: string; content: 
   return {
     campaignId: `warranty-opened:${event.aggregateId}`,
     content: [
-      "🚨 YÊU CẦU BẢO HÀNH MỚI",
+      "🚨 Yêu cầu bảo hành mới",
       "",
       `Mã: ${p.claimNumber}`,
       `Khách: ${String(p.customerId).slice(-4).padStart(8, "•")}`,
@@ -1179,7 +1179,7 @@ function warrantyCustomerNotice(
         campaignId: `warranty-verified:${event.aggregateId}`,
         customerId,
         content: [
-          "✅ ĐÃ XÁC NHẬN BẢO HÀNH",
+          "✅ Đã xác nhận bảo hành",
           "",
           "Shop đã kiểm tra và xác nhận sản phẩm của bạn thuộc phạm vi bảo hành.",
           "Shop sẽ liên hệ để đổi tài khoản hoặc hoàn tiền.",
@@ -1204,7 +1204,7 @@ function warrantyCustomerNotice(
         campaignId: `preorder-allocated:${event.aggregateId}`,
         customerId,
         content: [
-          "📦 HÀNG ĐÃ VỀ — GIỮ SUẤT CHO BẠN",
+          "📦 Hàng đã về — Giữ suất cho bạn",
           "",
           owed ? `Còn phải thanh toán: ${owed.toLocaleString("vi-VN")} ₫` : null,
           hours ? `Bạn có ${hours} giờ để thanh toán phần còn lại.` : null,
@@ -1221,7 +1221,7 @@ function warrantyCustomerNotice(
         campaignId: `preorder-deposit-paid:${event.aggregateId}`,
         customerId,
         content: [
-          "✅ ĐÃ NHẬN TIỀN CỌC",
+          "✅ Đã nhận tiền cọc",
           "",
           "Shop đã ghi nhận tiền cọc của bạn và giữ suất trong hàng chờ.",
           "Shop sẽ thông báo ngay khi hàng về.",
@@ -1243,7 +1243,7 @@ function warrantyCustomerNotice(
         campaignId: `preorder-forfeited:${event.aggregateId}`,
         customerId,
         content: [
-          "⌛ HẾT HẠN GIỮ SUẤT ĐẶT CỌC",
+          "⌛ Hết hạn giữ suất đặt cọc",
           "",
           "Shop đã giữ hàng đến hạn nhưng chưa nhận được phần thanh toán còn lại, nên suất giữ hàng được nhả cho khách khác.",
           deposit ? `Tiền cọc đã thanh toán: ${deposit.toLocaleString("vi-VN")} ₫` : null,
@@ -1258,7 +1258,7 @@ function warrantyCustomerNotice(
         campaignId: `warranty-refund-due:${event.aggregateId}`,
         customerId,
         content: [
-          "✅ YÊU CẦU BẢO HÀNH ĐÃ ĐƯỢC DUYỆT",
+          "✅ Yêu cầu bảo hành đã được duyệt",
           "",
           amount ? `Tiền hoàn: ${amount.toLocaleString("vi-VN")} ₫` : null,
           "Trạng thái: ⏳ Chờ shop chuyển tiền",
@@ -1273,7 +1273,7 @@ function warrantyCustomerNotice(
         campaignId: `warranty-refund-paid:${event.aggregateId}`,
         customerId,
         content: [
-          "💸 HOÀN TIỀN ĐÃ ĐƯỢC XỬ LÝ",
+          "💸 Hoàn tiền đã được xử lý",
           "",
           amount ? `Số tiền: ${amount.toLocaleString("vi-VN")} ₫` : null,
           "Trạng thái: ✅ Shop đã xác nhận chuyển khoản",

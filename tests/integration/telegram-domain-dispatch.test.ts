@@ -688,7 +688,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const sent = send.mock.calls[0]![0] as {
       message: { text: string; buttons: Array<Array<{ text: string }>> };
     };
-    expect(sent.message.text).toContain("QUẢN TRỊ");
+    expect(sent.message.text).toContain("Quản trị");
     const labels = sent.message.buttons.flat().map((button) => button.text);
     expect(labels).toEqual(expect.arrayContaining(["📦 Sản phẩm", "📥 Kho hàng", "🧾 Đơn hàng"]));
     expect(labels).not.toEqual(expect.arrayContaining(["Dashboard", "Products", "Inventory"]));
@@ -2219,7 +2219,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     });
 
     expect(send).toHaveBeenCalledTimes(1);
-    expect(send.mock.calls[0]![0].message.text).toContain("CHÍNH SÁCH BẢO HÀNH & HỖ TRỢ");
+    expect(send.mock.calls[0]![0].message.text).toContain("Chính sách bảo hành & hỗ trợ");
   });
 
   it("routes preorder:consent:<variantId> to preorder.consent", async () => {

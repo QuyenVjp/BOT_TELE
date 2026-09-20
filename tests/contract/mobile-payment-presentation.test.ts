@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { formatVnd, makeVnd } from "../../src/shared/money/index.js";
 import {
   PAYMENT_COPY,
   QR_RENDER_TIMEOUT_MS,
@@ -7,11 +8,15 @@ import {
   buildMobilePaymentKeyboard,
   buildPaymentCaption,
   paymentCopyPayloads,
+  presentCheckoutPreview,
+  presentInsufficientBalance,
   presentPaymentCancelled,
   presentPaymentExpired,
   presentPaymentNeedsReview,
   presentPaymentScreen,
   presentPaymentSettled,
+  presentPreorderPaymentScreen,
+  presentWalletHistory,
 } from "../../src/bot/presenters/payment.js";
 import {
   TELEGRAM_COPY_TEXT_LIMIT,
@@ -222,7 +227,8 @@ describe("payment keyboard layout (K6)", () => {
       [PAYMENT_COPY.copyAccount, PAYMENT_COPY.copyContent],
       [PAYMENT_COPY.copyAmount, PAYMENT_COPY.copyOrder],
       [PAYMENT_COPY.refresh],
-      [PAYMENT_COPY.cancel, PAYMENT_COPY.mainMenu],
+      [PAYMENT_COPY.cancel],
+      [PAYMENT_COPY.mainMenu],
     ]);
     const flat = msg.buttons.flat();
     for (const button of flat.filter((candidate) => candidate.copyText)) {
@@ -245,7 +251,8 @@ describe("payment keyboard layout (K6)", () => {
       [PAYMENT_COPY.copyContent],
       [PAYMENT_COPY.copyAmount, PAYMENT_COPY.copyOrder],
       [PAYMENT_COPY.refresh],
-      [PAYMENT_COPY.cancel, PAYMENT_COPY.mainMenu],
+      [PAYMENT_COPY.cancel],
+      [PAYMENT_COPY.mainMenu],
     ]);
 
     const noOrderCode = buildMobilePaymentKeyboard({
@@ -258,7 +265,8 @@ describe("payment keyboard layout (K6)", () => {
       [PAYMENT_COPY.copyAccount, PAYMENT_COPY.copyContent],
       [PAYMENT_COPY.copyAmount],
       [PAYMENT_COPY.refresh],
-      [PAYMENT_COPY.cancel, PAYMENT_COPY.mainMenu],
+      [PAYMENT_COPY.cancel],
+      [PAYMENT_COPY.mainMenu],
     ]);
 
     const noCheck = buildMobilePaymentKeyboard({
@@ -270,7 +278,8 @@ describe("payment keyboard layout (K6)", () => {
     expect(noCheck.map((row) => row.map((button) => button.text))).toEqual([
       [PAYMENT_COPY.copyAccount, PAYMENT_COPY.copyContent],
       [PAYMENT_COPY.copyAmount, PAYMENT_COPY.copyOrder],
-      [PAYMENT_COPY.cancel, PAYMENT_COPY.mainMenu],
+      [PAYMENT_COPY.cancel],
+      [PAYMENT_COPY.mainMenu],
     ]);
   });
 });
@@ -516,7 +525,8 @@ describe("copy contract (owner §7)", () => {
     expect(keyboard.map((row) => row.map((button) => button.text))).toEqual([
       [PAYMENT_COPY.copyAmount, PAYMENT_COPY.copyOrder],
       [PAYMENT_COPY.refresh],
-      [PAYMENT_COPY.cancel, PAYMENT_COPY.mainMenu],
+      [PAYMENT_COPY.cancel],
+      [PAYMENT_COPY.mainMenu],
     ]);
   });
 
@@ -633,7 +643,8 @@ describe("fulfillment/override matrix", () => {
       [PAYMENT_COPY.copyAccount, PAYMENT_COPY.copyContent],
       [PAYMENT_COPY.copyAmount, PAYMENT_COPY.copyOrder],
       [PAYMENT_COPY.refresh],
-      [PAYMENT_COPY.cancel, PAYMENT_COPY.mainMenu],
+      [PAYMENT_COPY.cancel],
+      [PAYMENT_COPY.mainMenu],
     ]);
   });
 
@@ -664,5 +675,107 @@ describe("copy_text exactness", () => {
     );
     expect([...caption].length).toBeLessThanOrEqual(TELEGRAM_PHOTO_CAPTION_LIMIT);
     expect(caption.includes("\uFFFD")).toBe(false);
+  });
+});
+
+describe("customer payment auxiliary screens layout and copy", () => {
+  it("preorder payment pairs secondary actions in a compact row without shouting headings", async () => {
+    const screen = await presentPreorderPaymentScreen({
+      productName: "ChatGPT Plus",
+      variantName: "1 tháng",
+      leg: "DEPOSIT",
+      depositVnd: 50000n,
+      balanceVnd: 149000n,
+      presentation: PRESENTATION,
+      reservationId: "res-123",
+      qrRenderer: async () => Buffer.from("qr"),
+    });
+
+    expect(screen.text.split("\n")[0]).toBe("💰 Thanh toán tiền đặt cọc");
+    expect(screen.text.split("\n")[0]).not.toMatch(/[A-ZÀ-Ỹ]{4,}/);
+    expect(screen.buttons).toEqual([
+      [
+        {
+          text: PAYMENT_COPY.copyAccount,
+          callbackData: "",
+          copyText: PRESENTATION.accountNumber,
+          style: "primary",
+        },
+        {
+          text: PAYMENT_COPY.copyContent,
+          callbackData: "",
+          copyText: PRESENTATION.transferContent,
+          style: "primary",
+        },
+      ],
+      [
+        {
+          text: PAYMENT_COPY.copyAmount,
+          callbackData: "",
+          copyText: String(PRESENTATION.amountVnd),
+          style: "primary",
+        },
+        {
+          text: PAYMENT_COPY.copyOrder,
+          callbackData: "",
+          copyText: PRESENTATION.orderNumber,
+          style: "primary",
+        },
+      ],
+      [{ text: PAYMENT_COPY.refresh, callbackData: "preorder:pay:res-123", style: "success" }],
+      [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+      [
+        { text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" },
+        { text: PAYMENT_COPY.support, callbackData: "supp:open" },
+      ],
+    ]);
+  });
+
+  it("insufficient balance uses sentence case and full-width actions", () => {
+    const screen = presentInsufficientBalance({
+      balanceVnd: 50000n,
+      priceVnd: 199000n,
+      shortfallVnd: 149000n,
+      topUpCallbackData: "wallet:topup:149000",
+      qrCallbackData: "buy:vietqr:ord-1",
+      cancelCallbackData: "buy:cancel:ord-1",
+    });
+
+    expect(screen.text.split("\n")[0]).toBe("⚠️ Số dư ví không đủ");
+    expect(screen.buttons).toEqual([
+      [{ text: `⚡ Nạp thêm ${formatVnd(makeVnd(149000n))}`, callbackData: "wallet:topup:149000" }],
+      [{ text: "🏦 Thanh toán VietQR", callbackData: "buy:vietqr:ord-1" }],
+      [{ text: "❌ Huỷ", callbackData: "buy:cancel:ord-1" }],
+    ]);
+  });
+
+  it("wallet history uses sentence case heading", () => {
+    const screen = presentWalletHistory({
+      balanceVnd: 100000n,
+      entries: [],
+    });
+
+    expect(screen.text.split("\n")[0]).toBe("📜 Lịch sử ví");
+    expect(screen.buttons).toEqual([[{ text: "🏠 Trang chủ", callbackData: "shop:home" }]]);
+  });
+
+  it("checkout preview keeps payment methods and cancel full-width", () => {
+    const screen = presentCheckoutPreview({
+      productName: "Claude Pro",
+      variantName: "1 tháng",
+      priceVnd: 199000n,
+      deliveryLabel: "Tự động",
+      warrantyLabel: "30 ngày",
+      qrCallbackData: "buy:qr:tok1",
+      walletCallbackData: "buy:wallet:tok1",
+      cancelCallbackData: "buy:cancel:tok1",
+    });
+
+    expect(screen.text.split("\n")[0]).toBe("🛒 Xác nhận mua hàng");
+    expect(screen.buttons).toEqual([
+      [{ text: "🏦 VietQR", callbackData: "buy:qr:tok1" }],
+      [{ text: "👛 Ví TIER20", callbackData: "buy:wallet:tok1" }],
+      [{ text: "❌ Huỷ", callbackData: "buy:cancel:tok1" }],
+    ]);
   });
 });

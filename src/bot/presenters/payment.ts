@@ -22,7 +22,7 @@ import {
 
 export const PAYMENT_COPY = {
   title: "💳 Thanh toán đơn hàng",
-  previewTitle: "🛒 XÁC NHẬN ĐƠN HÀNG",
+  previewTitle: "🛒 Xác nhận mua hàng",
   amountLabel: "Số tiền",
   accountLabel: "Số tài khoản",
   contentLabel: "Nội dung CK",
@@ -94,8 +94,10 @@ function copyButton(text: string, value: string): InlineButton {
 
 function navButtons(orderNumber: string): InlineButton[][] {
   return [
-    [styledButton(PAYMENT_COPY.mainMenu, "menu:main")],
-    [styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`)],
+    [
+      styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`),
+      styledButton(PAYMENT_COPY.mainMenu, "menu:main"),
+    ],
   ];
 }
 
@@ -167,12 +169,10 @@ export function buildMobilePaymentKeyboard(input: {
   if (profile.showPaymentCheckButton && input.refreshCallbackData) {
     rows.push([styledButton(PAYMENT_COPY.refresh, input.refreshCallbackData, "success")]);
   }
-  const actionRow: InlineButton[] = [];
   if (profile.showCancelButton && input.cancelCallbackData) {
-    actionRow.push(styledButton(PAYMENT_COPY.cancel, input.cancelCallbackData, "danger"));
+    rows.push([styledButton(PAYMENT_COPY.cancel, input.cancelCallbackData, "danger")]);
   }
-  actionRow.push(styledButton(PAYMENT_COPY.mainMenu, "menu:main"));
-  rows.push(actionRow);
+  rows.push([styledButton(PAYMENT_COPY.mainMenu, "menu:main")]);
   if (input.extraRows) rows.push(...input.extraRows);
   return rows;
 }
@@ -400,7 +400,7 @@ export async function presentPreorderPaymentScreen(
   const lines =
     input.leg === "DEPOSIT"
       ? [
-          "💰 THANH TOÁN TIỀN ĐẶT CỌC",
+          "💰 Thanh toán tiền đặt cọc",
           "",
           `📦 Sản phẩm: ${input.productName} · ${input.variantName}`,
           `Tiền đặt cọc: ${amount}`,
@@ -414,7 +414,7 @@ export async function presentPreorderPaymentScreen(
           PAYMENT_COPY.noScreenshot,
         ]
       : [
-          "💰 THANH TOÁN PHẦN CÒN LẠI",
+          "💰 Thanh toán phần còn lại",
           "",
           `📦 Sản phẩm: ${input.productName} · ${input.variantName}`,
           `Còn phải trả: ${amount}`,
@@ -443,8 +443,10 @@ export async function presentPreorderPaymentScreen(
       profile,
       refreshCallbackData: `preorder:pay:${input.reservationId}`,
       extraRows: [
-        [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
-        [{ text: PAYMENT_COPY.support, callbackData: "supp:open" }],
+        [
+          { text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" },
+          { text: PAYMENT_COPY.support, callbackData: "supp:open" },
+        ],
       ],
     }),
   };
@@ -460,8 +462,10 @@ export function presentPaymentExpired(orderNumber: string): PresentedMessage {
     ),
     buttons: [
       [styledButton(PAYMENT_COPY.reopen, `pay:reopen:${orderNumber}`)],
-      [{ text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` }],
-      [styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`)],
+      [
+        { text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` },
+        styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`),
+      ],
     ],
   };
 }
@@ -496,8 +500,10 @@ export function presentPaymentNeedsReview(
       `Mã tham chiếu: ${correlationId}`,
     ].join("\n"),
     buttons: [
-      [styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`)],
-      [styledButton(PAYMENT_COPY.mainMenu, "menu:main")],
+      [
+        styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`),
+        styledButton(PAYMENT_COPY.mainMenu, "menu:main"),
+      ],
     ],
   };
 }
@@ -562,7 +568,7 @@ export function presentInsufficientBalance(input: {
 }): PresentedMessage {
   return {
     text: [
-      "⚠️ SỐ DƯ VÍ KHÔNG ĐỦ",
+      "⚠️ Số dư ví không đủ",
       "",
       `💰 Số dư: ${formatVnd(makeVnd(input.balanceVnd))}`,
       `🏷 Giá: ${formatVnd(makeVnd(input.priceVnd))}`,
@@ -611,7 +617,7 @@ export function presentWalletHistory(input: {
   balanceVnd: bigint;
   entries: readonly WalletHistoryEntry[];
 }): PresentedMessage {
-  const lines = ["📜 LỊCH SỬ VÍ", "", `Số dư: ${formatVnd(makeVnd(input.balanceVnd))}`];
+  const lines = ["📜 Lịch sử ví", "", `Số dư: ${formatVnd(makeVnd(input.balanceVnd))}`];
   if (input.entries.length === 0) {
     lines.push("", "Chưa có giao dịch nào.");
   } else {

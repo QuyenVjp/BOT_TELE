@@ -35,8 +35,10 @@ export const DELIVERY_COPY = {
 function nav(orderNumber: string): InlineButton[][] {
   return [
     [{ text: DELIVERY_COPY.viewOrder, callbackData: `ord:view:${orderNumber}` }],
-    [{ text: DELIVERY_COPY.mainMenu, callbackData: "menu:main" }],
-    [{ text: DELIVERY_COPY.support, callbackData: `sup:open:${orderNumber}` }],
+    [
+      { text: DELIVERY_COPY.support, callbackData: `sup:open:${orderNumber}` },
+      { text: DELIVERY_COPY.mainMenu, callbackData: "menu:main" },
+    ],
   ];
 }
 
@@ -81,7 +83,7 @@ export function presentDeliveryCompleted(
   options?: DeliveryCompletedOptions,
 ): PresentedMessage {
   const lines = [
-    "✅ GIAO HÀNG THÀNH CÔNG",
+    "✅ Giao hàng thành công",
     "",
     options?.productName ?? "Sản phẩm",
     `Đơn: ${orderNumber}`,
@@ -97,8 +99,10 @@ export function presentDeliveryCompleted(
     text: lines.join("\n"),
     buttons: [
       [{ text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` }],
-      [{ text: "🛡 Bảo hành", callbackData: "cust:warranty" }],
-      [{ text: "💬 Hỗ trợ", callbackData: `sup:open:${orderNumber}` }],
+      [
+        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+        { text: "💬 Hỗ trợ", callbackData: `sup:open:${orderNumber}` },
+      ],
     ],
   };
 }
@@ -129,7 +133,7 @@ export function presentDeliveryReveal(input: {
   warrantyVi: string | null;
 }): PresentedMessage {
   const lines = [
-    "✅ GIAO HÀNG THÀNH CÔNG",
+    "✅ Giao hàng thành công",
     "",
     input.productName ?? "Sản phẩm",
     "",
@@ -142,8 +146,10 @@ export function presentDeliveryReveal(input: {
     text: lines.join("\n"),
     buttons: [
       [{ text: "🧾 Đơn hàng", callbackData: "ord:list" }],
-      [{ text: "🛡 Bảo hành", callbackData: "cust:warranty" }],
-      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+      [
+        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+      ],
     ],
   };
 }
@@ -161,8 +167,10 @@ export function presentDeliveryNeedsReview(
       `Mã tham chiếu: ${correlationId}`,
     ].join("\n"),
     buttons: [
-      [{ text: DELIVERY_COPY.support, callbackData: `sup:open:${orderNumber}` }],
-      [{ text: DELIVERY_COPY.mainMenu, callbackData: "menu:main" }],
+      [
+        { text: DELIVERY_COPY.support, callbackData: `sup:open:${orderNumber}` },
+        { text: DELIVERY_COPY.mainMenu, callbackData: "menu:main" },
+      ],
     ],
   };
 }

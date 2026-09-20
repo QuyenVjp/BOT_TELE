@@ -4,6 +4,9 @@ import {
   wizardValidationMessage,
   presentWizardDescriptionFieldPrompt,
   presentWizardDescriptionFields,
+  presentWizardDescriptionStep,
+  presentWizardCategoryStep,
+  presentWizardDeliveryStep,
   wizardDescriptionField,
 } from "../../src/bot/presenters/admin-wizard.js";
 import type { ProductDraft } from "../../src/modules/catalog/product-draft.js";
@@ -73,11 +76,50 @@ describe("wizard description field editor", () => {
     );
 
     const unknown = presentWizardDescriptionFieldPrompt("not_a_field");
-    expect(unknown.text).toContain("NỘI DUNG");
+    expect(unknown.text).toContain("Nội dung");
     expect(wizardDescriptionField("not_a_field")).toBeUndefined();
   });
 });
 
+describe("wizard step presentations and 2D row shape", () => {
+  it("renders sentence-case step title and pairs manual input choices in 2D rows", () => {
+    const msg = presentWizardDescriptionStep("STOCK_ACCOUNT");
+    expect(msg.text).toContain("Bước 5/8 — 📝 Mô tả & hướng dẫn");
+    // Row 0: template option
+    expect(msg.buttons[0]).toEqual([
+      { text: "✨ Dùng mẫu mô tả", callbackData: "admin:products:desc:template" },
+    ]);
+    // Row 1: paired manual input choices
+    expect(msg.buttons[1]).toEqual([
+      { text: "✏️ Tự nhập", callbackData: "admin:products:desc:custom" },
+      { text: "🧩 Nhập từng mục", callbackData: "admin:products:desc:fields" },
+    ]);
+    // Destructive cancel is separate from back
+    const cancelRow = msg.buttons.find((r) =>
+      r.some((b) => b.callbackData === "admin:products:cancel"),
+    );
+    expect(cancelRow).toHaveLength(1);
+  });
+
+  it("renders sentence-case category step title", () => {
+    const msg = presentWizardCategoryStep([{ id: "c1", name: "AI" }]);
+    expect(msg.text).toContain("Bước 3/8 — 📂 Chọn danh mục");
+  });
+
+  it("pairs custom and advanced field actions in delivery step", () => {
+    const msg = presentWizardDeliveryStep(
+      draft({ fulfillmentType: "STOCK_ACCOUNT", inventoryFields: [] }),
+    );
+    expect(msg.text).toContain("Bước 7/8 — 📦 Cách giao hàng / cấu trúc kho");
+    const configRow = msg.buttons.find((r) =>
+      r.some((b) => b.callbackData === "admin:products:dc:custom"),
+    );
+    expect(configRow).toEqual([
+      { text: "➕ Trường tùy chỉnh", callbackData: "admin:products:dc:custom" },
+      { text: "⚙️ Trường nâng cao", callbackData: "admin:products:dc:advanced" },
+    ]);
+  });
+});
 describe("wizard validation messages name the field (goal §131)", () => {
   it("never returns a bare invalid-data sentence", () => {
     // Every code the draft machine can return, against a representative step.

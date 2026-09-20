@@ -15,7 +15,7 @@ import type { Order, OrderStatus } from "../../modules/commerce/order.js";
  */
 
 export const HISTORY_COPY = {
-  title: "🧾 ĐƠN HÀNG CỦA TÔI",
+  title: "🧾 Đơn hàng của tôi",
   empty: "Bạn chưa có đơn hàng nào.",
   more: "Xem thêm",
   back: "⬅️ Quay lại",
@@ -110,9 +110,13 @@ export function presentOrderHistory(page: OrderHistoryPage): PresentedMessage {
   }
 
   if (page.nextCursor) {
-    buttons.push([{ text: HISTORY_COPY.more, callbackData: `ord:list:${page.nextCursor}` }]);
+    buttons.push([
+      { text: HISTORY_COPY.more, callbackData: `ord:list:${page.nextCursor}` },
+      { text: HISTORY_COPY.mainMenu, callbackData: "menu:main" },
+    ]);
+  } else {
+    buttons.push([{ text: HISTORY_COPY.mainMenu, callbackData: "menu:main" }]);
   }
-  buttons.push([{ text: HISTORY_COPY.mainMenu, callbackData: "menu:main" }]);
 
   return { text: lines.join("\n"), buttons };
 }
@@ -181,8 +185,10 @@ export function presentOrderDetail(
           ],
         ]
       : []),
-    [{ text: HISTORY_COPY.support, callbackData: `sup:open:${order.orderNumber}` }],
-    [{ text: HISTORY_COPY.back, callbackData: "ord:list" }],
+    [
+      { text: HISTORY_COPY.support, callbackData: `sup:open:${order.orderNumber}` },
+      { text: HISTORY_COPY.back, callbackData: "ord:list" },
+    ],
   ];
 
   return { text, buttons };

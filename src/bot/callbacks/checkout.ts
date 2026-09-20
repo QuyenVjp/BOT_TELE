@@ -253,8 +253,10 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       "Vui lòng mở lại sản phẩm để xem giá mới trước khi thanh toán. Bạn chưa bị trừ tiền.",
     ].join("\n"),
     buttons: [
-      [{ text: "🔄 Mở lại sản phẩm", callbackData: cancelCallbackData }],
-      [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+      [
+        { text: "🔄 Mở lại sản phẩm", callbackData: cancelCallbackData },
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+      ],
     ],
   });
 
@@ -293,8 +295,10 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       return {
         text: `✅ Đơn hàng đã hoàn tất.\n\nĐơn: ${order.orderNumber}`,
         buttons: [
-          [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
-          [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+          [
+            { text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` },
+            { text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" },
+          ],
         ],
       };
     }
@@ -307,8 +311,10 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
           ? `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang chờ nhân viên xử lý thủ công. Shop sẽ thông báo qua tin nhắn khi hoàn tất.`
           : `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`,
         buttons: [
-          [{ text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` }],
-          [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
+          [
+            { text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` },
+            { text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" },
+          ],
         ],
       };
     }

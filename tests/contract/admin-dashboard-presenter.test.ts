@@ -52,7 +52,7 @@ describe("admin operational presenters", () => {
     ]);
 
     const menu = presentAdminMenu();
-    expect(menu.text).toContain("⚙️ TIER20 SHOP — QUẢN TRỊ");
+    expect(menu.text).toContain("⚙️ TIER20 SHOP — Quản trị");
     const labels = menu.buttons.flat().map((button) => button.text);
     expect(labels).toEqual(
       expect.arrayContaining([
@@ -543,10 +543,9 @@ describe("admin operational presenters", () => {
     expect(message.text).not.toMatch(/password|credential|token|vault:/i);
   });
 
-  it("renders all product fulfillment type choices as selectable callbacks", () => {
-    const callbacks = presentProductFulfillmentTypeChoices()
-      .buttons.flat()
-      .map((button) => button.callbackData);
+  it("renders fulfillment choices with separate navigation and cancel rows", () => {
+    const message = presentProductFulfillmentTypeChoices();
+    const callbacks = message.buttons.flat().map((button) => button.callbackData);
 
     expect(callbacks).toEqual(
       expect.arrayContaining([
@@ -559,6 +558,13 @@ describe("admin operational presenters", () => {
         "admin:products:type:SUPPLIER_API",
       ]),
     );
+    expect(message.buttons.every((row) => row.length <= 2)).toBe(true);
+    expect(message.buttons.at(-2)).toEqual([
+      { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
+    ]);
+    expect(message.buttons.at(-1)).toEqual([
+      { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
+    ]);
   });
 
   it("uses type-specific inventory actions for non-secret stock variants", () => {
@@ -795,5 +801,105 @@ describe("admin operational presenters", () => {
       const labels = screen.buttons.flat().map((button) => button.text);
       expect(new Set(labels).size).toBe(labels.length);
     }
+  });
+
+  it("enforces 2D row contract on root admin menu (at most 2 buttons per row and paired bottom row)", () => {
+    const menu = presentAdminMenu();
+    for (const row of menu.buttons) {
+      expect(row.length).toBeLessThanOrEqual(2);
+    }
+    const bottomRow = menu.buttons.at(-1);
+    expect(bottomRow).toEqual([
+      { text: "⚙️ Cài đặt", callbackData: "admin:store:mode" },
+      { text: "🛒 Về Shop", callbackData: "shop:home" },
+    ]);
+  });
+
+  it("enforces 2D row contract on operations presenter (paired navigation rows)", () => {
+    const message = presentAdminOperations({
+      control: {
+        id: "main",
+        status: "CLOSED",
+        version: 1,
+        updatedAt: "2026-09-11",
+        updatedBy: "root",
+        lastRequestId: null,
+      },
+      database: "ok",
+      publicationBlocked: 0,
+      openDiscrepancies: 0,
+      resolvedDiscrepancies: 0,
+      terminalOutboxOrphans: 0,
+      terminalOutboxOrphansDisposed: 0,
+      openSupportTickets: 0,
+      criticalSupportTickets: 0,
+      stockAccountNotReady: 0,
+    });
+    expect(message.text).toContain("🛠 Vận hành / Readiness");
+    for (const row of message.buttons) {
+      expect(row.length).toBeLessThanOrEqual(2);
+    }
+    expect(message.buttons[0]).toEqual([
+      { text: "💳 Thanh toán / sai lệch", callbackData: "admin:payments" },
+      { text: "🛍 Readiness sản phẩm", callbackData: "admin:products" },
+    ]);
+    expect(message.buttons[1]).toEqual([
+      { text: "🏪 Store control", callbackData: "admin:store:mode" },
+      { text: "💬 Ticket hỗ trợ", callbackData: "admin:support" },
+    ]);
+    expect(message.buttons[2]).toEqual([
+      { text: "↩️ Quay lại", callbackData: "admin:menu" },
+      { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
+    ]);
+  });
+
+  it("enforces 2D row contract on product draft preview (submit/cancel full-width, secondary paired)", () => {
+    const preview = presentProductDraftPreview({
+      sku: "SKU-DRAFT",
+      variantName: "1 tháng",
+      priceVnd: 100000n,
+      fulfillmentType: "STOCK_ACCOUNT",
+      inventoryFields: [],
+    });
+    expect(preview.text).toContain("📋 Xem trước sản phẩm");
+    // Row 0: Full-width submit action
+    expect(preview.buttons[0]).toHaveLength(1);
+    expect(preview.buttons[0]![0]).toMatchObject({ callbackData: "admin:products:confirm" });
+    // Row 1: Paired secondary actions (Edit + Draft)
+    expect(preview.buttons[1]).toEqual([
+      { text: "✏️ Chỉnh sửa", callbackData: "admin:products:back" },
+      { text: "💾 Lưu nháp", callbackData: "admin:products:draft" },
+    ]);
+    // Row 2: Full-width destructive action (Cancel)
+    expect(preview.buttons[2]).toEqual([{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }]);
+  });
+
+  it("enforces 2D row contract on product detail actions and navigation", () => {
+    const detail = presentAdminProductDetail({
+      id: "prod-01",
+      name: "ChatGPT Plus",
+      slug: "chatgpt-plus",
+      categoryName: "AI",
+      description: null,
+      active: true,
+      variantCount: 0,
+      minPriceVnd: 200000n,
+      variants: [],
+    });
+    // Action row 0: Readiness + Sửa nội dung
+    expect(detail.buttons[0]).toEqual([
+      { text: "🚀 Readiness xuất bản", callbackData: "admin:products:ready:prod-01" },
+      { text: "✏️ Sửa nội dung", callbackData: "admin:products:content:prod-01" },
+    ]);
+    // Action row 1: Ghim nổi bật + Thêm biến thể
+    expect(detail.buttons[1]).toEqual([
+      { text: "⭐ Ghim nổi bật", callbackData: "admin:products:feature:prod-01" },
+      { text: "➕ Thêm biến thể", callbackData: "admin:products:variant-add:prod-01" },
+    ]);
+    // Bottom navigation: paired adminNav
+    expect(detail.buttons.at(-1)).toEqual([
+      { text: "↩️ Quay lại", callbackData: "admin:products" },
+      { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
+    ]);
   });
 });

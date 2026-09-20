@@ -117,7 +117,7 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   const buttons: InlineButton[][] = [];
   const featured = options.featuredProducts ?? [];
   if (featured.length) {
-    lines.push("", "🔥 SẢN PHẨM NỔI BẬT");
+    lines.push("", "🔥 Sản phẩm nổi bật");
     for (const product of featured.slice(0, 3)) {
       buttons.push([{ text: `🔥 ${product.name_vi}`, callbackData: `shop:product:${product.id}` }]);
     }
@@ -133,8 +133,10 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   }
   buttons.push(
     [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
-    [{ text: COMMUNITY_BUTTON_LABEL, url: COMMUNITY_URL, callbackData: "" }],
-    [{ text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" }],
+    [
+      { text: COMMUNITY_BUTTON_LABEL, url: COMMUNITY_URL, callbackData: "" },
+      { text: "👨‍💻 Liên hệ Admin", url: ADMIN_CONTACT_URL, callbackData: "" },
+    ],
   );
   if (options.isRootAdmin) buttons.push([{ text: "🛠 Quản trị", callbackData: "admin:menu" }]);
   return {
@@ -147,13 +149,15 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
 export function presentCustomerWarranty(summary?: string): PresentedMessage {
   return {
     text: [
-      "🛡 CHÍNH SÁCH BẢO HÀNH & HỖ TRỢ",
+      "🛡 Chính sách bảo hành & hỗ trợ",
       "",
       summary ?? "Vui lòng liên hệ để được hỗ trợ.",
     ].join("\n"),
     buttons: [
-      [{ text: "💬 Nhắn tin hỗ trợ", callbackData: "supp:open" }],
-      [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
+      [
+        { text: "💬 Nhắn tin hỗ trợ", callbackData: "supp:open" },
+        { text: "🛒 Về trang chủ", callbackData: "shop:home" },
+      ],
     ],
   };
 }
@@ -163,7 +167,7 @@ export function presentCustomerNotificationPreferences(prefs: {
 }): PresentedMessage {
   return {
     text: [
-      "CÀI ĐẶT THÔNG BÁO",
+      "Cài đặt thông báo",
       "",
       `Cập nhật sản phẩm: ${prefs.marketing ? "Bật" : "Tắt"}`,
       `Thông tin đơn hàng: ${prefs.socialProof ? "Bật" : "Tắt"}`,
@@ -212,7 +216,7 @@ const PREORDER_STATUS_LINE: Record<PreorderStatus, string> = {
 export function presentCustomerPreorders(
   preorders: readonly CustomerPreorderSummary[],
 ): PresentedMessage {
-  const lines = ["💰 ĐẶT CỌC CỦA TÔI", ""];
+  const lines = ["💰 Đặt cọc của tôi", ""];
   const buttons: InlineButton[][] = [];
   if (preorders.length === 0) {
     lines.push("Bạn chưa có suất đặt cọc nào.");
@@ -255,8 +259,10 @@ export function presentCustomerPreorders(
     }
     lines.push("");
   }
-  buttons.push([{ text: CUSTOMER_COPY.browse, callbackData: "shop:home" }]);
-  buttons.push([{ text: CUSTOMER_COPY.support, callbackData: "supp:open" }]);
+  buttons.push([
+    { text: CUSTOMER_COPY.browse, callbackData: "shop:home" },
+    { text: CUSTOMER_COPY.support, callbackData: "supp:open" },
+  ]);
   return { text: lines.join("\n").trimEnd(), buttons };
 }
 
@@ -273,7 +279,7 @@ export function presentCustomerAccount(input: {
 }): PresentedMessage {
   return {
     text: [
-      "👤 TÀI KHOẢN KHÁCH HÀNG",
+      "👤 Tài khoản khách hàng",
       "",
       `👋 ${input.displayName}`,
       `💰 Số dư ví: ${formatVnd(makeVnd(input.balanceVnd))}`,
@@ -281,12 +287,18 @@ export function presentCustomerAccount(input: {
       `🔔 Thông báo: Cập nhật sản phẩm ${input.shopUpdates ? "Bật" : "Tắt"} · Hoạt động mua hàng ${input.purchaseActivity ? "Bật" : "Tắt"}`,
     ].join("\n"),
     buttons: [
-      [{ text: "🧾 Đơn hàng của tôi", callbackData: "ord:list" }],
-      [{ text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" }],
-      [{ text: "💰 Nạp ví", callbackData: "wallet:topup" }],
-      [{ text: "🔔 Cài đặt thông báo", callbackData: "cust:notify" }],
-      [{ text: "🛡 Bảo hành", callbackData: "cust:warranty" }],
-      [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
+      [
+        { text: "🧾 Đơn hàng", callbackData: "ord:list" },
+        { text: "📌 Đặt cọc", callbackData: "cust:preorders" },
+      ],
+      [
+        { text: "💰 Nạp ví", callbackData: "wallet:topup" },
+        { text: "🔔 Thông báo", callbackData: "cust:notify" },
+      ],
+      [
+        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+        { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+      ],
       [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
     ],
   };
@@ -300,7 +312,7 @@ export function presentCustomerAccount(input: {
 export function presentCustomerWarrantyHome(
   orders: ReadonlyArray<{ orderNumber: string; productNameVi: string }>,
 ): PresentedMessage {
-  const lines = ["🛡 BẢO HÀNH", ""];
+  const lines = ["🛡 Bảo hành", ""];
   const buttons: InlineButton[][] = [];
   if (orders.length === 0) {
     lines.push("Bạn chưa có đơn hàng nào đã hoàn tất để bảo hành.");
@@ -332,7 +344,7 @@ export function presentPurchaseThankYou(input: {
 }): PresentedMessage {
   return {
     text: [
-      "🎉 CẢM ƠN BẠN ĐÃ MUA HÀNG!",
+      "🎉 Cảm ơn bạn đã mua hàng!",
       "",
       `Sản phẩm: ${input.productName} · Đơn: ${input.orderNumber}`,
       "✅ Đơn đã hoàn tất.",
@@ -341,6 +353,8 @@ export function presentPurchaseThankYou(input: {
       [
         { text: "🧾 Xem đơn", callbackData: `ord:view:${input.orderNumber}` },
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+      ],
+      [
         { text: "🛒 Mua thêm", callbackData: "shop:home" },
         { text: "💬 Hỗ trợ", callbackData: `sup:open:${input.orderNumber}` },
       ],

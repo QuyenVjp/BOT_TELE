@@ -92,7 +92,7 @@ export function presentAdminWarrantyQueue(input: {
   const views = Object.keys(VIEW_LABELS) as WarrantyQueueView[];
   return {
     text: [
-      "🛡 BẢO HÀNH / HỖ TRỢ",
+      "🛡 Bảo hành / Hỗ trợ",
       "",
       views
         .filter((view) => view !== input.view)
@@ -117,12 +117,18 @@ export function presentAdminWarrantyQueue(input: {
           callbackData: `admin:warranty:claim:${row.claimId}`,
         },
       ]),
-      ...views.map((view) => [
-        {
+      ...views.reduce<InlineButton[][]>((rowsAcc, view, idx) => {
+        const button = {
           text: `${VIEW_LABELS[view]} (${input.counts[view] ?? 0})`,
           callbackData: `admin:warranty:view:${view}`,
-        },
-      ]),
+        };
+        if (idx % 2 === 0) {
+          rowsAcc.push([button]);
+        } else {
+          rowsAcc.at(-1)?.push(button);
+        }
+        return rowsAcc;
+      }, []),
       [
         { text: "💰 Hàng chờ chi", callbackData: "admin:warranty:refunds" },
         { text: "🏠 Quản trị", callbackData: "admin:menu" },
@@ -198,7 +204,7 @@ export function presentAdminWarrantyClaim(claim: AdminClaimView): PresentedMessa
   }
   return {
     text: [
-      `🛡 YÊU CẦU ${claim.claimNumber}`,
+      `🛡 Yêu cầu ${claim.claimNumber}`,
       `Trạng thái: ${claim.statusLabel}`,
       "",
       `Khách: ${claim.customerLabel}`,
@@ -237,8 +243,10 @@ export function presentAdminWarrantyClaim(claim: AdminClaimView): PresentedMessa
     ].join("\n"),
     buttons: [
       ...actions,
-      [{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }],
-      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+      [
+        { text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
     ],
   };
 }
@@ -256,7 +264,7 @@ export function presentAdminRefundConfirm(input: {
 }): PresentedMessage {
   return {
     text: [
-      "💸 XÁC NHẬN HOÀN TIỀN",
+      "💸 Xác nhận hoàn tiền",
       "",
       `Mã: ${input.claimNumber}`,
       `Giá trị đơn: ${vnd(input.paidAmountVnd)}`,
@@ -276,8 +284,10 @@ export function presentAdminRefundConfirm(input: {
           callbackData: `admin:warranty:refund-confirm:${input.claimId}`,
         },
       ],
-      [{ text: "✏️ Điều chỉnh", callbackData: `admin:warranty:refund-adjust:${input.claimId}` }],
-      [{ text: "⬅️ Quay lại", callbackData: `admin:warranty:claim:${input.claimId}` }],
+      [
+        { text: "✏️ Điều chỉnh", callbackData: `admin:warranty:refund-adjust:${input.claimId}` },
+        { text: "⬅️ Quay lại", callbackData: `admin:warranty:claim:${input.claimId}` },
+      ],
     ],
   };
 }
@@ -288,7 +298,7 @@ export function presentAdminRefundAdjustPrompt(input: {
 }): PresentedMessage {
   return {
     text: [
-      "✏️ ĐIỀU CHỈNH SỐ TIỀN HOÀN",
+      "✏️ Điều chỉnh số tiền hoàn",
       "",
       `Hệ thống đề xuất: ${vnd(input.recommendedVnd)}`,
       "",
@@ -315,7 +325,7 @@ export function presentAdminRefundPayout(input: {
 }): PresentedMessage {
   return {
     text: [
-      `💸 HOÀN TIỀN ${input.claimNumber}`,
+      `💸 Hoàn tiền ${input.claimNumber}`,
       "",
       `Khách: ${input.customerLabel}`,
       `Sản phẩm: ${input.productName}`,
@@ -337,10 +347,20 @@ export function presentAdminRefundPayout(input: {
                 text: "📋 Copy số tài khoản",
                 callbackData: `admin:warranty:copy:acct:${input.claimId}`,
               },
+              {
+                text: "📋 Copy số tiền",
+                callbackData: `admin:warranty:copy:amount:${input.claimId}`,
+              },
             ],
           ]
-        : []),
-      [{ text: "📋 Copy số tiền", callbackData: `admin:warranty:copy:amount:${input.claimId}` }],
+        : [
+            [
+              {
+                text: "📋 Copy số tiền",
+                callbackData: `admin:warranty:copy:amount:${input.claimId}`,
+              },
+            ],
+          ]),
       [{ text: "✅ Tôi đã chuyển tiền", callbackData: `admin:warranty:paid:${input.claimId}` }],
       [{ text: "⬅️ Quay lại", callbackData: `admin:warranty:claim:${input.claimId}` }],
     ],
@@ -355,7 +375,7 @@ export function presentAdminRefundPaidConfirm(input: {
 }): PresentedMessage {
   return {
     text: [
-      "⚠️ XÁC NHẬN ĐÃ CHUYỂN TIỀN",
+      "⚠️ Xác nhận đã chuyển tiền",
       "",
       `${input.claimNumber} · ${vnd(input.amountVnd)}`,
       "",
@@ -365,7 +385,7 @@ export function presentAdminRefundPaidConfirm(input: {
     buttons: [
       [
         {
-          text: "✅ XÁC NHẬN ĐÃ HOÀN",
+          text: "✅ Xác nhận đã hoàn",
           callbackData: `admin:warranty:paid-confirm:${input.claimId}`,
         },
       ],
@@ -378,7 +398,7 @@ export function presentAdminRefundPaidConfirm(input: {
 export function presentAdminRefundQueue(rows: WarrantyQueueRow[]): PresentedMessage {
   return {
     text: [
-      "💸 CHỜ HOÀN TIỀN",
+      "💸 Chờ hoàn tiền",
       "",
       `Cần chuyển: ${rows.length} yêu cầu`,
       ...(rows.length === 0
@@ -421,7 +441,7 @@ export function presentAdminWarrantyRejectReason(input: {
 }): PresentedMessage {
   return {
     text: [
-      "❌ TỪ CHỐI BẢO HÀNH",
+      "❌ Từ chối bảo hành",
       "",
       `Mã: ${input.claimNumber}`,
       "Chọn lý do — khách sẽ đọc đúng câu này.",
@@ -447,8 +467,10 @@ export function presentAdminWarrantyActionDone(input: {
     text: [`✅ ${input.message}`, "", `Mã: ${input.claimNumber}`].join("\n"),
     buttons: [
       [{ text: "🛡 Xem yêu cầu", callbackData: `admin:warranty:claim:${input.claimId}` }],
-      [{ text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" }],
-      [{ text: "🏠 Quản trị", callbackData: "admin:menu" }],
+      [
+        { text: "🛡 Danh sách bảo hành", callbackData: "admin:warranty" },
+        { text: "🏠 Quản trị", callbackData: "admin:menu" },
+      ],
     ],
   };
 }

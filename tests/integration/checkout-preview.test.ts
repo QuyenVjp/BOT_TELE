@@ -215,7 +215,7 @@ describe("checkout confirmation screen", () => {
 
     const message = await preview(previewToken());
 
-    expect(message.text).toContain("🛒 XÁC NHẬN ĐƠN HÀNG");
+    expect(message.text).toContain("🛒 Xác nhận mua hàng");
     expect(message.text).toContain("Claude Pro");
     expect(message.text).toContain("1 tháng");
     expect(message.text).toContain("199.000");
@@ -272,7 +272,7 @@ describe("wallet choice", () => {
 
     const message = await wallet(walletToken());
 
-    expect(message.text).toContain("SỐ DƯ VÍ KHÔNG ĐỦ");
+    expect(message.text).toContain("Số dư ví không đủ");
     expect(message.text).toContain("149.000");
     expect(message.text).toContain("Còn thiếu");
     // formatVnd separates the amount from ₫ with a non-breaking space.
@@ -295,6 +295,12 @@ describe("wallet choice", () => {
     const message = await wallet(walletToken(catalog.variantId, Number(catalog.price)));
 
     expect(message.text).toContain("Giá sản phẩm vừa thay đổi");
+    expect(message.buttons).toEqual([
+      [
+        { text: "🔄 Mở lại sản phẩm", callbackData: expect.any(String) },
+        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+      ],
+    ]);
     expect(await orderCount()).toBe(0);
     expect(payOrderWithWallet).not.toHaveBeenCalled();
   });

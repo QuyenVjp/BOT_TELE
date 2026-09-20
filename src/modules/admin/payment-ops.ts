@@ -38,12 +38,12 @@ export const ADMIN_PAYMENT_OPS_VIEWS: ReadonlyArray<{
 ];
 
 const TITLES: Record<AdminPaymentOpsView, string> = {
-  pending: "⏳ CHỜ THANH TOÁN",
-  late: "⌛ QUÁ HẠN",
-  paid: "✅ ĐÃ THANH TOÁN",
-  unmatched: "❓ TIỀN CHƯA KHỚP",
-  discrepancy: "⚠️ SAI LỆCH",
-  refund: "↩️ CẦN HOÀN TIỀN",
+  pending: "⏳ Chờ thanh toán",
+  late: "⌛ Quá hạn",
+  paid: "✅ Đã thanh toán",
+  unmatched: "❓ Tiền chưa khớp",
+  discrepancy: "⚠️ Sai lệch",
+  refund: "↩️ Cần hoàn tiền",
 };
 
 const EMPTY_HINTS: Record<AdminPaymentOpsView, string> = {

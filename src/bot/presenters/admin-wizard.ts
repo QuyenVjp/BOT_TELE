@@ -4,10 +4,8 @@ import { FULFILLMENT_TYPE_LABELS } from "../../modules/catalog/fulfillment-type.
 import type { ProductDraft } from "../../modules/catalog/product-draft.js";
 
 const BACK_CANCEL: InlineButton[][] = [
-  [
-    { text: "⬅️ Quay lại", callbackData: "admin:products:back" },
-    { text: "❌ Huỷ", callbackData: "admin:products:cancel" },
-  ],
+  [{ text: "⬅️ Quay lại", callbackData: "admin:products:back" }],
+  [{ text: "❌ Huỷ", callbackData: "admin:products:cancel" }],
 ];
 
 /** Bước 1/8 — Tên sản phẩm. */
@@ -39,7 +37,7 @@ export function presentWizardCategoryStep(
   categories: Array<{ id: string; name: string }>,
 ): PresentedMessage {
   return {
-    text: "Bước 3/8 — 📂 CHỌN DANH MỤC",
+    text: "Bước 3/8 — 📂 Chọn danh mục",
     buttons: [
       ...categories.map((c) => [{ text: c.name, callbackData: `admin:products:category:${c.id}` }]),
       [{ text: "➕ Tạo danh mục mới", callbackData: "admin:products:category:new" }],
@@ -64,18 +62,20 @@ export function presentFulfillmentTypeChoices(): PresentedMessage {
     { text, callbackData: `admin:products:type:${type}` },
   ]);
   buttons.push(...BACK_CANCEL);
-  return { text: "Bước 4/8 — 🧩 LOẠI SẢN PHẨM\n\nChọn cách cửa hàng giao sản phẩm này.", buttons };
+  return { text: "Bước 4/8 — 🧩 Loại sản phẩm\n\nChọn cách cửa hàng giao sản phẩm này.", buttons };
 }
 
 /** Bước 5/8 — Mô tả & hướng dẫn. */
 export function presentWizardDescriptionStep(type: FulfillmentType | undefined): PresentedMessage {
   const typeLabel = type ? FULFILLMENT_TYPE_LABELS[type] : "sản phẩm";
   return {
-    text: `Bước 5/8 — 📝 MÔ TẢ & HƯỚNG DẪN\n\nChọn "Dùng mẫu mô tả" để điền sẵn nội dung chuẩn cho loại ${typeLabel} (có thể chỉnh sau), hoặc "Tự nhập" để viết mô tả riêng.`,
+    text: `Bước 5/8 — 📝 Mô tả & hướng dẫn\n\nChọn "Dùng mẫu mô tả" để điền sẵn nội dung chuẩn cho loại ${typeLabel} (có thể chỉnh sau), hoặc "Tự nhập" để viết mô tả riêng.`,
     buttons: [
       [{ text: "✨ Dùng mẫu mô tả", callbackData: "admin:products:desc:template" }],
-      [{ text: "✏️ Tự nhập", callbackData: "admin:products:desc:custom" }],
-      [{ text: "🧩 Nhập từng mục", callbackData: "admin:products:desc:fields" }],
+      [
+        { text: "✏️ Tự nhập", callbackData: "admin:products:desc:custom" },
+        { text: "🧩 Nhập từng mục", callbackData: "admin:products:desc:fields" },
+      ],
       ...BACK_CANCEL,
     ],
   };
@@ -84,7 +84,7 @@ export function presentWizardDescriptionStep(type: FulfillmentType | undefined):
 /** Bước 5/8 (tự nhập) — hướng dẫn nhập mô tả. */
 export function presentWizardDescriptionCustomPrompt(): PresentedMessage {
   return {
-    text: "Bước 5/8 — ✏️ TỰ NHẬP MÔ TẢ\n\nGửi mô tả sản phẩm của bạn (một tin nhắn). Bạn có thể chỉnh sửa ở bước xem trước.",
+    text: "Bước 5/8 — ✏️ Tự nhập mô tả\n\nGửi mô tả sản phẩm của bạn (một tin nhắn). Bạn có thể chỉnh sửa ở bước xem trước.",
     buttons: BACK_CANCEL,
   };
 }
@@ -92,7 +92,7 @@ export function presentWizardDescriptionCustomPrompt(): PresentedMessage {
 /** Bước 6/8 — Giá / biến thể. */
 export function presentWizardVariantStep(draft?: ProductDraft): PresentedMessage {
   return {
-    text: `Bước 6/8 — 💰 GIÁ / BIẾN THỂ\n\nNhập tên biến thể và giá theo định dạng:\nTên biến thể | Giá\n\nVí dụ: 1 tháng | 250000${draft?.variantName && draft.priceVnd ? `\n\n(Hiện tại: ${draft.variantName} | ${draft.priceVnd.toLocaleString("vi-VN")} ₫)` : ""}`,
+    text: `Bước 6/8 — 💰 Giá / biến thể\n\nNhập tên biến thể và giá theo định dạng:\nTên biến thể | Giá\n\nVí dụ: 1 tháng | 250000${draft?.variantName && draft.priceVnd ? `\n\n(Hiện tại: ${draft.variantName} | ${draft.priceVnd.toLocaleString("vi-VN")} ₫)` : ""}`,
     buttons: BACK_CANCEL,
   };
 }
@@ -128,7 +128,7 @@ const DELIVERY_INTRO: Record<FulfillmentType, string> = {
 export function presentWizardDeliveryStep(draft: ProductDraft): PresentedMessage {
   const type = draft.fulfillmentType;
   if (!type) return { text: "Bước 7/8 — Chọn loại sản phẩm trước.", buttons: BACK_CANCEL };
-  const intro = `Bước 7/8 — 📦 CÁCH GIAO HÀNG / CẤU TRÚC KHO\n\n${DELIVERY_INTRO[type]}`;
+  const intro = `Bước 7/8 — 📦 Cách giao hàng / cấu trúc kho\n\n${DELIVERY_INTRO[type]}`;
 
   if (type === "QUANTITY_STOCK")
     return {
@@ -142,7 +142,7 @@ export function presentWizardDeliveryStep(draft: ProductDraft): PresentedMessage
     };
   if (type === "SUPPLIER_API")
     return {
-      text: `${intro}\n\n🔌 CẤU HÌNH NHÀ CUNG CẤP / ĐỐI TÁC\nNhập thông tin kết nối API theo định dạng:\nTên đối tác | Mã gói đối tác | Giá vốn | Khu vực\nVí dụ: NCC_A | PRO_1M | 50000 | VN\n\n(Lưu ý: Chỉ áp dụng với nhà cung cấp đã được kích hoạt trong hệ thống)`,
+      text: `${intro}\n\n🔌 Cấu hình nhà cung cấp / đối tác\nNhập thông tin kết nối API theo định dạng:\nTên đối tác | Mã gói đối tác | Giá vốn | Khu vực\nVí dụ: NCC_A | PRO_1M | 50000 | VN\n\n(Lưu ý: Chỉ áp dụng với nhà cung cấp đã được kích hoạt trong hệ thống)`,
       buttons: BACK_CANCEL,
     };
 
@@ -172,8 +172,10 @@ export function presentWizardDeliveryStep(draft: ProductDraft): PresentedMessage
     buttons: [
       ...toggleButtons,
       ...customFields,
-      [{ text: "➕ Trường tùy chỉnh", callbackData: "admin:products:dc:custom" }],
-      [{ text: "⚙️ Trường nâng cao", callbackData: "admin:products:dc:advanced" }],
+      [
+        { text: "➕ Trường tùy chỉnh", callbackData: "admin:products:dc:custom" },
+        { text: "⚙️ Trường nâng cao", callbackData: "admin:products:dc:advanced" },
+      ],
       [{ text: "✅ Tiếp tục", callbackData: "admin:products:dc:done" }],
       ...BACK_CANCEL,
     ],
@@ -189,7 +191,7 @@ export function presentWizardVisibilityStep(draft: ProductDraft): PresentedMessa
         ? "Bản nháp"
         : "Công khai";
   return {
-    text: `Bước 8/8 — ⚙️ CÀI ĐẶT HIỂN THỊ & BÁN HÀNG\n\nHiển thị: ${visibility}\nGhim nổi bật: ${draft.isFeatured ? "Có" : "Không"}\nBảo hành: ${draft.warrantyEnabled ? `${draft.warrantyDays ?? 0} ngày${draft.warrantyProrationEnabled === false ? " · không chia theo thời gian" : " · hoàn theo thời gian còn lại"}` : "Không"}\nĐặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}\nCảnh báo sắp hết: ${draft.lowStockThreshold ?? 3}`,
+    text: `Bước 8/8 — ⚙️ Cài đặt hiển thị & bán hàng\n\nHiển thị: ${visibility}\nGhim nổi bật: ${draft.isFeatured ? "Có" : "Không"}\nBảo hành: ${draft.warrantyEnabled ? `${draft.warrantyDays ?? 0} ngày${draft.warrantyProrationEnabled === false ? " · không chia theo thời gian" : " · hoàn theo thời gian còn lại"}` : "Không"}\nĐặt cọc khi hết hàng: ${draft.preorderEnabled ? "Bật" : "Tắt"}\nCảnh báo sắp hết: ${draft.lowStockThreshold ?? 3}`,
     buttons: [
       [
         {
@@ -290,7 +292,7 @@ export function presentWizardCustomFieldFlags(
     callbackData: `admin:products:dc:flag:${fieldName}:${key}`,
   });
   return {
-    text: `🧩 TRƯỜNG TÙY CHỈNH\n\nTên: ${fieldLabel}\nKhoá nội bộ: ${fieldName}`,
+    text: `🧩 Trường tùy chỉnh\n\nTên: ${fieldLabel}\nKhoá nội bộ: ${fieldName}`,
     buttons: [
       [flag("required", "Bắt buộc", flags.required)],
       [flag("secret", "Ẩn giá trị (bí mật)", flags.secret)],
@@ -304,19 +306,19 @@ export function presentWizardCustomFieldFlags(
 /** Prompts for sub-flows (state carried via admin_callback_state). */
 export function presentWizardCategoryCreatePrompt(): PresentedMessage {
   return {
-    text: "➕ TẠO DANH MỤC MỚI\n\nNhập tên danh mục (ví dụ: 🤖 AI / ChatGPT).",
+    text: "➕ Tạo danh mục mới\n\nNhập tên danh mục (ví dụ: 🤖 AI / ChatGPT).",
     buttons: BACK_CANCEL,
   };
 }
 export function presentWizardCustomFieldPrompt(): PresentedMessage {
   return {
-    text: '➕ TRƯỜNG TÙY CHỈNH\n\nTên trường (khách hoặc bạn sẽ thấy):\nVí dụ: "Ngày hết hạn"',
+    text: '➕ Trường tùy chỉnh\n\nTên trường (khách hoặc bạn sẽ thấy):\nVí dụ: "Ngày hết hạn"',
     buttons: BACK_CANCEL,
   };
 }
 export function presentWizardAdvancedPrompt(): PresentedMessage {
   return {
-    text: "⚙️ TRƯỜNG NÂNG CAO\n\nNhập danh sách tên trường, phân tách bởi dấu phẩy.\nVí dụ: Email, Mật khẩu, Ngày hết hạn\n\n(Khuyến nghị dùng nút bấm ở màn hình trước.)",
+    text: "⚙️ Trường nâng cao\n\nNhập danh sách tên trường, phân tách bởi dấu phẩy.\nVí dụ: Email, Mật khẩu, Ngày hết hạn\n\n(Khuyến nghị dùng nút bấm ở màn hình trước.)",
     buttons: BACK_CANCEL,
   };
 }
@@ -375,7 +377,7 @@ export function presentWizardDescriptionFields(draft?: ProductDraft): PresentedM
   const remaining = WIZARD_DESCRIPTION_FIELDS.filter((field) => !filled(field.key)).length;
   return {
     text: [
-      "Bước 5/8 — 🧩 NỘI DUNG SẢN PHẨM",
+      "Bước 5/8 — 🧩 Nội dung sản phẩm",
       "",
       "Chọn từng mục để nhập riêng. Mục đã có nội dung được đánh dấu ✅.",
       remaining === 0 ? "Đã đủ nội dung." : `Còn ${remaining} mục chưa nhập (không bắt buộc).`,
@@ -401,7 +403,7 @@ export function presentWizardDescriptionFieldPrompt(
   const field = wizardDescriptionField(key);
   return {
     text: [
-      `Bước 5/8 — ${field ? field.label : "NỘI DUNG"}`,
+      `Bước 5/8 — ${field ? field.label : "Nội dung"}`,
       "",
       field ? field.prompt : "Nhập nội dung.",
       current && current.trim() ? `\n(Hiện tại: ${current.trim().slice(0, 200)})` : "",

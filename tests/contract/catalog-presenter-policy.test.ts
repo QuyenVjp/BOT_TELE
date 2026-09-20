@@ -124,10 +124,14 @@ describe("catalog presenter stock-policy guard", () => {
 
     expect(message.buttons).toEqual([
       [{ text: "🛒 Mua ngay", callbackData: "buy:signed-callback" }],
-      [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
-      [expect.objectContaining({ text: "👨‍💻 Liên hệ Admin" })],
-      [{ text: "⬅️ Quay lại", callbackData: "cat:view:cat-1" }],
-      [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+      [
+        { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+        expect.objectContaining({ text: "👨‍💻 Liên hệ Admin" }),
+      ],
+      [
+        { text: "⬅️ Quay lại", callbackData: "cat:view:cat-1" },
+        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+      ],
     ]);
   });
 });
@@ -160,7 +164,7 @@ describe("catalog product detail copy", () => {
       [sellable.id]: "buy:signed-callback",
     });
 
-    for (const heading of ["📝 MÔ TẢ", "📦 BẠN NHẬN ĐƯỢC", "📘 HƯỚNG DẪN", "🛡 BẢO HÀNH"]) {
+    for (const heading of ["📝 Mô tả", "📦 Bạn nhận được", "📘 Hướng dẫn", "🛡 Bảo hành"]) {
       expect(message.text).toContain(heading);
     }
     expect(message.text).toContain("💰 Giá từ: ");
@@ -172,9 +176,14 @@ describe("catalog product detail copy", () => {
     expect(
       message.buttons.flat().find((button) => button.callbackData === "buy:signed-callback")?.text,
     ).toMatch(/^Gói 1 tháng · 100\.000\s₫$/u);
-    expect(message.buttons).toContainEqual([{ text: "💬 Hỗ trợ", callbackData: "supp:open" }]);
-    expect(message.buttons).toContainEqual([{ text: "⬅️ Claude", callbackData: "cat:view:cat-1" }]);
-    expect(message.buttons).toContainEqual([{ text: "🏠 Trang chủ", callbackData: "shop:home" }]);
+    expect(message.buttons).toContainEqual([
+      { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+      expect.objectContaining({ text: "👨‍💻 Liên hệ Admin" }),
+    ]);
+    expect(message.buttons).toContainEqual([
+      { text: "⬅️ Claude", callbackData: "cat:view:cat-1" },
+      { text: "🏠 Trang chủ", callbackData: "shop:home" },
+    ]);
   });
 
   it("keeps restock and, when enabled, a deposit hold on an out-of-stock variant", () => {
@@ -190,17 +199,15 @@ describe("catalog product detail copy", () => {
 });
 
 describe("catalog search empty state", () => {
-  it("renders the exact empty copy with retry and home only", () => {
+  it("renders the exact empty copy with retry and home in one compact row", () => {
     const message = presentSearchResults([], null);
 
     expect(message.text).toBe("Không tìm thấy sản phẩm phù hợp.");
-    expect(message.buttons.flat().map((button) => button.text)).toEqual([
-      "🔎 Tìm lại",
-      "🏠 Trang chủ",
-    ]);
-    expect(message.buttons.flat().map((button) => button.callbackData)).toEqual([
-      "cat:search",
-      "menu:main",
+    expect(message.buttons).toEqual([
+      [
+        { text: "🔎 Tìm lại", callbackData: "cat:search" },
+        { text: "🏠 Trang chủ", callbackData: "menu:main" },
+      ],
     ]);
   });
 });

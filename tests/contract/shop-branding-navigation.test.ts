@@ -38,7 +38,7 @@ describe("customer branding presenters", () => {
 
   it("renders the support screen with admin and community URL buttons", () => {
     const support = presentSupportReasonMenu();
-    expect(support.text).toContain(`💬 HỖ TRỢ ${SHOP_NAME}`);
+    expect(support.text).toContain(`💬 Hỗ trợ ${SHOP_NAME}`);
     expect(support.text).toContain("chủ đề");
     expect(support.buttons.flat().find((b) => b.text.includes("Nhắn Admin"))?.url).toBe(
       ADMIN_CONTACT_URL,
@@ -311,7 +311,7 @@ describe("bot-only catalog navigation", () => {
       callbackQueryId: "cq-search",
     });
     const message = send.mock.calls[0]?.[0]?.message as { text: string };
-    expect(message.text).toContain("TÌM SẢN PHẨM");
+    expect(message.text).toContain("Tìm sản phẩm");
     expect(message.text).not.toContain("Danh sách sản phẩm");
   });
 
