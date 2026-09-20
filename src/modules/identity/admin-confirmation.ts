@@ -34,6 +34,7 @@ export const DURABLE_ADMIN_COMMAND_REFS = [
   "wallet.refund",
   "manual_fulfillment.complete",
   "support.replacement.approve",
+  "inventory.ready.release",
   "store.open",
   "store.close",
   "store.test",

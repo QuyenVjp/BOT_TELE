@@ -1326,9 +1326,21 @@ async function loadCustomerWarrantyClaim(
 async function lookupInventoryItemByRef(
   db: Db,
   ref: string,
-): Promise<{ id: string; variant_id: string; variant_name: string } | null> {
-  const found = await sql<{ id: string; variant_id: string; variant_name: string }>`
-    select a.id, a.variant_id, v.name_vi as variant_name
+): Promise<{
+  id: string;
+  variant_id: string;
+  variant_name: string;
+  status: string;
+  version: number;
+} | null> {
+  const found = await sql<{
+    id: string;
+    variant_id: string;
+    variant_name: string;
+    status: string;
+    version: number;
+  }>`
+    select a.id, a.variant_id, v.name_vi as variant_name, a.status, a.version
     from digital_asset a
     join product_variant v on v.id = a.variant_id
     where right(a.id, 8) = ${ref}
@@ -5528,6 +5540,10 @@ async function bootstrap(): Promise<void> {
             action,
             label: ITEM_ACTION_LABELS[action],
           })),
+          readyRecovery:
+            item.status === "READY" && Number.isInteger(item.version)
+              ? { version: item.version }
+              : undefined,
         });
       },
       async inventoryItemAction(input) {
@@ -5545,6 +5561,36 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
+        if (input.action === "READY_RELEASE") {
+          if (!item || item.status !== "READY" || !Number.isInteger(item.version)) {
+            return {
+              text: "Mục READY không còn ở đúng phiên bản cần khôi phục.",
+              buttons: [[{ text: "Dữ liệu kho", callbackData: "admin:inventory" }]],
+            };
+          }
+          const result = await adminCallbacks.handle({
+            command: "inventory.ready.release",
+            actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+            targetId: item.id,
+            expectedVersion: item.version,
+            reason: "Owner confirmed READY asset recovery",
+            correlationId: input.correlationId,
+          });
+          if (!result.ok)
+            return presentAdminHandleRefusal(
+              result,
+              "inventory.ready.release",
+              input.correlationId,
+            );
+          return result.needsConfirmation
+            ? presentHighRiskChallenge({
+                confirmationId: result.confirmationId,
+                challenge: result.challenge,
+                expiresAt: result.expiresAt,
+                action: "inventory.ready.release",
+              })
+            : presentHighRiskDone("inventory.ready.release");
+        }
         const { listInventoryItems, ITEM_ACTION_LABELS } =
           await import("./modules/digital-goods/inventory-item-ops.js");
         if (!(input.action in ITEM_ACTION_LABELS) || !item) {

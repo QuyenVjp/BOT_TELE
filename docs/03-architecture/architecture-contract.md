@@ -317,3 +317,13 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 - `invariants_preserved`: numeric root identity; private Telegram authorization; Vault-only TOTP material; append-only attempts/audits; single-use resource-bound grants; active factor continuity until verified promotion.
 - `intentional_breaks`: none to normal step-up verification or Telegram admin semantics; lost-factor recovery adds only a local operator path.
 - `risked_invariants`: candidate expiry, concurrent recovery attempts, factor promotion versus grant consumption, Vault cleanup after commit, and operator interruption between QR display and code entry. Focused tests must cover stale candidates, invalid codes, atomic promotion, grant revocation, old/new factor behavior, and abort safety.
+
+## 14. READY asset recovery contract (2026-09)
+
+- `digital-goods/recovery` owns the only `READY -> AVAILABLE` correction path. It is never exposed as inventory hygiene and never writes Vault data.
+- The owner command `inventory.ready.release` is a root-admin, private-chat, durable-confirmation action bound to the full asset ID, expected asset version, reason, and confirmation fingerprint. The `STOCK_ADJUSTMENT` policy remains authoritative.
+- The transaction locks the asset and linked order, validates the expected version and `READY` state, then proves the order is economically unpaid: no paid order status, no succeeded/refunded payment intent, no settled allocation, no unresolved discrepancy, no live or consumed delivery bundle, no open refund obligation, no active replacement/warranty case, and no open manual-fulfillment task.
+- A successful correction clears reservation ownership, increments the asset version, and appends redacted audit evidence. Any missing or ambiguous proof refuses without mutation. Replayed confirmations are no-ops; a new request with a stale version refuses.
+- `delivery_notification_handoff` with `SENT` plus a live bundle remains manual-review evidence, not inventory stock. It is never released by this operation.
+- `invariants_preserved`: paid ownership and delivery evidence remain immutable; no secret or Vault reference enters logs, audit, confirmation payloads, or Telegram; concurrent checkout/recovery is serialized by row locks and version checks.
+- `risked_invariants`: incomplete historical delivery finalization and a customer who may already possess a valid delivery capability. Production recovery must prefer leaving a paid `READY` asset unchanged over guessing.

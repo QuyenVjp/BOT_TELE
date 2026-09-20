@@ -22,6 +22,7 @@ import { SENSITIVE_REFUSAL_TEXT } from "../presenters/admin.js";
 import { guardRootAction } from "../middleware/root-admin.js";
 import { refundWalletCredit } from "../../modules/wallet/refund.js";
 import { completeManualFulfillmentTaskInTransaction } from "../../modules/digital-goods/manual-fulfillment.js";
+import { releaseReadyAssetInTransaction } from "../../modules/digital-goods/recovery.js";
 import {
   clearVariantSupplierMapping,
   markSupplierSkuManuallyVerified,
@@ -81,6 +82,7 @@ export const OWNER_COMMANDS = [
   "supplier.mapping.clear",
   "supplier.mapping.verify",
   "support.replacement.approve",
+  "inventory.ready.release",
   "store.open",
   "store.close",
   "store.test",
@@ -280,6 +282,7 @@ function targetTypeFor(
   | "ManualFulfillmentTask"
   | "SupplierSku"
   | "ReplacementCase"
+  | "DigitalAsset"
   | "StoreControl" {
   if (command.startsWith("store.")) return "StoreControl";
   if (command === "catalog.publish") return "Product";
@@ -290,6 +293,7 @@ function targetTypeFor(
   if (command.startsWith("supplier.")) return "SupplierSku";
   if (command.startsWith("discrepancy.")) return "Discrepancy";
   if (command === "manual_fulfillment.complete") return "ManualFulfillmentTask";
+  if (command === "inventory.ready.release") return "DigitalAsset";
   if (command === "support.replacement.approve") return "ReplacementCase";
   return "Order";
 }
@@ -564,6 +568,18 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           correlationId,
         });
         return durableResultOrThrow(action, completed);
+      }
+      case "inventory.ready.release": {
+        if (typeof action.expectedVersion !== "number") return false;
+        const result = await releaseReadyAssetInTransaction(exec, {
+          assetId: action.targetId,
+          expectedVersion: action.expectedVersion,
+          actorId: action.actorId,
+          reason: action.reason,
+          correlationId,
+          requestId,
+        });
+        return durableResultOrThrow(action, result);
       }
       case "support.replacement.approve": {
         if (!deps.supportReplacementApprove) return false;

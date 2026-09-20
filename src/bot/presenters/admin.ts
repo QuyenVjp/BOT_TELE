@@ -1904,6 +1904,7 @@ export function presentAdminInventoryItemActions(input: {
   ref: string;
   statusLabel: string;
   actions: Array<{ action: string; label: string }>;
+  readyRecovery?: { version: number } | undefined;
 }): PresentedMessage {
   return {
     text: [
@@ -1911,7 +1912,13 @@ export function presentAdminInventoryItemActions(input: {
       `Mục: ${input.ref}`,
       `Biến thể: ${input.variantName}`,
       `Trạng thái: ${input.statusLabel}`,
-      input.actions.length === 0
+      ...(input.readyRecovery
+        ? [
+            `Phiên bản kiểm tra: ${input.readyRecovery.version}`,
+            "READY chưa giao chỉ được khôi phục qua kiểm tra an toàn.",
+          ]
+        : []),
+      input.actions.length === 0 && !input.readyRecovery
         ? "Mục này đã giao cho khách hoặc đang trong đơn — chỉ xử lý được từ luồng đơn hàng."
         : "Chọn thao tác. Mỗi thao tác đều hỏi xác nhận và được ghi nhật ký.",
     ].join("\n"),
@@ -1922,6 +1929,16 @@ export function presentAdminInventoryItemActions(input: {
           callbackData: `admin:inventory:item-act:${input.ref}:${entry.action}`,
         },
       ]),
+      ...(input.readyRecovery
+        ? [
+            [
+              {
+                text: "🧯 Khôi phục READY chưa giao",
+                callbackData: `admin:inventory:item-act:${input.ref}:READY_RELEASE`,
+              },
+            ],
+          ]
+        : []),
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:items:${input.variantId}` }],
       adminHomeOnly,
     ],

@@ -8,6 +8,7 @@ import { recoverSupplierOrdersBatch } from "../../src/modules/supplier/recovery.
 import {
   recoverExpiredDeliveryBundlesBatch,
   recoverStaleReservationsBatch,
+  releaseReadyAssetInTransaction,
 } from "../../src/modules/digital-goods/recovery.js";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import type { SePayReconciliationPort } from "../../src/modules/payments/reconciliation.js";
@@ -146,6 +147,172 @@ async function seedReservedAsset(
 }
 
 describe("bounded recovery jobs (T167/T168)", () => {
+  it("releases an unpaid READY asset only after the payment and delivery proofs are clear", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed, { status: "CANCELLED" });
+    await sql`update payment_intent set status = 'EXPIRED' where id = ${order.intentId}`.execute(
+      ctx.db,
+    );
+    const assetId = newId();
+    await sql`
+      insert into digital_asset
+        (id, variant_id, source_type, vault_ref, fingerprint_hash, status,
+         reserved_order_id, reserved_until, version)
+      values
+        (${assetId}, ${seed.variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId},
+         'READY', ${order.orderId}, now() - interval '1 minute', 7)
+    `.execute(ctx.db);
+
+    const result = await releaseReadyAssetInTransaction(ctx.db, {
+      assetId,
+      expectedVersion: 7,
+      actorId: "1",
+      reason: "test stale unpaid delivery",
+      correlationId: "recovery-test-unpaid",
+      requestId: "request-unpaid-1",
+    });
+
+    expect(result).toMatchObject({ ok: true, newVersion: 8 });
+    const row = await sql<{ status: string; version: number; reserved_order_id: string | null }>`
+      select status, version, reserved_order_id from digital_asset where id = ${assetId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toEqual({ status: "AVAILABLE", version: 8, reserved_order_id: null });
+  });
+  it("releases a cancelled READY asset after the payment intent was fully refunded", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed, { status: "CANCELLED" });
+    await sql`update payment_intent set status = 'REFUNDED' where id = ${order.intentId}`.execute(
+      ctx.db,
+    );
+    const assetId = newId();
+    await sql`
+      insert into digital_asset
+        (id, variant_id, source_type, vault_ref, fingerprint_hash, status,
+         reserved_order_id, reserved_until, version)
+      values
+        (${assetId}, ${seed.variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId},
+         'READY', ${order.orderId}, now() + interval '15 minutes', 3)
+    `.execute(ctx.db);
+
+    const result = await releaseReadyAssetInTransaction(ctx.db, {
+      assetId,
+      expectedVersion: 3,
+      actorId: "1",
+      reason: "test refunded unpaid delivery",
+      correlationId: "recovery-test-refunded",
+      requestId: "request-refunded-1",
+    });
+
+    expect(result).toMatchObject({ ok: true, newVersion: 4 });
+  });
+  it("refuses an open refund obligation even when payment and delivery proofs are clear", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed, { status: "CANCELLED" });
+    await sql`update payment_intent set status = 'EXPIRED' where id = ${order.intentId}`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into shop_refund_obligation
+        (id, customer_id, amount_vnd, status, reason, created_by, order_id)
+      values
+        (${newId()}, ${seed.customerId}, 150000, 'OPEN', 'recovery regression', 'ROOT_ADMIN', ${order.orderId})
+    `.execute(ctx.db);
+    const assetId = newId();
+    await sql`
+      insert into digital_asset
+        (id, variant_id, source_type, vault_ref, fingerprint_hash, status,
+         reserved_order_id, reserved_until, version)
+      values
+        (${assetId}, ${seed.variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId},
+         'READY', ${order.orderId}, now() + interval '15 minutes', 3)
+    `.execute(ctx.db);
+
+    const result = await releaseReadyAssetInTransaction(ctx.db, {
+      assetId,
+      expectedVersion: 3,
+      actorId: "1",
+      reason: "test open refund obligation",
+      correlationId: "recovery-test-refund",
+      requestId: "request-refund-1",
+    });
+
+    expect(result).toEqual({ ok: false, code: "RECOVERY_NOT_SAFE" });
+    const row = await sql<{ status: string; version: number }>`
+      select status, version from digital_asset where id = ${assetId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toEqual({ status: "READY", version: 3 });
+  });
+
+  it("refuses the historical paid READY plus live bundle state without mutation", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed, { status: "PROCESSING" });
+    await sql`
+      update payment_intent
+      set status = 'SUCCEEDED', settled_at = now()
+      where id = ${order.intentId}
+    `.execute(ctx.db);
+    const bankTransactionId = newId();
+    await sql`
+      insert into bank_transaction
+        (id, provider, provider_transaction_id, direction, merchant_account_id,
+         amount_vnd, content, transacted_at, raw_hash, signature_status, schema_version)
+      values
+        (${bankTransactionId}, 'sepay', ${"test-" + bankTransactionId}, 'IN', ${order.account},
+         150000, ${order.content}, now(), ${"hash-" + bankTransactionId}, 'VERIFIED', 'v2')
+    `.execute(ctx.db);
+    await sql`
+      insert into payment_allocation
+        (id, bank_transaction_id, payment_intent_id, allocated_amount_vnd,
+         status, decision_code, correlation_id)
+      values
+        (${newId()}, ${bankTransactionId}, ${order.intentId}, 150000,
+         'SETTLED', 'SETTLED', 'recovery-test-paid')
+    `.execute(ctx.db);
+    const assetId = newId();
+    const bundleId = newId();
+    await sql`
+      insert into digital_asset
+        (id, variant_id, source_type, vault_ref, fingerprint_hash, status,
+         reserved_order_id, reserved_until, version)
+      values
+        (${assetId}, ${seed.variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId},
+         'READY', ${order.orderId}, now() + interval '15 minutes', 3)
+    `.execute(ctx.db);
+    await sql`
+      insert into delivery_bundle
+        (id, order_id, customer_id, asset_id, token_hash, status, expires_at)
+      values
+        (${bundleId}, ${order.orderId}, ${seed.customerId}, ${assetId},
+         ${"hash-" + bundleId}, 'AVAILABLE', now() + interval '1 day')
+    `.execute(ctx.db);
+    await sql`
+      insert into delivery_notification_handoff
+        (id, bundle_id, customer_id, telegram_chat_id, capability_key,
+         capability_ref, status, sent_at)
+      values
+        (${newId()}, ${bundleId}, ${seed.customerId}, '123456789', ${bundleId + ":123456789"},
+         ${"vault:capability-test"}, 'SENT', now())
+    `.execute(ctx.db);
+
+    const result = await releaseReadyAssetInTransaction(ctx.db, {
+      assetId,
+      expectedVersion: 3,
+      actorId: "1",
+      reason: "test must not release paid delivery",
+      correlationId: "recovery-test-paid",
+      requestId: "request-paid-1",
+    });
+
+    expect(result).toEqual({ ok: false, code: "RECOVERY_NOT_SAFE" });
+    const row = await sql<{ status: string; version: number; reserved_order_id: string | null }>`
+      select status, version, reserved_order_id from digital_asset where id = ${assetId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toEqual({
+      status: "READY",
+      version: 3,
+      reserved_order_id: order.orderId,
+    });
+  });
   it("expires only the bounded oldest Order batch and atomically voids intents/releases holds", async () => {
     const seed = await seedCommerce();
     const now = new Date();
