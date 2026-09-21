@@ -2829,6 +2829,84 @@ async function bootstrap(): Promise<void> {
           { adminTelegramUserId: input.telegramUserId, stateId: input.stateId },
         );
       },
+      async orderReconcile(input) {
+        if (
+          Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+          input.chatType !== "private"
+        )
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const resolutionCode = input.resolutionCode ?? "PARK_REVIEW";
+        const state = await resolveAdminOrderState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          stateId: input.stateId,
+        });
+        if (!state?.orderId) {
+          return {
+            text: "Phiên đơn hàng đã hết hạn.",
+            buttons: [[{ text: "Đơn hàng", callbackData: "admin:orders" }]],
+          };
+        }
+        const current = await sql<{
+          version: number;
+          status: string;
+          fulfillment_status: string | null;
+        }>`
+          select
+            o.version,
+            o.status,
+            (
+              select b.status
+              from delivery_bundle b
+              where b.order_id = o.id
+              order by b.created_at desc, b.id desc
+              limit 1
+            ) as fulfillment_status
+          from "order" o
+          where o.id = ${state.orderId}
+          limit 1
+        `.execute(dbHandle.db);
+        const row = current.rows[0];
+        if (!row) {
+          return {
+            text: "Không tìm thấy đơn hàng.",
+            buttons: [[{ text: "Đơn hàng", callbackData: "admin:orders" }]],
+          };
+        }
+        const parkReview = row.status === "PROCESSING" && row.fulfillment_status === "EXPIRED";
+        const resolveReview = row.status === "FULFILLMENT_NEEDS_REVIEW";
+        if (resolutionCode === "PARK_REVIEW" ? !parkReview : !resolveReview) {
+          return {
+            text: "Trạng thái giao hàng đã thay đổi; mở lại đơn để kiểm tra.",
+            buttons: [[{ text: "Đơn hàng", callbackData: `admin:orders:view:${input.stateId}` }]],
+          };
+        }
+        const reason =
+          resolutionCode === "RECONCILE_DELIVERED"
+            ? "Xác nhận đã giao dựa trên bằng chứng Telegram đã lưu."
+            : resolutionCode === "KEEP_UNCERTAIN"
+              ? "Giữ đơn ở trạng thái chưa xác định vì bằng chứng giao hàng chưa đủ."
+              : "Đưa sai lệch giao hàng đã thanh toán vào rà soát owner.";
+        const result = await adminCallbacks.handle({
+          command: "fulfillment.reconcile",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: state.orderId,
+          expectedVersion: row.version,
+          resolutionCode,
+          reason,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok)
+          return presentAdminHandleRefusal(result, "fulfillment.reconcile", input.correlationId);
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "fulfillment.reconcile",
+            })
+          : presentHighRiskDone("fulfillment.reconcile");
+      },
       async orderSearch(input) {
         if (
           Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
@@ -8409,7 +8487,7 @@ async function bootstrap(): Promise<void> {
         vault,
         sender: {
           send: async (input) => {
-            await telegramResponder.send({
+            const sent = await telegramResponder.send({
               chatId: input.chatId,
               messageId: null,
               message: presentDeliveryReveal({
@@ -8421,6 +8499,9 @@ async function bootstrap(): Promise<void> {
                 warrantyVi: input.product?.warrantyVi ?? null,
               }),
             });
+            if (!sent || sent.chatId !== input.chatId || sent.messageId.length === 0) {
+              throw new Error("Telegram provider message identity missing");
+            }
             // Keep the separate commercial thank-you best-effort; a failure here
             // must not make the credential handoff retry and duplicate the secret.
             try {
@@ -8438,6 +8519,7 @@ async function bootstrap(): Promise<void> {
                 "purchase thank-you send failed",
               );
             }
+            return { ...sent, succeededAt: new Date().toISOString() };
           },
         },
         owner: ownerId,

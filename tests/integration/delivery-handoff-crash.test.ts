@@ -36,6 +36,14 @@ const EXPIRED_ROTATION_CONFIG = {
   previousKeyGraceUntil: new Date("2000-01-01T00:00:00.000Z"),
 };
 
+function providerEvidence(chatId: string) {
+  return {
+    chatId,
+    messageId: "test-provider-message",
+    succeededAt: new Date().toISOString(),
+  };
+}
+
 let ctx: PgTestContext;
 
 beforeAll(async () => {
@@ -62,6 +70,9 @@ async function seedPaidAsset(status: "AVAILABLE" | "READY") {
   const customerId = newId();
   const orderId = newId();
   const assetId = newId();
+  const paymentIntentId = newId();
+  const bankTransactionId = newId();
+  const allocationId = newId();
   const assetVault = createInMemoryVault();
   const vaultRef = await assetVault.write("CRASH-FIXTURE-CREDENTIAL");
   const slug = categoryId.slice(-8);
@@ -91,6 +102,30 @@ async function seedPaidAsset(status: "AVAILABLE" | "READY") {
       100000, 'P1M', 'CREDENTIAL', 'PAID', now())
   `.execute(ctx.db);
   await sql`
+    insert into bank_transaction
+      (id, provider, provider_transaction_id, direction, merchant_account_id,
+       amount_vnd, content, transacted_at, raw_hash, signature_status, schema_version)
+    values
+      (${bankTransactionId}, 'TEST', ${"TX-" + bankTransactionId}, 'IN', 'TEST-MERCHANT',
+       100000, ${"ORD-" + orderId}, now(), ${"HASH-" + bankTransactionId}, 'VERIFIED', 'test')
+  `.execute(ctx.db);
+  await sql`
+    insert into payment_intent
+      (id, order_id, status, amount_vnd, merchant_account_id, transfer_content, expires_at,
+       presented_at, settled_at)
+    values
+      (${paymentIntentId}, ${orderId}, 'SUCCEEDED', 100000, 'TEST-MERCHANT',
+       ${"ORD-" + orderId}, now() + interval '1 hour', now(), now())
+  `.execute(ctx.db);
+  await sql`
+    insert into payment_allocation
+      (id, bank_transaction_id, payment_intent_id, allocated_amount_vnd, status,
+       decision_code, correlation_id)
+    values
+      (${allocationId}, ${bankTransactionId}, ${paymentIntentId}, 100000, 'SETTLED',
+       'TEST_EXACT', 'delivery-crash-fixture')
+  `.execute(ctx.db);
+  await sql`
     insert into digital_asset
       (id, variant_id, source_type, vault_ref, fingerprint_hash, status, reserved_order_id)
     values (${assetId}, ${variantId}, 'LOCAL', ${vaultRef}, ${"fp-" + newId()}, ${status},
@@ -109,6 +144,11 @@ async function seedReadyBundle() {
     correlationId: "delivery-crash-fixture",
   });
   if (!issued.ok) throw new Error("bundle issue failed");
+  await sql`
+    update "order"
+    set status = 'PROCESSING'
+    where id = ${fixture.orderId}
+  `.execute(ctx.db);
   return { ...fixture, ...issued };
 }
 
@@ -622,6 +662,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       sender: {
         async send(input) {
           expect(input.handoffId).toBeTruthy();
+          return providerEvidence(input.chatId);
         },
       },
       owner: "expiry-refresh-worker",
@@ -659,7 +700,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "refresh-before-write-a",
       batchSize: 1,
       maxAttempts: 5,
@@ -671,7 +716,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "refresh-before-write-b",
       batchSize: 1,
       maxAttempts: 5,
@@ -708,7 +757,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "refresh-grace-a",
       batchSize: 1,
       maxAttempts: 5,
@@ -720,7 +773,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "refresh-grace-b",
       batchSize: 1,
       maxAttempts: 5,
@@ -767,7 +824,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
         db: ctx.db,
         vault: controlled.vault,
         assetVault: f.assetVault,
-        sender: { async send() {} },
+        sender: {
+          async send(input) {
+            return providerEvidence(input.chatId);
+          },
+        },
         owner: "refresh-swap-a",
         batchSize: 1,
         maxAttempts: 5,
@@ -792,7 +853,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "refresh-swap-b",
       batchSize: 1,
       maxAttempts: 5,
@@ -846,7 +911,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
         db: ctx.db,
         vault: controlled.vault,
         assetVault: f.assetVault,
-        sender: { async send() {} },
+        sender: {
+          async send(input) {
+            return providerEvidence(input.chatId);
+          },
+        },
         owner: "cleanup-race-a",
         batchSize: 1,
         maxAttempts: 5,
@@ -882,7 +951,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "cleanup-race-b",
       batchSize: 1,
       maxAttempts: 5,
@@ -896,7 +969,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "cleanup-race-c",
       batchSize: 1,
       maxAttempts: 5,
@@ -931,7 +1008,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "lease-owner-a",
       batchSize: 1,
       maxAttempts: 5,
@@ -947,7 +1028,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "lease-owner-b",
       batchSize: 1,
       maxAttempts: 5,
@@ -986,7 +1071,11 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       db: ctx.db,
       vault: controlled.vault,
       assetVault: f.assetVault,
-      sender: { async send() {} },
+      sender: {
+        async send(input) {
+          return providerEvidence(input.chatId);
+        },
+      },
       owner: "old-ref-delete-failure",
       batchSize: 1,
       maxAttempts: 5,

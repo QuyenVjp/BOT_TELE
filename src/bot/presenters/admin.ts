@@ -531,6 +531,21 @@ export function presentAdminOrderSearchPrompt(): PresentedMessage {
 }
 
 export function presentAdminOrderDetail(order: AdminOrderDetail): PresentedMessage {
+  const review = order.deliveryReview;
+  const reviewLines = review
+    ? [
+        "",
+        "Đối soát giao hàng",
+        `Bằng chứng: ${review.evidenceComplete ? "đủ" : "chưa đủ"}`,
+        `Tài sản: ${review.assetStatus ?? "chưa có"}${review.assetRef ? ` · ref …${review.assetRef.slice(-8)}` : ""}`,
+        `Bundle: ${review.bundleStatus ?? "chưa có"}`,
+        `Handoff: ${review.handoffStatus ?? "chưa có"}`,
+        `message_id: ${review.providerMessageIdPresent ? "có" : "không"}`,
+        `Telegram khớp: ${review.providerChatMatches ? "có" : "không"}`,
+        `Provider success: ${review.providerSuccessAt ?? "không có"}`,
+        `Send attempt: ${review.sendAttemptedAt ?? "không có"}`,
+      ]
+    : [];
   return {
     text: [
       "Chi tiết đơn hàng",
@@ -549,9 +564,40 @@ export function presentAdminOrderDetail(order: AdminOrderDetail): PresentedMessa
       `Fulfillment: ${order.fulfillmentStatus ?? order.manualTaskStatus ?? "chưa có"}`,
       `Completed at: ${order.completedAt ?? "chưa có"}`,
       `Created at: ${order.createdAt}`,
+      ...reviewLines,
     ].join("\n"),
     buttons: [
       [{ text: "✉️ Nhắn khách", callbackData: `admin:orders:message:${order.messageStateId}` }],
+      ...(order.orderStatus === "PROCESSING" && order.fulfillmentStatus === "EXPIRED"
+        ? [
+            [
+              {
+                text: "🧭 Đưa vào rà soát giao hàng",
+                callbackData: `admin:orders:reconcile:${order.messageStateId}`,
+              },
+            ],
+          ]
+        : []),
+      ...(order.orderStatus === "FULFILLMENT_NEEDS_REVIEW"
+        ? [
+            ...(review?.evidenceComplete
+              ? [
+                  [
+                    {
+                      text: "✅ Xác nhận đã giao",
+                      callbackData: `admin:orders:reconcile_delivered:${order.messageStateId}`,
+                    },
+                  ],
+                ]
+              : []),
+            [
+              {
+                text: "🛑 Giữ chưa xác định",
+                callbackData: `admin:orders:keep_uncertain:${order.messageStateId}`,
+              },
+            ],
+          ]
+        : []),
       [
         { text: ADMIN_COPY.orders, callbackData: "admin:orders" },
         { text: ADMIN_COPY.mainMenu, callbackData: "admin:menu" },

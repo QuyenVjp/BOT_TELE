@@ -349,6 +349,163 @@ export async function loadSensitiveAuthorizationBinding(
           dispositionCode: value.disposition_code,
         }
       : null;
+  } else if (input.actionKey === "fulfillment.reconcile") {
+    const row = await sql<{
+      version: number;
+      status: string;
+      payment_intent_id: string | null;
+      payment_status: string | null;
+      allocation_settled: boolean;
+      asset_status: string | null;
+      bundle_status: string | null;
+      handoff_status: string | null;
+      handoff_sent: boolean;
+      provider_message_id: string | null;
+      provider_chat_id: string | null;
+      provider_success_at: string | null;
+      send_attempted: string | null;
+      consumed_bundle: boolean;
+      delivered_asset: boolean;
+      delivered_event: boolean;
+      manual_fulfillment: boolean;
+    }>`
+      select
+        o.version,
+        o.status,
+        (
+          select pi.id
+          from payment_intent pi
+          where pi.order_id = o.id
+          order by pi.created_at desc, pi.id desc
+          limit 1
+        ) as payment_intent_id,
+        (
+          select pi.status
+          from payment_intent pi
+          where pi.order_id = o.id
+          order by pi.created_at desc, pi.id desc
+          limit 1
+        ) as payment_status,
+        exists (
+          select 1
+          from payment_allocation pa
+          join payment_intent pi on pi.id = pa.payment_intent_id
+          where pi.id = (
+            select latest_pi.id
+            from payment_intent latest_pi
+            where latest_pi.order_id = o.id
+            order by latest_pi.created_at desc, latest_pi.id desc
+            limit 1
+          )
+            and pi.order_id = o.id
+            and pi.status = 'SUCCEEDED'
+            and pa.status = 'SETTLED'
+        ) as allocation_settled,
+        (
+          select a.status
+          from digital_asset a
+          where a.reserved_order_id = o.id
+          order by a.updated_at desc, a.id desc
+          limit 1
+        ) as asset_status,
+        (
+          select b.status
+          from delivery_bundle b
+          where b.order_id = o.id
+          order by b.created_at desc, b.id desc
+          limit 1
+        ) as bundle_status,
+        (
+          select h.status
+          from delivery_notification_handoff h
+          join delivery_bundle b on b.id = h.bundle_id
+          where b.order_id = o.id
+          order by h.created_at desc, h.id desc
+          limit 1
+        ) as handoff_status,
+        (
+          select h.payload_redacted->>'providerMessageId'
+          from delivery_notification_handoff h
+          join delivery_bundle b on b.id = h.bundle_id
+          where b.order_id = o.id
+          order by h.created_at desc, h.id desc
+          limit 1
+        ) as provider_message_id,
+        (
+          select h.payload_redacted->>'providerChatId'
+          from delivery_notification_handoff h
+          join delivery_bundle b on b.id = h.bundle_id
+          where b.order_id = o.id
+          order by h.created_at desc, h.id desc
+          limit 1
+        ) as provider_chat_id,
+        (
+          select h.payload_redacted->>'providerSucceededAt'
+          from delivery_notification_handoff h
+          join delivery_bundle b on b.id = h.bundle_id
+          where b.order_id = o.id
+          order by h.created_at desc, h.id desc
+          limit 1
+        ) as provider_success_at,
+        (
+          select h.payload_redacted->>'sendAttemptedAt'
+          from delivery_notification_handoff h
+          join delivery_bundle b on b.id = h.bundle_id
+          where b.order_id = o.id
+          order by h.created_at desc, h.id desc
+          limit 1
+        ) as send_attempted,
+        exists (
+          select 1
+          from delivery_notification_handoff h
+          join delivery_bundle b on b.id = h.bundle_id
+          where b.order_id = o.id and h.sent_at is not null
+        ) as handoff_sent,
+        exists (
+          select 1 from delivery_bundle b
+          where b.order_id = o.id and b.status = 'CONSUMED'
+        ) as consumed_bundle,
+        exists (
+          select 1 from digital_asset a
+          where a.delivered_order_id = o.id and a.status = 'DELIVERED'
+        ) as delivered_asset,
+        exists (
+          select 1 from outbox_event e
+          where e.event_type = 'DigitalAssetDelivered'
+            and e.payload_redacted->>'orderId' = o.id
+        ) as delivered_event,
+        exists (
+          select 1 from manual_fulfillment_task mft
+          where mft.order_id = o.id and mft.status = 'OPEN'
+        ) as manual_fulfillment
+      from "order" o
+      where o.id = ${input.resourceId}
+      limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value ? String(value.version) : "missing";
+    current = value
+      ? {
+          resolutionCode: requestedString(requested, "resolutionCode") ?? "PARK_REVIEW",
+          version: value.version,
+          status: value.status,
+          paymentIntentId: value.payment_intent_id,
+          paymentStatus: value.payment_status,
+          allocationSettled: value.allocation_settled,
+          assetStatus: value.asset_status,
+          bundleStatus: value.bundle_status,
+          handoffStatus: value.handoff_status,
+          handoffSent: value.handoff_sent,
+          providerMessageId: value.provider_message_id,
+          providerChatId: value.provider_chat_id,
+          providerSucceededAt: value.provider_success_at,
+          sendAttemptedAt: value.send_attempted,
+          consumedBundle: value.consumed_bundle,
+          deliveredAsset: value.delivered_asset,
+          deliveredEvent: value.delivered_event,
+          manualFulfillment: value.manual_fulfillment,
+        }
+      : null;
   } else if (input.resourceType === "StoreControl") {
     const row = await sql<{ status: string; version: number; updated_at: string }>`
       select status, version, updated_at::text from store_control where id = ${input.resourceId} limit 1

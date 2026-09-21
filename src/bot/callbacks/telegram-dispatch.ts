@@ -622,6 +622,13 @@ export interface TelegramDomainDispatcherDeps {
       stateId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    orderReconcile?(input: {
+      telegramUserId: string;
+      chatType: string;
+      stateId: string;
+      correlationId: string;
+      resolutionCode?: "PARK_REVIEW" | "RECONCILE_DELIVERED" | "KEEP_UNCERTAIN";
+    }): Promise<PresentedMessage>;
     orderSearch?(input: {
       telegramUserId: string;
       chatType: string;
@@ -2311,6 +2318,34 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Phiên đơn hàng không khả dụng.");
+        } else if (
+          route.startsWith("orders:reconcile_delivered:") ||
+          route.startsWith("orders:keep_uncertain:")
+        ) {
+          const prefix = route.startsWith("orders:reconcile_delivered:")
+            ? "orders:reconcile_delivered:"
+            : "orders:keep_uncertain:";
+          const resolutionCode =
+            prefix === "orders:reconcile_delivered:" ? "RECONCILE_DELIVERED" : "KEEP_UNCERTAIN";
+          message = admin.orderReconcile
+            ? await admin.orderReconcile({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                stateId: route.slice(prefix.length),
+                resolutionCode,
+                correlationId,
+              })
+            : safeError("Đối soát giao hàng không khả dụng.");
+        } else if (route.startsWith("orders:reconcile:")) {
+          message = admin.orderReconcile
+            ? await admin.orderReconcile({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                stateId: route.slice("orders:reconcile:".length),
+                resolutionCode: "PARK_REVIEW",
+                correlationId,
+              })
+            : safeError("Đối soát giao hàng không khả dụng.");
         } else if (route.startsWith("orders:message:")) {
           message = admin.orderMessagePrompt
             ? await admin.orderMessagePrompt({

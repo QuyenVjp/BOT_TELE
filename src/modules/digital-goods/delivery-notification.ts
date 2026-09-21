@@ -3,7 +3,11 @@ import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
 import { isId, newId } from "../../shared/ids/index.js";
-import { consumeDeliveryBundle, revealDeliveryBundle } from "./delivery.js";
+import { revealDeliveryBundle } from "./delivery.js";
+import {
+  reconcilePaidDeliveryDeliveredInTransaction,
+  parkPaidDeliveryUncertainInTransaction,
+} from "./recovery.js";
 import {
   ageSeconds,
   validateRecoveryBatchSize,
@@ -33,6 +37,47 @@ export interface DeliveryNotificationClaim {
   warrantyVi: string | null;
 }
 
+export interface DeliveryNotificationProviderEvidence {
+  chatId: string;
+  messageId: string;
+  succeededAt: string;
+}
+
+export interface DeliveryNotificationHandoffEvidence {
+  sendAttemptedAt: string | null;
+  provider: DeliveryNotificationProviderEvidence | null;
+}
+
+function safeEvidenceText(value: unknown, maxLength: number): string | null {
+  return typeof value === "string" && value.length > 0 && value.length <= maxLength ? value : null;
+}
+
+export function readDeliveryNotificationHandoffEvidence(
+  value: unknown,
+): DeliveryNotificationHandoffEvidence {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : value;
+  } catch {
+    return { sendAttemptedAt: null, provider: null };
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return { sendAttemptedAt: null, provider: null };
+  }
+  const row = parsed as Record<string, unknown>;
+  const sendAttemptedAt = safeEvidenceText(row.sendAttemptedAt, 64);
+  const providerChatId = safeEvidenceText(row.providerChatId, 128);
+  const providerMessageId = safeEvidenceText(row.providerMessageId, 128);
+  const succeededAt = safeEvidenceText(row.providerSucceededAt, 64);
+  return {
+    sendAttemptedAt,
+    provider:
+      providerChatId && providerMessageId && succeededAt
+        ? { chatId: providerChatId, messageId: providerMessageId, succeededAt }
+        : null,
+  };
+}
+
 export interface DeliveryNotificationCapability {
   deliveryUrl: string;
   sessionToken: string;
@@ -46,12 +91,17 @@ const DELIVERY_CAPABILITY_CLEANUP_LEASE_SECONDS = 180;
 const DEFAULT_DELIVERY_NOTIFICATION_SEND_TIMEOUT_MS = 25_000;
 const MAX_DELIVERY_NOTIFICATION_SEND_TIMEOUT_MS = 29_000;
 
+class DeliveryNotificationProviderEvidenceError extends Error {
+  override name = "DeliveryNotificationProviderEvidenceError";
+}
+
 class DeliveryNotificationSendTimeoutError extends Error {
   override name = "DeliveryNotificationSendTimeoutError";
 }
 const AMBIGUOUS_DELIVERY_NOTIFICATION_SEND_ERRORS: Record<string, true> = {
   DeliveryNotificationSendTimeoutError: true,
   TelegramAmbiguousSendError: true,
+  DeliveryNotificationProviderEvidenceError: true,
 };
 
 async function sendDeliveryNotificationWithTimeout(
@@ -64,7 +114,7 @@ async function sendDeliveryNotificationWithTimeout(
       orderNumber: string;
       amountVnd: string;
       secret: string;
-    }): Promise<void>;
+    }): Promise<DeliveryNotificationProviderEvidence>;
   },
   input: {
     chatId: string;
@@ -80,7 +130,7 @@ async function sendDeliveryNotificationWithTimeout(
     };
   },
   timeoutMs: number,
-): Promise<void> {
+): Promise<DeliveryNotificationProviderEvidence> {
   const controller = new AbortController();
   let timeout: ReturnType<typeof setTimeout> | undefined;
   const bounded = new Promise<never>((_resolve, reject) => {
@@ -93,9 +143,23 @@ async function sendDeliveryNotificationWithTimeout(
     }, timeoutMs);
   });
   try {
-    await Promise.race([sender.send({ ...input, signal: controller.signal }), bounded]);
+    const result = await Promise.race([
+      sender.send({ ...input, signal: controller.signal }),
+      bounded,
+    ]);
+    if (
+      !result ||
+      result.chatId !== input.chatId ||
+      !safeEvidenceText(result.messageId, 128) ||
+      !safeEvidenceText(result.succeededAt, 64)
+    ) {
+      throw new DeliveryNotificationProviderEvidenceError(
+        "Telegram provider success did not include a message identity",
+      );
+    }
+    return result;
   } finally {
-    if (timeout) clearTimeout(timeout);
+    clearTimeout(timeout);
   }
 }
 
@@ -107,10 +171,19 @@ type HandoffPayload = Record<string, unknown> & {
   refreshExpiresAt?: number;
   refreshKeyVersion?: number;
   refreshPending?: boolean;
+  sendAttemptedAt?: string;
+  providerChatId?: string;
+  providerMessageId?: string;
+  providerSucceededAt?: string;
 };
 
 function parseHandoffPayload(value: unknown): HandoffPayload {
-  const parsed = typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? (JSON.parse(value) as unknown) : value;
+  } catch {
+    throw new Error("Invalid delivery handoff payload");
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Invalid delivery handoff payload");
   }
@@ -151,6 +224,17 @@ function parseHandoffPayload(value: unknown): HandoffPayload {
   }
   if (payload.refreshPending !== undefined && typeof payload.refreshPending !== "boolean") {
     throw new Error("Invalid delivery handoff refresh state");
+  }
+  for (const [key, maxLength] of [
+    ["sendAttemptedAt", 64],
+    ["providerChatId", 128],
+    ["providerMessageId", 128],
+    ["providerSucceededAt", 64],
+  ] as const) {
+    const value = payload[key];
+    if (value !== undefined && safeEvidenceText(value, maxLength) === null) {
+      throw new Error(`Invalid delivery handoff provider evidence: ${key}`);
+    }
   }
   payload.orphanCapabilityRefs = [...new Set(refs ?? [])];
   return payload;
@@ -822,7 +906,12 @@ export async function loadDeliveryNotificationCapability(
   claim: DeliveryNotificationClaim,
 ): Promise<DeliveryNotificationCapability> {
   const raw = await vault.reveal(claim.capabilityRef);
-  const parsed: unknown = JSON.parse(raw);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error("Invalid delivery notification capability");
+  }
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("Invalid delivery notification capability");
   }
@@ -1033,6 +1122,116 @@ async function refreshDeliveryNotificationCapability(input: {
   return next;
 }
 
+type DeliveryNotificationAttemptResult = { ok: true } | { ok: false; uncertain: boolean };
+
+async function markDeliveryNotificationSendAttempt(
+  db: Db,
+  claim: DeliveryNotificationClaim,
+): Promise<DeliveryNotificationAttemptResult> {
+  return withTransaction(db, async (trx) => {
+    const row = await sql<{ payload_redacted: unknown }>`
+      select payload_redacted
+      from delivery_notification_handoff
+      where id = ${claim.id}
+        and status = 'PROCESSING'
+        and claimed_by = ${claim.owner}
+        and claim_generation = ${claim.generation}
+        and claim_expires_at > now()
+        and bundle_id = ${claim.bundleId}
+        and customer_id = ${claim.customerId}
+        and telegram_chat_id = ${claim.telegramChatId}
+        and capability_ref = ${claim.capabilityRef}
+      for update
+    `.execute(trx);
+    const owned = row.rows[0];
+    if (!owned) return { ok: false, uncertain: false };
+    const payload = parseHandoffPayload(owned.payload_redacted);
+    const evidence = readDeliveryNotificationHandoffEvidence(payload);
+    if (evidence.provider) return { ok: true };
+    if (evidence.sendAttemptedAt) return { ok: false, uncertain: true };
+    await sql`
+      update delivery_notification_handoff
+      set payload_redacted = ${JSON.stringify({
+        ...payload,
+        sendAttemptedAt: new Date().toISOString(),
+      })}::jsonb,
+          claim_expires_at = now() + (${DELIVERY_NOTIFICATION_LEASE_SECONDS} * interval '1 second')
+      where id = ${claim.id}
+        and status = 'PROCESSING'
+        and claimed_by = ${claim.owner}
+        and claim_generation = ${claim.generation}
+        and claim_expires_at > now()
+    `.execute(trx);
+    return { ok: true };
+  });
+}
+
+async function persistDeliveryNotificationProviderEvidence(
+  db: Db,
+  claim: DeliveryNotificationClaim,
+  evidence: DeliveryNotificationProviderEvidence,
+): Promise<boolean> {
+  return withTransaction(db, async (trx) => {
+    const row = await sql<{ payload_redacted: unknown }>`
+      select payload_redacted
+      from delivery_notification_handoff
+      where id = ${claim.id}
+        and status = 'PROCESSING'
+        and claimed_by = ${claim.owner}
+        and claim_generation = ${claim.generation}
+        and claim_expires_at > now()
+        and bundle_id = ${claim.bundleId}
+        and customer_id = ${claim.customerId}
+        and telegram_chat_id = ${claim.telegramChatId}
+        and capability_ref = ${claim.capabilityRef}
+      for update
+    `.execute(trx);
+    const owned = row.rows[0];
+    if (!owned) return false;
+    const payload = parseHandoffPayload(owned.payload_redacted);
+    const current = readDeliveryNotificationHandoffEvidence(payload).provider;
+    if (current) {
+      return (
+        current.chatId === evidence.chatId &&
+        current.messageId === evidence.messageId &&
+        current.succeededAt === evidence.succeededAt
+      );
+    }
+    await sql`
+      update delivery_notification_handoff
+      set payload_redacted = ${JSON.stringify({
+        ...payload,
+        providerChatId: evidence.chatId,
+        providerMessageId: evidence.messageId,
+        providerSucceededAt: evidence.succeededAt,
+      })}::jsonb,
+          claim_expires_at = now() + (${DELIVERY_NOTIFICATION_LEASE_SECONDS} * interval '1 second')
+      where id = ${claim.id}
+        and status = 'PROCESSING'
+        and claimed_by = ${claim.owner}
+        and claim_generation = ${claim.generation}
+        and claim_expires_at > now()
+    `.execute(trx);
+    return true;
+  });
+}
+
+async function handoffEvidenceForClaim(
+  db: Db,
+  claim: DeliveryNotificationClaim,
+): Promise<DeliveryNotificationHandoffEvidence> {
+  const row = await sql<{ payload_redacted: unknown }>`
+    select payload_redacted
+    from delivery_notification_handoff
+    where id = ${claim.id}
+      and bundle_id = ${claim.bundleId}
+      and customer_id = ${claim.customerId}
+      and telegram_chat_id = ${claim.telegramChatId}
+    limit 1
+  `.execute(db);
+  return readDeliveryNotificationHandoffEvidence(row.rows[0]?.payload_redacted);
+}
+
 async function markDeliveryNotificationSent(
   db: Db,
   claim: DeliveryNotificationClaim,
@@ -1072,7 +1271,7 @@ export async function processDeliveryNotificationBatch(input: {
         usageInstructionsVi: string | null;
         warrantyVi: string | null;
       };
-    }): Promise<void>;
+    }): Promise<DeliveryNotificationProviderEvidence>;
   };
   owner: string;
   batchSize: number;
@@ -1105,8 +1304,53 @@ export async function processDeliveryNotificationBatch(input: {
   let sent = 0;
   let failed = 0;
   let stale = 0;
+  const parkUncertain = (claim: DeliveryNotificationClaim) =>
+    withTransaction(input.db, (trx) =>
+      parkPaidDeliveryUncertainInTransaction(trx, {
+        handoffId: claim.id,
+        owner: claim.owner,
+        generation: claim.generation,
+        actorId: "delivery-worker",
+        reason: "Telegram provider outcome could not be durably proven.",
+        correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
+        requestId: claim.id,
+      }),
+    );
   for (const claim of claims) {
     try {
+      const handoffEvidence = await handoffEvidenceForClaim(input.db, claim);
+      if (handoffEvidence.provider) {
+        const linked = await sql<{ order_id: string }>`
+          select b.order_id
+          from delivery_bundle b
+          where b.id = ${claim.bundleId} and b.customer_id = ${claim.customerId}
+          limit 1
+        `.execute(input.db);
+        const resolved = linked.rows[0]
+          ? await withTransaction(input.db, (trx) =>
+              reconcilePaidDeliveryDeliveredInTransaction(trx, {
+                orderId: linked.rows[0]!.order_id,
+                actorId: "delivery-worker",
+                actorType: "SYSTEM",
+                reason: "Finalize delivery after durable Telegram provider success.",
+                correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
+                requestId: claim.id,
+                handoffId: claim.id,
+                claimOwner: claim.owner,
+                claimGeneration: claim.generation,
+              }),
+            )
+          : { ok: false as const, code: "RECONCILIATION_NOT_SAFE" as const };
+        if (!resolved.ok) throw new Error("DELIVERY_PROVIDER_EVIDENCE_RECONCILIATION_FAILED");
+        sent += 1;
+        continue;
+      }
+      if (handoffEvidence.sendAttemptedAt) {
+        const uncertain = await parkUncertain(claim);
+        if (!uncertain.ok) throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
+        failed += 1;
+        continue;
+      }
       const bundle = await sql<{ status: string }>`
         select status
         from delivery_bundle
@@ -1166,7 +1410,15 @@ export async function processDeliveryNotificationBatch(input: {
       });
       if (!prepared.ok) throw new Error("DELIVERY_SECRET_UNAVAILABLE");
 
-      await sendDeliveryNotificationWithTimeout(
+      const attempt = await markDeliveryNotificationSendAttempt(input.db, claim);
+      if (!attempt.ok) {
+        if (!attempt.uncertain) throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
+        const uncertain = await parkUncertain(claim);
+        if (!uncertain.ok) throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
+        failed += 1;
+        continue;
+      }
+      const provider = await sendDeliveryNotificationWithTimeout(
         input.sender,
         {
           chatId: claim.telegramChatId,
@@ -1183,33 +1435,43 @@ export async function processDeliveryNotificationBatch(input: {
         },
         sendTimeoutMs,
       );
-      const finalizationLease = await sql`
-        update delivery_notification_handoff
-        set claim_expires_at = now() +
-          (${DELIVERY_NOTIFICATION_LEASE_SECONDS} * interval '1 second')
-        where id = ${claim.id} and status = 'PROCESSING'
-          and claimed_by = ${claim.owner} and claim_generation = ${claim.generation}
-          and claim_expires_at > now()
-          and bundle_id = ${claim.bundleId}
-          and customer_id = ${claim.customerId}
-          and telegram_chat_id = ${claim.telegramChatId}
-          and capability_ref = ${claim.capabilityRef}
-        returning id
-      `.execute(input.db);
-      if (!finalizationLease.rows[0]) throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
-      const consumed = await consumeDeliveryBundle(input.db, {
-        bundleId: claim.bundleId,
-        customerId: claim.customerId,
-        session: sessionClaims,
-        allowExpiredSession: true,
-        correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
-      });
-      if (!consumed.ok) throw new Error("DELIVERY_BUNDLE_FINALIZATION_FAILED");
-      if (!(await markDeliveryNotificationSent(input.db, claim))) {
-        throw new Error("STALE_DELIVERY_NOTIFICATION_CLAIM");
+      if (!(await persistDeliveryNotificationProviderEvidence(input.db, claim, provider))) {
+        throw new Error("DELIVERY_PROVIDER_EVIDENCE_PERSIST_FAILED");
       }
+      const linked = await sql<{ order_id: string }>`
+        select b.order_id
+        from delivery_bundle b
+        where b.id = ${claim.bundleId} and b.customer_id = ${claim.customerId}
+        limit 1
+      `.execute(input.db);
+      const resolved = linked.rows[0]
+        ? await withTransaction(input.db, (trx) =>
+            reconcilePaidDeliveryDeliveredInTransaction(trx, {
+              orderId: linked.rows[0]!.order_id,
+              actorId: "delivery-worker",
+              actorType: "SYSTEM",
+              reason: "Finalize delivery after durable Telegram provider success.",
+              correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
+              requestId: claim.id,
+              handoffId: claim.id,
+              claimOwner: claim.owner,
+              claimGeneration: claim.generation,
+            }),
+          )
+        : { ok: false as const, code: "RECONCILIATION_NOT_SAFE" as const };
+      if (!resolved.ok) throw new Error("DELIVERY_PROVIDER_EVIDENCE_RECONCILIATION_FAILED");
       sent += 1;
     } catch (error) {
+      const evidence = await handoffEvidenceForClaim(input.db, claim);
+      if (evidence.sendAttemptedAt) {
+        const uncertain = await parkUncertain(claim);
+        if (uncertain.ok) {
+          failed += 1;
+          continue;
+        }
+        stale += 1;
+        continue;
+      }
       const rawCode =
         error instanceof Error ? (error.name !== "Error" ? error.name : error.message) : "";
       const code = /^[A-Za-z][A-Za-z0-9_]{0,127}$/u.test(rawCode)
