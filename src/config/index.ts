@@ -56,6 +56,19 @@ export function resetConfigCache(): void {
 function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv): string[] {
   if (config.NODE_ENV !== "production") return [];
   const issues: string[] = [];
+  if (config.GOOGLE_SHEETS_ENABLED) {
+    if (!config.GOOGLE_SHEETS_SPREADSHEET_ID) {
+      issues.push("GOOGLE_SHEETS_SPREADSHEET_ID is required when Google Sheets is enabled");
+    }
+    if (!config.GOOGLE_SHEETS_CREDENTIAL_VAULT_REF.startsWith("vault:")) {
+      issues.push(
+        "GOOGLE_SHEETS_CREDENTIAL_VAULT_REF must be a Vault reference when Google Sheets is enabled",
+      );
+    }
+    if (!config.GOOGLE_SHEETS_OWNER_ID) {
+      issues.push("GOOGLE_SHEETS_OWNER_ID is required when Google Sheets is enabled");
+    }
+  }
   if (!source.ADMIN_STEP_UP_MODE?.trim()) {
     issues.push("ADMIN_STEP_UP_MODE must be explicitly configured in production");
   }

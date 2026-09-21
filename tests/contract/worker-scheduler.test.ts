@@ -62,4 +62,50 @@ describe("worker scheduler", () => {
     expect(logger.error).toHaveBeenCalledTimes(1);
     await scheduler.stop();
   });
+
+  it("uses the dedicated Sheets cadence without changing commerce defaults", async () => {
+    const intervals: number[] = [];
+    const scheduler = createWorkerScheduler({
+      lanes: { sheets: vi.fn(async () => undefined), recovery: vi.fn(async () => undefined) },
+      pollIntervalMs: 500,
+      recoveryIntervalMs: 2_000,
+      laneIntervals: { sheets: 7_000 },
+      logger,
+      setInterval: (_run, timeout) => {
+        intervals.push(timeout);
+        return {} as WorkerSchedulerTimer;
+      },
+      clearInterval: () => undefined,
+    });
+
+    scheduler.start();
+    expect(intervals).toEqual([7_000, 2_000]);
+    await scheduler.stop();
+  });
+
+  it("isolates a Sheets outage from commerce lanes", async () => {
+    logger.error.mockClear();
+    const sheets = vi.fn(async () => {
+      throw new Error("sheets unavailable");
+    });
+    const telegram = vi.fn(async () => undefined);
+    const scheduler = createWorkerScheduler({
+      lanes: { sheets, telegram },
+      pollIntervalMs: 500,
+      recoveryIntervalMs: 2_000,
+      logger,
+      setInterval: () => ({}) as WorkerSchedulerTimer,
+      clearInterval: () => undefined,
+    });
+
+    scheduler.start();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(telegram).toHaveBeenCalledTimes(1);
+    expect(logger.error).toHaveBeenCalledWith(
+      { lane: "sheets", err: "sheets unavailable" },
+      "sheets worker lane failed",
+    );
+    await scheduler.stop();
+  });
 });

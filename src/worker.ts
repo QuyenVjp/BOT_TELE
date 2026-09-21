@@ -104,6 +104,7 @@ import {
 } from "./modules/warranty/proration.js";
 import type { WalletAccount } from "./modules/wallet/ledger.js";
 import type { Vault } from "./infrastructure/vault/port.js";
+import type { GoogleSheetsApi } from "./infrastructure/google-sheets/client.js";
 import {
   pruneTelegramUsernameData,
   createPostgresTelegramInbox,
@@ -649,6 +650,7 @@ export interface WorkerSchedulerInput {
   lanes: Record<string, () => Promise<void>>;
   pollIntervalMs: number;
   recoveryIntervalMs: number;
+  laneIntervals?: Readonly<Record<string, number>>;
   logger: WorkerSchedulerLogger;
   metrics?: LatencyMetrics;
   wakeListener?: WorkerWakeListener;
@@ -703,7 +705,9 @@ export function createWorkerScheduler(input: WorkerSchedulerInput): WorkerSchedu
       });
       for (const name of Object.keys(input.lanes)) {
         run(name);
-        const interval = name === "recovery" ? input.recoveryIntervalMs : input.pollIntervalMs;
+        const interval =
+          input.laneIntervals?.[name] ??
+          (name === "recovery" ? input.recoveryIntervalMs : input.pollIntervalMs);
         timers.push(setTimer(() => run(name), interval));
       }
     },
@@ -1637,7 +1641,25 @@ async function bootstrap(): Promise<void> {
       allowedCidrs: config.VAULT_EGRESS_CIDR_ALLOWLIST,
     },
   });
-  await vault.health?.();
+  let googleSheetsApi: GoogleSheetsApi | null = null;
+  let createGoogleSheetsApi: (() => Promise<GoogleSheetsApi>) | null = null;
+  if (config.GOOGLE_SHEETS_ENABLED) {
+    if (
+      !config.GOOGLE_SHEETS_SPREADSHEET_ID ||
+      !config.GOOGLE_SHEETS_CREDENTIAL_VAULT_REF.startsWith("vault:") ||
+      !config.GOOGLE_SHEETS_OWNER_ID
+    ) {
+      throw new Error("Google Sheets is enabled but its safe configuration is incomplete");
+    }
+    const { createGoogleSheetsClient } = await import("./infrastructure/google-sheets/client.js");
+    createGoogleSheetsApi = () =>
+      createGoogleSheetsClient({
+        credentialVaultRef: config.GOOGLE_SHEETS_CREDENTIAL_VAULT_REF,
+        timeoutMs: config.GOOGLE_SHEETS_TIMEOUT_MS,
+        maxAttempts: config.GOOGLE_SHEETS_MAX_ATTEMPTS,
+        vault,
+      });
+  }
   const telemetry = createFulfillmentTelemetry();
   // Fixture supplier for local/dev; production swaps an HTTP adapter (T143).
   const supplier =
@@ -8570,6 +8592,52 @@ async function bootstrap(): Promise<void> {
       "bounded recovery cycle",
     );
   };
+  const sheetsLane = createGoogleSheetsApi
+    ? async (): Promise<void> => {
+        const { reconcileRequestsAndProjection, recordSheetsSyncFailure } =
+          await import("./modules/google-sheets/requests.js");
+        try {
+          const api = googleSheetsApi ?? (googleSheetsApi = await createGoogleSheetsApi());
+          const result = await reconcileRequestsAndProjection({
+            db: dbHandle.db,
+            api,
+            config: {
+              spreadsheetId: config.GOOGLE_SHEETS_SPREADSHEET_ID,
+              ownerId: config.GOOGLE_SHEETS_OWNER_ID,
+              appBaseUrl: config.APP_BASE_URL,
+              ...(api.principalEmail ? { serviceAccountEmail: api.principalEmail } : {}),
+            },
+          });
+          logger.info(result, "Google Sheets reconciliation cycle");
+        } catch (error) {
+          const code =
+            error !== null &&
+            typeof error === "object" &&
+            "code" in error &&
+            typeof error.code === "string"
+              ? error.code
+              : "UNKNOWN";
+          try {
+            await recordSheetsSyncFailure(dbHandle.db, code);
+          } catch {
+            // The sync-status write is best-effort; Sheets must never stop commerce lanes.
+          }
+          logger.error({ code }, "Google Sheets unavailable; PostgreSQL commerce lanes continue");
+        }
+      }
+    : null;
+  let sheetsLaneInFlight: Promise<void> | null = null;
+  const runSheetsLane = async (): Promise<void> => {
+    if (!sheetsLane) return;
+    if (sheetsLaneInFlight) return sheetsLaneInFlight;
+    const run = sheetsLane();
+    sheetsLaneInFlight = run;
+    try {
+      await run;
+    } finally {
+      if (sheetsLaneInFlight === run) sheetsLaneInFlight = null;
+    }
+  };
   /**
    * Group publication detection. Runs on the recovery cadence and only ever enqueues
    * durable work: the actual Telegram send happens in the outbox lane under the limiter.
@@ -8577,7 +8645,10 @@ async function bootstrap(): Promise<void> {
   const { createDbWakeListener, DB_WAKE_CHANNELS } = await import("./infrastructure/db/client.js");
   const wakeListener = createDbWakeListener(dbHandle.pool, {
     callbacks: {
-      [DB_WAKE_CHANNELS.outbox]: outboxLane,
+      [DB_WAKE_CHANNELS.outbox]: async () => {
+        await outboxLane();
+        await runSheetsLane();
+      },
       [DB_WAKE_CHANNELS.telegram]: telegramLane,
       [DB_WAKE_CHANNELS.sepay]: sepayLane,
     },
@@ -8589,9 +8660,11 @@ async function bootstrap(): Promise<void> {
       sepay: sepayLane,
       notifications: notificationLane,
       recovery: recoveryLane,
+      ...(sheetsLane ? { sheets: runSheetsLane } : {}),
     },
     pollIntervalMs: config.OUTBOX_POLL_INTERVAL_MS,
     recoveryIntervalMs: 60_000,
+    laneIntervals: { sheets: config.GOOGLE_SHEETS_SYNC_INTERVAL_MS },
     logger,
     wakeListener,
   });
