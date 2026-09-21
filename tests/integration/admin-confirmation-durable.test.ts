@@ -92,6 +92,7 @@ function durableCommandFixture(command: string): {
     return { input: "OWNER_ATTESTATION|owner-reference-probe|Synthetic evidence probe" };
   }
   if (command === "catalog.evidence.revoke") return { input: newId(), expectedVersion: 1 };
+  if (command === "fulfillment.reconcile") return { expectedVersion: 1 };
   return {};
 }
 

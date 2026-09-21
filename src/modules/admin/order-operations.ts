@@ -67,6 +67,18 @@ export interface AdminOrderDetail {
   fulfillmentStatus: string | null;
   fulfillmentCreatedAt: string | null;
   manualTaskStatus: string | null;
+  deliveryReview?: {
+    assetStatus: string | null;
+    assetRef: string | null;
+    bundleStatus: string | null;
+    handoffStatus: string | null;
+    handoffSentAt: string | null;
+    providerMessageIdPresent: boolean;
+    providerChatMatches: boolean;
+    providerSuccessAt: string | null;
+    sendAttemptedAt: string | null;
+    evidenceComplete: boolean;
+  };
   messageStateId: string;
 }
 
@@ -100,6 +112,16 @@ interface OrderDetailRow extends OrderRow {
   payment_settled_at: Date | string | null;
   fulfillment_created_at: Date | string | null;
   manual_task_status: string | null;
+  allocation_settled: boolean;
+  asset_status: string | null;
+  asset_ref: string | null;
+  review_handoff_status: string | null;
+  review_handoff_sent_at: Date | string | null;
+  provider_message_id: string | null;
+  provider_chat_matches: boolean;
+  provider_success_at: string | null;
+  send_attempted_at: string | null;
+  evidence_complete: boolean;
 }
 
 function clampLimit(limit?: number): number {
@@ -302,25 +324,62 @@ export async function getAdminOrderDetail(
       o.fulfillment_type, o.supplier_policy_snapshot, o.paid_at, o.completed_at, o.created_at,
       pi.status as payment_status, pi.amount_vnd as payment_amount_vnd,
       pi.presented_at as payment_presented_at, pi.settled_at as payment_settled_at,
+      exists (
+        select 1 from payment_allocation pa
+        where pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
+      ) as allocation_settled,
       db.status as fulfillment_status, db.created_at as fulfillment_created_at,
+      da.status as asset_status, da.id as asset_ref,
+      dnh.status as review_handoff_status, dnh.sent_at as review_handoff_sent_at,
+      dnh.payload_redacted->>'providerMessageId' as provider_message_id,
+      coalesce(
+        dnh.payload_redacted->>'providerChatId' is not null
+          and dnh.payload_redacted->>'providerChatId' = coalesce(cps.telegram_user_id, ci.channel_user_id),
+        false
+      ) as provider_chat_matches,
+      dnh.payload_redacted->>'providerSucceededAt' as provider_success_at,
+      dnh.payload_redacted->>'sendAttemptedAt' as send_attempted_at,
+      coalesce(
+        pi.status = 'SUCCEEDED'
+        and exists (
+          select 1 from payment_allocation pa
+          where pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
+        )
+        and db.status = 'EXPIRED'
+        and da.status = 'READY'
+        and dnh.status = 'SENT'
+        and dnh.sent_at is not null
+        and dnh.payload_redacted->>'providerMessageId' is not null
+        and dnh.payload_redacted->>'providerSucceededAt' is not null
+        and dnh.payload_redacted->>'providerChatId' = coalesce(cps.telegram_user_id, ci.channel_user_id),
+        false
+      ) as evidence_complete,
       mft.status as manual_task_status
     from "order" o
     left join customer_profile_snapshot cps on cps.customer_id = o.customer_id
     left join channel_identity ci on ci.customer_id = o.customer_id and ci.channel = 'TELEGRAM'
     left join lateral (
-      select status, amount_vnd, presented_at, settled_at
+      select id, status, amount_vnd, presented_at, settled_at
       from payment_intent
       where order_id = o.id
       order by created_at desc, id desc
       limit 1
     ) pi on true
     left join lateral (
-      select status, created_at
+      select id, asset_id, status, created_at
       from delivery_bundle
       where order_id = o.id
       order by created_at desc, id desc
       limit 1
     ) db on true
+    left join digital_asset da on da.id = db.asset_id
+    left join lateral (
+      select status, sent_at, payload_redacted
+      from delivery_notification_handoff
+      where bundle_id = db.id
+      order by created_at desc, id desc
+      limit 1
+    ) dnh on true
     left join lateral (
       select status
       from manual_fulfillment_task
@@ -371,6 +430,24 @@ export async function getAdminOrderDetail(
       ? new Date(row.fulfillment_created_at).toISOString()
       : null,
     manualTaskStatus: row.manual_task_status,
+    ...(row.asset_ref || row.review_handoff_status
+      ? {
+          deliveryReview: {
+            assetStatus: row.asset_status,
+            assetRef: row.asset_ref,
+            bundleStatus: row.fulfillment_status,
+            handoffStatus: row.review_handoff_status,
+            handoffSentAt: row.review_handoff_sent_at
+              ? new Date(row.review_handoff_sent_at).toISOString()
+              : null,
+            providerMessageIdPresent: row.provider_message_id !== null,
+            providerChatMatches: row.provider_chat_matches,
+            providerSuccessAt: row.provider_success_at,
+            sendAttemptedAt: row.send_attempted_at,
+            evidenceComplete: row.evidence_complete,
+          },
+        }
+      : {}),
     messageStateId,
   };
 }

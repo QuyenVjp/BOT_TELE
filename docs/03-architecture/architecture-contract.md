@@ -328,6 +328,20 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 - `invariants_preserved`: paid ownership and delivery evidence remain immutable; no secret or Vault reference enters logs, audit, confirmation payloads, or Telegram; concurrent checkout/recovery is serialized by row locks and version checks.
 - `risked_invariants`: incomplete historical delivery finalization and a customer who may already possess a valid delivery capability. Production recovery must prefer leaving a paid `READY` asset unchanged over guessing.
 
+### Paid delivery reconciliation contract
+
+- `digital-goods/recovery` owns the only correction for the historical paid-delivery anomaly `PROCESSING + SUCCEEDED + SETTLED + READY + EXPIRED + SENT`; detection is exact and transaction-scoped, not a generic status override.
+- The owner command `fulfillment.reconcile` is a root-admin, private-chat, durable-confirmation action bound to the order ID and current order version. It may only park the exact anomaly in `FULFILLMENT_NEEDS_REVIEW`.
+- The transaction locks the order and linked fulfillment evidence, proves that no consumed bundle, delivered asset, or `DigitalAssetDelivered` evidence exists, and then records the order transition plus redacted audit evidence. Any mismatch, stale version, missing evidence, or concurrent change refuses without mutation.
+- This path never releases or reuses the `READY` asset, reissues or expires a bundle, changes payment/allocation truth, retries or sends Telegram, marks delivery complete, or creates an automatic worker retry. Later customer resolution is a separate owner-reviewed operation.
+- `delivery_notification_handoff` with `SENT` and either a live or expired bundle remains manual-review evidence; `SENT + EXPIRED + READY` is not proof that delivery failed and is never auto-resendable.
+- The notification sender must return the successful Telegram Bot API `Message` identity. The worker persists only safe provider evidence (`message_id`, recipient chat ID, and provider-success timestamp) in the redacted handoff record before bundle finalization; no credential or capability material is persisted there.
+- A durable send-attempt marker is written before calling Telegram. An expired claim with no provider-success evidence is parked as delivery-uncertain and never retried blindly. An expired claim with provider-success evidence is self-healed by finalization without another Telegram send.
+- `fulfillment.reconcile_delivered` is a separate root-admin, private-chat, durable-confirmation action. It requires current order version/fingerprint and proves payment `SUCCEEDED`, allocation `SETTLED`, exact recipient/order/asset/bundle/customer bindings, provider `message_id`, no duplicate delivery, no refund/reversal, and no conflicting manual fulfillment. It atomically moves the review order to `COMPLETED`, the exact `READY` asset to `DELIVERED`, the exact expired bundle to `CONSUMED`, writes one `DigitalAssetDelivered` outbox event, preserves `SENT`, and appends redacted audit evidence without touching payment, allocation, Vault, or Telegram.
+- `fulfillment.keep_uncertain` is the explicit owner resolution when provider success or another required binding cannot be proved. It keeps the order in `FULFILLMENT_NEEDS_REVIEW`, records `DELIVERY_UNCERTAIN` with safe evidence and reason, and never releases, reissues, completes, refunds, or sends.
+- `invariants_preserved`: payment, allocation, recipient, and Vault evidence remain immutable; a credential-bearing Telegram send occurs at most once per handoff; completion requires durable provider proof; confirmation is version/fingerprint-bound; no secret or raw delivery payload enters state, audit, confirmation payloads, or Telegram.
+- `risked_invariants`: the customer may already possess a valid delivery capability despite incomplete finalization. The safe correction is therefore an explicit delivered-proof or uncertain disposition, never an inferred resend, release, refund, or completion.
+
 ## 15. Google Sheets operations control plane (2026-09)
 
 Google Sheets is a disabled-by-default, asynchronous operational projection and

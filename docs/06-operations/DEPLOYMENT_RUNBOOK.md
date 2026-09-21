@@ -84,16 +84,16 @@ npm run migrate:production
 
 ## Current production migration head
 
-The source tree currently contains **78** SQL files under
+The source tree currently contains **81** SQL files under
 `src/infrastructure/db/migrations/`. The latest source migration is:
 
-- **filename:** `079_sepay_retry_after.sql`
-- **count:** `78`
+- **filename:** `082_paid_delivery_reconciliation.sql`
+- **count:** `81`
 
 The latest read-only production preflight observed production at
-`078_admin_step_up_replay.sql` (**77** migrations). Migration 079 is a
-forward-only nullable-column change and must be applied only through the
-normal production migration procedure while the store remains `CLOSED`.
+`081_google_sheets_ops.sql` (**80** migrations). Migration 082 is a
+forward-only allowlist change and must be applied only through the normal
+production migration procedure while the store remains `CLOSED`.
 Do not edit older migration files.
 
 The 072–076 procedure below is historical evidence only. Do not use it as the

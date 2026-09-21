@@ -22,7 +22,12 @@ import { SENSITIVE_REFUSAL_TEXT } from "../presenters/admin.js";
 import { guardRootAction } from "../middleware/root-admin.js";
 import { refundWalletCredit } from "../../modules/wallet/refund.js";
 import { completeManualFulfillmentTaskInTransaction } from "../../modules/digital-goods/manual-fulfillment.js";
-import { releaseReadyAssetInTransaction } from "../../modules/digital-goods/recovery.js";
+import {
+  keepPaidDeliveryUncertainInTransaction,
+  reconcilePaidDeliveryDeliveredInTransaction,
+  releaseReadyAssetInTransaction,
+  reconcilePaidDeliveryInTransaction,
+} from "../../modules/digital-goods/recovery.js";
 import {
   clearVariantSupplierMapping,
   markSupplierSkuManuallyVerified,
@@ -83,6 +88,7 @@ export const OWNER_COMMANDS = [
   "supplier.mapping.verify",
   "support.replacement.approve",
   "inventory.ready.release",
+  "fulfillment.reconcile",
   "store.open",
   "store.close",
   "store.test",
@@ -581,6 +587,45 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         });
         return durableResultOrThrow(action, result);
       }
+      case "fulfillment.reconcile": {
+        if (typeof action.expectedVersion !== "number") return false;
+        const decision = action.resolutionCode ?? "PARK_REVIEW";
+        if (decision === "PARK_REVIEW") {
+          const result = await reconcilePaidDeliveryInTransaction(exec, {
+            orderId: action.targetId,
+            expectedOrderVersion: action.expectedVersion,
+            actorId: action.actorId,
+            reason: action.reason,
+            correlationId,
+            requestId,
+          });
+          return durableResultOrThrow(action, result);
+        }
+        if (decision === "RECONCILE_DELIVERED") {
+          const result = await reconcilePaidDeliveryDeliveredInTransaction(exec, {
+            orderId: action.targetId,
+            expectedOrderVersion: action.expectedVersion,
+            actorId: action.actorId,
+            actorType: "ROOT_ADMIN",
+            reason: action.reason,
+            correlationId,
+            requestId,
+          });
+          return durableResultOrThrow(action, result);
+        }
+        if (decision === "KEEP_UNCERTAIN") {
+          const result = await keepPaidDeliveryUncertainInTransaction(exec, {
+            orderId: action.targetId,
+            expectedOrderVersion: action.expectedVersion,
+            actorId: action.actorId,
+            reason: action.reason,
+            correlationId,
+            requestId,
+          });
+          return durableResultOrThrow(action, result);
+        }
+        return false;
+      }
       case "support.replacement.approve": {
         if (!deps.supportReplacementApprove) return false;
         const approved = await deps.supportReplacementApprove({
@@ -734,6 +779,14 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           typeof input.expectedVersion !== "number" ||
           !Number.isInteger(input.expectedVersion) ||
           input.expectedVersion <= 0);
+      const reconciliationInputInvalid =
+        input.command === "fulfillment.reconcile" &&
+        (typeof input.expectedVersion !== "number" ||
+          !Number.isInteger(input.expectedVersion) ||
+          input.expectedVersion <= 0 ||
+          !["PARK_REVIEW", "RECONCILE_DELIVERED", "KEEP_UNCERTAIN"].includes(
+            input.resolutionCode ?? "PARK_REVIEW",
+          ));
       if (
         SENSITIVE_OPERATOR_TEXT.test(input.reason) ||
         (input.command !== "inventory.import" &&
@@ -741,14 +794,17 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           SENSITIVE_OPERATOR_TEXT.test(input.input)) ||
         (input.command === "catalog.evidence.register" &&
           (input.input === undefined || !isSafeResaleEvidenceInput(input.input))) ||
-        revokeInputInvalid
+        revokeInputInvalid ||
+        reconciliationInputInvalid
       ) {
         return {
           ok: false,
           code: "INVALID_REASON",
           message: revokeInputInvalid
             ? "Thiếu bằng chứng hoặc phiên bản biến thể cần thu hồi."
-            : "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
+            : reconciliationInputInvalid
+              ? "Thiếu phiên bản đơn hàng cần rà soát."
+              : "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
         };
       }
 
