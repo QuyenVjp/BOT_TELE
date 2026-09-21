@@ -31,6 +31,15 @@ const csvPortList = z
     }
     return ports;
   });
+const booleanEnv = z
+  .preprocess((value, context) => {
+    if (value === undefined || typeof value === "boolean") return value;
+    if (value === "true") return true;
+    if (value === "false") return false;
+    context.addIssue({ code: "custom", message: "must be true or false" });
+    return z.NEVER;
+  }, z.boolean())
+  .default(false);
 
 export const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
@@ -114,6 +123,24 @@ export const envSchema = z.object({
   SEARCH_PARSER_DRIVER: z.enum(["deterministic", "model"]).default("deterministic"),
   SEARCH_PARSER_TIMEOUT_MS: z.coerce.number().int().positive().default(1500),
 
+  GOOGLE_SHEETS_ENABLED: booleanEnv,
+  GOOGLE_SHEETS_SPREADSHEET_ID: z.string().trim().default(""),
+  GOOGLE_SHEETS_CREDENTIAL_VAULT_REF: z.string().trim().default(""),
+  GOOGLE_SHEETS_OWNER_ID: z
+    .preprocess(
+      (value) => (typeof value === "string" ? value.trim() : value),
+      z.union([z.literal(""), z.string().email().max(128)]),
+    )
+    .default(""),
+  GOOGLE_SHEETS_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(5_000),
+  GOOGLE_SHEETS_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(3),
+  GOOGLE_SHEETS_SYNC_INTERVAL_MS: z.coerce
+    .number()
+    .int()
+    .min(5_000)
+    .max(86_400_000)
+    .default(60_000),
+
   OUTBOX_POLL_INTERVAL_MS: z.coerce.number().int().positive().default(500),
   OUTBOX_MAX_ATTEMPTS: z.coerce.number().int().positive().default(10),
 
@@ -167,6 +194,7 @@ export const SECRET_ENV_KEYS = [
   "SUPPLIER_API_TOKEN",
   "DATABASE_URL",
   "REDIS_URL",
+  "GOOGLE_SHEETS_CREDENTIAL_VAULT_REF",
 ] as const;
 
 export type SecretEnvKey = (typeof SECRET_ENV_KEYS)[number];
