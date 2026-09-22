@@ -31,7 +31,7 @@
     "migrate:production": "node scripts/run-production-migrate.mjs",
     "preflight:production": "node scripts/run-production-preflight.mjs",
     "admin:step-up": "node scripts/run-admin-step-up.mjs",
-    "secret-scan": "node scripts/secret-scan.mjs",
+    "admin:inventory-import": "node scripts/run-production-inventory-import.mjs",
     "verify:gate": "node scripts/verify-gate.mjs",
     "audit": "npm audit --omit=dev --audit-level=high"
   },
