@@ -33,6 +33,7 @@
     "admin:step-up": "node scripts/run-admin-step-up.mjs",
     "admin:inventory-import": "node scripts/run-production-inventory-import.mjs",
     "verify:gate": "node scripts/verify-gate.mjs",
+    "secret-scan": "node scripts/secret-scan.mjs",
     "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {

@@ -8,6 +8,7 @@ import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { guardRootAction } from "../../bot/middleware/root-admin.js";
 import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfillment-type.js";
+import { deleteAssetVaultRef } from "./vault-orphan.js";
 
 export const MAX_IMPORT_BYTES = 64 * 1024;
 export const MAX_IMPORT_LINES = 500;
@@ -29,6 +30,16 @@ export interface InventoryImportResult {
   imported: number;
   duplicates: number;
   invalid: number;
+}
+
+export function maskInventoryLogin(value: string): string {
+  const normalized = value.trim();
+  if (!normalized) return "";
+  const at = normalized.indexOf("@");
+  if (at > 0 && at < normalized.length - 1) {
+    return `${normalized.slice(0, 1)}***${normalized.slice(at)}`;
+  }
+  return `${normalized.slice(0, Math.min(2, normalized.length))}***`;
 }
 
 interface VariantInventoryImportResult extends InventoryImportResult {
@@ -60,6 +71,9 @@ export interface InventoryImportInput {
   reason: string;
   correlationId: string;
   announceStock?: boolean;
+  sourceType?: string;
+  costPriceVnd?: number;
+  safeNote?: string;
 }
 
 type ParsedLine = {
@@ -83,6 +97,12 @@ interface StoredInventoryFieldValue {
 interface StoredInventorySecret {
   schemaVersion: "inventory-fields.v1";
   values: StoredInventoryFieldValue[];
+}
+function maskedLoginForSecret(secret: StoredInventorySecret): string {
+  const preferred = secret.values.find((entry) =>
+    /^(?:email|username|login|user)$/iu.test(entry.name),
+  );
+  return preferred ? maskInventoryLogin(preferred.value) : "***";
 }
 
 function parseStoredInventoryFields(value: unknown): InventoryField[] {
@@ -357,18 +377,44 @@ export async function importDigitalInventory(
       idempotencyKey: row.fingerprint,
     });
     try {
+      const maskedLogin = maskedLoginForSecret(storedSecret);
+      const sourceType = input.sourceType?.trim() || "LOCAL";
+      const safeNote = input.safeNote?.trim() ?? "";
+      const assetId = newId();
       await withTransaction(input.db, async (trx) => {
         await sql`select set_config('app.announce_stock', ${input.announceStock === true ? "true" : "false"}, true)`.execute(
           trx,
         );
-        await sql`insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status, validation_summary) values (${newId()}, ${row.variantId}, 'LOCAL', ${ref}, ${row.fingerprint}, 'AVAILABLE', ${JSON.stringify(assetValidationSummary(config.inventoryFields))}::jsonb)`.execute(
-          trx,
-        );
+        await sql`
+          insert into digital_asset
+            (id, variant_id, source_type, vault_ref, fingerprint_hash, masked_login,
+             status, validation_summary)
+          values
+            (${assetId}, ${row.variantId}, ${sourceType}, ${ref}, ${row.fingerprint},
+             ${maskedLogin}, 'AVAILABLE', ${JSON.stringify(assetValidationSummary(config.inventoryFields))}::jsonb)
+        `.execute(trx);
+        if (input.costPriceVnd !== undefined || safeNote.length > 0) {
+          await sql`
+            insert into google_sheets_asset_metadata
+              (asset_id, cost_price_vnd, safe_note, updated_by)
+            values
+              (${assetId}, ${input.costPriceVnd ?? null}, ${safeNote}, 'bot-inventory-import')
+            on conflict (asset_id) do update set
+              cost_price_vnd = coalesce(excluded.cost_price_vnd, google_sheets_asset_metadata.cost_price_vnd),
+              safe_note = case when excluded.safe_note = '' then google_sheets_asset_metadata.safe_note else excluded.safe_note end,
+              updated_by = excluded.updated_by,
+              updated_at = now(),
+              version = google_sheets_asset_metadata.version + 1
+          `.execute(trx);
+        }
       });
       summary.imported += 1;
       countVariantImport(perVariant, row.variantId, "imported");
     } catch (error) {
-      await input.vault.delete(ref);
+      await deleteAssetVaultRef(input.db, input.vault, ref, {
+        correlationId: input.correlationId,
+        reason: "inventory import compensation",
+      });
       if (postgresErrorCode(error) !== "23505") throw error;
       summary.duplicates += 1;
       countVariantImport(perVariant, row.variantId, "duplicates");

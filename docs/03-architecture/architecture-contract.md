@@ -344,8 +344,9 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 
 ## 15. Google Sheets operations control plane (2026-09)
 
-Google Sheets is a disabled-by-default, asynchronous operational projection and
-controlled request surface. PostgreSQL remains authoritative for orders,
+Google Sheets is the primary operator projection and safe metadata/control view
+for inventory, but never the commerce authority. Inventory entry remains in the
+protected Telegram bot flow; PostgreSQL remains authoritative for orders,
 payments, inventory, fulfillment, warranty/support, audit and all versions;
 Vault remains authoritative for credentials and secret material. Sheets outage,
 quota exhaustion or malformed external data must never block checkout, payment
@@ -358,10 +359,10 @@ or fulfillment.
   reference, timeout/backoff and safe error classification.
 - `modules/google-sheets/projection.ts` owns allowlisted, secret-free row
   builders, workbook schema/version, dashboard metrics and reconciliation.
-- `modules/google-sheets/requests.ts` owns Requests parsing, action allowlist,
-  optimistic version checks, idempotency, authorization, fixed transactional
-  state transitions and audit writeback. It never executes arbitrary SQL or
-  payment/delivery state transitions.
+- `modules/google-sheets/requests.ts` owns only safe metadata Requests parsing,
+  action allowlist, optimistic version checks, idempotency, authorization,
+  fixed transactional state transitions and audit writeback. It never accepts
+  inventory credentials or executes arbitrary SQL/payment/delivery transitions.
 - `worker.ts` owns only asynchronous dispatch and periodic reconciliation. An
   outbox wake is a hint that can trigger a single-flight Sheets cycle; the
   periodic lane remains the durable recovery path. No Google call runs inside a
@@ -380,17 +381,16 @@ The column ownership is explicit and structural, not a color convention:
 
 - Every canonical column on `Dashboard`, `Inventory`, `Orders`, `Payments`,
   `Fulfillment`, `Warranty_Support`, `Suppliers` and `Audit` is
-  `SYSTEM_AUTHORITATIVE`. The current `Inventory.safe_note` and supplier
-  metadata are PostgreSQL-backed safe metadata, not human-owned cells.
+  `SYSTEM_AUTHORITATIVE`. Inventory credentials enter only through the
+  protected bot/domain import boundary; the resulting PostgreSQL asset appears
+  later through the normal safe projection.
 - `Requests!A:H` (`request_id` through `payload`) is `HUMAN_EDITABLE`;
-  `Requests!I:L` (`status` through `processed_at`) is
-  `SYSTEM_AUTHORITATIVE`.
+  `Requests!I:L` (`status` through `processed_at`) is `SYSTEM_AUTHORITATIVE`.
+  Requests remains a safe metadata/control surface and is never a credential
+  transport.
 - Columns outside the canonical header width are `FORMULA_VIEW`. Reconciliation
   reads `A:Z` to discover stable keys and existing rows but writes only managed
   ranges, so formulas/views are never cleared.
-- A safe note entered by a human is carried in the Requests payload and survives
-  reconciliation until the request is processed. There is no current
-  human-owned supplier/operator note column.
 
 Projection uses immutable source keys to update the existing row in place,
 appends only missing keys, clears only stale system cells, and preserves
@@ -403,15 +403,12 @@ row per PostgreSQL audit event.
 Workbook protection is part of the trust boundary: projection tabs and
 Requests system columns are service-account-only; Requests input columns are
 editable only by the configured Google owner account plus the service account.
-`requested_by` is defense-in-depth metadata, not proof of the human editor
-because the Values API does not carry collaborator identity. Successful
-Requests are audited as `SYSTEM/google-sheets`, never as a Telegram
-`ROOT_ADMIN` derived from cell text. Deployment must share the workbook with
-the intended owner and service account and verify the protected ranges.
-The service account receives direct access to this workbook only; no
-domain-wide delegation is used.
-The worker establishes or repairs this protection before reading request rows;
-an uninitialized workbook cannot become an implicit write path.
+The workbook is never a credential transport, alternate database writer or
+authority. The Telegram bot remains the only operator credential-entry surface;
+its root-owner/step-up/domain guards and Vault boundary govern inventory
+staging and commit. No Apps Script, Web App or Mini App is part of this
+projection path.
+
 The Requests state machine is `PENDING -> PROCESSING -> SUCCEEDED`,
 `REJECTED`, `STALE` or `FAILED`; successful rows carry result code `APPLIED`
 or `ALREADY_APPLIED`. `request_id`, target identity, expected version, safe
@@ -420,18 +417,16 @@ durable in PostgreSQL. `PENDING`/`PROCESSING` rows resume safely; a repeated
 request ID replays its terminal result and a changed payload becomes a
 `REQUEST_ID_CONFLICT` rejection without a second domain mutation.
 
-Dashboard thresholds and sync state are safe operational signals only. They
-must not trigger duplicate Telegram broadcasts or mutate commerce state.
-Apps Script, if an operator adds it later, is formatting/convenience only and
-is never an authority or an alternate write path.
 
 ### Secret boundary
 
 No spreadsheet value, formula, hyperlink, audit metadata, request payload or
 log may contain passwords, TOTP, cookies, sessions, access/refresh tokens,
-Telegram auth, raw Vault values or digital-asset secrets. Account rows may
-contain only a masked login, stable non-reversible identity fingerprint,
-opaque Vault reference and safe operational metadata.
+Telegram auth, raw Vault values or digital-asset secrets. The raw candidate
+may exist only transiently in the HTTPS request and backend process memory
+until Vault staging; account rows may contain only a masked login, stable
+non-reversible identity fingerprint, opaque Vault reference and safe
+operational metadata.
 
 ### Controlled request allowlist
 
@@ -439,15 +434,18 @@ Allowed actions are limited to `ADD_INVENTORY_METADATA`, `UPDATE_COST`,
 `UPDATE_SAFE_NOTE`, `DISABLE_ASSET`, `ENABLE_ASSET`, `MARK_ASSET_REVIEW` and
 `REQUEST_SUPPORT_REVIEW`, each routed through a fixed transactional domain
 boundary, audit event and request-id idempotency record. `MARK_PAID`,
-`SETTLED`, `DELIVERED`, allocation/evidence/ledger mutation, secret reveal and
-direct `READY -> AVAILABLE` release are permanently rejected.
+`SETTLED`, `DELIVERED`, allocation/evidence/ledger mutation, secret reveal,
+direct `READY -> AVAILABLE` release and credential submission through
+`Requests` are permanently rejected.
 
 ### Invariant ledger
 
 - `invariants_preserved`: PostgreSQL/Vault authority; secret redaction; exact
   domain status; optimistic versions; stable row keys; durable audit;
-  idempotent requests; transactional commerce isolation; batch API use.
-- `intentional_breaks`: none; Sheets is opt-in and may be stale during outage.
-- `risked_invariants`: collaborator edits, duplicate/replayed rows, stale
-  versions, quota/network failure, credential misconfiguration and incomplete
-  reconciliation. Focused tests and periodic full reconciliation cover them.
+  idempotent requests and confirmations; transactional commerce isolation;
+  batch API use; terminal/Telegram fallback.
+- `intentional_breaks`: Sheets is the preferred operator projection and safe
+  metadata/control view, but remains an adapter and may be stale or unavailable.
+- `risked_invariants`: collaborator edits, stale versions, quota/network
+  failure, credential misconfiguration, and incomplete reconciliation.
+  Projection-contract tests and periodic full reconciliation cover them.
