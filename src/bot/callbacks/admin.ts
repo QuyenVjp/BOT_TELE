@@ -21,6 +21,7 @@ import {
 import { SENSITIVE_REFUSAL_TEXT } from "../presenters/admin.js";
 import { guardRootAction } from "../middleware/root-admin.js";
 import { refundWalletCredit } from "../../modules/wallet/refund.js";
+import { disableGroupPublicationInTransaction } from "../../modules/marketing/group-commerce-settings.js";
 import { completeManualFulfillmentTaskInTransaction } from "../../modules/digital-goods/manual-fulfillment.js";
 import {
   keepPaidDeliveryUncertainInTransaction,
@@ -89,6 +90,7 @@ export const OWNER_COMMANDS = [
   "support.replacement.approve",
   "inventory.ready.release",
   "fulfillment.reconcile",
+  "group.publication.disable",
   "store.open",
   "store.close",
   "store.test",
@@ -289,6 +291,7 @@ function targetTypeFor(
   | "SupplierSku"
   | "ReplacementCase"
   | "DigitalAsset"
+  | "GroupCommerceSettings"
   | "StoreControl" {
   if (command.startsWith("store.")) return "StoreControl";
   if (command === "catalog.publish") return "Product";
@@ -301,6 +304,7 @@ function targetTypeFor(
   if (command === "manual_fulfillment.complete") return "ManualFulfillmentTask";
   if (command === "inventory.ready.release") return "DigitalAsset";
   if (command === "support.replacement.approve") return "ReplacementCase";
+  if (command === "group.publication.disable") return "GroupCommerceSettings";
   return "Order";
 }
 
@@ -626,6 +630,16 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         }
         return false;
       }
+      case "group.publication.disable": {
+        if (typeof action.expectedVersion !== "string") return false;
+        const result = await disableGroupPublicationInTransaction(exec, {
+          expectedUpdatedAt: action.expectedVersion,
+          actorId: action.actorId,
+          reason: action.reason,
+          correlationId,
+        });
+        return durableResultOrThrow(action, result);
+      }
       case "support.replacement.approve": {
         if (!deps.supportReplacementApprove) return false;
         const approved = await deps.supportReplacementApprove({
@@ -787,6 +801,11 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           !["PARK_REVIEW", "RECONCILE_DELIVERED", "KEEP_UNCERTAIN"].includes(
             input.resolutionCode ?? "PARK_REVIEW",
           ));
+      const groupPublicationInputInvalid =
+        input.command === "group.publication.disable" &&
+        (input.targetId !== "main" ||
+          typeof input.expectedVersion !== "string" ||
+          input.expectedVersion.length === 0);
       if (
         SENSITIVE_OPERATOR_TEXT.test(input.reason) ||
         (input.command !== "inventory.import" &&
@@ -795,6 +814,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         (input.command === "catalog.evidence.register" &&
           (input.input === undefined || !isSafeResaleEvidenceInput(input.input))) ||
         revokeInputInvalid ||
+        groupPublicationInputInvalid ||
         reconciliationInputInvalid
       ) {
         return {

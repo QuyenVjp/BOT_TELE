@@ -299,6 +299,7 @@ describe("admin operational presenters", () => {
       terminalOutboxOrphansDisposed: 0,
       openSupportTickets: 0,
       criticalSupportTickets: 0,
+      groupPublicationDisabled: true,
       stockAccountNotReady: 0,
     });
     expect(message.text).toContain("DATABASE DOWN");
@@ -322,6 +323,7 @@ describe("admin operational presenters", () => {
       terminalOutboxOrphansDisposed: 0,
       openSupportTickets: 1,
       criticalSupportTickets: 0,
+      groupPublicationDisabled: true,
       stockAccountNotReady: 0,
     });
 
@@ -847,6 +849,7 @@ describe("admin operational presenters", () => {
       terminalOutboxOrphansDisposed: 0,
       openSupportTickets: 0,
       criticalSupportTickets: 0,
+      groupPublicationDisabled: true,
       stockAccountNotReady: 0,
     });
     expect(message.text).toContain("🛠 Vận hành / Readiness");
@@ -868,6 +871,37 @@ describe("admin operational presenters", () => {
       { text: "↩️ Quay lại", callbackData: "admin:menu" },
       { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
     ]);
+  });
+  it("offers the supported group publication shutdown only while group posting is enabled", () => {
+    const message = presentAdminOperations({
+      control: {
+        id: "main",
+        status: "CLOSED",
+        version: 1,
+        updatedAt: "2026-09-11",
+        updatedBy: "root",
+        lastRequestId: null,
+      },
+      database: "ok",
+      publicationBlocked: 0,
+      openDiscrepancies: 0,
+      resolvedDiscrepancies: 0,
+      terminalOutboxOrphans: 0,
+      terminalOutboxOrphansDisposed: 0,
+      openSupportTickets: 0,
+      criticalSupportTickets: 0,
+      groupPublicationDisabled: false,
+      stockAccountNotReady: 0,
+    });
+
+    expect(
+      message.buttons
+        .flat()
+        .find((button) => button.callbackData.includes("group-publication-off")),
+    ).toEqual({
+      text: "🚫 Tắt publication group",
+      callbackData: "admin:operations:group-publication-off",
+    });
   });
 
   it("enforces 2D row contract on product draft preview (submit/cancel full-width, secondary paired)", () => {

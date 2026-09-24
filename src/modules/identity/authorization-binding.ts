@@ -506,6 +506,31 @@ export async function loadSensitiveAuthorizationBinding(
           manualFulfillment: value.manual_fulfillment,
         }
       : null;
+  } else if (input.actionKey === "group.publication.disable") {
+    const row = await sql<{
+      updated_at: string;
+      shop_panel_enabled: boolean;
+      welcome_enabled: boolean;
+      restock_publishing_enabled: boolean;
+      social_proof_mode: string;
+    }>`
+      select updated_at::text, shop_panel_enabled, welcome_enabled,
+        restock_publishing_enabled, social_proof_mode
+      from group_commerce_settings
+      where id = ${input.resourceId}
+      limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value?.updated_at ?? "missing";
+    current = value
+      ? {
+          updatedAt: value.updated_at,
+          shopPanelEnabled: value.shop_panel_enabled,
+          welcomeEnabled: value.welcome_enabled,
+          restockPublishingEnabled: value.restock_publishing_enabled,
+          socialProofMode: value.social_proof_mode,
+        }
+      : null;
   } else if (input.resourceType === "StoreControl") {
     const row = await sql<{ status: string; version: number; updated_at: string }>`
       select status, version, updated_at::text from store_control where id = ${input.resourceId} limit 1

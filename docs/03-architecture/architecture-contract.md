@@ -342,30 +342,33 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 - `invariants_preserved`: payment, allocation, recipient, and Vault evidence remain immutable; a credential-bearing Telegram send occurs at most once per handoff; completion requires durable provider proof; confirmation is version/fingerprint-bound; no secret or raw delivery payload enters state, audit, confirmation payloads, or Telegram.
 - `risked_invariants`: the customer may already possess a valid delivery capability despite incomplete finalization. The safe correction is therefore an explicit delivered-proof or uncertain disposition, never an inferred resend, release, refund, or completion.
 
-## 15. Google Sheets operations control plane (2026-09)
+## 15. Google Sheets projection and optional intake adapter (2026-09)
 
-Google Sheets is the primary operator projection and safe metadata/control view
-for inventory, but never the commerce authority. Normal inventory entry uses the
-container-bound Apps Script menu/sidebar and a protected HTTPS intake boundary;
-Telegram and the local Terminal command remain fallback/break-glass paths.
-PostgreSQL remains authoritative for orders, payments, inventory, fulfillment,
-warranty/support, audit and all versions; Vault remains authoritative for
-credentials and secret material. Sheets outage, quota exhaustion or malformed
-external data must never block checkout, payment or fulfillment.
+Google Sheets is an optional operator projection and safe metadata/control view
+for inventory, but never the commerce authority. PostgreSQL remains authoritative
+for orders, payments, inventory, fulfillment, warranty/support, audit and all
+versions; Vault remains authoritative for credentials and secret material. The
+supported owner intake surfaces are Telegram root-admin and the local Terminal
+break-glass flow, both of which use the same PostgreSQL/Vault inventory domain.
+Sheets projection outage, quota exhaustion or malformed external data must never
+block checkout, payment or fulfillment.
 
 ### Staged intake enablement
 
-- `GOOGLE_SHEETS_ENABLED` controls the existing secret-free projection lane and may remain
-  enabled before the owner intake boundary is commissioned.
-- `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED` is a separate opt-in gate, defaulting to `false`.
-  It is the only switch that enables Apps Script catalog/preview/confirm routes and challenge
-  expiry/recovery.
-- Production requires `GOOGLE_SHEETS_OIDC_AUDIENCE` only when the intake gate is enabled.
-  Missing intake configuration must disable only the intake lane; it must not crash the worker
-  or stop PostgreSQL commerce lanes and projection reconciliation.
-- The intake gate may become `true` only after the migration, Apps Script manifest/owner setup,
-  exact audience, and live owner acceptance are ready. The store remains `CLOSED` during this
-  sequence.
+- `GOOGLE_SHEETS_ENABLED` controls the secret-free projection lane and may remain
+  enabled independently of inventory intake.
+- `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED` is an optional dormant adapter gate,
+  defaulting to `false`. It is not a production-release or store-opening
+  prerequisite.
+- Production requires `GOOGLE_SHEETS_OIDC_AUDIENCE` only when the optional intake
+  gate is enabled. Missing optional intake configuration must disable only that
+  lane; it must not crash the worker or stop PostgreSQL commerce lanes and
+  projection reconciliation.
+- The current product decision rejects Apps Script as the release intake
+  architecture. Do not commission the manifest, configure an OIDC audience or
+  enable this gate for release acceptance. If a future owner decision
+  reopens the adapter, it requires a separate security and live-acceptance gate
+  while the store remains `CLOSED`.
 
 ### Module seams
 
@@ -378,15 +381,16 @@ external data must never block checkout, payment or fulfillment.
   action allowlist, optimistic version checks, idempotency, authorization,
   fixed transactional state transitions and audit writeback. It never accepts
   inventory credentials or executes arbitrary SQL/payment/delivery transitions.
-- `infrastructure/google-sheets/owner-verifier.ts` verifies the Google OIDC
-  token, configured owner email, exact workbook id and configured audience.
-- `modules/google-sheets/inventory-intake.ts` owns the short-lived preview and
-  one-time confirmation challenge. It stages through Vault and calls the same
-  domain import/session engine used by Telegram; it never stores raw input.
+- `infrastructure/google-sheets/owner-verifier.ts` and
+  `modules/google-sheets/inventory-intake.ts` implement only the optional
+  dormant Apps Script adapter. They verify the Google OIDC owner boundary,
+  stage through Vault and call the same inventory domain import/session engine;
+  they never store raw input.
 - `worker.ts` owns only asynchronous dispatch and periodic reconciliation. An
   outbox wake is a hint that can trigger a single-flight Sheets cycle; the
   periodic lane remains the durable recovery path. No Google call runs inside a
   commerce transaction.
+
 
 ### Workbook contract
 
@@ -401,10 +405,10 @@ The column ownership is explicit and structural, not a color convention:
 
 - Every canonical column on `Dashboard`, `Inventory`, `Orders`, `Payments`,
   `Fulfillment`, `Warranty_Support`, `Suppliers` and `Audit` is
-  `SYSTEM_AUTHORITATIVE`. Inventory credentials enter only through the
-  protected Apps Script HTTPS/domain import boundary (with Telegram and Terminal
-  as fallback); the resulting PostgreSQL asset appears later through the normal
-  safe projection.
+  `SYSTEM_AUTHORITATIVE`. Inventory credentials enter through the supported
+  Telegram root-admin or local Terminal/Vault boundary; the resulting
+  PostgreSQL asset appears later through the safe Sheets projection. The
+  dormant Apps Script adapter is not a release intake path.
 - `Requests!A:H` (`request_id` through `payload`) is `HUMAN_EDITABLE`;
   `Requests!I:L` (`status` through `processed_at`) is `SYSTEM_AUTHORITATIVE`.
   Requests remains a safe metadata/control surface and is never a credential
@@ -425,11 +429,10 @@ Workbook protection is part of the trust boundary: projection tabs and
 Requests system columns are service-account-only; Requests input columns are
 editable only by the configured Google owner account plus the service account.
 The workbook is never a credential transport, alternate database writer or
-authority. The Apps Script sidebar is only a transient protected intake client;
-it writes no credentials to cells and the backend binds the exact workbook and
-verified Google owner before the root/domain guards and Vault boundary govern
-staging and commit. Telegram and Terminal remain fallback surfaces. No Mini App,
-storefront Web App or unprotected browser route is part of this path.
+authority. If the optional Apps Script adapter is ever reopened, its sidebar
+remains only a transient protected intake client and writes no credentials to
+cells. The current release uses Telegram and Terminal owner intake instead. No
+Mini App, storefront Web App or unprotected browser route is part of this path.
 
 The Requests state machine is `PENDING -> PROCESSING -> SUCCEEDED`,
 `REJECTED`, `STALE` or `FAILED`; successful rows carry result code `APPLIED`

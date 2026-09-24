@@ -280,6 +280,11 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    groupPublicationOff?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     reviews?(input: {
       telegramUserId: string;
       chatType: string;
@@ -1669,6 +1674,14 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Màn hình vận hành không khả dụng.");
+        } else if (route === "operations:group-publication-off") {
+          message = admin.groupPublicationOff
+            ? await admin.groupPublicationOff({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Cấu hình publication group không khả dụng.");
         } else if (route === "reviews") {
           message = admin.reviews
             ? await admin.reviews({

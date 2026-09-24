@@ -131,8 +131,10 @@ Production defaults for this growth train are fail-closed:
 `PAYMENT_REMINDERS_ENABLED=false`, `GROWTH_DIGEST_ENABLED=false`,
 `ADMIN_PAYMENT_ALERT_MODE=OFF`, and `REFERRAL_REWARDS_ENABLED=false`.
 
-Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while Apps Script owner/OIDC setup
-and live workbook acceptance are pending. Do not edit older migration files.
+Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` in production by owner
+decision. Apps Script commissioning, OIDC audience configuration and workbook
+acceptance are optional future work, not release or store-opening blockers. Do
+not edit older migration files.
 
 ## Historical migrations 072–076 — post-merge production procedure
 
