@@ -68,6 +68,9 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
     if (!config.GOOGLE_SHEETS_OWNER_ID) {
       issues.push("GOOGLE_SHEETS_OWNER_ID is required when Google Sheets is enabled");
     }
+    if (!config.GOOGLE_SHEETS_OIDC_AUDIENCE) {
+      issues.push("GOOGLE_SHEETS_OIDC_AUDIENCE is required when Google Sheets is enabled");
+    }
   }
   if (config.GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED) {
     if (!config.GOOGLE_SHEETS_ENABLED) {
