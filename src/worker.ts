@@ -1610,13 +1610,15 @@ async function bootstrap(): Promise<void> {
     releaseExpiredPreorderHolds,
   } = await import("./modules/commerce/preorder.js");
   const { shopCancelPreorder } = await import("./modules/commerce/shop-cancel.js");
-  const { generateCustomerAlias } = await import("./modules/marketing/social-proof.js");
+  const { generateCustomerAlias, listTrustScreen } =
+    await import("./modules/marketing/social-proof.js");
   const { formatSePayReconciliationAdminText, getSePayReconciliationStatus } =
     await import("./modules/payments/reconciliation-status.js");
   const {
     presentCustomerAccount,
     presentCustomerNotificationPreferences,
     presentCustomerPreorders,
+    presentCustomerTrustScreen,
     presentCustomerWarrantyHome,
     presentPurchaseThankYou,
   } = await import("./bot/presenters/customer.js");
@@ -2367,6 +2369,19 @@ async function bootstrap(): Promise<void> {
     codec: callbackCodec,
     resolveCustomerId,
     catalog,
+    trust: {
+      async page(customerId, page) {
+        if (!config.SOCIAL_PROOF_HMAC_KEY)
+          return { text: "Màn hình uy tín chưa được cấu hình.", buttons: [] };
+        return presentCustomerTrustScreen(
+          await listTrustScreen(dbHandle.db, {
+            page,
+            pageSize: 5,
+            aliasKey: config.SOCIAL_PROOF_HMAC_KEY,
+          }),
+        );
+      },
+    },
     uiSurface: createPostgresUiSurfaceRegistry(dbHandle.db),
     checkout,
     history,
@@ -6117,7 +6132,9 @@ async function bootstrap(): Promise<void> {
             status: r.status,
             depositVnd: Number(r.deposit_amount_vnd),
             balanceVnd: Number(r.balance_amount_vnd),
-            customerName: generateCustomerAlias(r.customer_id),
+            customerName: config.SOCIAL_PROOF_HMAC_KEY
+              ? generateCustomerAlias(r.customer_id, config.SOCIAL_PROOF_HMAC_KEY)
+              : `Khách ${r.customer_id.slice(-4)}`,
             holdUntil: r.hold_until,
           })),
           filter,
@@ -8553,16 +8570,32 @@ async function bootstrap(): Promise<void> {
     const result = await drainOutboxOnce(dbHandle.db, {
       batchSize: 20,
       maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
-      handler: (event) =>
-        // These two carry notices the owner must receive, and the root chat id only exists here.
-        event.eventType === "StockDelta" ||
-        event.eventType === "WarrantyClaimOpened" ||
-        // Root-facing: without the root id the alert reports a missing target and dead-letters.
-        event.eventType === "TicketOpened"
-          ? handleNotificationOutboxEvent(dbHandle.db, event, {
-              rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-            })
-          : handler(event),
+      handler: async (event) => {
+        const notificationEvent =
+          event.eventType === "StockDelta" ||
+          event.eventType === "WarrantyClaimOpened" ||
+          event.eventType === "TicketOpened" ||
+          event.eventType === "PaymentSettled" ||
+          event.eventType === "PaymentNeedsReview" ||
+          event.eventType === "DigitalAssetDelivered" ||
+          event.eventType === "ManualFulfillmentTaskCompleted" ||
+          event.eventType === "FulfillmentCompleted";
+        const completionEvent =
+          event.eventType === "DigitalAssetDelivered" ||
+          event.eventType === "ManualFulfillmentTaskCompleted" ||
+          event.eventType === "FulfillmentCompleted";
+        if (completionEvent) {
+          const fulfillmentResult = await handler(event);
+          if (fulfillmentResult.kind !== "PUBLISHED") return fulfillmentResult;
+        }
+        if (notificationEvent) {
+          return handleNotificationOutboxEvent(dbHandle.db, event, {
+            rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            adminAlertMode: config.ADMIN_PAYMENT_ALERT_MODE,
+          });
+        }
+        return handler(event);
+      },
       ownerId,
     });
     if (result.claimed > 0) {

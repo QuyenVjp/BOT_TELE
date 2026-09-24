@@ -471,3 +471,31 @@ direct `READY -> AVAILABLE` release and credential submission through
 - `risked_invariants`: collaborator edits, stale versions, quota/network
   failure, credential misconfiguration, and incomplete reconciliation.
   Projection-contract tests and periodic full reconciliation cover them.
+
+## 16. Verified social proof and admin payment alerts (2026-09)
+
+### Module seams
+
+- `modules/payments/service.ts` remains the only producer of canonical `PaymentSettled`; it emits only after verified SePay evidence, a `SUCCEEDED` payment intent, and a `SETTLED` allocation are committed.
+- `modules/notification/service.ts` owns the admin alert projection into the existing notification campaign/delivery lane. It never mutates payment, order, allocation, or fulfillment state.
+- `modules/marketing/social-proof.ts` owns read-only eligibility queries, HMAC aliases, bounded recent-sale rows, and public aggregate counts. It never creates arbitrary sale records or broadcasts payment events.
+- `bot/presenters/customer.ts` and `bot/callbacks/telegram-dispatch.ts` own the on-demand Telegram trust screen. Callback actions remain customer-bound through the existing callback codec; admin links stay root/private guarded by the existing admin dispatcher.
+
+### Event and delivery contract
+
+- A canonical `PaymentSettled` outbox event may create at most one root-private admin alert keyed by the order settlement identity. Pending, unmatched, discrepant, duplicate, or unverified provider evidence never creates a paid alert.
+- The alert payload contains only safe operational fields: order code, customer display metadata, safe customer reference, product/variant, quantity, VND amount, provider name, verified/settled state, payment timestamp, fulfillment state, and remaining stock. It never contains credentials, raw provider payload, authorization headers, Vault material, or Telegram auth.
+- The persisted notification delivery owns its Telegram message identity. Fulfillment completion updates the same campaign/delivery content and requests an edit. The Telegram adapter may fall back to one replacement send when an edit is not possible; the replacement identity replaces the stored identity. Payment and fulfillment never roll back on notification failure.
+- Admin alert mode is an operational notification concern (`IMMEDIATE` default; `OFF` suppresses delivery) and must not change payment-domain writes or settlement semantics.
+
+### Public eligibility and privacy contract
+
+- A public row requires `order=COMPLETED`, payment intent `SUCCEEDED`, allocation `SETTLED`, non-test/non-archived product, non-test customer fixture, and concrete fulfillment-success evidence. `PENDING`, `PROCESSING`, cancelled, uncertain, review, refunded, or otherwise incomplete records are excluded.
+- Public rows contain only a stable HMAC-keyed pseudonymous alias, safe product/variant display, exact listed sale amount, bounded delivery time, and optional non-sensitive proof code. Telegram IDs/usernames, names, email/phone, bank content/reference/UUID, order IDs, Vault refs, credentials, and secrets are never rendered.
+- Trust is pull-based and paginated (small bounded pages edited in place). No payment creates a customer broadcast, and `shop_updates`/purchase-activity consent does not silently become social-proof consent.
+
+### Invariant ledger
+
+- `invariants_preserved`: PostgreSQL commerce authority; verified settlement; at-least-once outbox; root/private admin authorization; no customer payment spam; immutable source references; HMAC privacy; no secret disclosure; payment/fulfillment unaffected by notification failure.
+- `intentional_breaks`: none; the former group-oriented social-proof publisher is not reused as a customer broadcast path.
+- `risked_invariants`: Telegram edit ambiguity, late refund/reversal visibility, stale public projection, alias-key rotation, and missing fulfillment evidence. Queries remain canonical and exclude rows unless every required predicate is true; refresh re-reads current state.

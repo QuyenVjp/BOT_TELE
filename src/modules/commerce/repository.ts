@@ -1,5 +1,6 @@
 import { sql } from "kysely";
 import type { Executor } from "../../infrastructure/db/transaction.js";
+import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { newId } from "../../shared/ids/index.js";
 import { nextVersion, assertVersionUpdated } from "../../infrastructure/db/version.js";
 import { assertTransition, type Order, type OrderSnapshot, type OrderStatus } from "./order.js";
@@ -295,6 +296,22 @@ export async function transitionOrder(
 
   const updated = await findOrderById(exec, order.id);
   if (!updated) throw new Error("order vanished after transition");
+  if (to === "COMPLETED") {
+    await enqueueOutboxEvent(exec, {
+      id: newId(),
+      aggregateType: "Order",
+      aggregateId: updated.id,
+      aggregateVersion: updated.version,
+      eventType: "FulfillmentCompleted",
+      payloadRedacted: {
+        orderId: updated.id,
+        customerId: updated.customerId,
+        completedAt: updated.completedAt,
+        reasonCode,
+        correlationId,
+      },
+    });
+  }
   return updated;
 }
 

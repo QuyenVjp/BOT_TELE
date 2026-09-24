@@ -355,10 +355,10 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
 
   describe("Real Social Proof & Truthful Counters (Sections 32-38)", () => {
     it("generates stable, pseudonymous HMAC alias and formats social proof message", () => {
-      const alias1 = generateCustomerAlias("customer-12345");
-      const alias2 = generateCustomerAlias("customer-12345");
-      const alias3 = generateCustomerAlias("customer-99999");
-
+      const aliasKey = "test-social-proof-key-material-1234567890";
+      const alias1 = generateCustomerAlias("customer-12345", aliasKey);
+      const alias2 = generateCustomerAlias("customer-12345", aliasKey);
+      const alias3 = generateCustomerAlias("customer-99999", aliasKey);
       // Stable
       expect(alias1).toBe(alias2);
       expect(alias1).toMatch(/^Khách #[A-F0-9]{4}$/);

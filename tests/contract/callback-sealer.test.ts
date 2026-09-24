@@ -31,6 +31,38 @@ describe("callback sealing", () => {
     expect(sealed.buttons[0]![0]!.callbackData).toBe("admin:dashboard");
   });
 
+  it("seals customer trust navigation for the current actor", async () => {
+    const tokenCodec = codec();
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "trust",
+        buttons: [
+          [
+            { text: "home", callbackData: "trust:home" },
+            { text: "next", callbackData: "trust:page:1" },
+          ],
+        ],
+      },
+      {
+        codec: tokenCodec,
+        telegramUserId: "123456789",
+        resolveOrderId: async () => null,
+      },
+    );
+
+    const [home, next] = sealed.buttons[0]!;
+    expect(home!.callbackData).toMatch(/^cb:/);
+    expect(next!.callbackData).toMatch(/^cb:/);
+    expect(tokenCodec.verify(home!.callbackData, { telegramUserId: "123456789" })).toMatchObject({
+      ok: true,
+      value: { action: "CUSTOMER_TRUST" },
+    });
+    expect(tokenCodec.verify(next!.callbackData, { telegramUserId: "123456789" })).toMatchObject({
+      ok: true,
+      value: { action: "CUSTOMER_TRUST_PAGE", option: 1 },
+    });
+  });
+
   it("keeps product draft category choices readable", async () => {
     const sealed = await sealPresentedMessageCallbacks(
       {

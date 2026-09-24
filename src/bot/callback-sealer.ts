@@ -89,6 +89,7 @@ async function parseLegacyCallback(
     "cust:notify": "CUSTOMER_NOTIFICATIONS",
     "cust:warranty": "CUSTOMER_WARRANTY",
     "cust:preorders": "PREORDER_LIST",
+    "trust:home": "CUSTOMER_TRUST",
   };
   if (noResource[value]) return { action: noResource[value] };
 
@@ -121,6 +122,11 @@ async function parseLegacyCallback(
   if (value.startsWith("shop:page:")) {
     const resourceId = value.slice("shop:page:".length);
     return /^\d{1,9}$/.test(resourceId) ? { action: "SHOP_PAGE", resourceId } : null;
+  }
+  if (value.startsWith("trust:page:")) {
+    const page = value.slice("trust:page:".length);
+    const option = /^\d{1,3}$/.test(page) ? Number(page) : -1;
+    return option >= 0 && option <= 255 ? { action: "CUSTOMER_TRUST_PAGE", option } : null;
   }
   if (value.startsWith("cust:notify:marketing:") || value.startsWith("cust:notify:social:")) {
     const rest = value.slice("cust:notify:".length);

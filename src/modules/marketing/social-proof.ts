@@ -1,21 +1,55 @@
 import { createHmac } from "node:crypto";
 import { sql } from "kysely";
-import type { Db, Executor } from "../../infrastructure/db/transaction.js";
-import { newId } from "../../shared/ids/index.js";
+import type { Executor } from "../../infrastructure/db/transaction.js";
 
-const DEFAULT_ALIAS_KEY = "tier20-social-proof-customer-masking-salt-2026";
+export const TRUST_PAGE_SIZE = 5;
+export const TRUST_MAX_PAGE_SIZE = 10;
 
-/**
- * Produces a stable, non-reversible pseudonymous alias for public display (FR 33).
- * Example output: "Khách #A7F3"
- */
-export function generateCustomerAlias(
-  customerId: string,
-  salt: string = DEFAULT_ALIAS_KEY,
-): string {
-  const hmac = createHmac("sha256", salt).update(customerId).digest("hex");
-  const code = hmac.slice(0, 4).toUpperCase();
-  return `Khách #${code}`;
+export interface RealStoreStats {
+  completedOrders: number;
+  totalCustomers: number;
+  automatedDeliveries: number;
+}
+
+export interface TrustSale {
+  customerAlias: string;
+  productName: string;
+  variantName: string;
+  amountVnd: number;
+  completedAt: string;
+}
+
+export interface TrustScreenData {
+  page: number;
+  pageSize: number;
+  rows: TrustSale[];
+  completed24h: number;
+  completed7d: number;
+  completedAll: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+}
+
+function clampPageSize(pageSize: number | undefined): number {
+  return Number.isInteger(pageSize)
+    ? Math.max(1, Math.min(TRUST_MAX_PAGE_SIZE, pageSize!))
+    : TRUST_PAGE_SIZE;
+}
+
+function clampPage(page: number | undefined): number {
+  return Number.isInteger(page) ? Math.max(0, Math.min(255, page!)) : 0;
+}
+
+function requireAliasKey(aliasKey: string): string {
+  if (typeof aliasKey !== "string" || Buffer.byteLength(aliasKey, "utf8") < 32)
+    throw new Error("SOCIAL_PROOF_HMAC_KEY_REQUIRED");
+  return aliasKey;
+}
+
+/** Stable, non-reversible pseudonym. Public callers must supply the configured secret key. */
+export function generateCustomerAlias(customerId: string, aliasKey: string): string {
+  const hmac = createHmac("sha256", requireAliasKey(aliasKey)).update(customerId).digest("hex");
+  return `Khách #${hmac.slice(0, 4).toUpperCase()}`;
 }
 
 export function renderSocialProofMessage(input: {
@@ -32,47 +66,67 @@ export function renderSocialProofMessage(input: {
     `💰 ${input.priceVnd.toLocaleString("vi-VN")} ₫`,
     "✅ Giao hàng thành công",
     "",
-    "Cảm ơn bạn đã tin tưởng TIER20 ❤️",
+    "Cảm ơn bạn đã tin tưởng TIER20.",
   ].join("\n");
 }
 
-export interface RealStoreStats {
-  completedOrders: number;
-  totalCustomers: number;
-  automatedDeliveries: number;
-}
+const ELIGIBLE_SALES = sql`
+  from "order" o
+  join payment_intent pi on pi.order_id = o.id and pi.status = 'SUCCEEDED'
+  join payment_allocation pa on pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
+  join bank_transaction bt on bt.id = pa.bank_transaction_id
+    and lower(bt.provider) = 'sepay'
+    and bt.direction = 'IN'
+    and bt.signature_status = 'VERIFIED'
+  join product_variant v on v.id = o.variant_id
+  join product p on p.id = v.product_id
+  where o.status = 'COMPLETED'
+    and o.completed_at is not null
+    and not p.is_test
+    and not p.is_archived
+    and p.name_vi not ilike '%canary%'
+    and not exists (
+      select 1
+      from test_customer_allowlist a
+      join channel_identity ci
+        on ci.channel = 'TELEGRAM'
+       and ci.channel_user_id = a.telegram_user_id
+       and ci.customer_id = o.customer_id
+    )
+    and (
+      exists (
+        select 1
+        from digital_asset da
+        where da.delivered_order_id = o.id and da.status = 'DELIVERED'
+      )
+      or exists (
+        select 1
+        from delivery_bundle b
+        join digital_asset da on da.id = b.asset_id and da.status = 'DELIVERED'
+        where b.order_id = o.id and b.status = 'CONSUMED'
+      )
+      or exists (select 1 from file_delivery_job f where f.order_id = o.id and f.status = 'SENT')
+      or exists (select 1 from manual_fulfillment_task m where m.order_id = o.id and m.status = 'COMPLETED')
+    )
+`;
 
-/**
- * Computes truthful stats from real DB records only, strictly excluding test, archived and
- * canary products — the same orders a customer would recognise as real sales.
- */
+/** Truthful store counters. The public screen and counters share the same eligibility predicates. */
 export async function getRealStoreStats(exec: Executor): Promise<RealStoreStats> {
   const result = await sql<{
     completed_orders: number;
     total_customers: number;
     automated_deliveries: number;
   }>`
-    with real_completed_orders as (
-      select o.id, o.customer_id
-      from "order" o
-      join product_variant v on v.id = o.variant_id
-      join product p on p.id = v.product_id
-      where o.status = 'COMPLETED'
-        and p.is_test = false
-        and p.is_archived = false
-        and p.name_vi not ilike '%canary%'
-    )
     select
-      count(*)::int as completed_orders,
-      count(distinct customer_id)::int as total_customers,
-      coalesce((
-        select count(*)::int from delivery_bundle b
-        where b.status = 'CONSUMED'
-          and exists (select 1 from real_completed_orders r where r.id = b.order_id)
-      ), 0)::int as automated_deliveries
-    from real_completed_orders
+      count(distinct o.id)::int as completed_orders,
+      count(distinct o.customer_id)::int as total_customers,
+      count(distinct o.id) filter (where exists (
+        select 1 from delivery_bundle b
+        join digital_asset da on da.id = b.asset_id
+        where b.order_id = o.id and b.status = 'CONSUMED' and da.status = 'DELIVERED'
+      ))::int as automated_deliveries
+    ${ELIGIBLE_SALES}
   `.execute(exec);
-
   const row = result.rows[0];
   return {
     completedOrders: row?.completed_orders ?? 0,
@@ -81,84 +135,53 @@ export async function getRealStoreStats(exec: Executor): Promise<RealStoreStats>
   };
 }
 
-/**
- * Evaluates and publishes social proof event if allowed (FR 32, 33, 35).
- */
-export async function evaluateAndPublishSocialProof(
-  db: Db,
-  input: {
-    orderId: string;
-    aliasSalt?: string;
-  },
-): Promise<
-  | { ok: true; published: boolean; message?: string }
-  | {
-      ok: false;
-      code: "ORDER_NOT_FOUND" | "ORDER_NOT_COMPLETED" | "TEST_EXCLUDED" | "CUSTOMER_OPT_OUT";
-    }
-> {
-  const result = await sql<{
-    order_id: string;
-    order_number: string;
-    status: string;
-    price_vnd: string;
-    customer_id: string;
-    product_name: string;
-    variant_name: string;
-    is_test: boolean;
-    is_archived: boolean;
-    social_proof_opt_in: boolean | null;
-  }>`
-    select
-      o.id as order_id,
-      o.order_number,
-      o.status,
-      o.price_vnd::text,
-      o.customer_id,
-      p.name_vi as product_name,
-      v.name_vi as variant_name,
-      p.is_test,
-      p.is_archived,
-      pref.social_proof_opt_in
-    from "order" o
-    left join delivery_bundle b on b.order_id = o.id
-    left join digital_asset da on da.id = b.asset_id
-    left join product_variant v on v.id = da.variant_id
-    left join product p on p.id = v.product_id
-    left join customer_notification_preference pref on pref.customer_id = o.customer_id
-    where o.id = ${input.orderId}
-    limit 1
-  `.execute(db);
-
-  const row = result.rows[0];
-  if (!row) return { ok: false, code: "ORDER_NOT_FOUND" };
-  if (row.status !== "COMPLETED") return { ok: false, code: "ORDER_NOT_COMPLETED" };
-  if (row.is_test || row.is_archived) return { ok: false, code: "TEST_EXCLUDED" };
-  if (row.social_proof_opt_in === false) return { ok: false, code: "CUSTOMER_OPT_OUT" };
-
-  const customerAlias = generateCustomerAlias(row.customer_id, input.aliasSalt);
-  const message = renderSocialProofMessage({
-    customerAlias,
-    productName: row.product_name ?? "Sản phẩm số",
-    variantName: row.variant_name ?? "Bản quyền",
-    priceVnd: Number(row.price_vnd),
-  });
-
-  const eventId = newId();
-  await sql`
-    insert into outbox_event (
-      id, aggregate_type, aggregate_id, aggregate_version, event_type, payload_redacted
-    ) values (
-      ${eventId}, 'SocialProof', ${row.order_id}, 1, 'SocialProofEventCreated',
-      jsonb_build_object(
-        'orderId', ${row.order_id}::text,
-        'orderNumber', ${row.order_number}::text,
-        'customerAlias', ${customerAlias}::text,
-        'message', ${message}::text
-      )
-    )
-    on conflict (aggregate_type, aggregate_id, aggregate_version, event_type) do nothing
-  `.execute(db);
-
-  return { ok: true, published: true, message };
+export async function listTrustScreen(
+  exec: Executor,
+  input: { page?: number; pageSize?: number; aliasKey: string },
+): Promise<TrustScreenData> {
+  const page = clampPage(input.page);
+  const pageSize = clampPageSize(input.pageSize);
+  const aliasKey = requireAliasKey(input.aliasKey);
+  const [counts, rows] = await Promise.all([
+    sql<{ completed_24h: number; completed_7d: number; completed_all: number }>`
+      select
+        count(*) filter (where o.completed_at >= now() - interval '24 hours')::int as completed_24h,
+        count(*) filter (where o.completed_at >= now() - interval '7 days')::int as completed_7d,
+        count(*)::int as completed_all
+      ${ELIGIBLE_SALES}
+    `.execute(exec),
+    sql<{
+      customer_id: string;
+      product_name: string;
+      variant_name: string;
+      amount_vnd: string;
+      completed_at: Date | string;
+    }>`
+      select o.customer_id, coalesce(nullif(o.product_name_vi, ''), p.name_vi) as product_name,
+        coalesce(nullif(o.variant_name_vi, ''), v.name_vi) as variant_name,
+        o.price_vnd::text as amount_vnd, o.completed_at
+      ${ELIGIBLE_SALES}
+      order by o.completed_at desc, o.id desc
+      offset ${page * pageSize} limit ${pageSize + 1}
+    `.execute(exec),
+  ]);
+  const count = counts.rows[0];
+  const hasNext = rows.rows.length > pageSize;
+  const visibleRows = rows.rows.slice(0, pageSize).map((row) => ({
+    customerAlias: generateCustomerAlias(row.customer_id, aliasKey),
+    productName: row.product_name,
+    variantName: row.variant_name,
+    amountVnd: Number(row.amount_vnd),
+    completedAt: new Date(row.completed_at).toISOString(),
+  }));
+  return {
+    page,
+    pageSize,
+    rows: visibleRows,
+    completed24h: count?.completed_24h ?? 0,
+    completed7d: count?.completed_7d ?? 0,
+    completedAll: count?.completed_all ?? 0,
+    hasPrevious: page > 0,
+    hasNext,
+  };
 }

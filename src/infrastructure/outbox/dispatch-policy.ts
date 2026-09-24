@@ -39,6 +39,7 @@ export const KNOWN_OUTBOX_EVENT_TYPES = [
   "DeliveryBundleCreated",
   "DigitalAssetClaimed",
   "DigitalAssetDelivered",
+  "FulfillmentCompleted",
   "ManualFulfillmentTaskCreated",
   "ManualFulfillmentTaskCompleted",
   "StockDelta",

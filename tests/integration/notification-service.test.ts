@@ -53,9 +53,10 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await sql`
-    truncate table admin_inventory_import, notification_delivery, notification_campaign, notification_preference,
-      restock_subscription, channel_identity, customer_profile_snapshot, digital_asset,
-      variant_quantity_stock, outbox_event, product_variant, product, category, customer cascade
+    truncate table admin_inventory_import, notification_delivery, notification_campaign,
+      notification_preference, restock_subscription, channel_identity, customer_profile_snapshot,
+      digital_asset, variant_quantity_stock, outbox_event, product_variant, product, category,
+      customer cascade
   `.execute(ctx.db);
 });
 
@@ -786,6 +787,8 @@ describe("notification service", () => {
         chatId: "111111",
         content: "hello",
         class: "CRITICAL_SERVICE",
+        buttons: [],
+        messageId: null,
         generation: 1,
       },
       {

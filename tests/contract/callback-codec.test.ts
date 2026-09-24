@@ -117,12 +117,15 @@ describe("checkout callback tokens", () => {
         "SHOP_OPEN",
         "CUSTOMER_NOTIFICATIONS",
         "CUSTOMER_WARRANTY",
+        "CUSTOMER_TRUST",
+        "CUSTOMER_TRUST_PAGE",
       ].includes(action);
       const token = unified().issue({
         action,
         telegramUserId: TELEGRAM_USER_ID,
         ...(needsResource ? { resourceId: variantId } : {}),
         ...(action === "SUPPORT_REASON" || action === "ADMIN_COMMAND" ? { option: 1 } : {}),
+        ...(action === "CUSTOMER_TRUST_PAGE" ? { option: 1 } : {}),
         ...(action === "CHECKOUT_WALLET" ? { amountVnd: 199_000 } : {}),
       });
       expect(peekCallbackAction(token)).toBe(action);
