@@ -84,15 +84,30 @@ npm run migrate:production
 
 ## Current production migration head
 
-The source tree currently contains **89** SQL files under `src/infrastructure/db/migrations/`.
+The source tree currently contains **90** SQL files under `src/infrastructure/db/migrations/`.
 The latest source migration is:
 
-- **filename:** `090_payment_reminders.sql`
-- **count:** `89`
+- **filename:** `091_growth_migration_repair.sql`
+- **count:** `90`
 
-The current read-only production preflight observed production at
-`084_social_proof_admin_alerts.sql` (**83** migrations). Migrations 085–090 are
-forward-only release migrations and must be applied in this order:
+The growth deployment recorded production at
+`090_payment_reminders.sql` (**95** migrations) after applying the canonical 085–090
+files plus six legacy migration receipts that were already present in the compiled
+artifact. Migration 091 is a forward-only repair for the legacy payment-reminder
+schema and is already recorded after the repair window.
+
+The production ledger retains these six legacy receipt names from the compiled
+artifact. They are accounted for by the preflight compatibility count; do not add
+duplicate source migrations for them:
+
+- `084_verified_reviews.sql` → canonical `085_verified_reviews.sql`
+- `085_promotions.sql` → canonical `086_promotions.sql`
+- `086_promotion_drafts.sql` → canonical `087_promotion_drafts.sql`
+- `087_referrals.sql` → canonical `088_referrals.sql`
+- `088_funnel_events.sql` → canonical `089_funnel_events.sql`
+- `089_payment_reminders.sql` → canonical `090_payment_reminders.sql`
+
+The canonical growth migrations remain ordered:
 
 1. `085_verified_reviews.sql`
 2. `086_promotions.sql`
@@ -100,13 +115,15 @@ forward-only release migrations and must be applied in this order:
 4. `088_referrals.sql`
 5. `089_funnel_events.sql`
 6. `090_payment_reminders.sql`
+7. `091_growth_migration_repair.sql`
 
 The release sequence is linear: automated CI and security gates → protected PR merge →
-build the exact clean SHA → keep the store `CLOSED` and risky flags off → apply only the
-next ordered migration → restart the existing API/worker supervisors → verify `/health`,
-`/ready`, and `npm run preflight:production` → run direct live Telegram/browser smoke →
-enable one feature flag at a time with rollback evidence. Migration application must not
-wait on a first-sale or workbook write; those are separate acceptance gates.
+build the exact clean SHA with an empty compiled migration directory → keep the store
+`CLOSED` and risky flags off → apply only the ordered migrations → restart the existing
+API/worker supervisors → verify `/health`, `/ready`, and `npm run preflight:production`
+→ run direct live Telegram/browser smoke → enable one feature flag at a time with
+rollback evidence. Migration application must not wait on a first-sale or workbook
+write; those are separate acceptance gates.
 
 Production defaults for this growth train are fail-closed:
 `SOCIAL_PROOF_ENABLED=false`, `VERIFIED_REVIEWS_ENABLED=false`,
