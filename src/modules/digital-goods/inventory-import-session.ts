@@ -13,6 +13,7 @@ import {
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { guardRootAction } from "../../bot/middleware/root-admin.js";
 import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfillment-type.js";
+import { deleteAssetVaultRef, recordAssetVaultOrphan } from "./vault-orphan.js";
 
 export const INVENTORY_IMPORT_TTL_SECONDS = 15 * 60;
 
@@ -33,11 +34,20 @@ export interface InventoryImportSession {
   cancelledAt?: number;
 }
 
+export interface InventoryImportAssetMetadata {
+  sourceType?: string;
+  costPriceVnd?: number;
+  safeNote?: string;
+}
+
 export interface InventoryImportSessionInput {
   actor: RootActor;
   config: RootAdminConfig;
   correlationId: string;
   variantId?: string;
+  assetMetadata?: InventoryImportAssetMetadata;
+  /** Optional opaque ref binding for non-Telegram confirmation callers. */
+  expectedInputVaultRef?: string;
 }
 
 export interface InventoryImportTemplate {
@@ -632,7 +642,12 @@ export async function cancelInventoryImportSession(
   if (!gate.ok) return { ok: false, code: gate.reason };
   const session = await loadSession(db, String(input.actor.numericUserId));
   if (!session) return { ok: false, code: "NOT_FOUND" };
-  if (session.inputVaultRef) await vault.delete(session.inputVaultRef).catch(() => undefined);
+  if (session.inputVaultRef) {
+    await deleteAssetVaultRef(db, vault, session.inputVaultRef, {
+      correlationId: input.correlationId,
+      reason: "inventory import cancellation",
+    });
+  }
   await clearSession(db, String(input.actor.numericUserId));
   await sql`
     insert into admin_inventory_import
@@ -670,6 +685,11 @@ export async function stageInventoryImportInput(
   const session = await loadSession(db, String(input.actor.numericUserId));
   if (!session) return { ok: false, code: "NOT_FOUND" };
   const selectedVariantId = selectedVariantFrom(session);
+  if (
+    input.variantId !== undefined &&
+    (session.status !== "WAITING_INPUT" || selectedVariantId !== input.variantId)
+  )
+    return { ok: false, code: "NOT_FOUND" };
   const gate = await guardRootAction(db, {
     actor: input.actor,
     config: input.config,
@@ -680,7 +700,12 @@ export async function stageInventoryImportInput(
   });
   if (!gate.ok) return { ok: false, code: gate.reason };
   if (session.expiresAt <= now) {
-    if (session.inputVaultRef) await vault.delete(session.inputVaultRef).catch(() => undefined);
+    if (session.inputVaultRef) {
+      await deleteAssetVaultRef(db, vault, session.inputVaultRef, {
+        correlationId: input.correlationId,
+        reason: "inventory import expired preview",
+      });
+    }
     await clearSession(db, String(input.actor.numericUserId));
     return { ok: false, code: "EXPIRED" };
   }
@@ -706,22 +731,34 @@ export async function stageInventoryImportInput(
     idempotencyKey: rawHash,
   });
   const existingRef = session.inputVaultRef;
-  await sql`
-    update admin_inventory_import
-    set status = 'READY',
-        input_vault_ref = ${vaultRef},
-        preview_ready = ${preview.ready},
-        preview_invalid = ${preview.invalid},
-        preview_duplicates = ${preview.duplicates},
-        preview_variants = ${JSON.stringify(preview.lines.map((line) => line.variantId).filter((variantId): variantId is string => Boolean(variantId)))}::jsonb,
-        expires_at = ${ttlExpiry(now).toISOString()},
-        imported_at = null,
-        cancelled_at = null,
-        updated_at = now()
-    where admin_telegram_user_id = ${String(input.actor.numericUserId)}
-  `.execute(db);
-  if (existingRef && existingRef !== vaultRef)
-    await vault.delete(existingRef).catch(() => undefined);
+  try {
+    await sql`
+      update admin_inventory_import
+      set status = 'READY',
+          input_vault_ref = ${vaultRef},
+          preview_ready = ${preview.ready},
+          preview_invalid = ${preview.invalid},
+          preview_duplicates = ${preview.duplicates},
+          preview_variants = ${JSON.stringify(preview.lines.map((line) => line.variantId).filter((variantId): variantId is string => Boolean(variantId)))}::jsonb,
+          expires_at = ${ttlExpiry(now).toISOString()},
+          imported_at = null,
+          cancelled_at = null,
+          updated_at = now()
+      where admin_telegram_user_id = ${String(input.actor.numericUserId)}
+    `.execute(db);
+  } catch (error) {
+    await recordAssetVaultOrphan(db, vaultRef, {
+      correlationId: input.correlationId,
+      reason: "inventory import session bind failed",
+    });
+    throw error;
+  }
+  if (existingRef && existingRef !== vaultRef) {
+    await deleteAssetVaultRef(db, vault, existingRef, {
+      correlationId: input.correlationId,
+      reason: "inventory import superseded preview",
+    });
+  }
   return { ok: true, preview };
 }
 export async function stageInventoryImportDocument(
@@ -799,6 +836,12 @@ export async function confirmInventoryImportSession(
     if (session.expiresAt <= now) return { expired: true as const, session };
     if (session.status === "COMMITTED") return { committed: true as const, session };
     if (session.status === "PROCESSING") return { busy: true as const, session };
+    if (
+      input.expectedInputVaultRef !== undefined &&
+      session.inputVaultRef !== input.expectedInputVaultRef
+    ) {
+      return { ready: false as const, session };
+    }
     if (session.status !== "READY" || !session.inputVaultRef)
       return { ready: false as const, session };
     await sql`
@@ -811,8 +854,12 @@ export async function confirmInventoryImportSession(
 
   if (!prepared) return { ok: false, code: "NOT_FOUND" };
   if ("expired" in prepared) {
-    if (prepared.session.inputVaultRef)
-      await vault.delete(prepared.session.inputVaultRef).catch(() => undefined);
+    if (prepared.session.inputVaultRef) {
+      await deleteAssetVaultRef(db, vault, prepared.session.inputVaultRef, {
+        correlationId: input.correlationId,
+        reason: "inventory import confirmation expired",
+      });
+    }
     await clearSession(db, adminTelegramUserId);
     return { ok: false, code: "EXPIRED" };
   }
@@ -831,16 +878,17 @@ export async function confirmInventoryImportSession(
   if (!prepared.session.inputVaultRef) return { ok: false, code: "NOT_READY" };
   if (!prepared.ready) return { ok: false, code: "NOT_READY" };
 
-  const rawInput = await vault.reveal(prepared.session.inputVaultRef);
   try {
+    const rawInput = await vault.reveal(prepared.session.inputVaultRef);
     const result = await importDigitalInventory({
       actor: input.actor,
       config: input.config,
       vault,
       db,
       input: rawInput,
-      reason: "Admin inventory import",
+      reason: input.assetMetadata ? "Sheets inventory import" : "Admin inventory import",
       correlationId: input.correlationId,
+      ...input.assetMetadata,
     });
     if (!result.ok) {
       await sql`
@@ -855,7 +903,10 @@ export async function confirmInventoryImportSession(
       set status = 'COMMITTED', input_vault_ref = null, imported_at = now(), updated_at = now()
       where admin_telegram_user_id = ${adminTelegramUserId}
     `.execute(db);
-    await vault.delete(prepared.session.inputVaultRef).catch(() => undefined);
+    await deleteAssetVaultRef(db, vault, prepared.session.inputVaultRef, {
+      correlationId: input.correlationId,
+      reason: "inventory import committed",
+    });
     return { ok: true, reused: false, summary: result.summary };
   } catch (error) {
     await sql`

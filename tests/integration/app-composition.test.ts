@@ -105,6 +105,36 @@ describe("createApp composition", () => {
     // Liveness must not depend on the DB.
     expect(deps.dbSpy.executeQuery).not.toHaveBeenCalled();
   });
+  it("rate-limits the protected Google Sheets inventory routes", async () => {
+    const createApp = await loadCreateApp();
+    const deps = BASE_DEPS();
+    const app = await createApp({
+      ...deps,
+      googleSheetsInventoryIntake: {
+        db: deps.db,
+        vault: deps.vault,
+        rootConfig: { adminTelegramUserId: 123, expectedUsername: "owner" },
+        spreadsheetId: "sheet-test",
+        ownerVerifier: {
+          verify: vi.fn().mockResolvedValue({ ok: false, code: "UNAUTHORIZED" }),
+        },
+      },
+    });
+    closers.push(() => app.close());
+
+    const statuses: number[] = [];
+    for (let attempt = 0; attempt < 31; attempt += 1) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/ops/google-sheets/inventory-intake/catalog",
+        payload: JSON.stringify({ spreadsheetId: "sheet-test" }),
+      });
+      statuses.push(response.statusCode);
+    }
+
+    expect(statuses.slice(0, 30).every((status) => status === 401)).toBe(true);
+    expect(statuses[30]).toBe(429);
+  });
 
   it("GET /ready returns 503 when the database ping fails", async () => {
     const createApp = await loadCreateApp();

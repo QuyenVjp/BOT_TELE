@@ -1,0 +1,214 @@
+<!doctype html>
+<html>
+  <head>
+    <base target="_top" />
+    <style>
+      body {
+        font:
+          13px Arial,
+          sans-serif;
+        padding: 12px;
+        color: #202124;
+      }
+      label {
+        display: block;
+        margin: 12px 0 4px;
+        font-weight: 600;
+      }
+      select,
+      textarea,
+      input,
+      button {
+        box-sizing: border-box;
+        width: 100%;
+      }
+      select,
+      textarea,
+      input {
+        border: 1px solid #dadce0;
+        border-radius: 4px;
+        padding: 8px;
+      }
+      textarea {
+        min-height: 150px;
+        resize: vertical;
+        font-family: monospace;
+      }
+      button {
+        margin-top: 12px;
+        border: 0;
+        border-radius: 4px;
+        padding: 9px;
+        background: #1a73e8;
+        color: white;
+        cursor: pointer;
+      }
+      button.secondary {
+        background: #5f6368;
+      }
+      button:disabled {
+        background: #bdc1c6;
+        cursor: wait;
+      }
+      #status {
+        margin-top: 12px;
+        white-space: pre-wrap;
+      }
+      .error {
+        color: #b3261e;
+      }
+      .ok {
+        color: #137333;
+      }
+      .preview {
+        background: #f8f9fa;
+        border-radius: 4px;
+        padding: 8px;
+        margin-top: 10px;
+      }
+    </style>
+  </head>
+  <body>
+    <h3>Nhập tài khoản</h3>
+    <p>Thông tin nhập ở đây chỉ chuyển tạm thời qua API bảo vệ, không ghi vào Sheet.</p>
+    <label for="variant">Sản phẩm / biến thể</label>
+    <select id="variant" disabled>
+      <option>Đang tải...</option>
+    </select>
+    <label for="input">Tài khoản</label>
+    <textarea
+      id="input"
+      autocomplete="off"
+      autocapitalize="off"
+      spellcheck="false"
+      placeholder="Mỗi dòng một tài khoản theo mẫu của biến thể"
+    ></textarea>
+    <label for="cost">Giá vốn (VND, tùy chọn)</label>
+    <input id="cost" type="number" min="0" step="1" autocomplete="off" />
+    <label for="note">Ghi chú an toàn (tùy chọn)</label>
+    <input id="note" type="text" maxlength="240" autocomplete="off" />
+    <button id="previewButton" disabled onclick="preview()">Xem trước</button>
+    <div id="preview" class="preview" hidden></div>
+    <button id="confirmButton" class="secondary" disabled onclick="confirmImport()">
+      Xác nhận nhập kho
+    </button>
+    <div id="status"></div>
+
+    <script>
+      let challenge = null;
+      const variant = document.getElementById("variant");
+      const input = document.getElementById("input");
+      const cost = document.getElementById("cost");
+      const note = document.getElementById("note");
+      const previewBox = document.getElementById("preview");
+      const statusBox = document.getElementById("status");
+      const previewButton = document.getElementById("previewButton");
+      const confirmButton = document.getElementById("confirmButton");
+
+      function setStatus(message, error) {
+        statusBox.textContent = message || "";
+        statusBox.className = error ? "error" : "ok";
+      }
+
+      function renderPreview(result) {
+        const p = result.preview;
+        previewBox.hidden = false;
+        previewBox.textContent =
+          "Sẵn sàng: " + p.ready + "\nKhông hợp lệ: " + p.invalid + "\nTrùng: " + p.duplicates;
+      }
+
+      function loadVariants(result) {
+        if (!result || !result.ok) {
+          setStatus(
+            "Không tải được danh sách biến thể: " + ((result && result.code) || "REQUEST_FAILED"),
+            true,
+          );
+          return;
+        }
+        variant.textContent = "";
+        result.variants.forEach(function (item) {
+          const option = document.createElement("option");
+          option.value = item.variantId;
+          option.textContent = item.name + " (" + item.sku + ")";
+          variant.appendChild(option);
+        });
+        variant.disabled = false;
+        previewButton.disabled = result.variants.length === 0;
+        setStatus("");
+      }
+
+      function preview() {
+        challenge = null;
+        confirmButton.disabled = true;
+        previewButton.disabled = true;
+        setStatus("Đang kiểm tra...", false);
+        const payload = {
+          variantId: variant.value,
+          input: input.value,
+          safeNote: note.value || undefined,
+          costPriceVnd: cost.value ? Number(cost.value) : undefined,
+        };
+        google.script.run
+          .withSuccessHandler(function (result) {
+            previewButton.disabled = false;
+            if (!result || !result.ok) {
+              if (result && result.preview) renderPreview(result);
+              setStatus(
+                "Không thể tạo bản xem trước: " + ((result && result.code) || "REQUEST_FAILED"),
+                true,
+              );
+              return;
+            }
+            challenge = result.challenge;
+            renderPreview(result);
+            confirmButton.disabled = false;
+            setStatus("Bản xem trước hợp lệ. Xác nhận để ghi vào kho.", false);
+          })
+          .withFailureHandler(function () {
+            previewButton.disabled = false;
+            setStatus("Không thể kết nối dịch vụ nhập kho.", true);
+          })
+          .previewInventory(payload);
+      }
+
+      function confirmImport() {
+        if (!challenge) return;
+        confirmButton.disabled = true;
+        previewButton.disabled = true;
+        setStatus("Đang ghi vào Vault và kho...", false);
+        google.script.run
+          .withSuccessHandler(function (result) {
+            previewButton.disabled = false;
+            if (!result || !result.ok) {
+              confirmButton.disabled = false;
+              setStatus(
+                "Chưa ghi được vào kho: " + ((result && result.code) || "REQUEST_FAILED"),
+                true,
+              );
+              return;
+            }
+            input.value = "";
+            challenge = null;
+            previewBox.hidden = true;
+            setStatus(
+              "Đã nhập " + result.summary.imported + " tài khoản vào trạng thái AVAILABLE.",
+              false,
+            );
+          })
+          .withFailureHandler(function () {
+            previewButton.disabled = false;
+            confirmButton.disabled = false;
+            setStatus("Không thể kết nối dịch vụ nhập kho.", true);
+          })
+          .confirmInventory({ challenge: challenge });
+      }
+
+      google.script.run
+        .withSuccessHandler(loadVariants)
+        .withFailureHandler(function () {
+          setStatus("Không thể tải danh sách biến thể.", true);
+        })
+        .getInventoryVariants();
+    </script>
+  </body>
+</html>

@@ -8660,6 +8660,18 @@ async function bootstrap(): Promise<void> {
         batchSize: config.TELEGRAM_INBOX_PRUNE_BATCH_SIZE,
       },
     });
+    const { expireGoogleSheetsInventoryChallenges } =
+      await import("./modules/google-sheets/inventory-intake.js");
+    const expiredSheetChallenges = config.GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED
+      ? await expireGoogleSheetsInventoryChallenges({
+          db: dbHandle.db,
+          vault,
+          rootConfig: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+        })
+      : 0;
     // Deposit holds are a bounded promise: a reservation whose balance deadline passed
     // forfeits the deposit (per the terms the customer accepted) and its held unit goes
     // back to the next waiter in the queue. Same lane, same cadence as the other recovery.
@@ -8667,6 +8679,7 @@ async function bootstrap(): Promise<void> {
     logger.info(
       {
         recovery,
+        expiredSheetChallenges,
         preorderHolds,
         sePayRecoveryConfigured: sePayRecoveryPort !== null,
         supplierRecoveryConfigured: supplier !== null,

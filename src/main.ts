@@ -43,6 +43,8 @@ async function main(): Promise<void> {
   const { createPostgresTelegramInbox } = await import("./infrastructure/inbox/telegram.js");
   const { createPostgresSePayInbox } = await import("./infrastructure/inbox/sepay.js");
   const { createSePayIngressHandler } = await import("./modules/payments/sepay-ingress.js");
+  const { createGoogleSheetsOwnerVerifier } =
+    await import("./infrastructure/google-sheets/owner-verifier.js");
 
   const dbHandle = createDb({
     connectionString: config.DATABASE_URL,
@@ -75,6 +77,27 @@ async function main(): Promise<void> {
     trustedProxyIps: config.SEPAY_TRUSTED_PROXY_IPS,
     inbox: sepayInbox,
   });
+  const googleSheetsInventoryIntake =
+    config.GOOGLE_SHEETS_ENABLED &&
+    config.GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED &&
+    config.GOOGLE_SHEETS_SPREADSHEET_ID &&
+    config.GOOGLE_SHEETS_OWNER_ID &&
+    config.GOOGLE_SHEETS_OIDC_AUDIENCE
+      ? {
+          db: dbHandle.db,
+          vault,
+          rootConfig: {
+            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+          },
+          spreadsheetId: config.GOOGLE_SHEETS_SPREADSHEET_ID,
+          ownerVerifier: createGoogleSheetsOwnerVerifier({
+            ownerEmail: config.GOOGLE_SHEETS_OWNER_ID,
+            audience: config.GOOGLE_SHEETS_OIDC_AUDIENCE,
+            spreadsheetId: config.GOOGLE_SHEETS_SPREADSHEET_ID,
+          }),
+        }
+      : undefined;
 
   const app = await createApp({
     db: dbHandle.db,
@@ -220,6 +243,7 @@ async function main(): Promise<void> {
           : {}),
       },
     },
+    ...(googleSheetsInventoryIntake === undefined ? {} : { googleSheetsInventoryIntake }),
     bodyLimitBytes: config.HTTP_BODY_LIMIT_BYTES,
     logger: false,
   });
