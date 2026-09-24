@@ -15,6 +15,15 @@ import {
 import { listMigrationFiles } from "../infrastructure/db/migrate.js";
 import { createVault } from "../infrastructure/vault/adapter.js";
 import { decodeBase32 } from "../modules/identity/step-up.js";
+const LEGACY_GROWTH_MIGRATION_RECEIPTS = [
+  "084_verified_reviews.sql",
+  "085_promotions.sql",
+  "086_promotion_drafts.sql",
+  "087_referrals.sql",
+  "088_funnel_events.sql",
+  "089_payment_reminders.sql",
+] as const;
+
 export interface ProductionPreflightOptions {
   /** Probe live dependencies; disabled for pure config/unit tests. */
   probeLiveDependencies?: boolean;
@@ -377,9 +386,17 @@ export async function runProductionPreflight(
           issues.push("store_control must be CLOSED during production commissioning");
         }
       }
-
-      const head = await pool.query<{ filename: string; count: string }>(
-        "select max(filename) as filename, count(*)::text as count from schema_migrations",
+      const head = await pool.query<{
+        filename: string;
+        count: string;
+        legacy_count: string;
+      }>(
+        `select
+           max(filename) as filename,
+           count(*)::text as count,
+           count(*) filter (where filename = any($1::text[]))::text as legacy_count
+         from schema_migrations`,
+        [LEGACY_GROWTH_MIGRATION_RECEIPTS],
       );
       const row = head.rows[0];
       if (row?.filename) {
@@ -388,9 +405,10 @@ export async function runProductionPreflight(
       if (options.probeLiveDependencies) {
         const migrationFiles = await listMigrationFiles();
         const expectedHead = migrationFiles[migrationFiles.length - 1];
+        const legacyReceiptCount = Number(row?.legacy_count ?? "0");
         if (
           !row?.filename ||
-          Number(row.count) !== migrationFiles.length ||
+          Number(row.count) !== migrationFiles.length + legacyReceiptCount ||
           row.filename !== expectedHead
         ) {
           issues.push("database migration head/count does not match source migrations");
