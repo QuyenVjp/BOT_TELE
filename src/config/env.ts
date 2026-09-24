@@ -124,6 +124,7 @@ export const envSchema = z.object({
   SEARCH_PARSER_TIMEOUT_MS: z.coerce.number().int().positive().default(1500),
 
   GOOGLE_SHEETS_ENABLED: booleanEnv,
+  GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED: booleanEnv,
   GOOGLE_SHEETS_SPREADSHEET_ID: z.string().trim().default(""),
   GOOGLE_SHEETS_CREDENTIAL_VAULT_REF: z.string().trim().default(""),
   GOOGLE_SHEETS_OWNER_ID: z

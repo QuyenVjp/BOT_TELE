@@ -79,6 +79,7 @@ async function main(): Promise<void> {
   });
   const googleSheetsInventoryIntake =
     config.GOOGLE_SHEETS_ENABLED &&
+    config.GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED &&
     config.GOOGLE_SHEETS_SPREADSHEET_ID &&
     config.GOOGLE_SHEETS_OWNER_ID &&
     config.GOOGLE_SHEETS_OIDC_AUDIENCE

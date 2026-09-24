@@ -15,6 +15,7 @@ the local Terminal command remain fallback/break-glass paths.
 2. Set the backend HTTPS base URL in `Code.gs` to the approved production API origin.
 3. Configure the backend with:
    - `GOOGLE_SHEETS_ENABLED=true`
+   - `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=true` only after migration and live owner acceptance
    - exact `GOOGLE_SHEETS_SPREADSHEET_ID`
    - `GOOGLE_SHEETS_OWNER_ID` as the owner Google account email
    - `GOOGLE_SHEETS_OIDC_AUDIENCE` as the Apps Script OAuth audience/client id

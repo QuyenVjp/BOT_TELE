@@ -8662,7 +8662,7 @@ async function bootstrap(): Promise<void> {
     });
     const { expireGoogleSheetsInventoryChallenges } =
       await import("./modules/google-sheets/inventory-intake.js");
-    const expiredSheetChallenges = config.GOOGLE_SHEETS_ENABLED
+    const expiredSheetChallenges = config.GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED
       ? await expireGoogleSheetsInventoryChallenges({
           db: dbHandle.db,
           vault,

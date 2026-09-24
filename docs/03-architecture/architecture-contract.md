@@ -353,6 +353,20 @@ warranty/support, audit and all versions; Vault remains authoritative for
 credentials and secret material. Sheets outage, quota exhaustion or malformed
 external data must never block checkout, payment or fulfillment.
 
+### Staged intake enablement
+
+- `GOOGLE_SHEETS_ENABLED` controls the existing secret-free projection lane and may remain
+  enabled before the owner intake boundary is commissioned.
+- `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED` is a separate opt-in gate, defaulting to `false`.
+  It is the only switch that enables Apps Script catalog/preview/confirm routes and challenge
+  expiry/recovery.
+- Production requires `GOOGLE_SHEETS_OIDC_AUDIENCE` only when the intake gate is enabled.
+  Missing intake configuration must disable only the intake lane; it must not crash the worker
+  or stop PostgreSQL commerce lanes and projection reconciliation.
+- The intake gate may become `true` only after the migration, Apps Script manifest/owner setup,
+  exact audience, and live owner acceptance are ready. The store remains `CLOSED` during this
+  sequence.
+
 ### Module seams
 
 - `infrastructure/google-sheets/client.ts` owns the official Google Sheets API

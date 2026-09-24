@@ -98,6 +98,11 @@ recovery. Apply it only after the exact release artifact, Apps Script intake acc
 and a controlled migration window are ready. Keep the store `CLOSED`; do not activate
 sales as part of applying 083. See `docs/06-operations/google-sheets-inventory-intake.md`.
 
+Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while the migration and Apps Script
+acceptance are pending. This gate enables the OIDC-backed catalog/preview/confirm route
+and challenge recovery only after the configured audience and owner acceptance exist; the
+existing secret-free projection lane may remain enabled independently.
+
 Do not edit older migration files.
 
 The 072–076 procedure below is historical evidence only. Do not use it as the current
