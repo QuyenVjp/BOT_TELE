@@ -1,8 +1,9 @@
+import { sql } from "kysely";
 import type { Db, Trx } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { newId } from "../../shared/ids/index.js";
-import { findOrderById, findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
+import { findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
 import {
   confirmPreorderDepositInTransaction,
   finalizePreorderInTransaction,
@@ -11,6 +12,7 @@ import {
   recordPreorderPaymentIntent,
   type PreorderSettlementTarget,
 } from "../commerce/preorder.js";
+import { canPurchase, getStoreMode } from "../commerce/store-mode.js";
 import { isSupportedCatalogRoute } from "../catalog/domain.js";
 import { orderHasActiveReservation } from "../digital-goods/repository.js";
 import { isVerifiedSePayEvidence, type VerifiedSePayEvidence } from "./sepay-ingress.js";
@@ -31,6 +33,8 @@ import {
 } from "./repository.js";
 import { presentPayment, type PaymentPresentation } from "./vietqr.js";
 import { generateOrderPaymentCode, generatePreorderPaymentCode } from "./payment-code.js";
+import { consumePromotion } from "../promotions/service.js";
+import { recordFunnelEvent } from "../operations/funnel.js";
 
 /**
  * Payment settlement service (T053, T128).
@@ -95,6 +99,9 @@ export interface PresentPaymentForOrderInput {
   /** Public VietQR bank alias used only by the image URL renderer. */
   bankAlias?: string;
   correlationId: string;
+  /** Channel identity for re-validating store mode when resuming checkout. */
+  telegramUserId?: string;
+  isRootAdmin?: boolean;
   /** Intent TTL in seconds (default 900). */
   ttlSeconds?: number;
 }
@@ -109,7 +116,7 @@ export async function presentPaymentForOrder(
   input: PresentPaymentForOrderInput,
 ): Promise<PresentPaymentResult> {
   return withTransaction(db, async (trx) => {
-    const order = await findOrderById(trx, input.orderId);
+    const order = await findOrderByIdForUpdate(trx, input.orderId);
     if (!order) return { ok: false, error: "order not found" };
     // Only a still-pending order may present a QR. An order under
     // PAYMENT_NEEDS_REVIEW (or paid/cancelled/expired) must not mint a new one
@@ -123,6 +130,61 @@ export async function presentPaymentForOrder(
     const now = new Date();
     if (order.expiresAt !== null && new Date(order.expiresAt).getTime() <= now.getTime()) {
       return { ok: false, error: "order expired" };
+    }
+    const liveVariant = await sql<{
+      price_vnd: string;
+      variant_active: boolean;
+      product_active: boolean;
+      product_archived: boolean;
+      product_test: boolean;
+      category_active: boolean;
+    }>`
+      select v.price_vnd::text,
+             v.is_active as variant_active,
+             p.is_active as product_active,
+             p.is_archived as product_archived,
+             p.is_test as product_test,
+             c.is_active as category_active
+      from product_variant v
+      join product p on p.id = v.product_id
+      join category c on c.id = p.category_id
+      where v.id = ${order.variantId}
+      limit 1
+    `.execute(trx);
+    const live = liveVariant.rows[0];
+    if (
+      !live ||
+      !live.variant_active ||
+      !live.product_active ||
+      live.product_archived ||
+      !live.category_active
+    ) {
+      return { ok: false, error: "product unavailable" };
+    }
+
+    let snapshotBaseVnd: bigint;
+    try {
+      const snapshottedBase = order.promotionSnapshot?.baseAmountVnd;
+      snapshotBaseVnd =
+        typeof snapshottedBase === "string"
+          ? BigInt(snapshottedBase)
+          : BigInt(order.priceVnd) + BigInt(order.promotionDiscountVnd ?? "0");
+    } catch {
+      return { ok: false, error: "order amount is invalid" };
+    }
+    if (BigInt(live.price_vnd) !== snapshotBaseVnd) {
+      return { ok: false, error: "product price changed" };
+    }
+
+    const storeMode = await getStoreMode(trx);
+    if (storeMode === "CLOSED") return { ok: false, error: "store closed" };
+    if (input.telegramUserId !== undefined) {
+      const gate = await canPurchase(trx, {
+        telegramUserId: input.telegramUserId,
+        isRootAdmin: input.isRootAdmin ?? false,
+        variantIsTest: live.product_test,
+      });
+      if (!gate.ok) return { ok: false, error: gate.code ?? "store closed" };
     }
 
     // T157 / FR-006a: every payable order must still match a supported route
@@ -141,9 +203,9 @@ export async function presentPaymentForOrder(
     if (!hasReservation) {
       return { ok: false, error: "no active reservation" };
     }
-
     // Reuse the live intent if one already exists (double-tap / reopen).
     const existing = await findLiveIntentByOrder(trx, order.id);
+
     if (existing) {
       const presentation = presentPayment({
         bankBin: input.bankBin,
@@ -156,15 +218,26 @@ export async function presentPaymentForOrder(
         ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
         ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
       });
+      await recordFunnelEvent(trx, {
+        eventName: "PAYMENT_PRESENTED",
+        eventKey: `payment-presented:${existing.id}`,
+        variantId: order.variantId,
+      });
       return { ok: true, intentId: existing.id, presentation };
     }
 
     // Fresh intent: unique transfer content derived from the order number so
     // the customer can also type it, and so content→intent is deterministic.
-    const amountVnd = Number(order.priceVnd);
-    if (!Number.isInteger(amountVnd) || amountVnd <= 0) {
+    let amountVndBigInt: bigint;
+    try {
+      amountVndBigInt = BigInt(order.priceVnd);
+    } catch {
       return { ok: false, error: "order amount is not a positive integer VND" };
     }
+    if (amountVndBigInt <= 0n || amountVndBigInt > BigInt(Number.MAX_SAFE_INTEGER)) {
+      return { ok: false, error: "order amount is not a positive integer VND" };
+    }
+    const amountVnd = Number(amountVndBigInt);
     const ttlSeconds = input.ttlSeconds ?? 900;
     const expiresAt =
       order.expiresAt !== null
@@ -202,6 +275,11 @@ export async function presentPaymentForOrder(
         ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
         ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
       });
+      await recordFunnelEvent(trx, {
+        eventName: "PAYMENT_PRESENTED",
+        eventKey: `payment-presented:${raced.id}`,
+        variantId: order.variantId,
+      });
       return { ok: true, intentId: raced.id, presentation };
     }
 
@@ -230,6 +308,11 @@ export async function presentPaymentForOrder(
       expiresAt,
       ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
       ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
+    });
+    await recordFunnelEvent(trx, {
+      eventName: "PAYMENT_PRESENTED",
+      eventKey: `payment-presented:${intentId}`,
+      variantId: order.variantId,
     });
     return { ok: true, intentId, presentation };
   });
@@ -704,6 +787,12 @@ export async function applyPaymentEvidence(
             intentId: decision.intentId,
             correlationId: evidence.correlationId,
           },
+        });
+        if (order.promotionCode) await consumePromotion(trx, order.id);
+        await recordFunnelEvent(trx, {
+          eventName: "PAYMENT_SUCCEEDED",
+          eventKey: `payment-succeeded:${decision.intentId}`,
+          variantId: order.variantId,
         });
       }
 

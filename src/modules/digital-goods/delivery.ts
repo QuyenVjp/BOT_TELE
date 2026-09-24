@@ -12,6 +12,7 @@ import {
 import { markAssetDelivered } from "./repository.js";
 import { hashDeliverySessionNonce, type DeliverySessionClaims } from "./delivery-session.js";
 import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfillment-type.js";
+import { recordFunnelEvent } from "../operations/funnel.js";
 
 /**
  * Secure Delivery Bundle issue / reveal / reissue (T073, FR-017, SR-003,
@@ -462,6 +463,11 @@ export async function consumeDeliveryBundle(db: Db, input: ConsumeInput): Promis
           id: "delivery",
         });
       }
+      await recordFunnelEvent(trx, {
+        eventKey: `delivered:${row.id}`,
+        eventName: "DELIVERED",
+        ...(order ? { variantId: order.variantId } : {}),
+      });
 
       return { ok: true as const, alreadyConsumed: false };
     });

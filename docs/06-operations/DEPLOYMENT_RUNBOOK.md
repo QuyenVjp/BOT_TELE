@@ -84,29 +84,32 @@ npm run migrate:production
 
 ## Current production migration head
 
-The source tree currently contains **82** SQL files under `src/infrastructure/db/migrations/`.
+The source tree currently contains **89** SQL files under `src/infrastructure/db/migrations/`.
 The latest source migration is:
 
-- **filename:** `083_google_sheets_inventory_intake.sql`
-- **count:** `82`
+- **filename:** `090_payment_reminders.sql`
+- **count:** `89`
 
 The current read-only production preflight observed production at
-`082_paid_delivery_reconciliation.sql` (**81** migrations). Migration 082 is therefore
-already applied. Migration 083 is a forward-only expand migration for safe Google
-Sheets projection metadata, the Sheet-native owner challenge and inventory Vault-orphan
-recovery. Apply it only after the exact release artifact, Apps Script intake acceptance,
-and a controlled migration window are ready. Keep the store `CLOSED`; do not activate
-sales as part of applying 083. See `docs/06-operations/google-sheets-inventory-intake.md`.
+`082_paid_delivery_reconciliation.sql` (**81** migrations). Migrations 083–090 are
+forward-only release migrations and must be applied in this order:
 
-Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while the migration and Apps Script
-acceptance are pending. This gate enables the OIDC-backed catalog/preview/confirm route
-and challenge recovery only after the configured audience and owner acceptance exist; the
-existing secret-free projection lane may remain enabled independently.
+1. `083_google_sheets_inventory_intake.sql`
+2. `084_social_proof_admin_alerts.sql`
+3. `085_verified_reviews.sql`
+4. `086_promotions.sql`
+5. `087_promotion_drafts.sql`
+6. `088_referrals.sql`
+7. `089_funnel_events.sql`
+8. `090_payment_reminders.sql`
 
+Apply them only from the exact release artifact, while the store remains `CLOSED`,
+after first-sale critical-path verification and the staged feature acceptance gates.
 Do not edit older migration files.
 
-The 072–076 procedure below is historical evidence only. Do not use it as the current
-production migration target; use the release-specific procedure above for pending 083.
+Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while migration 083, Apps Script
+owner/OIDC setup and live acceptance are pending. Referral rewards remain disabled by
+default; referral attribution and aggregate analytics do not issue monetary credit.
 
 ## Historical migrations 072–076 — post-merge production procedure
 

@@ -65,6 +65,16 @@ interface OrderRef {
   createdAt: string;
 }
 
+function funnelEventKey(
+  envelope: Pick<TelegramCommandEnvelope, "callbackQueryId" | "messageId" | "receivedAt">,
+  prefix: string,
+  resource: string,
+): string {
+  const requestId =
+    envelope.callbackQueryId ?? envelope.messageId ?? envelope.receivedAt ?? "unknown";
+  return `${prefix}:${resource}:${requestId}`;
+}
+
 export type WalletTopupAction =
   | { kind: "PICK" }
   | { kind: "SELECT"; amountVnd: bigint }
@@ -151,6 +161,7 @@ export interface TelegramDomainDispatcherDeps {
       telegramUserId: string | bigint | number,
       identity?:
         { telegramUserId?: string | undefined; isRootAdmin?: boolean | undefined } | undefined,
+      eventKey?: string,
     ): Promise<PresentedMessage>;
     openStartPayload?(
       payload: string,
@@ -158,6 +169,7 @@ export interface TelegramDomainDispatcherDeps {
         actorName: string;
         telegramUserId: string;
         isRootAdmin?: boolean;
+        eventKey?: string;
       },
     ): Promise<PresentedMessage>;
   };
@@ -170,11 +182,30 @@ export interface TelegramDomainDispatcherDeps {
    * with a recovery message instead of failing open.
    */
   checkout: Pick<CheckoutCallbacks, "buyNowFromCallback" | "refresh" | "reopen" | "cancel"> &
-    Partial<Pick<CheckoutCallbacks, "previewFromCallback" | "payWithWalletFromCallback">>;
+    Partial<
+      Pick<CheckoutCallbacks, "previewFromCallback" | "payWithWalletFromCallback" | "remind">
+    >;
   history: {
     list(customerId: string, cursor?: string | null): Promise<PresentedMessage>;
     detail(orderNumber: string, customerId: string): Promise<PresentedMessage>;
+    buyAgain?(
+      orderNumber: string,
+      customerId: string,
+      telegramUserId: string,
+    ): Promise<PresentedMessage>;
   };
+  reviews?: {
+    start(orderNumber: string, customerId: string): Promise<PresentedMessage>;
+    rate(orderNumber: string, customerId: string, rating: number): Promise<PresentedMessage>;
+  };
+  promotion?: {
+    apply(customerId: string, code: string): Promise<PresentedMessage>;
+  };
+  referral?: {
+    home(customerId: string): Promise<PresentedMessage>;
+    attribute(customerId: string, token: string): Promise<PresentedMessage>;
+  };
+  resumePendingCheckout?: (customerId: string) => Promise<PresentedMessage | null>;
   support: {
     reasonMenu(orderNumber?: string): PresentedMessage;
     open(input: {
@@ -247,6 +278,18 @@ export interface TelegramDomainDispatcherDeps {
     operations?(input: {
       telegramUserId: string;
       chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    reviews?(input: {
+      telegramUserId: string;
+      chatType: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    reviewModerate?(input: {
+      telegramUserId: string;
+      chatType: string;
+      reviewId: string;
+      status: "VISIBLE" | "HIDDEN";
       correlationId: string;
     }): Promise<PresentedMessage>;
     audit?(input: {
@@ -1174,8 +1217,23 @@ export function createTelegramDomainDispatcher(
         const orderNumber = envelope.callbackData.slice("pay:refresh:".length);
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
         message = customerId
-          ? await deps.checkout.refresh(orderNumber, customerId)
+          ? await deps.checkout.refresh(
+              orderNumber,
+              customerId,
+              catalogActorIdentity(deps, envelope.actorUserId),
+            )
           : safeError("Không tìm thấy thông tin khách hàng.");
+      } else if (envelope.callbackData?.startsWith("pay:remind:")) {
+        const orderNumber = envelope.callbackData.slice("pay:remind:".length);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          customerId && deps.checkout.remind
+            ? await deps.checkout.remind(
+                orderNumber,
+                customerId,
+                catalogActorIdentity(deps, envelope.actorUserId),
+              )
+            : safeError("Nhắc thanh toán hiện chưa khả dụng.");
       } else if (envelope.callbackData?.startsWith("pay:cancel:")) {
         const orderNumber = envelope.callbackData.slice("pay:cancel:".length);
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
@@ -1186,8 +1244,41 @@ export function createTelegramDomainDispatcher(
         const orderNumber = envelope.callbackData.slice("pay:reopen:".length);
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
         message = customerId
-          ? await deps.checkout.reopen(orderNumber, customerId)
+          ? await deps.checkout.reopen(
+              orderNumber,
+              customerId,
+              catalogActorIdentity(deps, envelope.actorUserId),
+            )
           : safeError("Không tìm thấy thông tin khách hàng.");
+      } else if (envelope.callbackData?.startsWith("buyagain:")) {
+        const orderNumber = envelope.callbackData.slice("buyagain:".length);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          customerId && deps.history.buyAgain
+            ? await deps.history.buyAgain(orderNumber, customerId, envelope.actorUserId)
+            : safeError("Mua lại hiện chưa khả dụng.");
+      } else if (envelope.callbackData?.startsWith("review:start:")) {
+        const orderNumber = envelope.callbackData.slice("review:start:".length);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          customerId && deps.reviews
+            ? await deps.reviews.start(orderNumber, customerId)
+            : safeError("Đánh giá hiện chưa khả dụng.");
+      } else if (envelope.callbackData?.startsWith("review:rate:")) {
+        const [orderNumber, ratingText] = envelope.callbackData
+          .slice("review:rate:".length)
+          .split(":");
+        const rating = Number(ratingText);
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          customerId &&
+          deps.reviews &&
+          Number.isInteger(rating) &&
+          rating >= 1 &&
+          rating <= 5 &&
+          orderNumber
+            ? await deps.reviews.rate(orderNumber, customerId, rating)
+            : safeError("Đánh giá không hợp lệ.");
       } else if (envelope.callbackData?.startsWith("ord:view:")) {
         const orderNumber = envelope.callbackData.slice("ord:view:".length);
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
@@ -1335,6 +1426,7 @@ export function createTelegramDomainDispatcher(
               prodId,
               envelope.actorUserId,
               catalogActorIdentity(deps, envelope.actorUserId),
+              funnelEventKey(envelope, "product-view", prodId),
             )
           : await shopHome(deps, envelope);
       } else if (envelope.callbackData === "cust:warranty") {
@@ -1577,6 +1669,27 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Màn hình vận hành không khả dụng.");
+        } else if (route === "reviews") {
+          message = admin.reviews
+            ? await admin.reviews({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                correlationId,
+              })
+            : safeError("Kiểm duyệt đánh giá không khả dụng.");
+        } else if (route.startsWith("reviews:")) {
+          const parts = route.split(":");
+          const status = parts[1] === "hide" ? "HIDDEN" : parts[1] === "restore" ? "VISIBLE" : null;
+          message =
+            admin.reviewModerate && status && parts[2]
+              ? await admin.reviewModerate({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  reviewId: parts[2],
+                  status,
+                  correlationId,
+                })
+              : safeError("Thao tác kiểm duyệt không hợp lệ.");
         } else if (route === "products:view" || route.startsWith("products:view:")) {
           // `products:view:<view>[:<page>]` — one route family so paging keeps the active filter.
           const parts = route.split(":");
@@ -2537,7 +2650,13 @@ export function createTelegramDomainDispatcher(
       } else if (command === "/start") {
         if (envelope.searchQuery) {
           const q = envelope.searchQuery.trim();
-          if (q.startsWith("product_") || q.startsWith("prod_")) {
+          if (q.startsWith("ref_")) {
+            const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+            message =
+              customerId && deps.referral
+                ? await deps.referral.attribute(customerId, q)
+                : safeError("Không xác minh được khách hàng.");
+          } else if (q.startsWith("product_") || q.startsWith("prod_")) {
             message = deps.catalog.openStartPayload
               ? await deps.catalog.openStartPayload(q, {
                   actorName: envelope.firstName ?? envelope.actorUsername ?? "bạn",
@@ -2545,6 +2664,7 @@ export function createTelegramDomainDispatcher(
                   isRootAdmin:
                     deps.adminRootUserId !== undefined &&
                     Number(envelope.actorUserId) === deps.adminRootUserId,
+                  eventKey: funnelEventKey(envelope, "product-start", q),
                 })
               : deps.catalog.storefront
                 ? await deps.catalog.storefront({
@@ -2582,19 +2702,36 @@ export function createTelegramDomainDispatcher(
               : presentCustomerHome();
           }
         } else {
-          message = deps.catalog.storefront
-            ? await deps.catalog.storefront({
-                actorName: envelope.firstName ?? envelope.actorUsername ?? "bạn",
-                telegramUserId: envelope.actorUserId,
-                offset: 0,
-                isRootAdmin:
-                  deps.adminRootUserId !== undefined &&
-                  Number(envelope.actorUserId) === deps.adminRootUserId,
-              })
-            : presentCustomerHome();
+          const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+          const resumed = customerId ? await deps.resumePendingCheckout?.(customerId) : null;
+          message =
+            resumed ??
+            (deps.catalog.storefront
+              ? await deps.catalog.storefront({
+                  actorName: envelope.firstName ?? envelope.actorUsername ?? "bạn",
+                  telegramUserId: envelope.actorUserId,
+                  offset: 0,
+                  isRootAdmin:
+                    deps.adminRootUserId !== undefined &&
+                    Number(envelope.actorUserId) === deps.adminRootUserId,
+                })
+              : presentCustomerHome());
         }
       } else if (command === "/catalog" || command === "/shop") {
         message = await shopHome(deps, envelope);
+      } else if (command === "/promo") {
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        const code = envelope.searchQuery?.trim();
+        message =
+          customerId && deps.promotion && code
+            ? await deps.promotion.apply(customerId, code)
+            : safeError("Dùng /promo <mã ưu đãi> trước khi bấm Mua ngay.");
+      } else if (command === "/referral") {
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        message =
+          customerId && deps.referral
+            ? await deps.referral.home(customerId)
+            : safeError("Giới thiệu bạn bè hiện chưa khả dụng.");
       } else if (command === "/orders") {
         const customerId = await deps.resolveCustomerId(envelope.actorUserId);
         message = customerId
@@ -3075,7 +3212,23 @@ async function dispatchVerified(
       if (!token.resourceId) return safeError("Không tìm thấy đơn hàng.");
       const order = await ownedOrder(deps, token.resourceId, customerId);
       return order
-        ? deps.checkout.refresh(order.orderNumber, customerId)
+        ? deps.checkout.refresh(
+            order.orderNumber,
+            customerId,
+            catalogActorIdentity(deps, envelope.actorUserId),
+          )
+        : safeError("Không tìm thấy đơn hàng.");
+    }
+    case "PAYMENT_REMINDER": {
+      if (!token.resourceId || !deps.checkout.remind)
+        return safeError("Nhắc thanh toán hiện chưa khả dụng.");
+      const order = await ownedOrder(deps, token.resourceId, customerId);
+      return order
+        ? deps.checkout.remind(
+            order.orderNumber,
+            customerId,
+            catalogActorIdentity(deps, envelope.actorUserId),
+          )
         : safeError("Không tìm thấy đơn hàng.");
     }
     case "PAYMENT_CANCEL": {
@@ -3089,7 +3242,11 @@ async function dispatchVerified(
       if (!token.resourceId) return safeError("Không tìm thấy đơn hàng.");
       const order = await ownedOrder(deps, token.resourceId, customerId);
       return order
-        ? deps.checkout.reopen(order.orderNumber, customerId)
+        ? deps.checkout.reopen(
+            order.orderNumber,
+            customerId,
+            catalogActorIdentity(deps, envelope.actorUserId),
+          )
         : safeError("Không tìm thấy đơn hàng.");
     }
     case "SUPPORT_MENU": {
@@ -3147,6 +3304,7 @@ async function dispatchVerified(
             token.resourceId,
             envelope.actorUserId,
             catalogActorIdentity(deps, envelope.actorUserId),
+            funnelEventKey(envelope, "product-token", token.resourceId),
           )
         : shopHome(deps, envelope);
     case "CUSTOMER_WARRANTY":

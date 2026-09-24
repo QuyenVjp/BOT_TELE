@@ -33,6 +33,7 @@ export const PAYMENT_COPY = {
     "Không hiển thị được QR. Dùng nút sao chép STK / số tiền / nội dung bên dưới để chuyển trên điện thoại này.",
   refresh: "✅ Kiểm tra thanh toán",
   cancel: "❌ Huỷ đơn",
+  reminder: "🔔 Nhắc thanh toán",
   reopen: "🛒 Tạo lại thanh toán",
   support: "💬 Hỗ trợ",
   mainMenu: "🏠 Menu",
@@ -142,6 +143,7 @@ export function buildMobilePaymentKeyboard(input: {
   profile: PaymentPresentationProfile;
   refreshCallbackData?: string;
   cancelCallbackData?: string;
+  reminderCallbackData?: string;
   extraRows?: InlineButton[][];
 }): InlineButton[][] {
   const payloads = paymentCopyPayloads(input.presentation);
@@ -171,6 +173,9 @@ export function buildMobilePaymentKeyboard(input: {
   }
   if (profile.showCancelButton && input.cancelCallbackData) {
     rows.push([styledButton(PAYMENT_COPY.cancel, input.cancelCallbackData, "danger")]);
+  }
+  if (input.reminderCallbackData) {
+    rows.push([styledButton(PAYMENT_COPY.reminder, input.reminderCallbackData)]);
   }
   rows.push([styledButton(PAYMENT_COPY.mainMenu, "menu:main")]);
   if (input.extraRows) rows.push(...input.extraRows);
@@ -365,6 +370,7 @@ export async function presentPaymentScreen(
       presentation,
       profile,
       refreshCallbackData: `pay:refresh:${presentation.orderNumber}`,
+      reminderCallbackData: `pay:remind:${presentation.orderNumber}`,
       cancelCallbackData: `pay:cancel:${presentation.orderNumber}`,
     }),
   };
@@ -516,6 +522,17 @@ export function presentPaymentCancelled(orderNumber: string): PresentedMessage {
       "Các nút thanh toán trên tin nhắn cũ không còn hiệu lực.",
     ].join("\n"),
     buttons: [[styledButton(PAYMENT_COPY.mainMenu, "menu:main")]],
+  };
+}
+export function presentPaymentReminderCooldown(orderNumber: string): PresentedMessage {
+  return {
+    text: `🔔 Đã nhắc thanh toán cho đơn ${orderNumber} gần đây. Vui lòng kiểm tra tin nhắn thanh toán hiện tại.`,
+    buttons: [
+      [
+        styledButton(PAYMENT_COPY.refresh, `pay:refresh:${orderNumber}`),
+        styledButton(PAYMENT_COPY.mainMenu, "menu:main"),
+      ],
+    ],
   };
 }
 

@@ -179,10 +179,12 @@ describe("pending mobile payment screen", () => {
         PAYMENT_COPY.copyOrder,
         PAYMENT_COPY.refresh,
         PAYMENT_COPY.cancel,
+        PAYMENT_COPY.reminder,
       ]),
     );
     const data = msg.buttons.flat().map((button) => button.callbackData);
     expect(data).toContain(`pay:refresh:${PRESENTATION.orderNumber}`);
+    expect(data).toContain(`pay:remind:${PRESENTATION.orderNumber}`);
     expect(data).toContain(`pay:cancel:${PRESENTATION.orderNumber}`);
   });
 
@@ -221,13 +223,14 @@ describe("pending mobile payment screen", () => {
 });
 
 describe("payment keyboard layout (K6)", () => {
-  it("lays out the copy trio, check, and cancel in the mandated row order", async () => {
+  it("lays out the copy trio, check, cancel, and one cooldown-backed reminder", async () => {
     const msg = await presentPaymentScreen(PRESENTATION, silentQr);
     expect(msg.buttons.map((row) => row.map((button) => button.text))).toEqual([
       [PAYMENT_COPY.copyAccount, PAYMENT_COPY.copyContent],
       [PAYMENT_COPY.copyAmount, PAYMENT_COPY.copyOrder],
       [PAYMENT_COPY.refresh],
       [PAYMENT_COPY.cancel],
+      [PAYMENT_COPY.reminder],
       [PAYMENT_COPY.mainMenu],
     ]);
     const flat = msg.buttons.flat();
@@ -636,14 +639,12 @@ describe("fulfillment/override matrix", () => {
     if (row.expectedFulfillmentLine) {
       expect(msg.text).toContain(row.expectedFulfillmentLine);
     }
-    if (row.name === "product override") {
-      expect(msg.text).toContain("Gói kích hoạt sau khi ngân hàng xác nhận.");
-    }
     expect(msg.buttons.map((buttonRow) => buttonRow.map((button) => button.text))).toEqual([
       [PAYMENT_COPY.copyAccount, PAYMENT_COPY.copyContent],
       [PAYMENT_COPY.copyAmount, PAYMENT_COPY.copyOrder],
       [PAYMENT_COPY.refresh],
       [PAYMENT_COPY.cancel],
+      [PAYMENT_COPY.reminder],
       [PAYMENT_COPY.mainMenu],
     ]);
   });

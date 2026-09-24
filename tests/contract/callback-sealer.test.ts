@@ -262,6 +262,30 @@ describe("callback sealing", () => {
     });
   });
 
+  it("seals pay:reopen when resolveOrderId returns an order id", async () => {
+    const tokenCodec = codec();
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "expired",
+        buttons: [[{ text: "reopen", callbackData: "pay:reopen:ORD-20260716-ABCD1234" }]],
+      },
+      {
+        codec: tokenCodec,
+        telegramUserId: "123456789",
+        resolveOrderId: async () => COMMAND_ID,
+      },
+    );
+    const callbackData = sealed.buttons[0]![0]!.callbackData;
+    expect(callbackData).toMatch(/^cb:/);
+    expect(tokenCodec.verify(callbackData, { telegramUserId: "123456789" })).toEqual({
+      ok: true,
+      value: expect.objectContaining({
+        action: "PAYMENT_REOPEN",
+        resourceId: COMMAND_ID,
+      }),
+    });
+  });
+
   it("keeps acknowledged delivery deletion readable", async () => {
     const sealed = await sealPresentedMessageCallbacks(
       {

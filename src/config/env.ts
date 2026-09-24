@@ -60,6 +60,7 @@ export const envSchema = z.object({
   BUY_NOW_CALLBACK_HMAC_KEY: z.string().min(32),
   SOCIAL_PROOF_HMAC_KEY: z.string().default(""),
   ADMIN_PAYMENT_ALERT_MODE: z.enum(["IMMEDIATE", "OFF"]).default("IMMEDIATE"),
+  REFERRAL_REWARDS_ENABLED: booleanEnv,
   BUY_NOW_CALLBACK_KEY_VERSION: z.coerce.number().int().min(0).max(15).default(1),
   BUY_NOW_CALLBACK_TTL_SECONDS: z.coerce.number().int().positive().max(86400).default(900),
   BUY_NOW_CALLBACK_CLOCK_SKEW_SECONDS: z.coerce.number().int().nonnegative().max(60).default(5),

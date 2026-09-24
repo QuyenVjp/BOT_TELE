@@ -175,6 +175,20 @@ export function presentOrderDetail(
           ],
         ]
       : []),
+    ...(order.status === "COMPLETED"
+      ? [
+          [
+            {
+              text: "🔁 Mua lại",
+              callbackData: `buyagain:${order.orderNumber}`,
+            },
+            {
+              text: "⭐ Đánh giá",
+              callbackData: `review:start:${order.orderNumber}`,
+            },
+          ],
+        ]
+      : []),
     ...(warranty && !warranty.expired && warranty.warrantyDays > 0
       ? [
           [

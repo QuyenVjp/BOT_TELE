@@ -587,7 +587,8 @@ function classifyAction(
     if (action) return "CATALOG";
     return "UNKNOWN";
   }
-  if (callbackData?.startsWith("pay:refresh:")) return "PAYMENT_CHECK";
+  if (callbackData?.startsWith("pay:refresh:") || callbackData?.startsWith("pay:remind:"))
+    return "PAYMENT_CHECK";
   if (callbackData?.startsWith("pay:cancel:")) return "CANCEL";
   if (callbackData?.startsWith("support:")) return "SUPPORT";
   if (callbackData?.startsWith("admin:")) return "ADMIN";

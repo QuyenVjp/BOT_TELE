@@ -24,11 +24,17 @@ import { isWithinWarranty, usedDaysAt, warrantyEndOf } from "../../modules/warra
 export interface HistoryCallbackDeps {
   db: Db;
   pageSize?: number;
+  buyAgainVariantDetail?: (variantId: string, telegramUserId: string) => Promise<PresentedMessage>;
 }
 
 export interface HistoryCallbacks {
   list(customerId: string, cursor?: string | null): Promise<PresentedMessage>;
   detail(orderReference: string, customerId: string): Promise<PresentedMessage>;
+  buyAgain(
+    orderReference: string,
+    customerId: string,
+    telegramUserId: string,
+  ): Promise<PresentedMessage>;
 }
 
 function errorMessage(text: string): PresentedMessage {
@@ -109,6 +115,18 @@ export function createHistoryCallbacks(deps: HistoryCallbackDeps): HistoryCallba
         return errorMessage("Không tìm thấy đơn hàng hoặc bạn không sở hữu đơn hàng này.");
       }
       return presentOrderDetail(owned, await orderWarrantyState(deps.db, owned));
+    },
+    async buyAgain(orderReference, customerId, telegramUserId) {
+      if (!deps.buyAgainVariantDetail) return errorMessage("Mua lại hiện chưa khả dụng.");
+      const orderId = isId(orderReference)
+        ? orderReference
+        : ((await findOrderByNumberForOwner(deps.db, orderReference, customerId))?.id ?? null);
+      if (!orderId)
+        return errorMessage("Không tìm thấy đơn hàng hoặc bạn không sở hữu đơn hàng này.");
+      const owned = await getOrderDetailForCustomer(deps.db, { orderId, customerId });
+      if (!owned || owned.status !== "COMPLETED")
+        return errorMessage("Đơn hàng này chưa đủ điều kiện để mua lại.");
+      return deps.buyAgainVariantDetail(owned.variantId, telegramUserId);
     },
   };
 }
