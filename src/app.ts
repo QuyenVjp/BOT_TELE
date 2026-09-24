@@ -172,6 +172,8 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
     });
   }
   if (deps.googleSheetsInventoryIntake) {
+    const { default: rateLimit } = await import("@fastify/rate-limit");
+    await app.register(rateLimit, { global: false });
     await registerGoogleSheetsInventoryIntake(app, deps.googleSheetsInventoryIntake);
   }
 

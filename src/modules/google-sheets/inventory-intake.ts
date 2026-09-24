@@ -259,8 +259,16 @@ export async function registerGoogleSheetsInventoryIntake(
   deps: GoogleSheetsInventoryIntakeDeps,
 ): Promise<void> {
   const basePath = deps.path ?? GOOGLE_SHEETS_INVENTORY_INTAKE_PATH;
+  const rateLimitedRouteOptions = {
+    config: {
+      rateLimit: {
+        max: 30,
+        timeWindow: "1 minute",
+      },
+    },
+  } as const;
 
-  app.post(`${basePath}/catalog`, async (request, reply) => {
+  app.post(`${basePath}/catalog`, rateLimitedRouteOptions, async (request, reply) => {
     const parsed = spreadsheetSchema.safeParse(parseJsonBody(request.body));
     if (!parsed.success) return reply.code(400).send({ ok: false, code: "INVALID_INPUT" });
     const owner = await verifyRequest(request, deps, parsed.data.spreadsheetId);
@@ -272,7 +280,7 @@ export async function registerGoogleSheetsInventoryIntake(
     }
   });
 
-  app.post(`${basePath}/preview`, async (request, reply) => {
+  app.post(`${basePath}/preview`, rateLimitedRouteOptions, async (request, reply) => {
     const parsed = previewSchema.safeParse(parseJsonBody(request.body));
     if (!parsed.success) return reply.code(400).send({ ok: false, code: "INVALID_INPUT" });
     const owner = await verifyRequest(request, deps, parsed.data.spreadsheetId);
@@ -351,7 +359,7 @@ export async function registerGoogleSheetsInventoryIntake(
     }
   });
 
-  app.post(`${basePath}/confirm`, async (request, reply) => {
+  app.post(`${basePath}/confirm`, rateLimitedRouteOptions, async (request, reply) => {
     const parsed = confirmSchema.safeParse(parseJsonBody(request.body));
     if (!parsed.success) return reply.code(400).send({ ok: false, code: "INVALID_INPUT" });
     const owner = await verifyRequest(request, deps, parsed.data.spreadsheetId);
