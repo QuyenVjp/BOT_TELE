@@ -19,7 +19,9 @@ import {
 import type { TypedStockKind } from "../digital-goods/repository.js";
 import { isSupportedCatalogRoute } from "../catalog/domain.js";
 import { canPurchase } from "./store-mode.js";
-
+import { normalizePromoCode, quotePromotion, reservePromotion } from "../promotions/service.js";
+import { releasePromotion } from "../promotions/service.js";
+import { recordFunnelEvent } from "../operations/funnel.js";
 /**
  * BuyNow command (FR-006, FR-007, FR-008, FR-010).
  *
@@ -42,6 +44,7 @@ export type BuyNowErrorCode =
   | "POLICY_BLOCKED"
   | "IDEMPOTENCY_CONFLICT"
   | "ALREADY_PAID"
+  | "PROMOTION_INVALID"
   | "ORDER_NOT_CANCELLABLE"
   | "STORE_CLOSED"
   | "STORE_TEST_ONLY"
@@ -81,6 +84,8 @@ export interface BuyNowInput {
   isRootAdmin?: boolean;
   /** Admin explicit test bypass. */
   skipStoreStatusCheck?: boolean;
+  /** Optional customer-entered code, normalized and revalidated inside the transaction. */
+  promoCode?: string;
 }
 
 interface LiveVariant {
@@ -183,11 +188,11 @@ function revalidate(live: LiveVariant, expectedPriceVnd: number): BuyNowErrorCod
   return null;
 }
 
-function toSnapshot(live: LiveVariant): OrderSnapshot {
+function toSnapshot(live: LiveVariant, priceVnd = live.price_vnd): OrderSnapshot {
   return {
     productNameVi: live.product_name_vi,
     variantNameVi: live.name_vi,
-    priceVnd: String(live.price_vnd),
+    priceVnd: String(priceVnd),
     durationCode: live.duration_code,
     deliveryType: live.delivery_type,
     warrantyDays: live.warranty_days,
@@ -206,6 +211,7 @@ const BUY_NOW_MESSAGES: Record<BuyNowErrorCode, string> = {
     "Sản phẩm cuối vừa được khách khác đặt trước. Bạn chưa bị trừ tiền và chưa có phiên thanh toán.",
   POLICY_BLOCKED: "Sản phẩm chưa được phép bán.",
   IDEMPOTENCY_CONFLICT: "Yêu cầu mua hàng không hợp lệ. Vui lòng mở lại sản phẩm.",
+  PROMOTION_INVALID: "Mã ưu đãi không áp dụng được cho đơn hàng này.",
   ALREADY_PAID: "Đơn hàng đã được thanh toán.",
   ORDER_NOT_CANCELLABLE: "Đơn hàng không thể hủy.",
   STORE_CLOSED: "Cửa hàng hiện đang tạm đóng cửa. Vui lòng quay lại sau.",
@@ -252,7 +258,8 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
   type TxOutcome =
     | { kind: "ORDER"; order: Order }
     | { kind: "REJECT"; code: BuyNowErrorCode }
-    | { kind: "STOCK"; code: StockOutcomeCode };
+    | { kind: "STOCK"; code: StockOutcomeCode }
+    | { kind: "PROMOTION"; message: string };
 
   const runAttempt = () =>
     withTransaction(db, async (trx): Promise<TxOutcome> => {
@@ -280,6 +287,26 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
       const rejection = revalidate(live, input.expectedPriceVnd);
       if (rejection) return { kind: "REJECT", code: rejection };
 
+      let promotionQuote:
+        | {
+            promotionId: string;
+            codeNormalized: string;
+            baseAmountVnd: bigint;
+            discountVnd: bigint;
+            finalAmountVnd: bigint;
+            snapshot: Record<string, string | number | boolean | null>;
+          }
+        | undefined;
+      if (input.promoCode) {
+        const quoted = await quotePromotion(trx, {
+          code: input.promoCode,
+          baseAmountVnd: BigInt(live.price_vnd),
+          productId: live.product_id,
+          variantId: live.id,
+        });
+        if (!quoted.ok) return { kind: "PROMOTION", message: quoted.message };
+        promotionQuote = quoted.quote;
+      }
       const needsReadinessHold = isSupportedCatalogRoute({
         stockPolicy: live.stock_policy,
         fulfillmentType: live.fulfillment_type,
@@ -291,7 +318,10 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
         customerId: input.customerId,
         variantId: input.variantId,
         idempotencyKey: input.idempotencyKey,
-        snapshot: toSnapshot(live),
+        snapshot: toSnapshot(live, promotionQuote?.finalAmountVnd.toString() ?? live.price_vnd),
+        promotionCode: promotionQuote?.codeNormalized ?? null,
+        promotionDiscountVnd: promotionQuote?.discountVnd ?? 0n,
+        promotionSnapshot: promotionQuote?.snapshot,
         status: "PENDING_PAYMENT",
         expiresAt,
         correlationId: input.correlationId,
@@ -304,6 +334,22 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
         return matchesBuyNowFingerprint(order, input)
           ? { kind: "ORDER", order }
           : { kind: "REJECT", code: "IDEMPOTENCY_CONFLICT" };
+      }
+
+      if (promotionQuote && input.promoCode) {
+        const reservedPromotion = await reservePromotion(trx, {
+          code: input.promoCode,
+          customerId: input.customerId,
+          orderId: order.id,
+          baseAmountVnd: promotionQuote.baseAmountVnd,
+          productId: live.product_id,
+          variantId: live.id,
+        });
+        if (!reservedPromotion.ok) {
+          throw Object.assign(new Error(reservedPromotion.message), {
+            code: "PROMOTION_INVALID",
+          });
+        }
       }
 
       if (needsReadinessHold) {
@@ -321,13 +367,29 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
           });
         }
       }
-
+      await recordFunnelEvent(trx, {
+        eventKey: `checkout-started:${order.id}`,
+        eventName: "CHECKOUT_STARTED",
+        variantId: live.id,
+      });
       return { kind: "ORDER", order };
     }).catch((err: unknown): TxOutcome => {
-      if (typeof err === "object" && err !== null) {
-        const code = (err as { code?: string }).code;
-        if (code === "NO_STOCK" || code === "CONTENTION_TIMEOUT" || code === "RESERVATION_LOST") {
-          return { kind: "STOCK", code };
+      if (typeof err === "object" && err !== null && "code" in err) {
+        if (err.code === "PROMOTION_INVALID") {
+          return {
+            kind: "PROMOTION",
+            message:
+              "message" in err && typeof err.message === "string"
+                ? err.message
+                : BUY_NOW_MESSAGES.PROMOTION_INVALID,
+          };
+        }
+        if (
+          err.code === "NO_STOCK" ||
+          err.code === "CONTENTION_TIMEOUT" ||
+          err.code === "RESERVATION_LOST"
+        ) {
+          return { kind: "STOCK", code: err.code };
         }
       }
       throw err;
@@ -356,6 +418,9 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
   if (outcome.kind === "STOCK") {
     return { ok: false, code: outcome.code, message: BUY_NOW_MESSAGES[outcome.code] };
   }
+  if (outcome.kind === "PROMOTION") {
+    return { ok: false, code: "PROMOTION_INVALID", message: outcome.message };
+  }
   if (outcome.kind === "REJECT") {
     return { ok: false, code: outcome.code, message: BUY_NOW_MESSAGES[outcome.code] };
   }
@@ -370,10 +435,18 @@ export async function isStoreOpen(db: Db): Promise<boolean> {
 
 /** The persisted immutable Order snapshot is the canonical Buy Now fingerprint. */
 function matchesBuyNowFingerprint(order: Order, input: BuyNowInput): boolean {
+  const hasPromo = Boolean(input.promoCode?.trim());
+  const requestedPromo = hasPromo ? normalizePromoCode(input.promoCode ?? "") : null;
+  const basePrice = hasPromo
+    ? Number(order.promotionSnapshot?.baseAmountVnd ?? Number.NaN)
+    : Number(order.priceVnd);
   return (
     order.customerId === input.customerId &&
     order.variantId === input.variantId &&
-    Number(order.priceVnd) === input.expectedPriceVnd
+    basePrice === input.expectedPriceVnd &&
+    (hasPromo
+      ? requestedPromo !== null && order.promotionCode === requestedPromo
+      : order.promotionCode == null)
   );
 }
 
@@ -426,6 +499,7 @@ export async function cancelUnpaidOrder(db: Db, input: CancelInput): Promise<Buy
       },
     );
     await voidLiveIntentsForOrder(trx, order.id);
+    await releasePromotion(trx, order.id);
     await releaseTypedStockForOrder(trx, order.id);
     return { ok: true, order: cancelled };
   });
@@ -453,6 +527,7 @@ export async function expireOverdueOrders(db: Db, options: { now?: Date } = {}):
       // Same atomic void + release as cancel — an expired Order must not accept
       // settlement and must free its reserved unit for the next buyer.
       await voidLiveIntentsForOrder(trx, locked.id);
+      await releasePromotion(trx, locked.id);
       await releaseTypedStockForOrder(trx, locked.id);
       return true;
     });

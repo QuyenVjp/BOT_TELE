@@ -235,6 +235,7 @@ export function presentCategoryPage(page: PublicCategoryPage): PresentedMessage 
 export function presentProductDetail(
   detail: ProductDetailView,
   buyNowByVariantId: Record<string, string | undefined>,
+  reviewSummary?: { averageRating: number; visibleCount: number },
 ): PresentedMessage {
   const prices = detail.variants.map((v) => BigInt(v.price_vnd)).filter((p) => p > 0n);
   const minPrice = prices.length ? prices.reduce((a, b) => (a < b ? a : b)) : null;
@@ -251,6 +252,11 @@ export function presentProductDetail(
     ...(detail.short_description_vi ? [detail.short_description_vi] : []),
     "",
     ...(minPrice != null ? [`💰 Giá từ: ${formatVnd(makeVnd(minPrice))}`] : []),
+    ...(reviewSummary && reviewSummary.visibleCount > 0
+      ? [
+          `⭐ ${reviewSummary.averageRating.toFixed(1)}/5 · ${reviewSummary.visibleCount} đánh giá ✅ Đã mua hàng`,
+        ]
+      : []),
     stockStateLine(anyReady, lowStock),
     `⚡ Giao hàng: ${deliveryModes.join(" / ") || "Tự động"}`,
     `⏱ Dự kiến: ${detail.delivery_eta_vi || "vài giây sau khi thanh toán"}`,

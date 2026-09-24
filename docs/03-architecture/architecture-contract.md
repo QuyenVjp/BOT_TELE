@@ -499,3 +499,69 @@ direct `READY -> AVAILABLE` release and credential submission through
 - `invariants_preserved`: PostgreSQL commerce authority; verified settlement; at-least-once outbox; root/private admin authorization; no customer payment spam; immutable source references; HMAC privacy; no secret disclosure; payment/fulfillment unaffected by notification failure.
 - `intentional_breaks`: none; the former group-oriented social-proof publisher is not reused as a customer broadcast path.
 - `risked_invariants`: Telegram edit ambiguity, late refund/reversal visibility, stale public projection, alias-key rotation, and missing fulfillment evidence. Queries remain canonical and exclude rows unless every required predicate is true; refresh re-reads current state.
+
+## 17. Growth, retention and operational trust contract (2026-09)
+
+This feature branch extends the Telegram-only commerce surface with verified reviews,
+repeat purchase, bounded promotions, referral attribution, explicit checkout resume,
+and aggregate operator metrics. PostgreSQL remains authoritative; Telegram is the
+only customer/admin UI; VietQR + SePay and the existing payment/fulfillment paths
+are reused rather than forked.
+
+### Module seams
+
+- `modules/reviews/*` owns eligibility, customer-scoped review writes, public visible-review
+  summaries, and audited moderation. It reuses `marketing/social-proof.generateCustomerAlias`
+  for public pseudonyms and never changes social-proof event delivery.
+- `modules/promotions/*` owns normalized promo codes, transactional validation/redemption,
+  and immutable order snapshots. Checkout submits only a code; the service computes the
+  discount and final payable amount inside the same transaction as the order.
+- `modules/referrals/*` owns bounded HMAC referral tokens, one-time attribution, fraud flags,
+  and post-fulfillment reward idempotency. Raw Telegram IDs never enter links or public views.
+- `bot/callbacks/history.ts` owns only the historical-reference lookup and delegates
+  to the existing current-catalog Buy Now command; old price, payment, reservation, asset,
+  promotion and terms are never copied.
+- `worker.ts` owns active pending-order lookup and one resume action bound to the exact
+  customer/order/payment intent. Existing active PaymentIntents are reused; no automatic
+  abandoned-cart campaign is introduced.
+- `modules/operations/*` owns daily digest and explainable inventory/funnel read models.
+  Metrics are aggregate or customer-safe and cannot mutate commerce state.
+
+### Required invariants
+
+- A review is writable only when the customer owns the order and the same order proves payment
+  `SUCCEEDED`, allocation `SETTLED`, order `COMPLETED`, and delivery `DELIVERED`; one active
+  review per order is enforced by a database uniqueness constraint.
+- Moderation may change only visibility/status and append audit evidence; operators cannot create,
+  re-rate, or rewrite a customer review.
+- A promotion is normalized case/whitespace-insensitively, validated server-side, reserved and
+  accounted transactionally, and snapshotted on the order; the payment intent uses that final
+  amount. Cancelled/unpaid semantics are explicit and cannot create free usage through retries.
+- Referral attribution is one-time, rejects self/loop attribution, and remains reviewable when
+  abuse signals fire. Reward issuance requires a real non-test settled and fulfilled order,
+  is idempotent per completed order, and is disabled by `REFERRAL_REWARDS_ENABLED=false` until
+  the owner approves an amount/policy and trigger.
+- Pending-checkout resume is customer-scoped and returns the existing live intent; expiry/cancel
+  never silently creates a replacement or sends a reminder.
+- Admin digest, forecast and funnel views contain no credentials, provider identifiers, raw
+  Telegram identity, or customer-level behavioral analytics.
+### Rollout gates
+
+- Growth customer/admin entrypoints are fail-closed by typed configuration:
+  `SOCIAL_PROOF_ENABLED`, `VERIFIED_REVIEWS_ENABLED`, `PROMOTIONS_ENABLED`,
+  `REFERRAL_ATTRIBUTION_ENABLED`, `PAYMENT_REMINDERS_ENABLED`, and
+  `GROWTH_DIGEST_ENABLED` default to `false`.
+- `REFERRAL_REWARDS_ENABLED=false` remains an independent monetary safety gate; attribution
+  and aggregate analytics never imply reward issuance.
+- A release may deploy code and ordered migrations while `CLOSED`; enablement is a separate
+  one-flag-at-a-time operation with direct Telegram/browser evidence and rollback readiness.
+
+
+### Risk ledger
+
+- `invariants_preserved`: Telegram-only UX; numeric identity; immutable order/payment evidence;
+  transaction/outbox boundaries; opt-in notifications; secret-safe admin/public projections.
+- `intentional_breaks`: none to payment provider, delivery semantics, or store-mode gates.
+- `risked_invariants`: concurrent promotion usage, stale Buy Again references, review eligibility
+  proof, referral abuse and aggregate metric drift. Focused transaction, security and acceptance
+  tests must cover each boundary before release.

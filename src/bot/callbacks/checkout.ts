@@ -2,6 +2,7 @@ import type { Db } from "../../infrastructure/db/transaction.js";
 import { buyNow, cancelUnpaidOrder, isStockOutcomeCode } from "../../modules/commerce/buy-now.js";
 import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
 import { presentPaymentForOrder } from "../../modules/payments/service.js";
+import { claimPaymentReminder } from "../../modules/payments/reminder.js";
 import { findLiveIntentByOrderForOwner } from "../../modules/payments/repository.js";
 import {
   normalizeTelegramUserId,
@@ -13,6 +14,7 @@ import {
   presentPaymentExpired,
   presentPaymentNeedsReview,
   presentPaymentCancelled,
+  presentPaymentReminderCooldown,
   presentCheckoutPreview,
   presentInsufficientBalance,
   PAYMENT_COPY,
@@ -76,8 +78,10 @@ export interface CheckoutCallbackDeps {
    * button falls back to the internal projection only (no provider call).
    */
   reconcileForCheck?: () => Promise<PaymentCheckResult>;
+  paymentRemindersEnabled?: boolean;
+  promotionCodeForCustomer?: (customerId: string) => Promise<string | null>;
+  clearPromotionCodeForCustomer?: (customerId: string, code: string) => Promise<void>;
 }
-
 /**
  * Customer-facing delivery wording per fulfillment type. The raw enum never reaches a
  * customer (`ACCOUNT`/`UNLIMITED_SERVICE` are backend vocabulary).
@@ -118,10 +122,22 @@ export interface CheckoutCallbacks {
   buyNowFromCallback(input: SignedBuyNowCallbackInput): Promise<PresentedMessage>;
   /** Goal §32: confirmation screen rendered BEFORE any order or payment intent exists. */
   previewFromCallback(input: SignedCheckoutChoiceInput): Promise<PresentedMessage>;
-  /** Goal §32/§41: pay the confirmed order from the wallet, atomically and once. */
   payWithWalletFromCallback(input: SignedCheckoutChoiceInput): Promise<PresentedMessage>;
-  refresh(orderNumber: string, customerId: string): Promise<PresentedMessage>;
-  reopen(orderNumber: string, customerId: string): Promise<PresentedMessage>;
+  refresh(
+    orderNumber: string,
+    customerId: string,
+    identity?: { telegramUserId: string; isRootAdmin: boolean },
+  ): Promise<PresentedMessage>;
+  remind?(
+    orderNumber: string,
+    customerId: string,
+    identity?: { telegramUserId: string; isRootAdmin: boolean },
+  ): Promise<PresentedMessage>;
+  reopen(
+    orderNumber: string,
+    customerId: string,
+    identity?: { telegramUserId: string; isRootAdmin: boolean },
+  ): Promise<PresentedMessage>;
   cancel(orderNumber: string, customerId: string, correlationId: string): Promise<PresentedMessage>;
   /** Last presented order number (test/probe helper). */
   lastOrderNumber(): string | null;
@@ -148,8 +164,8 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     bankName: deps.merchant.bankName,
     ...(deps.merchant.bankAlias !== undefined ? { bankAlias: deps.merchant.bankAlias } : {}),
   });
-
   const handleBuyNow = async (input: BuyNowCallbackInput): Promise<PresentedMessage> => {
+    const promoCode = await deps.promotionCodeForCustomer?.(input.customerId);
     const result = await buyNow(deps.db, {
       customerId: input.customerId,
       variantId: input.variantId,
@@ -158,16 +174,20 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       correlationId: input.correlationId,
       telegramUserId: input.telegramUserId,
       isRootAdmin: input.isRootAdmin,
+      ...(promoCode ? { promoCode } : {}),
     });
     if (!result.ok) {
       if (isStockOutcomeCode(result.code)) return presentStockOutcome(result.code);
       return errorMessage(result.message);
     }
+    if (promoCode) await deps.clearPromotionCodeForCustomer?.(input.customerId, promoCode);
 
     const presented = await presentPaymentForOrder(deps.db, {
       orderId: result.order.id,
       correlationId: input.correlationId,
       ...merchantInput(),
+      telegramUserId: input.telegramUserId,
+      isRootAdmin: input.isRootAdmin,
     });
     if (!presented.ok) return errorMessage("Không tạo được mã thanh toán. Vui lòng thử lại.");
     lastOrderNumber = presented.presentation.orderNumber;
@@ -177,6 +197,9 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       productName: result.order.productNameVi,
       variantName: result.order.variantNameVi,
       fulfillmentType: result.order.fulfillmentType,
+      ...(deps.paymentRemindersEnabled === undefined
+        ? {}
+        : { paymentRemindersEnabled: deps.paymentRemindersEnabled }),
       ...(await presentationContext(result.order.variantId, result.order.id)),
     });
   };
@@ -277,6 +300,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     orderNumber: string,
     customerId: string,
     check: boolean,
+    identity?: { telegramUserId: string; isRootAdmin: boolean },
   ): Promise<PresentedMessage> => {
     let order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
     if (!order) return errorMessage("Không tìm thấy đơn hàng.");
@@ -332,6 +356,9 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       orderId: order.id,
       correlationId: `refresh-${order.id}`,
       ...merchantInput(),
+      ...(identity
+        ? { telegramUserId: identity.telegramUserId, isRootAdmin: identity.isRootAdmin }
+        : {}),
     });
     if (!presented.ok) {
       // Intent may already be non-live (e.g. NEEDS_REVIEW on the intent).
@@ -346,6 +373,9 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       productName: order.productNameVi,
       variantName: order.variantNameVi,
       fulfillmentType: order.fulfillmentType,
+      ...(deps.paymentRemindersEnabled === undefined
+        ? {}
+        : { paymentRemindersEnabled: deps.paymentRemindersEnabled }),
       ...(await presentationContext(order.variantId, order.id)),
     });
   };
@@ -519,14 +549,29 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       });
     },
 
-    async refresh(orderNumber, customerId) {
-      return presentOrderPayment(orderNumber, customerId, true);
+    async refresh(orderNumber, customerId, identity) {
+      return presentOrderPayment(orderNumber, customerId, true, identity);
+    },
+    async remind(orderNumber, customerId, identity) {
+      if (deps.paymentRemindersEnabled === false)
+        return errorMessage("Nhắc thanh toán hiện chưa khả dụng.");
+      const order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
+      if (!order) return errorMessage("Không tìm thấy đơn hàng.");
+      const claimed = await claimPaymentReminder(deps.db, {
+        orderId: order.id,
+        customerId,
+      });
+      const active =
+        order.status === "PENDING_PAYMENT" &&
+        (order.expiresAt === null || new Date(order.expiresAt).getTime() > Date.now());
+      if (!claimed && active) return presentPaymentReminderCooldown(order.orderNumber);
+      return presentOrderPayment(orderNumber, customerId, true, identity);
     },
 
-    async reopen(orderNumber, customerId) {
+    async reopen(orderNumber, customerId, identity) {
       // Same screen as refresh, but reopen is a navigation action: it must not spend a
       // provider call. The "Kiểm tra thanh toán" button owns that side effect.
-      return presentOrderPayment(orderNumber, customerId, false);
+      return presentOrderPayment(orderNumber, customerId, false, identity);
     },
 
     async cancel(orderNumber, customerId, correlationId) {

@@ -754,7 +754,45 @@ async function readSnapshot(db: Db, config: SheetsProjectionConfig, now: Date): 
         select 'outbox_dead', count(*) filter (where dead_lettered_at is not null and published_at is null)::text,
                case when count(*) filter (where dead_lettered_at is not null and published_at is null) > 0 then 'ATTENTION' else 'OK' end,
                'Dead-lettered asynchronous events' from outbox_event
-      ) metrics
+        union all
+        select 'growth_new_customers_14d', count(*)::text,
+               'OK',
+               'New customers in the last 14 days' from customer
+         where created_at >= now() - interval '14 days'
+        union all
+        select 'growth_repeat_customers_14d', count(*)::text,
+               'OK',
+               'Customers with at least two completed orders in the last 14 days'
+          from (
+            select o.customer_id
+              from "order" o
+             where o.status = 'COMPLETED'
+               and o.completed_at >= now() - interval '14 days'
+             group by o.customer_id
+            having count(*) >= 2
+          ) repeat_customers
+        union all
+        select 'growth_coupon_redemptions_14d', count(*)::text,
+               'OK',
+               'Consumed coupon redemptions in the last 14 days'
+          from promotion_redemption
+         where status = 'CONSUMED'
+           and consumed_at >= now() - interval '14 days'
+        union all
+        select 'growth_referrals_qualified_14d', count(*)::text,
+               'OK',
+               'Qualified referrals in the last 14 days'
+          from referral_reward
+         where status = 'ISSUED'
+           and created_at >= now() - interval '14 days'
+        union all
+        select 'growth_funnel_delivered_14d', coalesce(sum(event_count), 0)::text,
+               'OK',
+               'Aggregate delivered funnel events in the last 14 days'
+          from funnel_event_daily
+         where event_name = 'DELIVERED'
+           and event_date >= current_date - 14
+        ) metrics
   `.execute(db);
 
   const state = await sql<{

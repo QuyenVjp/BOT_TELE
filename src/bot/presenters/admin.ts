@@ -1,4 +1,5 @@
 import { compactInlineRows, type InlineButton, type PresentedMessage } from "./catalog.js";
+import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import { ORDER_STATUS_FALLBACK, ORDER_STATUS_LABEL } from "./history.js";
 import {
   FULFILLMENT_TYPE_LABELS,
@@ -19,6 +20,7 @@ import type {
   AdminOrderStatusFilter,
 } from "../../modules/admin/order-operations.js";
 import { canTicketTransition, type SupportTicketStatus } from "../../modules/support/domain.js";
+import type { DailyGrowthDigest } from "../../modules/operations/digest.js";
 import type { AdminSupportTicketRow } from "../../modules/support/service.js";
 import type {
   AdminDiscrepancyDetail,
@@ -247,6 +249,14 @@ export interface AdminOperationsSnapshot {
   /** Actionable: tickets parked for operator judgement (`MANUAL_REVIEW`). */
   criticalSupportTickets: number;
   stockAccountNotReady: number;
+  growthDigest?: DailyGrowthDigest;
+  inventoryForecast?: Array<{
+    variantName: string;
+    availableUnits: number;
+    reorderUnits: number;
+    averageDailyUnits: number;
+  }>;
+  funnelCounts?: Array<{ eventName: string; count: number }>;
 }
 
 export function presentAdminOperations(input: AdminOperationsSnapshot): PresentedMessage {
@@ -261,6 +271,31 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
         : []),
       `Publication còn blocker: ${input.publicationBlocked}`,
       `STOCK_ACCOUNT chưa sẵn sàng: ${input.stockAccountNotReady}`,
+      ...(input.growthDigest
+        ? [
+            "",
+            `📊 Hôm nay — hoàn tất: ${input.growthDigest.completedOrders} đơn · doanh thu: ${formatVnd(makeVnd(input.growthDigest.revenueVnd))}`,
+            `Khách mới: ${input.growthDigest.newCustomers} · khách mua lại: ${input.growthDigest.repeatCustomers}`,
+            `Coupon: ${input.growthDigest.couponRedemptions} · giới thiệu đủ điều kiện: ${input.growthDigest.qualifiedReferrals}`,
+          ]
+        : []),
+      ...(input.inventoryForecast?.length
+        ? [
+            "",
+            "📦 Dự báo nhập kho (lead 3 ngày + an toàn 2 ngày):",
+            ...input.inventoryForecast.map(
+              (row) =>
+                `• ${row.variantName}: còn ${row.availableUnits}, cần nhập ${row.reorderUnits} (bán TB ${row.averageDailyUnits.toFixed(1)}/ngày)`,
+            ),
+          ]
+        : []),
+      ...(input.funnelCounts?.length
+        ? [
+            "",
+            "📈 Phễu 14 ngày (aggregate):",
+            ...input.funnelCounts.map((row) => `• ${row.eventName}: ${row.count}`),
+          ]
+        : []),
       "",
       // Actionable work and retained history are printed apart on purpose: one blended
       // figure makes a finished queue look like an incident and hides a real one behind it.
@@ -278,9 +313,10 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
         { text: "🛍 Readiness sản phẩm", callbackData: "admin:products" },
       ],
       [
+        { text: "⭐ Kiểm duyệt đánh giá", callbackData: "admin:reviews" },
         { text: "🏪 Store control", callbackData: "admin:store:mode" },
-        { text: "💬 Ticket hỗ trợ", callbackData: "admin:support" },
       ],
+      [{ text: "💬 Ticket hỗ trợ", callbackData: "admin:support" }],
       adminNav("admin:menu"),
     ],
   };

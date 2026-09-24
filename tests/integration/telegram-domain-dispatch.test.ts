@@ -402,7 +402,10 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData,
     });
 
-    expect(refresh).toHaveBeenCalledWith(order.orderNumber, CUSTOMER);
+    expect(refresh).toHaveBeenCalledWith(order.orderNumber, CUSTOMER, {
+      telegramUserId: USER,
+      isRootAdmin: false,
+    });
     expect(send).toHaveBeenCalledTimes(1);
     const sent = send.mock.calls[0]![0];
     expect(sent.message.buttons[0]![0]!.callbackData).toMatch(/^cb:/);
@@ -1399,7 +1402,10 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData: "pay:refresh:ORD-20260908-16QVJNC6",
     });
 
-    expect(refresh).toHaveBeenCalledWith("ORD-20260908-16QVJNC6", CUSTOMER);
+    expect(refresh).toHaveBeenCalledWith("ORD-20260908-16QVJNC6", CUSTOMER, {
+      telegramUserId: USER,
+      isRootAdmin: false,
+    });
   });
   it("routes inventory import text before the generic workflow when present", async () => {
     const base = setup();

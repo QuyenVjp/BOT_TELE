@@ -84,29 +84,38 @@ npm run migrate:production
 
 ## Current production migration head
 
-The source tree currently contains **82** SQL files under `src/infrastructure/db/migrations/`.
+The source tree currently contains **89** SQL files under `src/infrastructure/db/migrations/`.
 The latest source migration is:
 
-- **filename:** `083_google_sheets_inventory_intake.sql`
-- **count:** `82`
+- **filename:** `090_payment_reminders.sql`
+- **count:** `89`
 
 The current read-only production preflight observed production at
-`082_paid_delivery_reconciliation.sql` (**81** migrations). Migration 082 is therefore
-already applied. Migration 083 is a forward-only expand migration for safe Google
-Sheets projection metadata, the Sheet-native owner challenge and inventory Vault-orphan
-recovery. Apply it only after the exact release artifact, Apps Script intake acceptance,
-and a controlled migration window are ready. Keep the store `CLOSED`; do not activate
-sales as part of applying 083. See `docs/06-operations/google-sheets-inventory-intake.md`.
+`084_social_proof_admin_alerts.sql` (**83** migrations). Migrations 085–090 are
+forward-only release migrations and must be applied in this order:
 
-Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while the migration and Apps Script
-acceptance are pending. This gate enables the OIDC-backed catalog/preview/confirm route
-and challenge recovery only after the configured audience and owner acceptance exist; the
-existing secret-free projection lane may remain enabled independently.
+1. `085_verified_reviews.sql`
+2. `086_promotions.sql`
+3. `087_promotion_drafts.sql`
+4. `088_referrals.sql`
+5. `089_funnel_events.sql`
+6. `090_payment_reminders.sql`
 
-Do not edit older migration files.
+The release sequence is linear: automated CI and security gates → protected PR merge →
+build the exact clean SHA → keep the store `CLOSED` and risky flags off → apply only the
+next ordered migration → restart the existing API/worker supervisors → verify `/health`,
+`/ready`, and `npm run preflight:production` → run direct live Telegram/browser smoke →
+enable one feature flag at a time with rollback evidence. Migration application must not
+wait on a first-sale or workbook write; those are separate acceptance gates.
 
-The 072–076 procedure below is historical evidence only. Do not use it as the current
-production migration target; use the release-specific procedure above for pending 083.
+Production defaults for this growth train are fail-closed:
+`SOCIAL_PROOF_ENABLED=false`, `VERIFIED_REVIEWS_ENABLED=false`,
+`PROMOTIONS_ENABLED=false`, `REFERRAL_ATTRIBUTION_ENABLED=false`,
+`PAYMENT_REMINDERS_ENABLED=false`, `GROWTH_DIGEST_ENABLED=false`,
+`ADMIN_PAYMENT_ALERT_MODE=OFF`, and `REFERRAL_REWARDS_ENABLED=false`.
+
+Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while Apps Script owner/OIDC setup
+and live workbook acceptance are pending. Do not edit older migration files.
 
 ## Historical migrations 072–076 — post-merge production procedure
 

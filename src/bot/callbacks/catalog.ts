@@ -9,6 +9,8 @@ import {
 } from "../../modules/catalog/repository.js";
 import { getShopProfile } from "../../modules/catalog/shop-profile.js";
 import { getRealStoreStats } from "../../modules/marketing/social-proof.js";
+import { getProductReviewSummary } from "../../modules/reviews/service.js";
+import { recordFunnelEvent } from "../../modules/operations/funnel.js";
 import { verifyProductLinkToken } from "../../modules/catalog/product-link-token.js";
 import { presentStorefront } from "../presenters/customer.js";
 import { searchCatalog } from "../../modules/catalog/search.js";
@@ -51,6 +53,8 @@ export interface CatalogCallbackDeps {
    */
   tokenCodec?: CallbackTokenCodec;
   productLinkSecret?: string;
+  /** Rollout gate for verified review summaries. */
+  reviewsEnabled?: boolean;
   /** Goal §28: opens the one-shot permission the search prompt needs before it accepts text. */
   searchPrompt?: {
     open(input: { chatId: string; correlationId: string }): Promise<void>;
@@ -119,6 +123,7 @@ export interface CatalogCallbacks {
     productId: string,
     telegramUserId: string | bigint | number,
     identity?: CatalogIdentity | undefined,
+    eventKey?: string,
   ): Promise<PresentedMessage>;
   openStartPayload(
     payload: string,
@@ -126,6 +131,7 @@ export interface CatalogCallbacks {
       actorName: string;
       telegramUserId: string;
       isRootAdmin?: boolean;
+      eventKey?: string;
     },
   ): Promise<PresentedMessage>;
 }
@@ -279,7 +285,12 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       });
     },
 
-    async productDetail(productId, telegramUserId, identity?: CatalogIdentity | undefined) {
+    async productDetail(
+      productId,
+      telegramUserId,
+      identity?: CatalogIdentity | undefined,
+      eventKey?: string,
+    ) {
       const audience = await resolveCatalogAudience(deps.db, {
         telegramUserId: String(telegramUserId),
         isRootAdmin: identity?.isRootAdmin === true,
@@ -295,7 +306,17 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       for (const variant of detail.variants) {
         buyNowByVariantId[variant.id] = issueBuyNow(telegramUserId, variant);
       }
-      return presentProductDetail(detail, buyNowByVariantId);
+      const reviewSummary =
+        deps.reviewsEnabled === false
+          ? undefined
+          : await getProductReviewSummary(deps.db, productId);
+      const featuredVariantId = detail.variants[0]?.id;
+      await recordFunnelEvent(deps.db, {
+        eventKey: eventKey ?? `product-view:${productId}:unknown`,
+        eventName: "PRODUCT_VIEW",
+        ...(featuredVariantId ? { variantId: featuredVariantId } : {}),
+      });
+      return presentProductDetail(detail, buyNowByVariantId, reviewSummary);
     },
 
     async openStartPayload(payload, input) {
@@ -309,10 +330,15 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       if (!deps.productLinkSecret || !payload.startsWith("product_")) return home();
       const productId = verifyProductLinkToken(payload, { secret: deps.productLinkSecret });
       if (!productId) return home();
-      return callbacks.productDetail(productId, input.telegramUserId, {
-        telegramUserId: input.telegramUserId,
-        isRootAdmin: input.isRootAdmin === true,
-      });
+      return callbacks.productDetail(
+        productId,
+        input.telegramUserId,
+        {
+          telegramUserId: input.telegramUserId,
+          isRootAdmin: input.isRootAdmin === true,
+        },
+        input.eventKey,
+      );
     },
   };
 

@@ -78,6 +78,15 @@ describe("Google Sheets configuration", () => {
   it("defaults the inventory intake gate off", () => {
     expect(envSchema.parse(baseEnv).GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED).toBe(false);
   });
+  it("defaults referral rewards off and rejects non-boolean values", () => {
+    expect(envSchema.parse(baseEnv).REFERRAL_REWARDS_ENABLED).toBe(false);
+    expect(
+      envSchema.safeParse({ ...baseEnv, REFERRAL_REWARDS_ENABLED: "not-a-boolean" }).success,
+    ).toBe(false);
+    expect(
+      envSchema.parse({ ...baseEnv, REFERRAL_REWARDS_ENABLED: "true" }).REFERRAL_REWARDS_ENABLED,
+    ).toBe(true);
+  });
 
   it("allows the projection worker without intake OIDC configuration", () => {
     expect(() => loadConfig(productionSheetsEnv)).not.toThrow();

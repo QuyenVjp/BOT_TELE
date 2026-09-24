@@ -24,9 +24,25 @@ import {
 } from "./modules/catalog/repository.js";
 import { createCatalogCache } from "./modules/catalog/cache.js";
 import { resolveCatalogAudience } from "./modules/catalog/visibility.js";
+import {
+  clearPromotionDraft,
+  getPromotionDraft,
+  savePromotionDraft,
+} from "./modules/promotions/service.js";
+import {
+  attributeReferral,
+  getOrCreateReferralToken,
+  getReferralStats,
+} from "./modules/referrals/service.js";
+import { presentReferralAttributed, presentReferralHome } from "./bot/presenters/referrals.js";
+import { getDailyGrowthDigest } from "./modules/operations/digest.js";
+import { listReviewModeration, moderateReview } from "./modules/reviews/service.js";
+import { presentReviewModerated, presentReviewModeration } from "./bot/presenters/reviews-admin.js";
+import { forecastInventory } from "./modules/operations/forecast.js";
+import { getFunnelCounts } from "./modules/operations/funnel.js";
 
 import { pathToFileURL } from "node:url";
-import { getAdminOverview } from "./modules/admin/overview.js";
+import { getAdminOverview, vietnamDayStart } from "./modules/admin/overview.js";
 import {
   updateAdminProductContent,
   ADMIN_PRODUCT_CONTENT_FIELDS,
@@ -1419,6 +1435,7 @@ async function bootstrap(): Promise<void> {
   const { createCatalogCallbacks } = await import("./bot/callbacks/catalog.js");
   const { createCheckoutCallbacks } = await import("./bot/callbacks/checkout.js");
   const { createHistoryCallbacks } = await import("./bot/callbacks/history.js");
+  const { createReviewCallbacks } = await import("./bot/callbacks/reviews.js");
   const { createSupportCallbacks } = await import("./bot/callbacks/support.js");
   const { presentPaymentScreen, presentPreorderPaymentScreen, presentWalletHistory } =
     await import("./bot/presenters/payment.js");
@@ -1734,6 +1751,7 @@ async function bootstrap(): Promise<void> {
   catalogCache.invalidate();
   const catalog = createCatalogCallbacks({
     db: dbHandle.db,
+    reviewsEnabled: config.VERIFIED_REVIEWS_ENABLED,
     // Warranty (goal: warranty vertical). Every handler re-authorizes against the actor's own
     // order, so a forged callback can only ever reach the caller's own data.
     warranty: {
@@ -1885,6 +1903,7 @@ async function bootstrap(): Promise<void> {
   });
   const checkout = createCheckoutCallbacks({
     db: dbHandle.db,
+    paymentRemindersEnabled: config.PAYMENT_REMINDERS_ENABLED,
     merchant: {
       merchantAccountId: config.SEPAY_MERCHANT_ACCOUNT_ID,
       beneficiaryAccountNumber: config.VIETQR_ACCOUNT_NUMBER,
@@ -1902,6 +1921,9 @@ async function bootstrap(): Promise<void> {
         telegramUserId: input.telegramUserId,
         isRootAdmin: input.isRootAdmin,
       }),
+    promotionCodeForCustomer: (customerId) => getPromotionDraft(dbHandle.db, customerId),
+    clearPromotionCodeForCustomer: (customerId, code) =>
+      clearPromotionDraft(dbHandle.db, customerId, code),
     walletBalanceVnd: async (customerId) => {
       const account = await walletLedger.ensureAccount(customerId);
       return account ? BigInt(account.balanceVnd) : null;
@@ -1929,7 +1951,12 @@ async function bootstrap(): Promise<void> {
         }
       : {}),
   });
-  const history = createHistoryCallbacks({ db: dbHandle.db });
+  const history = createHistoryCallbacks({
+    db: dbHandle.db,
+    buyAgainVariantDetail: (variantId, telegramUserId) =>
+      catalog.variantDetail(variantId, telegramUserId),
+  });
+  const reviews = config.VERIFIED_REVIEWS_ENABLED ? createReviewCallbacks(dbHandle.db) : undefined;
   const notificationService = { getNotificationPreferences, setNotificationPreferences };
   const walletLedger = createWalletLedgerService(dbHandle.db);
   const walletPurchase = createWalletPurchaseService(dbHandle.db);
@@ -2352,6 +2379,7 @@ async function bootstrap(): Promise<void> {
     config.NODE_ENV !== "production" ? logger : undefined,
     telegramClient,
   );
+  const readStoreOpenCounts = () => getStoreOpenReadiness(dbHandle.db);
   try {
     await ensureTelegramCommandMenu({
       botToken: config.TELEGRAM_BOT_TOKEN,
@@ -2364,15 +2392,14 @@ async function bootstrap(): Promise<void> {
       "telegram command menu sync failed",
     );
   }
-  const readStoreOpenCounts = () => getStoreOpenReadiness(dbHandle.db);
   const telegramDispatcher = createTelegramDomainDispatcher({
     codec: callbackCodec,
     resolveCustomerId,
     catalog,
     trust: {
       async page(customerId, page) {
-        if (!config.SOCIAL_PROOF_HMAC_KEY)
-          return { text: "Màn hình uy tín chưa được cấu hình.", buttons: [] };
+        if (!config.SOCIAL_PROOF_ENABLED || !config.SOCIAL_PROOF_HMAC_KEY)
+          return { text: "Màn hình uy tín chưa được bật.", buttons: [] };
         return presentCustomerTrustScreen(
           await listTrustScreen(dbHandle.db, {
             page,
@@ -2385,6 +2412,70 @@ async function bootstrap(): Promise<void> {
     uiSurface: createPostgresUiSurfaceRegistry(dbHandle.db),
     checkout,
     history,
+    ...(reviews ? { reviews } : {}),
+    ...(config.PROMOTIONS_ENABLED
+      ? {
+          promotion: {
+            async apply(customerId, code) {
+              const result = await savePromotionDraft(dbHandle.db, { customerId, code });
+              return result.ok
+                ? {
+                    text: `✅ Đã lưu mã ${result.codeNormalized}. Mở sản phẩm và bấm Mua ngay để áp dụng.`,
+                    buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
+                  }
+                : {
+                    text: "Mã ưu đãi không hợp lệ. Dùng 2–32 ký tự chữ, số, _ hoặc -.",
+                    buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
+                  };
+            },
+          },
+        }
+      : {}),
+    ...(config.REFERRAL_ATTRIBUTION_ENABLED
+      ? {
+          referral: {
+            async home(customerId) {
+              const [token, stats] = await Promise.all([
+                getOrCreateReferralToken(dbHandle.db, {
+                  customerId,
+                  secret: config.BUY_NOW_CALLBACK_HMAC_KEY,
+                }),
+                getReferralStats(dbHandle.db, customerId),
+              ]);
+              return presentReferralHome({
+                link: `https://t.me/tier20ai_bot?start=ref_${token.slice(4)}`,
+                ...stats,
+              });
+            },
+            async attribute(customerId, token) {
+              const result = await attributeReferral(dbHandle.db, {
+                token,
+                refereeCustomerId: customerId,
+                secret: config.BUY_NOW_CALLBACK_HMAC_KEY,
+              });
+              return result.ok
+                ? presentReferralAttributed()
+                : {
+                    text: "Link giới thiệu không hợp lệ hoặc đã được ghi nhận trước đó.",
+                    buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
+                  };
+            },
+          },
+        }
+      : {}),
+    resumePendingCheckout: async (customerId) => {
+      const pending = await sql<{ order_number: string }>`
+        select order_number
+        from "order"
+        where customer_id = ${customerId}
+          and status = 'PENDING_PAYMENT'
+          and expires_at > now()
+        order by created_at desc, id desc
+        limit 1
+      `.execute(dbHandle.db);
+      const orderNumber = pending.rows[0]?.order_number;
+      return orderNumber ? checkout.refresh(orderNumber, customerId) : null;
+    },
     support,
     resolveOrderByIdForOwner: (orderId, customerId) =>
       findOrderByIdForOwner(dbHandle.db, orderId, customerId),
@@ -2686,6 +2777,7 @@ async function bootstrap(): Promise<void> {
                   showCancelButton: false,
                   showOrderCodeCopyButton: false,
                 },
+                paymentRemindersEnabled: false,
               }),
             )
           : walletTopupPickerMessage(account);
@@ -3592,7 +3684,9 @@ async function bootstrap(): Promise<void> {
         const publicationBlocked = await countAdminPublicationBlockers(dbHandle.db);
         // The operations and health screens use the same queue predicates, but they are separate reads
         // and may differ transiently while concurrent work commits.
-        const [health, stock] = await Promise.all([
+        const dayStart = vietnamDayStart(new Date());
+        const dayEnd = new Date(dayStart.getTime() + 86_400_000);
+        const [health, stock, growthDigest, forecastRows, funnelCounts] = await Promise.all([
           getAdminHealthFacts(dbHandle.db),
           sql<{ stock_account_not_ready: number }>`
             select
@@ -3602,7 +3696,56 @@ async function bootstrap(): Promise<void> {
                   and v.fulfillment_type = 'STOCK_ACCOUNT'
                   and not exists (select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE')) as stock_account_not_ready
           `.execute(dbHandle.db),
+          config.GROWTH_DIGEST_ENABLED
+            ? getDailyGrowthDigest(dbHandle.db, { dayStart, dayEnd })
+            : Promise.resolve(undefined),
+          sql<{ variant_name: string; available_units: number; sold_14d: number }>`
+            select
+              v.name_vi as variant_name,
+              case
+                when v.fulfillment_type in ('STOCK_ACCOUNT', 'STOCK_CODE')
+                  then (select count(*)::int from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE')
+                when v.fulfillment_type = 'QUANTITY_STOCK'
+                  then coalesce((select available_quantity from variant_quantity_stock q where q.variant_id = v.id), 0)::int
+                else 0
+              end as available_units,
+              (
+                select count(*)::int
+                from "order" o
+                where o.variant_id = v.id
+                  and o.status = 'COMPLETED'
+                  and o.completed_at >= now() - interval '14 days'
+              ) as sold_14d
+            from product_variant v
+            join product p on p.id = v.product_id
+            where v.is_active and p.is_active and not p.is_test and not p.is_archived
+              and v.fulfillment_type in ('STOCK_ACCOUNT', 'STOCK_CODE', 'QUANTITY_STOCK')
+            order by sold_14d desc, v.name_vi
+            limit 20
+          `.execute(dbHandle.db),
+          getFunnelCounts(dbHandle.db, {
+            from: new Date(dayEnd.getTime() - 14 * 86_400_000),
+            to: dayEnd,
+          }),
         ]);
+        const inventoryForecast = forecastRows.rows
+          .map((row) => ({
+            ...row,
+            ...forecastInventory({
+              dailyUnits: Array.from({ length: 14 }, () => row.sold_14d / 14),
+              availableUnits: row.available_units,
+              leadTimeDays: 3,
+              safetyDays: 2,
+            }),
+          }))
+          .filter((row) => row.reorderUnits > 0)
+          .slice(0, 5)
+          .map((row) => ({
+            variantName: row.variant_name,
+            availableUnits: row.available_units,
+            reorderUnits: row.reorderUnits,
+            averageDailyUnits: row.averageDailyUnits,
+          }));
         return presentAdminOperations({
           control: await getStoreControl(dbHandle.db),
           database: health.database,
@@ -3613,8 +3756,61 @@ async function bootstrap(): Promise<void> {
           terminalOutboxOrphansDisposed: health.queues.outboxDeadLetteredDisposed,
           openSupportTickets: health.queues.openSupportTickets,
           criticalSupportTickets: health.queues.criticalSupportTickets,
+          funnelCounts,
           stockAccountNotReady: stock.rows[0]?.stock_account_not_ready ?? 0,
+          ...(growthDigest ? { growthDigest } : {}),
+          inventoryForecast,
         });
+      },
+      async reviews(input) {
+        if (!config.VERIFIED_REVIEWS_ENABLED) return presentReviewModeration([]);
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: "admin-reviews",
+          reason: "Admin review moderation access",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        if (!config.SOCIAL_PROOF_HMAC_KEY) return presentReviewModeration([]);
+        return presentReviewModeration(
+          await listReviewModeration(dbHandle.db, { aliasSalt: config.SOCIAL_PROOF_HMAC_KEY }),
+        );
+      },
+      async reviewModerate(input) {
+        if (!config.VERIFIED_REVIEWS_ENABLED)
+          return { text: "Kiểm duyệt đánh giá chưa được bật.", buttons: [] };
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const gate = await adminCallbacks.handle({
+          command: "order.inspect",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: input.reviewId,
+          reason: "Admin review moderation mutation",
+          correlationId: input.correlationId,
+        });
+        if (!gate.ok)
+          return presentAdminDenied(
+            gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
+          );
+        const result = await moderateReview(dbHandle.db, {
+          reviewId: input.reviewId,
+          status: input.status,
+          adminId: input.telegramUserId,
+          reason: "Telegram admin review moderation",
+          correlationId: input.correlationId,
+        });
+        return result.ok
+          ? presentReviewModerated(input.status)
+          : {
+              text: "Đánh giá không tồn tại.",
+              buttons: [[{ text: "⭐ Xem đánh giá", callbackData: "admin:reviews" }]],
+            };
       },
       async productFeature(input) {
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");

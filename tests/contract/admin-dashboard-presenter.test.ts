@@ -858,10 +858,13 @@ describe("admin operational presenters", () => {
       { text: "🛍 Readiness sản phẩm", callbackData: "admin:products" },
     ]);
     expect(message.buttons[1]).toEqual([
+      { text: "⭐ Kiểm duyệt đánh giá", callbackData: "admin:reviews" },
       { text: "🏪 Store control", callbackData: "admin:store:mode" },
-      { text: "💬 Ticket hỗ trợ", callbackData: "admin:support" },
     ]);
     expect(message.buttons[2]).toEqual([
+      { text: "💬 Ticket hỗ trợ", callbackData: "admin:support" },
+    ]);
+    expect(message.buttons[3]).toEqual([
       { text: "↩️ Quay lại", callbackData: "admin:menu" },
       { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
     ]);

@@ -31,9 +31,17 @@ export async function sealPresentedMessageCallbacks(
         sealedRow.push(button);
         continue;
       }
-      // Warranty navigation is plain, like the admin routes: no money moves, no secret travels, and
-      // every handler re-authorizes against the actor's own order or claim.
+      // Buy Again carries only a public order number; the callback handler still enforces ownership
+      // and COMPLETED status before reading the historical variant.
+      if (button.callbackData.startsWith("buyagain:")) {
+        sealedRow.push(button);
+        continue;
+      }
       if (button.callbackData.startsWith("warranty:")) {
+        sealedRow.push(button);
+        continue;
+      }
+      if (button.callbackData.startsWith("review:")) {
         sealedRow.push(button);
         continue;
       }
@@ -147,6 +155,7 @@ async function parseLegacyCallback(
   for (const [prefix, action] of [
     ["ord:view:", "ORDER_VIEW"],
     ["pay:refresh:", "PAYMENT_REFRESH"],
+    ["pay:remind:", "PAYMENT_REMINDER"],
     ["pay:cancel:", "PAYMENT_CANCEL"],
     ["pay:reopen:", "PAYMENT_REOPEN"],
     ["sup:open:", "SUPPORT_MENU"],

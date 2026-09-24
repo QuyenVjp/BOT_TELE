@@ -250,6 +250,7 @@ export const CALLBACK_ACTION_CODES = {
   ORDER_LIST_PAGE: 7,
   ORDER_VIEW: 8,
   PAYMENT_REFRESH: 9,
+  PAYMENT_REMINDER: 34,
   PAYMENT_CANCEL: 10,
   PAYMENT_REOPEN: 11,
   SUPPORT_MENU: 12,
@@ -446,6 +447,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "ORDER_LIST_PAGE":
     case "ORDER_VIEW":
     case "PAYMENT_REFRESH":
+    case "PAYMENT_REMINDER":
     case "PAYMENT_CANCEL":
     case "PAYMENT_REOPEN":
     case "SUPPORT_TICKET_VIEW":
@@ -563,6 +565,7 @@ function decodeActionPayload(
       "ORDER_LIST_PAGE",
       "ORDER_VIEW",
       "PAYMENT_REFRESH",
+      "PAYMENT_REMINDER",
       "PAYMENT_CANCEL",
       "PAYMENT_REOPEN",
       "SUPPORT_TICKET_VIEW",

@@ -27,6 +27,9 @@ export interface InsertOrderInput {
   actorId: string | null;
   /** Reason recorded on the creation transition (defaults to BUY_NOW). */
   creationReasonCode?: string;
+  promotionCode?: string | null;
+  promotionDiscountVnd?: bigint | string;
+  promotionSnapshot?: Record<string, unknown> | undefined;
 }
 
 function mapRow(row: {
@@ -43,6 +46,9 @@ function mapRow(row: {
   warranty_days: number;
   supplier_policy_snapshot: string | null;
   fulfillment_type: FulfillmentType;
+  promotion_code: string | null;
+  promotion_discount_vnd: string | null;
+  promotion_snapshot: string | Record<string, unknown> | null;
   status: OrderStatus;
   expires_at: Date | string | null;
   paid_at: Date | string | null;
@@ -68,6 +74,12 @@ function mapRow(row: {
     warrantyDays: row.warranty_days,
     supplierPolicySnapshot: row.supplier_policy_snapshot,
     fulfillmentType: row.fulfillment_type,
+    promotionCode: row.promotion_code,
+    promotionDiscountVnd: row.promotion_discount_vnd ?? "0",
+    promotionSnapshot:
+      typeof row.promotion_snapshot === "string"
+        ? (JSON.parse(row.promotion_snapshot) as Record<string, unknown>)
+        : (row.promotion_snapshot ?? undefined),
     status: row.status,
     expiresAt: toIso(row.expires_at),
     paidAt: toIso(row.paid_at),
@@ -222,12 +234,15 @@ export async function insertOrder(
       insert into "order"
         (id, order_number, idempotency_key, customer_id, variant_id,
          product_name_vi, variant_name_vi, price_vnd, duration_code, delivery_type,
-         warranty_days, supplier_policy_snapshot, fulfillment_type, status, expires_at)
+         warranty_days, supplier_policy_snapshot, fulfillment_type, status, expires_at,
+         promotion_code, promotion_discount_vnd, promotion_snapshot)
       values
         (${id}, ${orderNumber}, ${input.idempotencyKey}, ${input.customerId}, ${input.variantId},
          ${s.productNameVi}, ${s.variantNameVi}, ${s.priceVnd}, ${s.durationCode}, ${s.deliveryType},
          ${s.warrantyDays}, ${s.supplierPolicySnapshot}, ${s.fulfillmentType}, ${input.status},
-         ${input.expiresAt ? input.expiresAt.toISOString() : null})
+         ${input.expiresAt ? input.expiresAt.toISOString() : null},
+         ${input.promotionCode ?? null}, ${input.promotionDiscountVnd ?? 0},
+         ${JSON.stringify(input.promotionSnapshot ?? {})}::jsonb)
       on conflict (customer_id, idempotency_key)
         where idempotency_key is not null
         do nothing

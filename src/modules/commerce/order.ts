@@ -55,6 +55,9 @@ export interface Order {
   warrantyDays: number;
   supplierPolicySnapshot: string | null;
   fulfillmentType: FulfillmentType;
+  promotionCode?: string | null | undefined;
+  promotionDiscountVnd?: string | undefined;
+  promotionSnapshot?: Record<string, unknown> | undefined;
 }
 
 /** Legal transitions for the MVP (data-model.md Commerce). */

@@ -249,12 +249,22 @@ describe("catalog product detail copy", () => {
     expect(callbacks.some((callback) => callback.startsWith("buy:"))).toBe(false);
   });
 
+  it("shows only aggregate verified-purchase review evidence", () => {
+    const sellable = variant("LOCAL_ONLY", "MANUAL_FULFILLMENT", true, 2);
+    const message = presentProductDetail(
+      detailView([sellable]),
+      { [sellable.id]: "buy:signed-callback" },
+      { averageRating: 4.5, visibleCount: 2 },
+    );
+    expect(message.text).toContain("⭐ 4.5/5 · 2 đánh giá ✅ Đã mua hàng");
+    expect(message.text).not.toContain("customer");
+  });
+
   it("does not offer restock for a ready variant without a supported buy route", () => {
     const readyUnsupported = variant("SUPPLIER_ONLY", "STOCK_ACCOUNT", true, 1);
     const callbacks = presentProductDetail(detailView([readyUnsupported]), {})
       .buttons.flat()
       .map((button) => button.callbackData);
-
     expect(callbacks.some((callback) => callback.startsWith("rst:sub:"))).toBe(false);
   });
 });

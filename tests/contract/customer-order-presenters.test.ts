@@ -95,6 +95,16 @@ describe("customer order screens", () => {
 
     expect(presentOrderDetail(makeOrder()).buttons).toEqual([
       [
+        {
+          text: "🔁 Mua lại",
+          callbackData: "buyagain:ORD-2026-0001",
+        },
+        {
+          text: "⭐ Đánh giá",
+          callbackData: "review:start:ORD-2026-0001",
+        },
+      ],
+      [
         { text: "💬 Hỗ trợ", callbackData: "sup:open:ORD-2026-0001" },
         { text: "⬅️ Quay lại", callbackData: "ord:list" },
       ],
