@@ -78,6 +78,7 @@ export interface CheckoutCallbackDeps {
    * button falls back to the internal projection only (no provider call).
    */
   reconcileForCheck?: () => Promise<PaymentCheckResult>;
+  paymentRemindersEnabled?: boolean;
   promotionCodeForCustomer?: (customerId: string) => Promise<string | null>;
   clearPromotionCodeForCustomer?: (customerId: string, code: string) => Promise<void>;
 }
@@ -196,6 +197,9 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       productName: result.order.productNameVi,
       variantName: result.order.variantNameVi,
       fulfillmentType: result.order.fulfillmentType,
+      ...(deps.paymentRemindersEnabled === undefined
+        ? {}
+        : { paymentRemindersEnabled: deps.paymentRemindersEnabled }),
       ...(await presentationContext(result.order.variantId, result.order.id)),
     });
   };
@@ -369,6 +373,9 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       productName: order.productNameVi,
       variantName: order.variantNameVi,
       fulfillmentType: order.fulfillmentType,
+      ...(deps.paymentRemindersEnabled === undefined
+        ? {}
+        : { paymentRemindersEnabled: deps.paymentRemindersEnabled }),
       ...(await presentationContext(order.variantId, order.id)),
     });
   };
@@ -546,6 +553,8 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       return presentOrderPayment(orderNumber, customerId, true, identity);
     },
     async remind(orderNumber, customerId, identity) {
+      if (deps.paymentRemindersEnabled === false)
+        return errorMessage("Nhắc thanh toán hiện chưa khả dụng.");
       const order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
       if (!order) return errorMessage("Không tìm thấy đơn hàng.");
       const claimed = await claimPaymentReminder(deps.db, {

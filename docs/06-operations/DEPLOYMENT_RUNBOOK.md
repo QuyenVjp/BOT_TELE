@@ -91,25 +91,31 @@ The latest source migration is:
 - **count:** `89`
 
 The current read-only production preflight observed production at
-`082_paid_delivery_reconciliation.sql` (**81** migrations). Migrations 083–090 are
+`084_social_proof_admin_alerts.sql` (**83** migrations). Migrations 085–090 are
 forward-only release migrations and must be applied in this order:
 
-1. `083_google_sheets_inventory_intake.sql`
-2. `084_social_proof_admin_alerts.sql`
-3. `085_verified_reviews.sql`
-4. `086_promotions.sql`
-5. `087_promotion_drafts.sql`
-6. `088_referrals.sql`
-7. `089_funnel_events.sql`
-8. `090_payment_reminders.sql`
+1. `085_verified_reviews.sql`
+2. `086_promotions.sql`
+3. `087_promotion_drafts.sql`
+4. `088_referrals.sql`
+5. `089_funnel_events.sql`
+6. `090_payment_reminders.sql`
 
-Apply them only from the exact release artifact, while the store remains `CLOSED`,
-after first-sale critical-path verification and the staged feature acceptance gates.
-Do not edit older migration files.
+The release sequence is linear: automated CI and security gates → protected PR merge →
+build the exact clean SHA → keep the store `CLOSED` and risky flags off → apply only the
+next ordered migration → restart the existing API/worker supervisors → verify `/health`,
+`/ready`, and `npm run preflight:production` → run direct live Telegram/browser smoke →
+enable one feature flag at a time with rollback evidence. Migration application must not
+wait on a first-sale or workbook write; those are separate acceptance gates.
 
-Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while migration 083, Apps Script
-owner/OIDC setup and live acceptance are pending. Referral rewards remain disabled by
-default; referral attribution and aggregate analytics do not issue monetary credit.
+Production defaults for this growth train are fail-closed:
+`SOCIAL_PROOF_ENABLED=false`, `VERIFIED_REVIEWS_ENABLED=false`,
+`PROMOTIONS_ENABLED=false`, `REFERRAL_ATTRIBUTION_ENABLED=false`,
+`PAYMENT_REMINDERS_ENABLED=false`, `GROWTH_DIGEST_ENABLED=false`,
+`ADMIN_PAYMENT_ALERT_MODE=OFF`, and `REFERRAL_REWARDS_ENABLED=false`.
+
+Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while Apps Script owner/OIDC setup
+and live workbook acceptance are pending. Do not edit older migration files.
 
 ## Historical migrations 072–076 — post-merge production procedure
 

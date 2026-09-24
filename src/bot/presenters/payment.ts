@@ -62,6 +62,7 @@ export interface PaymentScreenContext {
   variantName?: string;
   quantity?: number;
   fulfillmentType?: FulfillmentType;
+  paymentRemindersEnabled?: boolean;
   /** Untrusted product metadata; sanitized by the profile schema. */
   profileOverride?: unknown;
   /** Trusted caller patch (wallet / checkout). May hide check/cancel. */
@@ -370,7 +371,9 @@ export async function presentPaymentScreen(
       presentation,
       profile,
       refreshCallbackData: `pay:refresh:${presentation.orderNumber}`,
-      reminderCallbackData: `pay:remind:${presentation.orderNumber}`,
+      ...(context.paymentRemindersEnabled === false
+        ? {}
+        : { reminderCallbackData: `pay:remind:${presentation.orderNumber}` }),
       cancelCallbackData: `pay:cancel:${presentation.orderNumber}`,
     }),
   };

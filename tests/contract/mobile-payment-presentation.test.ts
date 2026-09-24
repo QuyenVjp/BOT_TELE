@@ -187,6 +187,18 @@ describe("pending mobile payment screen", () => {
     expect(data).toContain(`pay:remind:${PRESENTATION.orderNumber}`);
     expect(data).toContain(`pay:cancel:${PRESENTATION.orderNumber}`);
   });
+  it("hides payment reminders when the rollout gate is disabled", async () => {
+    const msg = await presentPaymentScreen(PRESENTATION, {
+      status: "PENDING",
+      paymentRemindersEnabled: false,
+    });
+
+    const data = msg.buttons.flat().map((button) => button.callbackData);
+    expect(labels(msg)).not.toContain(PAYMENT_COPY.reminder);
+    expect(data).not.toContain(`pay:remind:${PRESENTATION.orderNumber}`);
+    expect(data).toContain(`pay:refresh:${PRESENTATION.orderNumber}`);
+    expect(data).toContain(`pay:cancel:${PRESENTATION.orderNumber}`);
+  });
 
   it("keeps the caption within Telegram's photo limit", async () => {
     const msg = await presentPaymentScreen(PRESENTATION, {

@@ -545,6 +545,17 @@ are reused rather than forked.
   never silently creates a replacement or sends a reminder.
 - Admin digest, forecast and funnel views contain no credentials, provider identifiers, raw
   Telegram identity, or customer-level behavioral analytics.
+### Rollout gates
+
+- Growth customer/admin entrypoints are fail-closed by typed configuration:
+  `SOCIAL_PROOF_ENABLED`, `VERIFIED_REVIEWS_ENABLED`, `PROMOTIONS_ENABLED`,
+  `REFERRAL_ATTRIBUTION_ENABLED`, `PAYMENT_REMINDERS_ENABLED`, and
+  `GROWTH_DIGEST_ENABLED` default to `false`.
+- `REFERRAL_REWARDS_ENABLED=false` remains an independent monetary safety gate; attribution
+  and aggregate analytics never imply reward issuance.
+- A release may deploy code and ordered migrations while `CLOSED`; enablement is a separate
+  one-flag-at-a-time operation with direct Telegram/browser evidence and rollback readiness.
+
 
 ### Risk ledger
 

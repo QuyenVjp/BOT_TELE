@@ -53,6 +53,8 @@ export interface CatalogCallbackDeps {
    */
   tokenCodec?: CallbackTokenCodec;
   productLinkSecret?: string;
+  /** Rollout gate for verified review summaries. */
+  reviewsEnabled?: boolean;
   /** Goal §28: opens the one-shot permission the search prompt needs before it accepts text. */
   searchPrompt?: {
     open(input: { chatId: string; correlationId: string }): Promise<void>;
@@ -304,7 +306,10 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       for (const variant of detail.variants) {
         buyNowByVariantId[variant.id] = issueBuyNow(telegramUserId, variant);
       }
-      const reviewSummary = await getProductReviewSummary(deps.db, productId);
+      const reviewSummary =
+        deps.reviewsEnabled === false
+          ? undefined
+          : await getProductReviewSummary(deps.db, productId);
       const featuredVariantId = detail.variants[0]?.id;
       await recordFunnelEvent(deps.db, {
         eventKey: eventKey ?? `product-view:${productId}:unknown`,

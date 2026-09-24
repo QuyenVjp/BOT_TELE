@@ -1751,6 +1751,7 @@ async function bootstrap(): Promise<void> {
   catalogCache.invalidate();
   const catalog = createCatalogCallbacks({
     db: dbHandle.db,
+    reviewsEnabled: config.VERIFIED_REVIEWS_ENABLED,
     // Warranty (goal: warranty vertical). Every handler re-authorizes against the actor's own
     // order, so a forged callback can only ever reach the caller's own data.
     warranty: {
@@ -1902,6 +1903,7 @@ async function bootstrap(): Promise<void> {
   });
   const checkout = createCheckoutCallbacks({
     db: dbHandle.db,
+    paymentRemindersEnabled: config.PAYMENT_REMINDERS_ENABLED,
     merchant: {
       merchantAccountId: config.SEPAY_MERCHANT_ACCOUNT_ID,
       beneficiaryAccountNumber: config.VIETQR_ACCOUNT_NUMBER,
@@ -1954,7 +1956,7 @@ async function bootstrap(): Promise<void> {
     buyAgainVariantDetail: (variantId, telegramUserId) =>
       catalog.variantDetail(variantId, telegramUserId),
   });
-  const reviews = createReviewCallbacks(dbHandle.db);
+  const reviews = config.VERIFIED_REVIEWS_ENABLED ? createReviewCallbacks(dbHandle.db) : undefined;
   const notificationService = { getNotificationPreferences, setNotificationPreferences };
   const walletLedger = createWalletLedgerService(dbHandle.db);
   const walletPurchase = createWalletPurchaseService(dbHandle.db);
@@ -2396,8 +2398,8 @@ async function bootstrap(): Promise<void> {
     catalog,
     trust: {
       async page(customerId, page) {
-        if (!config.SOCIAL_PROOF_HMAC_KEY)
-          return { text: "Màn hình uy tín chưa được cấu hình.", buttons: [] };
+        if (!config.SOCIAL_PROOF_ENABLED || !config.SOCIAL_PROOF_HMAC_KEY)
+          return { text: "Màn hình uy tín chưa được bật.", buttons: [] };
         return presentCustomerTrustScreen(
           await listTrustScreen(dbHandle.db, {
             page,
@@ -2410,49 +2412,57 @@ async function bootstrap(): Promise<void> {
     uiSurface: createPostgresUiSurfaceRegistry(dbHandle.db),
     checkout,
     history,
-    reviews,
-    promotion: {
-      async apply(customerId, code) {
-        const result = await savePromotionDraft(dbHandle.db, { customerId, code });
-        return result.ok
-          ? {
-              text: `✅ Đã lưu mã ${result.codeNormalized}. Mở sản phẩm và bấm Mua ngay để áp dụng.`,
-              buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
-            }
-          : {
-              text: "Mã ưu đãi không hợp lệ. Dùng 2–32 ký tự chữ, số, _ hoặc -.",
-              buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
-            };
-      },
-    },
-    referral: {
-      async home(customerId) {
-        const [token, stats] = await Promise.all([
-          getOrCreateReferralToken(dbHandle.db, {
-            customerId,
-            secret: config.BUY_NOW_CALLBACK_HMAC_KEY,
-          }),
-          getReferralStats(dbHandle.db, customerId),
-        ]);
-        return presentReferralHome({
-          link: `https://t.me/tier20ai_bot?start=ref_${token.slice(4)}`,
-          ...stats,
-        });
-      },
-      async attribute(customerId, token) {
-        const result = await attributeReferral(dbHandle.db, {
-          token,
-          refereeCustomerId: customerId,
-          secret: config.BUY_NOW_CALLBACK_HMAC_KEY,
-        });
-        return result.ok
-          ? presentReferralAttributed()
-          : {
-              text: "Link giới thiệu không hợp lệ hoặc đã được ghi nhận trước đó.",
-              buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
-            };
-      },
-    },
+    ...(reviews ? { reviews } : {}),
+    ...(config.PROMOTIONS_ENABLED
+      ? {
+          promotion: {
+            async apply(customerId, code) {
+              const result = await savePromotionDraft(dbHandle.db, { customerId, code });
+              return result.ok
+                ? {
+                    text: `✅ Đã lưu mã ${result.codeNormalized}. Mở sản phẩm và bấm Mua ngay để áp dụng.`,
+                    buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
+                  }
+                : {
+                    text: "Mã ưu đãi không hợp lệ. Dùng 2–32 ký tự chữ, số, _ hoặc -.",
+                    buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
+                  };
+            },
+          },
+        }
+      : {}),
+    ...(config.REFERRAL_ATTRIBUTION_ENABLED
+      ? {
+          referral: {
+            async home(customerId) {
+              const [token, stats] = await Promise.all([
+                getOrCreateReferralToken(dbHandle.db, {
+                  customerId,
+                  secret: config.BUY_NOW_CALLBACK_HMAC_KEY,
+                }),
+                getReferralStats(dbHandle.db, customerId),
+              ]);
+              return presentReferralHome({
+                link: `https://t.me/tier20ai_bot?start=ref_${token.slice(4)}`,
+                ...stats,
+              });
+            },
+            async attribute(customerId, token) {
+              const result = await attributeReferral(dbHandle.db, {
+                token,
+                refereeCustomerId: customerId,
+                secret: config.BUY_NOW_CALLBACK_HMAC_KEY,
+              });
+              return result.ok
+                ? presentReferralAttributed()
+                : {
+                    text: "Link giới thiệu không hợp lệ hoặc đã được ghi nhận trước đó.",
+                    buttons: [[{ text: "🛒 Mở cửa hàng", callbackData: "shop:home" }]],
+                  };
+            },
+          },
+        }
+      : {}),
     resumePendingCheckout: async (customerId) => {
       const pending = await sql<{ order_number: string }>`
         select order_number
@@ -2767,6 +2777,7 @@ async function bootstrap(): Promise<void> {
                   showCancelButton: false,
                   showOrderCodeCopyButton: false,
                 },
+                paymentRemindersEnabled: false,
               }),
             )
           : walletTopupPickerMessage(account);
@@ -3685,7 +3696,9 @@ async function bootstrap(): Promise<void> {
                   and v.fulfillment_type = 'STOCK_ACCOUNT'
                   and not exists (select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE')) as stock_account_not_ready
           `.execute(dbHandle.db),
-          getDailyGrowthDigest(dbHandle.db, { dayStart, dayEnd }),
+          config.GROWTH_DIGEST_ENABLED
+            ? getDailyGrowthDigest(dbHandle.db, { dayStart, dayEnd })
+            : Promise.resolve(undefined),
           sql<{ variant_name: string; available_units: number; sold_14d: number }>`
             select
               v.name_vi as variant_name,
@@ -3745,11 +3758,12 @@ async function bootstrap(): Promise<void> {
           criticalSupportTickets: health.queues.criticalSupportTickets,
           funnelCounts,
           stockAccountNotReady: stock.rows[0]?.stock_account_not_ready ?? 0,
-          growthDigest,
+          ...(growthDigest ? { growthDigest } : {}),
           inventoryForecast,
         });
       },
       async reviews(input) {
+        if (!config.VERIFIED_REVIEWS_ENABLED) return presentReviewModeration([]);
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const gate = await adminCallbacks.handle({
@@ -3769,6 +3783,8 @@ async function bootstrap(): Promise<void> {
         );
       },
       async reviewModerate(input) {
+        if (!config.VERIFIED_REVIEWS_ENABLED)
+          return { text: "Kiểm duyệt đánh giá chưa được bật.", buttons: [] };
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const gate = await adminCallbacks.handle({
