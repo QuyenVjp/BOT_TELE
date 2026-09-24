@@ -32,6 +32,8 @@ describe("customer trust screen", () => {
     expect(text).toContain("Khách #");
     expect(text).toContain("ChatGPT Plus");
     expect(text).toContain("250.000 ₫");
+    expect(text).toContain("Đã hoàn tất");
+    expect(text).not.toMatch(/2026-09-24|24\/09|03:00|10:00/u);
     expect(text).not.toContain("customer-internal-id");
     expect(text).not.toMatch(/telegram|username|phone|email|bank|token|vault|password/i);
   });

@@ -24,6 +24,7 @@ import {
 } from "../../src/modules/commerce/preorder.js";
 import {
   generateCustomerAlias,
+  listTrustScreen,
   renderSocialProofMessage,
   getRealStoreStats,
 } from "../../src/modules/marketing/social-proof.js";
@@ -38,7 +39,7 @@ import { isStoreOpen } from "../../src/modules/commerce/buy-now.js";
 
 describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", () => {
   let ctx: PgTestContext;
-
+  let commercialVariantId: string;
   beforeAll(async () => {
     ctx = await startPostgresContainer();
 
@@ -55,7 +56,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
       values (${prodId}, ${categoryId}, 'ChatGPT Plus Chính Chủ', 'chatgpt-plus', 'Tài khoản chính chủ', true, 1, false, false)
     `.execute(ctx.db);
 
-    const varId = newId();
+    commercialVariantId = newId();
     await sql`
       insert into product_variant (
         id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
@@ -63,7 +64,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         resale_evidence_id, preorder_enabled, deposit_mode, deposit_amount_vnd,
         min_deposit_vnd, hold_duration_hours, balance_due_hours
       ) values (
-        ${varId}, ${prodId}, 'GPT-PLUS-1M', '1 Tháng BHF', 250000, 'P1M', 'CREDENTIAL',
+        ${commercialVariantId}, ${prodId}, 'GPT-PLUS-1M', '1 Tháng BHF', 250000, 'P1M', 'CREDENTIAL',
         30, 'LOCAL_ONLY', true, 1, 'STOCK_ACCOUNT',
         'RES_TEST_1', true, 'FIXED', 50000,
         50000, 24, 24
@@ -72,7 +73,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
     // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
     await sql`
       insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
-      values ('RES_TEST_1', ${varId}, 'OWNER_ATTESTATION', 'TEST-REF-COMMERCE-SPRINT', 'fixture publication evidence', 'test')
+      values ('RES_TEST_1', ${commercialVariantId}, 'OWNER_ATTESTATION', 'TEST-REF-COMMERCE-SPRINT', 'fixture publication evidence', 'test')
     `.execute(ctx.db);
     await sql`
       update product_variant
@@ -81,7 +82,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
              publication_variant_version = 1,
              published_at = now(),
              published_by = 'test'
-       where id = ${varId}
+       where id = ${commercialVariantId}
     `.execute(ctx.db);
 
     // Also seed a test Canary product to verify it is filtered out of customer view
@@ -385,6 +386,101 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
       expect(typeof stats.completedOrders).toBe("number");
       expect(typeof stats.totalCustomers).toBe("number");
       expect(typeof stats.automatedDeliveries).toBe("number");
+    });
+    it("excludes test and manual settlement evidence from public trust counters", async () => {
+      const aliasKey = "test-social-proof-key-material-1234567890";
+      const completedAt = new Date("2026-09-24T03:00:00.000Z");
+
+      const createSettledOrder = async (input: {
+        label: string;
+        decisionCode: string;
+        resolutionCode?: string;
+      }) => {
+        const customerId = newId();
+        const orderId = newId();
+        const intentId = newId();
+        const bankTransactionId = newId();
+        const allocationId = newId();
+        const assetId = newId();
+        const fingerprint = "f".repeat(64) + input.label;
+        await sql`insert into customer (id) values (${customerId})`.execute(ctx.db);
+        await sql`
+          insert into "order" (
+            id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
+            price_vnd, duration_code, delivery_type, warranty_days, status, paid_at, completed_at
+          ) values (
+            ${orderId}, ${`TRUST-${input.label}`}, ${customerId}, ${commercialVariantId},
+            'ChatGPT Plus Chính Chủ', '1 Tháng BHF', 250000, 'P1M', 'CREDENTIAL', 30,
+            'COMPLETED', ${completedAt}, ${completedAt}
+          )
+        `.execute(ctx.db);
+        await sql`
+          insert into payment_intent (
+            id, order_id, status, amount_vnd, merchant_account_id, transfer_content,
+            expires_at, settled_at
+          ) values (
+            ${intentId}, ${orderId}, 'SUCCEEDED', 250000, 'TIER20', ${`TIER20-${input.label}`},
+            ${new Date(completedAt.getTime() + 86_400_000)}, ${completedAt}
+          )
+        `.execute(ctx.db);
+        await sql`
+          insert into bank_transaction (
+            id, provider, provider_transaction_id, direction, merchant_account_id,
+            amount_vnd, content, reference, transacted_at, raw_hash, signature_status,
+            schema_version
+          ) values (
+            ${bankTransactionId}, 'sepay', ${`provider-${input.label}`}, 'IN', 'TIER20',
+            250000, ${`TIER20-${input.label}`}, ${`ref-${input.label}`}, ${completedAt},
+            ${"a".repeat(64)}, 'VERIFIED', 'v2'
+          )
+        `.execute(ctx.db);
+        await sql`
+          insert into payment_allocation (
+            id, bank_transaction_id, payment_intent_id, allocated_amount_vnd,
+            status, decision_code, correlation_id
+          ) values (
+            ${allocationId}, ${bankTransactionId}, ${intentId}, 250000,
+            'SETTLED', ${input.decisionCode}, ${`correlation-${input.label}`}
+          )
+        `.execute(ctx.db);
+        await sql`
+          insert into digital_asset (
+            id, variant_id, source_type, vault_ref, fingerprint_hash, status, delivered_order_id
+          ) values (
+            ${assetId}, ${commercialVariantId}, 'LOCAL', ${`test-ref-${input.label}`},
+            ${fingerprint}, 'DELIVERED', ${orderId}
+          )
+        `.execute(ctx.db);
+        if (input.resolutionCode) {
+          await sql`
+            insert into discrepancy (
+              id, type, bank_transaction_id, payment_intent_id, order_id, status,
+              reason, owner, resolution_code, resolved_at
+            ) values (
+              ${newId()}, 'WRONG_CONTENT', ${bankTransactionId}, ${intentId}, ${orderId},
+              'RESOLVED', 'manual fixture', 'owner', ${input.resolutionCode}, ${completedAt}
+            )
+          `.execute(ctx.db);
+        }
+        return customerId;
+      };
+
+      const validCustomerId = await createSettledOrder({
+        label: "VALID",
+        decisionCode: "EXACT_MATCH",
+      });
+      await createSettledOrder({ label: "TEST", decisionCode: "TEST_EXACT" });
+      await createSettledOrder({ label: "MANUAL", decisionCode: "MANUAL_SETTLE" });
+      await createSettledOrder({
+        label: "RESOLVED",
+        decisionCode: "EXACT_MATCH",
+        resolutionCode: "MANUAL_SETTLE",
+      });
+
+      const screen = await listTrustScreen(ctx.db, { aliasKey, pageSize: 10 });
+      expect(screen.completedAll).toBe(1);
+      expect(screen.rows).toHaveLength(1);
+      expect(screen.rows[0]?.customerAlias).toBe(generateCustomerAlias(validCustomerId, aliasKey));
     });
   });
 

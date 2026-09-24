@@ -174,16 +174,9 @@ export function presentCustomerTrustScreen(data: TrustScreenData): PresentedMess
     "Các giao dịch dưới đây đã thanh toán và giao thành công:",
   ];
   for (const row of data.rows) {
-    const when = new Date(row.completedAt).toLocaleString("vi-VN", {
-      timeZone: "Asia/Ho_Chi_Minh",
-      day: "2-digit",
-      month: "2-digit",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
     lines.push(
       `• ${row.customerAlias} · ${row.productName} · ${row.variantName}`,
-      `  ${formatVnd(makeVnd(BigInt(row.amountVnd)))} · ${when}`,
+      `  ${formatVnd(makeVnd(BigInt(row.amountVnd)))} · ✅ Đã hoàn tất`,
     );
   }
   if (data.rows.length === 0) lines.push("• Chưa có giao dịch đủ điều kiện hiển thị.");

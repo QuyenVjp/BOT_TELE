@@ -100,6 +100,7 @@ function setup() {
     buttons: [[{ text: "cancel", callbackData: `pay:cancel:${order.orderNumber}` }]],
   });
   const send = vi.fn().mockResolvedValue(undefined);
+  const ack = vi.fn().mockResolvedValue(undefined);
   const deleteMessage = vi.fn().mockResolvedValue(undefined);
   const walletTopup = vi.fn().mockResolvedValue({ text: "wallet topup", buttons: [] });
   const walletTopupText = vi.fn().mockResolvedValue(null);
@@ -176,6 +177,7 @@ function setup() {
   const preorderCreate = vi.fn().mockResolvedValue({ text: "preorder deposit qr", buttons: [] });
   const preorderPay = vi.fn().mockResolvedValue({ text: "preorder deposit qr", buttons: [] });
   const preorderList = vi.fn().mockResolvedValue({ text: "preorder list", buttons: [] });
+  const trustPage = vi.fn().mockResolvedValue({ text: "trust", buttons: [] });
 
   const dispatcher = createTelegramDomainDispatcher({
     codec,
@@ -297,7 +299,8 @@ function setup() {
       pay: preorderPay,
       list: preorderList,
     },
-    responder: { send, deleteMessage },
+    trust: { page: trustPage },
+    responder: { send, deleteMessage, ack },
   });
 
   return {
@@ -370,6 +373,8 @@ function setup() {
     restockList,
     deleteMessage,
     send,
+    ack,
+    trustPage,
     order,
     visibilityAction,
     preorderConsent,
@@ -402,6 +407,23 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const sent = send.mock.calls[0]![0];
     expect(sent.message.buttons[0]![0]!.callbackData).toMatch(/^cb:/);
     expect(sent.message.buttons[0]![0]!.callbackData).not.toContain(order.orderNumber);
+  });
+  it("acknowledges every trust callback before rendering the trust page", async () => {
+    const { dispatcher, ack, trustPage, send } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "trust-message",
+      action: "UNKNOWN",
+      callbackData: "trust:page:2",
+      callbackQueryId: "trust-callback-2",
+    });
+
+    expect(ack).toHaveBeenCalledWith("trust-callback-2");
+    expect(trustPage).toHaveBeenCalledWith(CUSTOMER, 2);
+    expect(send).toHaveBeenCalledTimes(1);
   });
 
   it("deletes the credential message after the customer acknowledges it", async () => {

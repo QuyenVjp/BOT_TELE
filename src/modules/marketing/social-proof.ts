@@ -85,6 +85,14 @@ const ELIGIBLE_SALES = sql`
     and not p.is_test
     and not p.is_archived
     and p.name_vi not ilike '%canary%'
+    and pa.decision_code not ilike 'MANUAL%'
+    and pa.decision_code not ilike 'TEST%'
+    and not exists (
+      select 1
+      from discrepancy d
+      where d.payment_intent_id = pi.id
+        and d.resolution_code ilike 'MANUAL%'
+    )
     and not exists (
       select 1
       from test_customer_allowlist a
