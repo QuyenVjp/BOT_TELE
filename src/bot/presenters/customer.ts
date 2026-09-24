@@ -7,6 +7,7 @@ import {
 } from "./catalog.js";
 import { formatExpiryVietnam } from "./payment.js";
 import type { StorefrontProductSummary } from "../../modules/catalog/repository.js";
+import type { TrustScreenData } from "../../modules/marketing/social-proof.js";
 import {
   preorderPayableLeg,
   type CustomerPreorderSummary,
@@ -32,8 +33,9 @@ export const CUSTOMER_COPY = {
   orders: "🧾 Đơn hàng",
   account: "👤 Tài khoản",
   topup: "💰 Nạp ví",
-  warranty: "🛡 Bảo hành",
   support: "💬 Hỗ trợ",
+  warranty: "🛡 Bảo hành",
+  trust: "✅ Uy tín",
   purchaseActivity: "📣 Hoạt động mua hàng",
   shopUpdates: "🛍 Cập nhật sản phẩm",
   notifications: "🔔 Cài đặt thông báo",
@@ -138,6 +140,7 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
   }
   buttons.push(
     [{ text: "🔎 Tìm sản phẩm", callbackData: "cat:search" }],
+    [{ text: CUSTOMER_COPY.trust, callbackData: "trust:home" }],
     [
       {
         text: COMMUNITY_BUTTON_LABEL,
@@ -158,6 +161,34 @@ export function presentStorefront(options: StorefrontDisplayOptions): PresentedM
     replyKeyboard: MAIN_REPLY_KEYBOARD,
     installPersistentKeyboard: true,
   };
+}
+
+export function presentCustomerTrustScreen(data: TrustScreenData): PresentedMessage {
+  const lines = [
+    "✅ Uy tín TIER20",
+    "",
+    `Đã hoàn tất 24 giờ qua: ${data.completed24h}`,
+    `Đã hoàn tất 7 ngày qua: ${data.completed7d}`,
+    `Tổng đơn hoàn tất: ${data.completedAll}`,
+    "",
+    "Các giao dịch dưới đây đã thanh toán và giao thành công:",
+  ];
+  for (const row of data.rows) {
+    lines.push(
+      `• ${row.customerAlias} · ${row.productName} · ${row.variantName}`,
+      `  ${formatVnd(makeVnd(BigInt(row.amountVnd)))} · ✅ Đã hoàn tất`,
+    );
+  }
+  if (data.rows.length === 0) lines.push("• Chưa có giao dịch đủ điều kiện hiển thị.");
+  const buttons: InlineButton[][] = [
+    [{ text: "🔄 Làm mới", callbackData: `trust:page:${data.page}` }],
+  ];
+  if (data.hasPrevious)
+    buttons[0]!.push({ text: "← Trước", callbackData: `trust:page:${data.page - 1}` });
+  if (data.hasNext)
+    buttons[0]!.push({ text: "Sau →", callbackData: `trust:page:${data.page + 1}` });
+  buttons.push([{ text: CUSTOMER_COPY.browse, callbackData: "shop:home" }]);
+  return { text: lines.join("\n"), buttons };
 }
 export function presentCustomerWarranty(summary?: string): PresentedMessage {
   return {

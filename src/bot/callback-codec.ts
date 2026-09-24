@@ -272,8 +272,9 @@ export const CALLBACK_ACTION_CODES = {
   CHECKOUT_WALLET: 29,
   PREORDER_LIST: 30,
   PREORDER_PAY: 31,
+  CUSTOMER_TRUST: 32,
+  CUSTOMER_TRUST_PAGE: 33,
 } as const;
-
 export type CallbackAction = keyof typeof CALLBACK_ACTION_CODES;
 
 export interface IssueCallbackTokenInput {
@@ -429,6 +430,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "CUSTOMER_NOTIFICATIONS":
     case "CUSTOMER_WARRANTY":
     case "PREORDER_LIST":
+    case "CUSTOMER_TRUST":
       assertNoPayload(input);
       return Buffer.alloc(0);
     case "CATEGORY_VIEW": {
@@ -480,17 +482,28 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
       // derived from customer+variant, which permanently blocked repeat purchases of a variant.
       if (input.secondaryResourceId === undefined)
         return Buffer.concat([encodeResourceId(input.resourceId), amount]);
+      const attempt = decodeAttemptId(input.secondaryResourceId);
+      if (!attempt) throw new Error("Invalid checkout wallet attempt id");
       // The attempt id is 6 random bytes carried as 8 base64url characters. A full 16-byte ULID
       // would push the finished token to 67 bytes and the issue() guard would refuse it — Telegram
       // caps callback_data at 64 — so the attempt id is sized to fit: 51 bytes without it, 59 with.
-      const attempt = decodeAttemptId(input.secondaryResourceId);
-      if (!attempt) throw new Error("Invalid checkout wallet attempt id");
       return Buffer.concat([encodeResourceId(input.resourceId), amount, attempt]);
+    }
+    case "CUSTOMER_TRUST_PAGE": {
+      if (
+        input.resourceId !== undefined ||
+        input.secondaryResourceId !== undefined ||
+        !Number.isInteger(input.option) ||
+        input.option! < 0 ||
+        input.option! > 255
+      )
+        throw new Error("Invalid trust page callback payload");
+      return Buffer.from([input.option!]);
     }
     case "CUSTOMER_NOTIFICATION_TOGGLE":
       assertOnlyResource(input);
       return encodeResourceId(input.resourceId!);
-    case "CATALOG_PAGE":
+    case "CATALOG_PAGE": {
       if (!input.resourceId || input.option !== undefined)
         throw new Error("Invalid catalog page callback payload");
       return input.secondaryResourceId
@@ -499,6 +512,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
             encodeResourceId(input.secondaryResourceId),
           ])
         : encodeResourceId(input.resourceId);
+    }
     case "SUPPORT_MENU":
       if (input.secondaryResourceId !== undefined || input.option !== undefined)
         throw new Error("Invalid support menu callback payload");
@@ -538,6 +552,7 @@ function decodeActionPayload(
       "CUSTOMER_NOTIFICATIONS",
       "CUSTOMER_WARRANTY",
       "PREORDER_LIST",
+      "CUSTOMER_TRUST",
     ].includes(action)
   ) {
     return payload.byteLength === 0 ? {} : null;
@@ -564,6 +579,9 @@ function decodeActionPayload(
   ) {
     if (payload.byteLength === 16) return { resourceId: decodeUlid(payload) };
     return payload.byteLength === 26 ? { resourceId: payload.toString("utf8") } : null;
+  }
+  if (action === "CUSTOMER_TRUST_PAGE") {
+    return payload.byteLength === 1 ? { option: payload[0]! } : null;
   }
   if (action === "CHECKOUT_WALLET") {
     if (payload.byteLength === 22)

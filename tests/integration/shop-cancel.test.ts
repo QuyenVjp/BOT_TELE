@@ -325,7 +325,10 @@ describe("shop-cancel refund-due writer", () => {
           status: "DEPOSIT_PAID",
           depositVnd: 50000,
           balanceVnd: 200000,
-          customerName: generateCustomerAlias(customerId),
+          customerName: generateCustomerAlias(
+            customerId,
+            "test-social-proof-key-material-1234567890",
+          ),
         },
       ],
     });

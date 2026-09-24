@@ -12,6 +12,7 @@ import { appendAuditEvent } from "../identity/audit.js";
 export type NotificationClass =
   "TRANSACTIONAL" | "CRITICAL_SERVICE" | "SHOP_UPDATE" | "PURCHASE_ACTIVITY";
 export type BroadcastAudience = "all" | "shop" | "activity" | "root";
+export type NotificationButton = { text: string; callbackData: string };
 export interface NotificationPreferences {
   customerId: string;
   shopUpdates: boolean;
@@ -30,6 +31,8 @@ export interface NotificationDeliveryClaim {
   content: string;
   class: NotificationClass;
   productVariantId?: string | null;
+  buttons: NotificationButton[][];
+  messageId: string | null;
   generation: number;
 }
 export interface BroadcastStatus {
@@ -47,7 +50,7 @@ export interface NotificationResponder {
   send(input: {
     chatId: string;
     telegramUserId: string;
-    messageId: null;
+    messageId: string | null;
     message: { text: string; buttons: Array<Array<{ text: string; callbackData: string }>> };
   }): Promise<unknown>;
 }
@@ -70,6 +73,8 @@ type NotificationDeliveryClaimRow = {
   content: string;
   class: NotificationClass;
   product_variant_id: string | null;
+  buttons: unknown;
+  message_id: string | null;
   claim_generation: string | number;
 };
 
@@ -85,6 +90,28 @@ function mapPreferences(row: NotificationPreferenceRow): NotificationPreferences
   };
 }
 
+function safeButton(value: unknown): NotificationButton | null {
+  if (!value || typeof value !== "object" || !("text" in value) || !("callbackData" in value))
+    return null;
+  const text = value.text;
+  const callbackData = value.callbackData;
+  return typeof text === "string" && typeof callbackData === "string"
+    ? { text: text.slice(0, 64), callbackData: callbackData.slice(0, 128) }
+    : null;
+}
+
+function safeButtons(value: unknown): NotificationButton[][] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((row): row is unknown[] => Array.isArray(row))
+    .map((row) =>
+      row.map(safeButton).filter((button): button is NotificationButton => button !== null),
+    )
+    .filter((row) => row.length > 0)
+    .slice(0, 4)
+    .map((row) => row.slice(0, 2));
+}
+
 function mapClaim(row: NotificationDeliveryClaimRow): NotificationDeliveryClaim {
   return {
     id: row.id,
@@ -95,9 +122,12 @@ function mapClaim(row: NotificationDeliveryClaimRow): NotificationDeliveryClaim 
     content: row.content,
     class: row.class,
     productVariantId: row.product_variant_id,
+    buttons: safeButtons(row.buttons),
+    messageId: row.message_id,
     generation: Number(row.claim_generation),
   };
 }
+
 async function hasActiveRestockSubscriptionForDelivery(
   exec: Executor,
   delivery: Pick<NotificationDeliveryClaim, "campaignId" | "customerId">,
@@ -711,7 +741,11 @@ export async function claimNotificationDeliveries(
     claim_expires_at=now()+interval '30 seconds',claim_generation=d.claim_generation+1
     from picked p, notification_campaign c
     where d.id=p.id and c.id=d.campaign_id
-    returning d.id,d.campaign_id,d.customer_id,d.chat_id,coalesce((select cps.telegram_user_id from customer_profile_snapshot cps where cps.customer_id=d.customer_id),(select ci.channel_user_id from channel_identity ci where ci.customer_id=d.customer_id and ci.channel='TELEGRAM' limit 1),d.chat_id) as telegram_user_id,c.content,c.class,c.product_variant_id,d.claim_generation`.execute(
+    returning d.id,d.campaign_id,d.customer_id,d.chat_id,
+      coalesce((select cps.telegram_user_id from customer_profile_snapshot cps where cps.customer_id=d.customer_id),
+        (select ci.channel_user_id from channel_identity ci where ci.customer_id=d.customer_id and ci.channel='TELEGRAM' limit 1),
+        d.chat_id) as telegram_user_id,
+      c.content,c.class,c.product_variant_id,c.buttons,d.message_id,d.claim_generation`.execute(
     exec,
   );
   return r.rows.map(mapClaim);
@@ -721,10 +755,14 @@ export async function markNotificationSent(
   exec: Executor,
   id: string,
   generation: number,
+  messageId: string | null = null,
 ): Promise<boolean> {
   const r = await sql<{
     id: string;
-  }>`update notification_delivery set status='SENT',sent_at=now(),last_error=null,claimed_by=null,claim_expires_at=null where id=${id} and status='RETRY' and claim_generation=${generation} returning id`.execute(
+  }>`update notification_delivery set status='SENT',sent_at=now(),last_error=null,
+      message_id=coalesce(${messageId}, message_id),
+      claimed_by=null,claim_expires_at=null
+      where id=${id} and status='RETRY' and claim_generation=${generation} returning id`.execute(
     exec,
   );
   return r.rows.length === 1;
@@ -763,12 +801,19 @@ export async function markNotificationFailure(
   return r.rows.length === 1;
 }
 
+function sentMessageId(value: unknown): string | null {
+  if (!value || typeof value !== "object" || !("messageId" in value)) return null;
+  const messageId = value.messageId;
+  return typeof messageId === "string" && messageId.trim() ? messageId : null;
+}
+
 export async function processNotificationDeliveryClaim(
   exec: Executor,
   delivery: NotificationDeliveryClaim,
   responder: NotificationResponder,
   input?: {
     maxAttempts?: number;
+
     retryAfterSeconds?: (error: unknown) => number | null;
     onRateLimit?: (seconds: number) => Promise<void>;
   },
@@ -797,18 +842,23 @@ export async function processNotificationDeliveryClaim(
         ? "SUPPRESSED"
         : "STALE";
     }
-    await responder.send({
+    const sent = await responder.send({
       telegramUserId: delivery.telegramUserId ?? delivery.chatId,
       chatId: delivery.chatId,
-      messageId: null,
+      messageId: delivery.messageId,
       message: {
         text: delivery.content,
-        buttons: delivery.productVariantId
-          ? [[{ text: "Xem sản phẩm", callbackData: `var:view:${delivery.productVariantId}` }]]
-          : [],
+        buttons:
+          delivery.buttons.length > 0
+            ? delivery.buttons
+            : delivery.productVariantId
+              ? [[{ text: "Xem sản phẩm", callbackData: `var:view:${delivery.productVariantId}` }]]
+              : [],
       },
     });
-    return (await markNotificationSent(exec, delivery.id, delivery.generation)) ? "SENT" : "STALE";
+    return (await markNotificationSent(exec, delivery.id, delivery.generation, sentMessageId(sent)))
+      ? "SENT"
+      : "STALE";
   } catch (error) {
     const retryAfter = input?.retryAfterSeconds?.(error) ?? 30;
     if (retryAfter > 0 && input?.retryAfterSeconds?.(error)) await input.onRateLimit?.(retryAfter);
@@ -976,7 +1026,7 @@ async function queueCustomerCriticalNotification(
 /** Queue a critical notice to the owner's own chat. Same shape as the low-stock alert. */
 async function queueRootCriticalNotification(
   trx: Executor,
-  notice: { campaignId: string; content: string },
+  notice: { campaignId: string; content: string; buttons?: NotificationButton[][] },
   rootTelegramUserId: number | undefined,
 ): Promise<boolean> {
   if (rootTelegramUserId === undefined) return false;
@@ -989,8 +1039,9 @@ async function queueRootCriticalNotification(
   const target = root.rows[0];
   if (!target) return false;
   await sql`
-    insert into notification_campaign(id, class, content, status, created_by, idempotency_key)
-    values (${notice.campaignId}, 'CRITICAL_SERVICE', ${notice.content}, 'QUEUED', 'system', ${notice.campaignId})
+    insert into notification_campaign(id, class, content, status, created_by, idempotency_key, buttons)
+    values (${notice.campaignId}, 'CRITICAL_SERVICE', ${notice.content}, 'QUEUED', 'system',
+      ${notice.campaignId}, ${JSON.stringify(notice.buttons ?? [])}::jsonb)
     on conflict (idempotency_key) do nothing
   `.execute(trx);
   await sql`
@@ -1324,10 +1375,235 @@ function warrantyCustomerNotice(
   }
 }
 
+type AdminAlert = {
+  campaignId: string;
+  content: string;
+  buttons: NotificationButton[][];
+};
+
+const ADMIN_ALERT_BUTTONS: NotificationButton[][] = [
+  [
+    { text: "Xem đơn", callbackData: "admin:orders" },
+    { text: "Thanh toán", callbackData: "admin:payments" },
+  ],
+  [{ text: "Khách hàng", callbackData: "admin:customers" }],
+];
+
+function safeAdminText(value: string | null | undefined, fallback: string): string {
+  const cleaned = [...(value ?? "")]
+    .map((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 0x1f || code === 0x7f ? " " : character;
+    })
+    .join("")
+    .trim();
+  return cleaned ? cleaned.slice(0, 120) : fallback;
+}
+
+function eventPayloadString(event: OutboxEvent, key: string): string | null {
+  const value = event.payloadRedacted[key];
+  return typeof value === "string" && value.trim() ? value : null;
+}
+
+async function buildPaymentSettledAdminAlert(
+  exec: Executor,
+  orderId: string,
+): Promise<AdminAlert | null> {
+  const result = await sql<{
+    order_id: string;
+    order_number: string;
+    customer_id: string;
+    display_name: string | null;
+    username: string | null;
+    order_status: string;
+    product_name: string;
+    variant_name: string;
+    amount_vnd: string;
+    settled_at: Date | string | null;
+    remaining_stock: number | null;
+    delivered: boolean;
+  }>`
+    select
+      o.id as order_id,
+      o.order_number,
+      o.customer_id,
+      cps.display_name,
+      cps.username,
+      o.status as order_status,
+      coalesce(nullif(o.product_name_vi, ''), p.name_vi) as product_name,
+      coalesce(nullif(o.variant_name_vi, ''), v.name_vi) as variant_name,
+      pa.allocated_amount_vnd::text as amount_vnd,
+      coalesce(pi.settled_at, o.paid_at) as settled_at,
+      case
+        when v.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then
+          (select count(*)::int from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE')
+        when v.fulfillment_type = 'QUANTITY_STOCK' then
+          coalesce((select q.available_quantity from variant_quantity_stock q where q.variant_id = v.id), 0)::int
+        when v.fulfillment_type = 'DIGITAL_FILE' then
+          (select count(*)::int from variant_file_artifact f where f.variant_id = v.id and f.is_active)
+        else null
+      end as remaining_stock,
+      (
+        exists (
+          select 1 from delivery_bundle b
+          join digital_asset a on a.id = b.asset_id
+          where b.order_id = o.id and b.status = 'CONSUMED' and a.status = 'DELIVERED'
+        )
+        or exists (select 1 from file_delivery_job f where f.order_id = o.id and f.status = 'SENT')
+        or exists (select 1 from manual_fulfillment_task m where m.order_id = o.id and m.status = 'COMPLETED')
+      ) as delivered
+    from "order" o
+    join product_variant v on v.id = o.variant_id
+    join product p on p.id = v.product_id
+    join lateral (
+      select pi.*
+      from payment_intent pi
+      where pi.order_id = o.id and pi.status = 'SUCCEEDED'
+      order by pi.settled_at desc nulls last, pi.id desc
+      limit 1
+    ) pi on true
+    join payment_allocation pa on pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
+    join bank_transaction bt on bt.id = pa.bank_transaction_id
+      and lower(bt.provider) = 'sepay'
+      and bt.direction = 'IN'
+      and bt.signature_status = 'VERIFIED'
+    left join customer_profile_snapshot cps on cps.customer_id = o.customer_id
+    where o.id = ${orderId}
+      and o.status in ('PAID','PROCESSING','COMPLETED')
+      and not p.is_test and not p.is_archived
+      and p.name_vi not ilike '%canary%'
+      and not exists (
+        select 1
+        from test_customer_allowlist a
+        join channel_identity ci
+          on ci.channel = 'TELEGRAM'
+         and ci.channel_user_id = a.telegram_user_id
+         and ci.customer_id = o.customer_id
+      )
+    limit 1
+  `.execute(exec);
+  const row = result.rows[0];
+  if (!row) return null;
+  const customer = safeAdminText(row.display_name, "Khách không có tên");
+  const username = row.username ? ` (@${safeAdminText(row.username, "").replace(/^@+/, "")})` : "";
+  const stock =
+    row.remaining_stock === null ? "không áp dụng" : `${Math.max(0, row.remaining_stock)} sản phẩm`;
+  const fulfillment = row.delivered
+    ? "✅ Đã giao"
+    : row.order_status === "COMPLETED"
+      ? "✅ Đã hoàn tất"
+      : row.order_status === "PROCESSING"
+        ? "⏳ Đang xử lý"
+        : "⏳ Chờ giao";
+  const settledAt = row.settled_at ? new Date(row.settled_at).toISOString() : "chưa ghi nhận";
+  return {
+    campaignId: `admin-payment-settled:${row.order_id}`,
+    content: [
+      "✅ KHÁCH VỪA THANH TOÁN",
+      "",
+      `Đơn: ${safeAdminText(row.order_number, "không rõ")}`,
+      `Khách: ${customer}${username}`,
+      `Mã khách an toàn: ${row.customer_id.slice(-8).padStart(8, "•")}`,
+      `Sản phẩm: ${safeAdminText(row.product_name, "không rõ")}`,
+      `Gói: ${safeAdminText(row.variant_name, "không rõ")}`,
+      "Số lượng: 1",
+      `Số tiền: ${BigInt(row.amount_vnd).toLocaleString("vi-VN")} ₫`,
+      "Nguồn: SePay · ✅ Đã xác minh · ✅ Đã đối soát",
+      `Thời điểm: ${settledAt}`,
+      `Fulfillment: ${fulfillment}`,
+      `Tồn còn lại: ${stock}`,
+    ].join("\n"),
+    buttons: ADMIN_ALERT_BUTTONS,
+  };
+}
+
+function paymentReviewAdminAlert(event: OutboxEvent): AdminAlert | null {
+  if (event.eventType !== "PaymentNeedsReview") return null;
+  const orderId = eventPayloadString(event, "orderId");
+  const reason = safeAdminText(
+    eventPayloadString(event, "reason"),
+    "Bằng chứng thanh toán chưa đủ",
+  );
+  return {
+    campaignId: `admin-payment-review:${event.aggregateId}`,
+    content: [
+      "⚠️ THANH TOÁN CẦN SOÁT",
+      "",
+      orderId ? `Đơn: ${orderId.slice(-12).padStart(12, "•")}` : "Đơn: chưa xác định",
+      `Lý do: ${reason}`,
+      "Không tự giao hàng hoặc ghi nhận đã thanh toán.",
+    ].join("\n"),
+    buttons: ADMIN_ALERT_BUTTONS,
+  };
+}
+
+async function queueRootAdminAlert(
+  trx: Executor,
+  alert: AdminAlert,
+  rootTelegramUserId: number | undefined,
+  mode: "IMMEDIATE" | "OFF" = "IMMEDIATE",
+): Promise<boolean> {
+  if (mode === "OFF") return true;
+  if (rootTelegramUserId === undefined) return false;
+  const root = await sql<{ customer_id: string; chat_id: string }>`
+    select customer_id, channel_user_id as chat_id
+    from channel_identity
+    where channel = 'TELEGRAM' and channel_user_id = ${String(rootTelegramUserId)}
+    limit 1
+  `.execute(trx);
+  const target = root.rows[0];
+  if (!target) return false;
+  await sql`
+    insert into notification_campaign(id, class, content, status, created_by, idempotency_key, buttons)
+    values (${alert.campaignId}, 'CRITICAL_SERVICE', ${alert.content}, 'QUEUED', 'system',
+      ${alert.campaignId}, ${JSON.stringify(alert.buttons)}::jsonb)
+    on conflict (idempotency_key) do nothing
+  `.execute(trx);
+  await sql`
+    insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+    values (${newId()}, ${alert.campaignId}, ${target.customer_id}, ${target.chat_id})
+    on conflict (campaign_id, customer_id) do nothing
+  `.execute(trx);
+  return true;
+}
+
+async function refreshRootAdminAlert(trx: Executor, alert: AdminAlert): Promise<void> {
+  await sql`
+    update notification_campaign
+    set content = ${alert.content}, buttons = ${JSON.stringify(alert.buttons)}::jsonb,
+        status = 'QUEUED'
+    where id = ${alert.campaignId} and status <> 'CANCELLED'
+  `.execute(trx);
+  await sql`
+    update notification_delivery
+    set status = case when status in ('SENT','PENDING','RETRY') then 'RETRY' else status end,
+        next_attempt_at = now(), last_error = null, claimed_by = null,
+        claim_expires_at = null, claim_generation = claim_generation + 1
+    where campaign_id = ${alert.campaignId} and status in ('SENT','PENDING','RETRY')
+  `.execute(trx);
+}
+
+async function fulfillmentUpdateAlert(
+  exec: Executor,
+  event: OutboxEvent,
+): Promise<AdminAlert | null> {
+  if (
+    !["DigitalAssetDelivered", "ManualFulfillmentTaskCompleted", "FulfillmentCompleted"].includes(
+      event.eventType,
+    )
+  )
+    return null;
+  const orderId = eventPayloadString(event, "orderId");
+  return orderId ? buildPaymentSettledAdminAlert(exec, orderId) : null;
+}
+
 export async function handleNotificationOutboxEvent(
   db: Db,
   event: OutboxEvent,
-  options: { rootTelegramUserId?: number } = {},
+  options: {
+    rootTelegramUserId?: number;
+    adminAlertMode?: "IMMEDIATE" | "OFF";
+  } = {},
 ): Promise<
   | { kind: "PUBLISHED" }
   | { kind: "RETRY"; errorCode: string }
@@ -1344,6 +1620,12 @@ export async function handleNotificationOutboxEvent(
   const warrantyAdmin = warrantyAdminAlert(event);
   const ticketAdmin = ticketOpenedAdminAlert(event);
   const warrantyCustomer = warrantyCustomerNotice(event);
+  const paymentSettled =
+    event.eventType === "PaymentSettled"
+      ? await buildPaymentSettledAdminAlert(db, eventPayloadString(event, "orderId") ?? "")
+      : null;
+  const paymentReview = paymentReviewAdminAlert(event);
+  const fulfillmentUpdate = await fulfillmentUpdateAlert(db, event);
   if (walletEvent && !wallet)
     return { kind: "TERMINAL_REVIEW", errorCode: "WALLET_NOTIFICATION_PAYLOAD_INVALID" };
   if (
@@ -1353,13 +1635,17 @@ export async function handleNotificationOutboxEvent(
     !shopCancel &&
     !warrantyAdmin &&
     !ticketAdmin &&
-    !warrantyCustomer
+    !warrantyCustomer &&
+    !paymentSettled &&
+    !paymentReview &&
+    !fulfillmentUpdate
   )
     return { kind: "PUBLISHED" };
   let missingWalletTarget = false;
   let missingWarrantyTarget = false;
   let missingLowStockTarget = false;
   let missingShopCancelTarget = false;
+  let missingPaymentTarget = false;
   await withTransaction(db, async (trx) => {
     if (stock) {
       const snapshot = await restockCampaignSnapshot(trx, stock);
@@ -1378,34 +1664,48 @@ export async function handleNotificationOutboxEvent(
           and coalesce(cps.chat_id,ci.channel_user_id) is not null
         on conflict (campaign_id,customer_id) do nothing returning 1 as n`.execute(trx);
     }
-    if (wallet && !(await queueCustomerCriticalNotification(trx, wallet))) {
+    if (wallet && !(await queueCustomerCriticalNotification(trx, wallet)))
       missingWalletTarget = true;
-    }
     if (
       lowStock &&
       !(await queueRootLowStockAlert(trx, event, lowStock, options.rootTelegramUserId))
-    ) {
+    )
       missingLowStockTarget = true;
-    }
-    if (shopCancel && !(await queueCustomerCriticalNotification(trx, shopCancel))) {
+    if (shopCancel && !(await queueCustomerCriticalNotification(trx, shopCancel)))
       missingShopCancelTarget = true;
-    }
-    // The admin alert goes to the owner's own chat, the customer notices to the customer.
     if (
       warrantyAdmin &&
       !(await queueRootCriticalNotification(trx, warrantyAdmin, options.rootTelegramUserId))
-    ) {
+    )
       missingWarrantyTarget = true;
-    }
     if (
       ticketAdmin &&
       !(await queueRootCriticalNotification(trx, ticketAdmin, options.rootTelegramUserId))
-    ) {
+    )
       missingWarrantyTarget = true;
-    }
-    if (warrantyCustomer && !(await queueCustomerCriticalNotification(trx, warrantyCustomer))) {
+    if (warrantyCustomer && !(await queueCustomerCriticalNotification(trx, warrantyCustomer)))
       missingWarrantyTarget = true;
-    }
+    if (
+      paymentSettled &&
+      !(await queueRootAdminAlert(
+        trx,
+        paymentSettled,
+        options.rootTelegramUserId,
+        options.adminAlertMode,
+      ))
+    )
+      missingPaymentTarget = true;
+    if (
+      paymentReview &&
+      !(await queueRootAdminAlert(
+        trx,
+        paymentReview,
+        options.rootTelegramUserId,
+        options.adminAlertMode,
+      ))
+    )
+      missingPaymentTarget = true;
+    if (fulfillmentUpdate) await refreshRootAdminAlert(trx, fulfillmentUpdate);
   });
   if (missingWarrantyTarget)
     return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
@@ -1414,6 +1714,8 @@ export async function handleNotificationOutboxEvent(
   if (missingLowStockTarget)
     return { kind: "RETRY", errorCode: "LOW_STOCK_ROOT_NOTIFICATION_TARGET_MISSING" };
   if (missingShopCancelTarget)
+    return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
+  if (missingPaymentTarget)
     return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
   return { kind: "PUBLISHED" };
 }

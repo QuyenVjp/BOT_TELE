@@ -77,6 +77,14 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
       issues.push("GOOGLE_SHEETS_OIDC_AUDIENCE is required when inventory intake is enabled");
     }
   }
+  if (config.GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED) {
+    if (!config.GOOGLE_SHEETS_ENABLED) {
+      issues.push("GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED requires Google Sheets to be enabled");
+    }
+    if (!config.GOOGLE_SHEETS_OIDC_AUDIENCE) {
+      issues.push("GOOGLE_SHEETS_OIDC_AUDIENCE is required when inventory intake is enabled");
+    }
+  }
   if (!source.ADMIN_STEP_UP_MODE?.trim()) {
     issues.push("ADMIN_STEP_UP_MODE must be explicitly configured in production");
   }

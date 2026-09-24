@@ -161,6 +161,9 @@ export interface TelegramDomainDispatcherDeps {
       },
     ): Promise<PresentedMessage>;
   };
+  trust?: {
+    page(customerId: string, page: number): Promise<PresentedMessage>;
+  };
   /**
    * Checkout port. The two confirmation routes (goal §32) are optional so a host that only
    * wires the original Buy Now path still type-checks; when they are absent the route answers
@@ -1191,6 +1194,20 @@ export function createTelegramDomainDispatcher(
         message = customerId
           ? await deps.history.detail(orderNumber, customerId)
           : safeError("Không tìm thấy thông tin khách hàng.");
+      } else if (
+        envelope.callbackData === "trust:home" ||
+        envelope.callbackData?.startsWith("trust:page:")
+      ) {
+        const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+        const suffix =
+          envelope.callbackData === "trust:home"
+            ? "0"
+            : envelope.callbackData.slice("trust:page:".length);
+        const page = /^\d{1,5}$/.test(suffix) ? Number(suffix) : 0;
+        message =
+          customerId && deps.trust
+            ? await deps.trust.page(customerId, page)
+            : safeError("Không xác minh được khách hàng.");
       } else if (envelope.callbackData === "shop:home" || envelope.callbackData === "menu:main") {
         message = await shopHome(deps, envelope);
       } else if (envelope.callbackData === "cat:search") {
@@ -3140,6 +3157,16 @@ async function dispatchVerified(
       return deps.notificationPreferences
         ? deps.notificationPreferences.get(customerId)
         : safeError("Không xác minh được khách hàng.");
+    case "CUSTOMER_TRUST":
+      return deps.trust
+        ? deps.trust.page(customerId, 0)
+        : safeError("Màn hình uy tín không khả dụng.");
+    case "CUSTOMER_TRUST_PAGE": {
+      const page = token.option;
+      return deps.trust && page !== undefined
+        ? deps.trust.page(customerId, Math.min(255, Math.max(0, page)))
+        : safeError("Trang uy tín không hợp lệ.");
+    }
     case "CUSTOMER_NOTIFICATION_TOGGLE": {
       const kind = token.resourceId?.startsWith("social") ? "social" : "marketing";
       return deps.notificationPreferences
