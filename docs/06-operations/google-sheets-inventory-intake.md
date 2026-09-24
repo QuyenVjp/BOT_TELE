@@ -28,6 +28,7 @@ PostgreSQL asset appears later through the safe Sheets projection.
 
 1. Configure only the secret-free projection lane:
    - `GOOGLE_SHEETS_ENABLED=true`
+   - `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=true` only after migration and live owner acceptance
    - exact `GOOGLE_SHEETS_SPREADSHEET_ID`
    - `GOOGLE_SHEETS_CREDENTIAL_VAULT_REF` for the projection service account
 2. Protect projection tabs and Requests system columns. Requests remains a
