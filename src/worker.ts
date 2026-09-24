@@ -3686,9 +3686,10 @@ async function bootstrap(): Promise<void> {
         // and may differ transiently while concurrent work commits.
         const dayStart = vietnamDayStart(new Date());
         const dayEnd = new Date(dayStart.getTime() + 86_400_000);
-        const [health, stock, growthDigest, forecastRows, funnelCounts] = await Promise.all([
-          getAdminHealthFacts(dbHandle.db),
-          sql<{ stock_account_not_ready: number }>`
+        const [health, stock, growthDigest, forecastRows, funnelCounts, groupSettings] =
+          await Promise.all([
+            getAdminHealthFacts(dbHandle.db),
+            sql<{ stock_account_not_ready: number }>`
             select
               (select count(*)::int from product_variant v
                 join product p on p.id = v.product_id
@@ -3696,10 +3697,10 @@ async function bootstrap(): Promise<void> {
                   and v.fulfillment_type = 'STOCK_ACCOUNT'
                   and not exists (select 1 from digital_asset a where a.variant_id = v.id and a.status = 'AVAILABLE')) as stock_account_not_ready
           `.execute(dbHandle.db),
-          config.GROWTH_DIGEST_ENABLED
-            ? getDailyGrowthDigest(dbHandle.db, { dayStart, dayEnd })
-            : Promise.resolve(undefined),
-          sql<{ variant_name: string; available_units: number; sold_14d: number }>`
+            config.GROWTH_DIGEST_ENABLED
+              ? getDailyGrowthDigest(dbHandle.db, { dayStart, dayEnd })
+              : Promise.resolve(undefined),
+            sql<{ variant_name: string; available_units: number; sold_14d: number }>`
             select
               v.name_vi as variant_name,
               case
@@ -3723,11 +3724,23 @@ async function bootstrap(): Promise<void> {
             order by sold_14d desc, v.name_vi
             limit 20
           `.execute(dbHandle.db),
-          getFunnelCounts(dbHandle.db, {
-            from: new Date(dayEnd.getTime() - 14 * 86_400_000),
-            to: dayEnd,
-          }),
-        ]);
+            getFunnelCounts(dbHandle.db, {
+              from: new Date(dayEnd.getTime() - 14 * 86_400_000),
+              to: dayEnd,
+            }),
+            sql<{
+              shop_panel_enabled: boolean;
+              welcome_enabled: boolean;
+              restock_publishing_enabled: boolean;
+              social_proof_mode: string;
+            }>`
+            select shop_panel_enabled, welcome_enabled, restock_publishing_enabled,
+              social_proof_mode
+            from group_commerce_settings
+            where id = 'main'
+            limit 1
+          `.execute(dbHandle.db),
+          ]);
         const inventoryForecast = forecastRows.rows
           .map((row) => ({
             ...row,
@@ -3756,11 +3769,54 @@ async function bootstrap(): Promise<void> {
           terminalOutboxOrphansDisposed: health.queues.outboxDeadLetteredDisposed,
           openSupportTickets: health.queues.openSupportTickets,
           criticalSupportTickets: health.queues.criticalSupportTickets,
+          groupPublicationDisabled:
+            groupSettings.rows[0] !== undefined &&
+            !groupSettings.rows[0].shop_panel_enabled &&
+            !groupSettings.rows[0].welcome_enabled &&
+            !groupSettings.rows[0].restock_publishing_enabled &&
+            groupSettings.rows[0].social_proof_mode === "OFF",
           funnelCounts,
           stockAccountNotReady: stock.rows[0]?.stock_account_not_ready ?? 0,
           ...(growthDigest ? { growthDigest } : {}),
           inventoryForecast,
         });
+      },
+      async groupPublicationOff(input) {
+        if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const current = await sql<{ updated_at: string }>`
+          select updated_at::text
+          from group_commerce_settings
+          where id = 'main'
+          limit 1
+        `.execute(dbHandle.db);
+        const updatedAt = current.rows[0]?.updated_at;
+        if (!updatedAt) {
+          return { text: "Cấu hình publication group không khả dụng.", buttons: [] };
+        }
+        const result = await adminCallbacks.handle({
+          command: "group.publication.disable",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          targetId: "main",
+          expectedVersion: updatedAt,
+          reason: "Tắt toàn bộ publication group theo chính sách owner.",
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) {
+          return presentAdminHandleRefusal(
+            result,
+            "group.publication.disable",
+            input.correlationId,
+          );
+        }
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "group.publication.disable",
+            })
+          : presentHighRiskDone("group.publication.disable");
       },
       async reviews(input) {
         if (!config.VERIFIED_REVIEWS_ENABLED) return presentReviewModeration([]);

@@ -248,6 +248,8 @@ export interface AdminOperationsSnapshot {
   openSupportTickets: number;
   /** Actionable: tickets parked for operator judgement (`MANUAL_REVIEW`). */
   criticalSupportTickets: number;
+  /** All group posting/publication switches are disabled. */
+  groupPublicationDisabled: boolean;
   stockAccountNotReady: number;
   growthDigest?: DailyGrowthDigest;
   inventoryForecast?: Array<{
@@ -302,6 +304,7 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
       `⚠️ Cần xử lý — sai lệch thanh toán: ${input.openDiscrepancies}`,
       `⚠️ Cần xử lý — outbox terminal chưa kết luận: ${input.terminalOutboxOrphans}`,
       `🚨 Cần xử lý — phiếu hỗ trợ chờ người xử lý: ${input.criticalSupportTickets}`,
+      `👥 Publication group: ${input.groupPublicationDisabled ? "OFF" : "ON"}`,
       `✅ Đã xử lý (chỉ lưu vết) — sai lệch: ${input.resolvedDiscrepancies} · outbox: ${input.terminalOutboxOrphansDisposed}`,
       `ℹ️ Ticket thường đang mở (chờ shop/khách): ${input.openSupportTickets}`,
       "",
@@ -317,6 +320,16 @@ export function presentAdminOperations(input: AdminOperationsSnapshot): Presente
         { text: "🏪 Store control", callbackData: "admin:store:mode" },
       ],
       [{ text: "💬 Ticket hỗ trợ", callbackData: "admin:support" }],
+      ...(input.groupPublicationDisabled
+        ? []
+        : [
+            [
+              {
+                text: "🚫 Tắt publication group",
+                callbackData: "admin:operations:group-publication-off",
+              },
+            ],
+          ]),
       adminNav("admin:menu"),
     ],
   };

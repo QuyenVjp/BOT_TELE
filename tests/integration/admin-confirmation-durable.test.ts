@@ -30,8 +30,9 @@ beforeEach(async () => {
   await sql`drop function if exists reject_atomic_admin_audit()`.execute(ctx.db);
   await sql`
     truncate table admin_confirmation, audit_event, discrepancy, channel_identity, customer,
-      product_variant, product, category, resale_evidence cascade
+      product_variant, product, category, resale_evidence, group_commerce_settings cascade
   `.execute(ctx.db);
+  await sql`insert into group_commerce_settings (id) values ('main')`.execute(ctx.db);
 });
 
 /**
@@ -86,13 +87,16 @@ async function seedEvidence(): Promise<{
 /** The per-verb fixture a durable command needs before it can issue a challenge. */
 function durableCommandFixture(command: string): {
   input?: string;
-  expectedVersion?: number;
+  expectedVersion?: number | string;
 } {
   if (command === "catalog.evidence.register") {
     return { input: "OWNER_ATTESTATION|owner-reference-probe|Synthetic evidence probe" };
   }
   if (command === "catalog.evidence.revoke") return { input: newId(), expectedVersion: 1 };
   if (command === "fulfillment.reconcile") return { expectedVersion: 1 };
+  if (command === "group.publication.disable") {
+    return { expectedVersion: "synthetic-group-publication-version" };
+  }
   return {};
 }
 
@@ -323,7 +327,7 @@ describe("durable AdminConfirmation (T163/T164)", () => {
       const issued = await admin.handle({
         command,
         actor,
-        targetId: newId(),
+        targetId: command === "group.publication.disable" ? "main" : newId(),
         reason: `Synthetic vocabulary probe for ${command}`,
         correlationId: `vocabulary-${command}`,
         ...durableCommandFixture(command),
