@@ -345,12 +345,13 @@ This remediation closes the remaining owner-facing commissioning blockers withou
 ## 15. Google Sheets operations control plane (2026-09)
 
 Google Sheets is the primary operator projection and safe metadata/control view
-for inventory, but never the commerce authority. Inventory entry remains in the
-protected Telegram bot flow; PostgreSQL remains authoritative for orders,
-payments, inventory, fulfillment, warranty/support, audit and all versions;
-Vault remains authoritative for credentials and secret material. Sheets outage,
-quota exhaustion or malformed external data must never block checkout, payment
-or fulfillment.
+for inventory, but never the commerce authority. Normal inventory entry uses the
+container-bound Apps Script menu/sidebar and a protected HTTPS intake boundary;
+Telegram and the local Terminal command remain fallback/break-glass paths.
+PostgreSQL remains authoritative for orders, payments, inventory, fulfillment,
+warranty/support, audit and all versions; Vault remains authoritative for
+credentials and secret material. Sheets outage, quota exhaustion or malformed
+external data must never block checkout, payment or fulfillment.
 
 ### Module seams
 
@@ -363,6 +364,11 @@ or fulfillment.
   action allowlist, optimistic version checks, idempotency, authorization,
   fixed transactional state transitions and audit writeback. It never accepts
   inventory credentials or executes arbitrary SQL/payment/delivery transitions.
+- `infrastructure/google-sheets/owner-verifier.ts` verifies the Google OIDC
+  token, configured owner email, exact workbook id and configured audience.
+- `modules/google-sheets/inventory-intake.ts` owns the short-lived preview and
+  one-time confirmation challenge. It stages through Vault and calls the same
+  domain import/session engine used by Telegram; it never stores raw input.
 - `worker.ts` owns only asynchronous dispatch and periodic reconciliation. An
   outbox wake is a hint that can trigger a single-flight Sheets cycle; the
   periodic lane remains the durable recovery path. No Google call runs inside a
@@ -382,8 +388,9 @@ The column ownership is explicit and structural, not a color convention:
 - Every canonical column on `Dashboard`, `Inventory`, `Orders`, `Payments`,
   `Fulfillment`, `Warranty_Support`, `Suppliers` and `Audit` is
   `SYSTEM_AUTHORITATIVE`. Inventory credentials enter only through the
-  protected bot/domain import boundary; the resulting PostgreSQL asset appears
-  later through the normal safe projection.
+  protected Apps Script HTTPS/domain import boundary (with Telegram and Terminal
+  as fallback); the resulting PostgreSQL asset appears later through the normal
+  safe projection.
 - `Requests!A:H` (`request_id` through `payload`) is `HUMAN_EDITABLE`;
   `Requests!I:L` (`status` through `processed_at`) is `SYSTEM_AUTHORITATIVE`.
   Requests remains a safe metadata/control surface and is never a credential
@@ -404,10 +411,11 @@ Workbook protection is part of the trust boundary: projection tabs and
 Requests system columns are service-account-only; Requests input columns are
 editable only by the configured Google owner account plus the service account.
 The workbook is never a credential transport, alternate database writer or
-authority. The Telegram bot remains the only operator credential-entry surface;
-its root-owner/step-up/domain guards and Vault boundary govern inventory
-staging and commit. No Apps Script, Web App or Mini App is part of this
-projection path.
+authority. The Apps Script sidebar is only a transient protected intake client;
+it writes no credentials to cells and the backend binds the exact workbook and
+verified Google owner before the root/domain guards and Vault boundary govern
+staging and commit. Telegram and Terminal remain fallback surfaces. No Mini App,
+storefront Web App or unprotected browser route is part of this path.
 
 The Requests state machine is `PENDING -> PROCESSING -> SUCCEEDED`,
 `REJECTED`, `STALE` or `FAILED`; successful rows carry result code `APPLIED`
@@ -423,10 +431,10 @@ request ID replays its terminal result and a changed payload becomes a
 No spreadsheet value, formula, hyperlink, audit metadata, request payload or
 log may contain passwords, TOTP, cookies, sessions, access/refresh tokens,
 Telegram auth, raw Vault values or digital-asset secrets. The raw candidate
-may exist only transiently in the HTTPS request and backend process memory
-until Vault staging; account rows may contain only a masked login, stable
-non-reversible identity fingerprint, opaque Vault reference and safe
-operational metadata.
+may exist only transiently in the Apps Script server call, protected HTTPS
+request and backend process memory until Vault staging; account rows may
+contain only a masked login, stable non-reversible identity fingerprint, opaque
+Vault reference and safe operational metadata.
 
 ### Controlled request allowlist
 

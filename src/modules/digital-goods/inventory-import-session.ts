@@ -46,6 +46,8 @@ export interface InventoryImportSessionInput {
   correlationId: string;
   variantId?: string;
   assetMetadata?: InventoryImportAssetMetadata;
+  /** Optional opaque ref binding for non-Telegram confirmation callers. */
+  expectedInputVaultRef?: string;
 }
 
 export interface InventoryImportTemplate {
@@ -834,6 +836,12 @@ export async function confirmInventoryImportSession(
     if (session.expiresAt <= now) return { expired: true as const, session };
     if (session.status === "COMMITTED") return { committed: true as const, session };
     if (session.status === "PROCESSING") return { busy: true as const, session };
+    if (
+      input.expectedInputVaultRef !== undefined &&
+      session.inputVaultRef !== input.expectedInputVaultRef
+    ) {
+      return { ready: false as const, session };
+    }
     if (session.status !== "READY" || !session.inputVaultRef)
       return { ready: false as const, session };
     await sql`

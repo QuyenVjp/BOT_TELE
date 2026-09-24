@@ -132,6 +132,7 @@ export const envSchema = z.object({
       z.union([z.literal(""), z.string().email().max(128)]),
     )
     .default(""),
+  GOOGLE_SHEETS_OIDC_AUDIENCE: z.string().trim().max(256).default(""),
   GOOGLE_SHEETS_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(5_000),
   GOOGLE_SHEETS_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(5).default(3),
   GOOGLE_SHEETS_SYNC_INTERVAL_MS: z.coerce

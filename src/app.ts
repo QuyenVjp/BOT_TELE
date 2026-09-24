@@ -15,6 +15,10 @@ import {
 import { registerDeliveryRoute } from "./modules/digital-goods/delivery-route.js";
 import type { DeliverySessionCodecConfig } from "./modules/digital-goods/delivery-session.js";
 import { healthPayload, loadBuildIdentity } from "./shared/build-identity.js";
+import {
+  registerGoogleSheetsInventoryIntake,
+  type GoogleSheetsInventoryIntakeDeps,
+} from "./modules/google-sheets/inventory-intake.js";
 
 /**
  * HTTP application composition (T118, FR-024, SR-004).
@@ -68,6 +72,7 @@ export interface CreateAppDeps {
     path?: string;
     session: DeliverySessionCodecConfig;
   };
+  googleSheetsInventoryIntake?: GoogleSheetsInventoryIntakeDeps;
   bodyLimitBytes: number;
   /**
    * `false` in production: the entrypoint logs structured events through the redacted
@@ -165,6 +170,9 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
       session: deps.delivery.session,
       ...(deps.delivery.path !== undefined ? { path: deps.delivery.path } : {}),
     });
+  }
+  if (deps.googleSheetsInventoryIntake) {
+    await registerGoogleSheetsInventoryIntake(app, deps.googleSheetsInventoryIntake);
   }
 
   await app.ready();

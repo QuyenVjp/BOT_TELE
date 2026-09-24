@@ -93,10 +93,10 @@ The latest source migration is:
 The current read-only production preflight observed production at
 `082_paid_delivery_reconciliation.sql` (**81** migrations). Migration 082 is therefore
 already applied. Migration 083 is a forward-only expand migration for safe Google
-Sheets projection metadata and inventory Vault-orphan recovery. Apply it only after
-the exact release artifact, bot inventory acceptance, and a controlled migration
-window are ready. Keep the store `CLOSED`; do not activate sales as part of
-applying 083.
+Sheets projection metadata, the Sheet-native owner challenge and inventory Vault-orphan
+recovery. Apply it only after the exact release artifact, Apps Script intake acceptance,
+and a controlled migration window are ready. Keep the store `CLOSED`; do not activate
+sales as part of applying 083. See `docs/06-operations/google-sheets-inventory-intake.md`.
 
 Do not edit older migration files.
 
