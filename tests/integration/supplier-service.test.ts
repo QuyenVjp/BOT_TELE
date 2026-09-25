@@ -7,7 +7,7 @@ import {
   provisionFromSupplier,
   recoverUnknownSupplierOrder,
 } from "../../src/modules/supplier/service.js";
-import type { SupplierPort } from "../../src/modules/supplier/port.js";
+import type { SupplierPort, SupplierProvider } from "../../src/modules/supplier/port.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 import { performance } from "node:perf_hooks";
 import { listActiveCategories } from "../../src/modules/catalog/repository.js";
@@ -180,6 +180,45 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       port,
       vault: createInMemoryVault(),
       purchaseEnabled: false,
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "UNSUPPORTED" });
+    expect(createCalls).toBe(0);
+    const orders = await sql<{ count: number }>`
+      select count(*)::int as count from supplier_order where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(orders.rows[0]?.count).toBe(0);
+  });
+  it("does not call the upstream when the provider lacks ORDER_CREATE", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    let createCalls = 0;
+    const provider: SupplierProvider = {
+      ...sandbox,
+      providerKey: f.supplierId,
+      displayName: "Health only",
+      capabilities: new Set(["HEALTH_READ"]),
+      async createOrder(input) {
+        createCalls += 1;
+        return sandbox.createOrder(input);
+      },
+    };
+
+    const result = await provisionFromSupplier(ctx.db, {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL",
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "missing-order-capability",
+      port: provider,
+      vault: createInMemoryVault(),
+      purchaseEnabled: true,
     });
 
     expect(result).toMatchObject({ ok: false, code: "UNSUPPORTED" });

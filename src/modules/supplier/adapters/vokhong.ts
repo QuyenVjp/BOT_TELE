@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { createPinnedFetch } from "../../../infrastructure/net/pinned-fetch.js";
 import { OutboundPolicyError } from "../../../infrastructure/net/outbound-policy.js";
+import type { Vault } from "../../../infrastructure/vault/port.js";
 import {
   SupplierPortError,
   type SupplierProvider,
@@ -22,6 +23,8 @@ const HealthSchema = z
 
 export interface VokhongSupplierOptions {
   baseUrl: string;
+  apiKeyVaultRef: string;
+  vault: Vault;
   timeoutMs: number;
   testTransport?: {
     allowInsecureLoopback?: boolean;
@@ -52,6 +55,7 @@ function validateBaseUrl(options: VokhongSupplierOptions): URL {
     url.search ||
     url.hash ||
     url.pathname.replace(/\/$/, "") !== "/api" ||
+    !options.apiKeyVaultRef.startsWith("vault:") ||
     !Number.isInteger(options.timeoutMs) ||
     options.timeoutMs < 10 ||
     options.timeoutMs > 30_000
@@ -122,10 +126,13 @@ export function createVokhongSupplierPort(options: VokhongSupplierOptions): Supp
       options.timeoutMs,
     );
     try {
-      const response = await guardedFetch(new URL("/", base.origin), {
+      const apiKey = await options.vault.reveal(options.apiKeyVaultRef).catch(() => {
+        throw new SupplierPortError("AUTH", "supplier authentication failed");
+      });
+      const response = await guardedFetch(new URL("/api/health", base.origin), {
         method: "GET",
         signal: controller.signal,
-        headers: { accept: "application/json" },
+        headers: { accept: "application/json", "X-API-Key": apiKey },
       });
       const value = await readBounded(response, controller.signal);
       if (!response.ok) throw new SupplierPortError("HTTP_ERROR", "supplier response is invalid");

@@ -137,23 +137,20 @@ export const envSchema = z.object({
   QCST_ADMIN_PRODUCT_BROWSER: booleanEnv,
   QCST_OWNER_SELECTION: booleanEnv,
   QCST_LOCAL_PRICE_CONTROL: booleanEnv,
-  QCST_UNSELECTED_PRODUCTS_HIDDEN: booleanEnv,
-  QCST_DUPLICATE_MAPPING_PROTECTED: booleanEnv,
-  QCST_PRICE_CHANGE_SAFE: booleanEnv,
   QCST_PURCHASE_ENABLED: booleanEnv,
   QCST_API_BASE_URL: z.string().url().default("https://api.qcst.tech"),
   QCST_API_KEY_VAULT_REF: z.string().trim().default(""),
   QCST_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(8_000),
 
-  // Vô Không is discovery-only until its authenticated contract is verified.
+  // Vô Không is authenticated health-only until its catalog/order contract is implemented.
   VOKHONG_PROVIDER_ENABLED: booleanEnv,
   VOKHONG_CATALOG_SYNC: booleanEnv,
   VOKHONG_ADMIN_PRODUCT_BROWSER: booleanEnv,
   VOKHONG_OWNER_SELECTION: booleanEnv,
   VOKHONG_LOCAL_PRICE_CONTROL: booleanEnv,
   VOKHONG_PURCHASE_ENABLED: booleanEnv,
-  VOKHONG_API_BASE_URL: z.string().url().default("https://vokhong.xyz/api"),
   VOKHONG_API_KEY_VAULT_REF: z.string().trim().default(""),
+  VOKHONG_API_BASE_URL: z.string().url().default("https://vokhong.xyz/api"),
   VOKHONG_TIMEOUT_MS: z.coerce.number().int().min(100).max(30_000).default(8_000),
 
   SEARCH_PARSER_DRIVER: z.enum(["deterministic", "model"]).default("deterministic"),

@@ -113,7 +113,7 @@ describe("QCST configuration", () => {
     expect(config.QCST_PURCHASE_ENABLED).toBe(false);
   });
 
-  it("requires every curation safety gate before production purchase enablement", () => {
+  it("requires actual provider rollout gates before production purchase enablement", () => {
     expect(() =>
       loadConfig({
         ...productionSheetsEnv,
@@ -124,7 +124,7 @@ describe("QCST configuration", () => {
     ).toThrow("QCST_PURCHASE_ENABLED requires the generic and QCST provider gates");
   });
 
-  it("accepts production QCST only with the Vault reference and all safety gates", () => {
+  it("accepts production QCST with actual rollout gates and a Vault reference", () => {
     expect(() =>
       loadConfig({
         ...productionSheetsEnv,
@@ -134,9 +134,6 @@ describe("QCST configuration", () => {
         QCST_ADMIN_PRODUCT_BROWSER: "true",
         QCST_OWNER_SELECTION: "true",
         QCST_LOCAL_PRICE_CONTROL: "true",
-        QCST_UNSELECTED_PRODUCTS_HIDDEN: "true",
-        QCST_DUPLICATE_MAPPING_PROTECTED: "true",
-        QCST_PRICE_CHANGE_SAFE: "true",
         QCST_PURCHASE_ENABLED: "true",
         QCST_API_KEY_VAULT_REF: "vault:qcst-api-key",
       }),
@@ -165,7 +162,16 @@ describe("generic supplier platform configuration", () => {
     expect(config.VOKHONG_API_BASE_URL).toBe("https://vokhong.xyz/api");
   });
 
-  it("allows read-only Vô Không provider configuration but blocks purchase", () => {
+  it("keeps Vô Không disabled without a Vault credential", () => {
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        VOKHONG_PROVIDER_ENABLED: "true",
+      }),
+    ).toThrow("VOKHONG_API_KEY_VAULT_REF must be a Vault reference");
+  });
+
+  it("allows authenticated health-only Vô Không registration but blocks purchase", () => {
     expect(() =>
       loadConfig({
         ...productionSheetsEnv,
@@ -179,8 +185,8 @@ describe("generic supplier platform configuration", () => {
         ...productionSheetsEnv,
         SUPPLIER_PURCHASE_ENABLED: "true",
         VOKHONG_PROVIDER_ENABLED: "true",
-        VOKHONG_PURCHASE_ENABLED: "true",
         VOKHONG_API_KEY_VAULT_REF: "vault:vokhong-api-key",
+        VOKHONG_PURCHASE_ENABLED: "true",
       }),
     ).toThrow("VOKHONG_PURCHASE_ENABLED is blocked");
   });

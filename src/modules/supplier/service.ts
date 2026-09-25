@@ -233,7 +233,7 @@ export async function provisionFromSupplier(
   if (!order) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
-  if (input.purchaseEnabled === false) {
+  if (input.purchaseEnabled !== true) {
     return {
       ok: false,
       code: "UNSUPPORTED",

@@ -1024,6 +1024,17 @@ describe("admin operational presenters", () => {
       localPriceVnd: 199000n,
       localDescriptionVi: "Mô tả local",
     });
+    const attachPreview = presentAdminSupplierConfigPreview({
+      providerKey: "vokhong",
+      providerName: "Vô Không",
+      stateId: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+      localNameVi: "A",
+      localVariantNameVi: "B",
+      localPriceVnd: 159000n,
+      localDescriptionVi: "C",
+      attachOnly: true,
+    });
+    expect(attachPreview.text).toContain("chỉ đọc");
     expect(preview.text).toContain("199.000 ₫");
     const previewCallbacks = preview.buttons.flat().map((button) => button.callbackData);
     expect(previewCallbacks).toContain("admin:supplier:qcst:confirm:01ARZ3NDEKTSV4RRFFQ69G5FAX:on");

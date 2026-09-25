@@ -197,7 +197,8 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
         message: "Không tìm thấy SKU nhà cung cấp chính đang hoạt động.",
       };
     }
-    if (deps.supplierPurchaseEnabled && !deps.supplierPurchaseEnabled(sku.supplier_id)) {
+    const purchaseEnabled = deps.supplierPurchaseEnabled?.(sku.supplier_id) ?? false;
+    if (!purchaseEnabled) {
       return {
         ok: false,
         code: "SUPPLIER_UNSUPPORTED",
@@ -229,7 +230,7 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
       port: selectedSupplier,
       vault: deps.vault,
       idempotencyKey: `${orderId}:${sku.supplier_sku_id}`,
-      purchaseEnabled: deps.supplierPurchaseEnabled?.(sku.supplier_id) ?? true,
+      purchaseEnabled,
     });
     if (!provision.ok) {
       return {

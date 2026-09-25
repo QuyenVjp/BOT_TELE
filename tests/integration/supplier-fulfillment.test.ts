@@ -4,6 +4,7 @@ import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adap
 import { enqueueOutboxEvent } from "../../src/infrastructure/outbox/repository.js";
 import { drainOutboxOnce } from "../../src/infrastructure/outbox/worker.js";
 import { createFulfillmentOutboxHandler } from "../../src/modules/digital-goods/handlers.js";
+import { fulfillPaidOrder } from "../../src/modules/digital-goods/fulfillment.js";
 import { createSandboxSupplierAdapter } from "../../src/modules/supplier/adapters/primary.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
@@ -84,8 +85,63 @@ async function enqueueOrderPaid(orderId: string, correlationId: string) {
   });
   return eventId;
 }
+async function attemptSupplierFulfillment(gate?: () => boolean) {
+  const fixture = await seedSupplierPaidOrder();
+  const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+  let createCalls = 0;
+  const supplier = {
+    ...sandbox,
+    async createOrder(input: Parameters<typeof sandbox.createOrder>[0]) {
+      createCalls += 1;
+      return sandbox.createOrder(input);
+    },
+  };
+  const result = await fulfillPaidOrder(ctx.db, {
+    orderId: fixture.orderId,
+    correlationId: "purchase-gate-regression",
+    deps: {
+      vault: createInMemoryVault(),
+      supplier,
+      ...(gate ? { supplierPurchaseEnabled: gate } : {}),
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+    },
+  });
+  return { fixture, result, createCalls };
+}
+
+async function supplierOrderCount(orderId: string): Promise<number> {
+  const rows = await sql<{ count: number }>`
+    select count(*)::int as count from supplier_order where order_id = ${orderId}
+  `.execute(ctx.db);
+  return rows.rows[0]?.count ?? 0;
+}
 
 describe("supplier fulfillment from OrderPaid", () => {
+  it("fails closed when the supplier purchase dependency is absent", async () => {
+    const attempt = await attemptSupplierFulfillment();
+    expect(attempt.result).toMatchObject({ ok: false, code: "SUPPLIER_UNSUPPORTED" });
+    expect(attempt.createCalls).toBe(0);
+    expect(await supplierOrderCount(attempt.fixture.orderId)).toBe(0);
+  });
+
+  it.each(["generic gate disabled", "provider gate disabled"])(
+    "fails closed when the %s",
+    async () => {
+      const attempt = await attemptSupplierFulfillment(() => false);
+      expect(attempt.result).toMatchObject({ ok: false, code: "SUPPLIER_UNSUPPORTED" });
+      expect(attempt.createCalls).toBe(0);
+      expect(await supplierOrderCount(attempt.fixture.orderId)).toBe(0);
+    },
+  );
+
+  it("executes the supplier boundary only for an explicit allowed gate", async () => {
+    const attempt = await attemptSupplierFulfillment(() => true);
+    expect(attempt.result.ok).toBe(true);
+    expect(attempt.createCalls).toBe(1);
+    expect(await supplierOrderCount(attempt.fixture.orderId)).toBe(1);
+  });
+
   it("drains a paid supplier order into one supplier asset and delivery bundle", async () => {
     const f = await seedSupplierPaidOrder();
     const eventId = await enqueueOrderPaid(f.orderId, "supplier-paid");
@@ -94,6 +150,7 @@ describe("supplier fulfillment from OrderPaid", () => {
       db: ctx.db,
       vault,
       supplier: createSandboxSupplierAdapter({ mode: "fulfill" }),
+      supplierPurchaseEnabled: () => true,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });
@@ -132,6 +189,7 @@ describe("supplier fulfillment from OrderPaid", () => {
       db: ctx.db,
       vault,
       supplier: createSandboxSupplierAdapter({ mode: "timeout-then-fulfill" }),
+      supplierPurchaseEnabled: () => true,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });
@@ -193,6 +251,7 @@ describe("supplier fulfillment from OrderPaid", () => {
       db: ctx.db,
       vault,
       supplier,
+      supplierPurchaseEnabled: () => true,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });

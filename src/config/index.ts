@@ -166,12 +166,9 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
       !config.QCST_CATALOG_SYNC ||
       !config.QCST_ADMIN_PRODUCT_BROWSER ||
       !config.QCST_OWNER_SELECTION ||
-      !config.QCST_LOCAL_PRICE_CONTROL ||
-      !config.QCST_UNSELECTED_PRODUCTS_HIDDEN ||
-      !config.QCST_DUPLICATE_MAPPING_PROTECTED ||
-      !config.QCST_PRICE_CHANGE_SAFE
+      !config.QCST_LOCAL_PRICE_CONTROL
     ) {
-      issues.push("QCST purchase requires catalog curation safety gates");
+      issues.push("QCST purchase requires its actual provider rollout gates");
     }
   }
   if (config.VOKHONG_PURCHASE_ENABLED) {

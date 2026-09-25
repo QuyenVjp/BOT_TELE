@@ -137,6 +137,7 @@ import {
   configureSupplierCatalogProduct,
   ensureSupplierProvider,
   getSupplierCatalogProduct,
+  getSupplierLocalVariantTarget,
   listSupplierCatalog,
   listSupplierLocalVariantTargets,
   parseSupplierCurationText,
@@ -1748,6 +1749,8 @@ async function bootstrap(): Promise<void> {
     }
     const vokhong = createVokhongSupplierPort({
       baseUrl: config.VOKHONG_API_BASE_URL,
+      apiKeyVaultRef: config.VOKHONG_API_KEY_VAULT_REF,
+      vault,
       timeoutMs: config.VOKHONG_TIMEOUT_MS,
     });
     providers.push(vokhong);
@@ -4632,6 +4635,7 @@ async function bootstrap(): Promise<void> {
             providerName: provider.displayName,
             stateId: previewStateId,
             ...parsed,
+            ...(targetVariantId ? { attachOnly: true } : {}),
           });
         }
         if (state.kind === "ADMIN_RESALE_EVIDENCE_PROMPT" && payload.intent !== "REVOKE") {
@@ -5292,20 +5296,33 @@ async function bootstrap(): Promise<void> {
             ],
           };
         }
-        await createAdminCallbackState(dbHandle.db, {
+        const target = await getSupplierLocalVariantTarget(dbHandle.db, input.targetVariantId);
+        if (!target) {
+          return { text: "SKU local không còn tồn tại hoặc không khả dụng.", buttons: [] };
+        }
+        const previewStateId = await createAdminCallbackState(dbHandle.db, {
           adminTelegramUserId: input.telegramUserId,
-          kind: "SUPPLIER_CURATE_PROMPT",
+          kind: "SUPPLIER_CURATE_PREVIEW",
           payload: {
             providerKey: input.providerKey,
             catalogId: row.id,
-            targetVariantId: input.targetVariantId,
+            targetVariantId: target.variantId,
+            localNameVi: target.productNameVi,
+            localVariantNameVi: target.variantNameVi,
+            localPriceVnd: target.priceVnd,
+            localDescriptionVi: target.descriptionVi ?? "",
           },
           ttlMinutes: 10,
         });
-        return presentAdminSupplierConfigPrompt({
+        return presentAdminSupplierConfigPreview({
           providerKey: input.providerKey,
           providerName: cfg.provider.displayName,
-          ...(input.targetVariantId ? { targetVariantId: input.targetVariantId } : {}),
+          stateId: previewStateId,
+          localNameVi: target.productNameVi,
+          localVariantNameVi: target.variantNameVi,
+          localPriceVnd: BigInt(target.priceVnd),
+          localDescriptionVi: target.descriptionVi ?? "",
+          attachOnly: true,
         });
       },
       async supplierCatalogPrimary(input) {

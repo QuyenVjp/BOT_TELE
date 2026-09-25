@@ -617,12 +617,29 @@ permanently off for this rollout.
 
 Upstream existence never publishes a product. Every provider sync creates or
 updates `DISCOVERED`/unselected disabled rows. The owner explicitly chooses the
-provider mapping, local product/variant, Vietnamese presentation, local selling
-price, enabled state, and primary source. Only an owner-selected enabled primary
-mapping with an active local product/variant and provider availability rules may
-enter customer routing. Supplier cost is reference data and never rewrites the
-local selling price. Missing or out-of-stock mappings preserve history and are
-hidden or buy-blocked.
+provider mapping and enabled state. Creating a new local product may set its
+Vietnamese presentation and local selling price; attaching a provider mapping
+to an existing local variant is mapping-only and preserves every local product,
+variant, description, and selling-price field. Supplier cost is reference data
+and never rewrites the local selling price. Only an owner-selected enabled
+primary mapping with an active local product/variant and provider availability
+rules may enter customer routing. Missing or out-of-stock mappings preserve
+history and are hidden or buy-blocked.
+Supplier purchase requires the generic purchase gate, the specific provider
+purchase gate, `ORDER_CREATE`, and paid/settled fulfillment prerequisites.
+Missing authorization is false; no upstream POST is permitted otherwise.
+
+QCST uses the documented raw `X-API-Key` from Vault at request time, pinned
+`https://api.qcst.tech`, and separate read-only/purchase gates. QCST
+cancellation is supported only through its documented endpoint; no separate
+refund route is assumed. Owner-provided documentation now identifies an
+authenticated Vô Không API under `https://vokhong.xyz/api`, including
+`GET /health`, `/products`, `/balance`, and `/orders` plus API-key,
+idempotency, and rate-limit behavior. The adapter currently adopts only
+authenticated `HEALTH_READ` using a fresh Vault reference; catalog, balance,
+order, delivery, cancellation, refund, and reconciliation remain unsupported
+until bounded read-only evidence and implementation exist. The chat-exposed
+credential is not used.
 
 Telegram private owner UX is the only supplier surface: supplier hub, provider
 screen, capability-specific controls, paginated safe metadata, explicit
@@ -631,18 +648,11 @@ products and never provider IDs. No Mini App, public admin HTTP surface, raw key
 credential, or provider delivery payload enters Telegram, logs, Sheets, fixtures,
 or screenshots.
 
-QCST uses the documented raw `X-API-Key` from Vault at request time, pinned
-`https://api.qcst.tech`, and separate read-only/purchase gates. QCST cancellation
-is supported only through its documented endpoint; no separate refund route is
-assumed. Vô Không currently has only an observed unauthenticated root response
-(`GET https://vokhong.xyz/`); `/api`, common docs, and OpenAPI discovery routes
-returned 404. Its catalog, balance, order, and delivery capabilities remain
-disabled until the owner provides a documented contract and fresh Vault key.
-
 ### Invariant ledger
 
 - `invariants_preserved`: Vault-only secrets; Telegram-only UX; generic durable
-  idempotency and timeout ambiguity; local price authority; root/step-up
+  idempotency and timeout ambiguity; local price authority; mapping-only
+  existing-SKU attachment; fail-closed supplier purchase; root/step-up
   authorization; explicit primary mapping; existing publication/evidence gates;
   audit, versions, and fail-closed customer routing.
 - `intentional_breaks`: none to payment, fulfillment, or store-mode semantics;

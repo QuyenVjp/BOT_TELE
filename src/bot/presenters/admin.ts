@@ -1276,13 +1276,16 @@ export function presentAdminSupplierConfigPreview(input: {
   localVariantNameVi: string;
   localPriceVnd: bigint;
   localDescriptionVi: string;
+  attachOnly?: boolean;
 }): PresentedMessage {
   const base = supplierBase(input.providerKey);
   return {
     text: [
       `Nhà cung cấp: ${input.providerName}`,
       "",
-      "Xem trước cấu hình local:",
+      input.attachOnly
+        ? "Gắn mapping vào SKU local; các giá trị local dưới đây là chỉ đọc:"
+        : "Xem trước cấu hình local:",
       `Tên: ${input.localNameVi}`,
       `Gói: ${input.localVariantNameVi}`,
       `Giá bán: ${input.localPriceVnd.toLocaleString("vi-VN")} ₫`,

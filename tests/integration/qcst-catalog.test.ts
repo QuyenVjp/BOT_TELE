@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
+import { newId } from "../../src/shared/ids/index.js";
 import type { NormalizedSupplierProduct } from "../../src/modules/supplier/port.js";
 import {
   configureSupplierCatalogProduct,
@@ -232,54 +233,105 @@ describe("generic supplier curation persistence", () => {
     expect(afterPrice.rows[0]?.price_vnd).toBe("79000");
   });
 
-  it("supports multiple provider mappings and an explicit primary switch", async () => {
+  it("keeps existing SKU fields stable across QCST and Vô Không attachments", async () => {
     await ensure("qcst", "QCST");
     await ensure("vokhong", "Vô Không");
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    await sql`
+      insert into category (id, name_vi, slug, is_active, sort_order)
+      values (${categoryId}, 'Category', ${categoryId.slice(-8)}, true, 1)
+    `.execute(ctx.db);
+    await sql`
+      insert into product
+        (id, category_id, name_vi, short_description_vi, description_vi, slug, is_active, is_archived, sort_order)
+      values
+        (${productId}, ${categoryId}, 'A', 'C', 'C', ${productId.slice(-8)}, true, false, 1)
+    `.execute(ctx.db);
+    await sql`
+      insert into product_variant
+        (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
+         stock_policy, fulfillment_type, is_active)
+      values
+        (${variantId}, ${productId}, 'SKU-A', 'B', 159000, 'CUSTOM', 'CREDENTIAL',
+         'SUPPLIER_ONLY', 'SUPPLIER_API', true)
+    `.execute(ctx.db);
+
     await syncSupplierCatalog(ctx.db, "qcst", [product()], "supplier-multi-qcst");
     const qcstRow = (await listSupplierCatalog(ctx.db, { supplierId: "qcst", limit: 8, offset: 0 }))
       .items[0]!;
-    const local = await configureSupplierCatalogProduct(ctx.db, {
+    const qcstAttached = await configureSupplierCatalogProduct(ctx.db, {
       supplierId: "qcst",
       catalogId: qcstRow.id,
-      localNameVi: "Tên local",
-      localVariantNameVi: "Gói local",
-      localPriceVnd: 99_000n,
-      localDescriptionVi: "Local",
+      targetVariantId: variantId,
+      makePrimary: true,
+      localNameVi: "supplier overwrite A",
+      localVariantNameVi: "supplier overwrite B",
+      localPriceVnd: 1n,
+      localDescriptionVi: "supplier overwrite C",
       enabled: true,
       expectedVersion: qcstRow.version,
       actorId: "123456789",
-      correlationId: "supplier-multi-config",
+      correlationId: "supplier-multi-qcst-attach",
     });
+    expect(qcstAttached).toMatchObject({ variantId, primary: true });
 
     await syncSupplierCatalog(
       ctx.db,
       "vokhong",
-      [product({ providerKey: "vokhong", externalProductId: "qcst-product-1", costVnd: 80_000 })],
+      [product({ providerKey: "vokhong", costVnd: 80_000 })],
       "supplier-multi-vokhong",
     );
     const vokhongRow = (
       await listSupplierCatalog(ctx.db, { supplierId: "vokhong", limit: 8, offset: 0 })
     ).items[0]!;
-    const attached = await configureSupplierCatalogProduct(ctx.db, {
+    const vokhongAttached = await configureSupplierCatalogProduct(ctx.db, {
       supplierId: "vokhong",
       catalogId: vokhongRow.id,
-      targetVariantId: local.variantId,
+      targetVariantId: variantId,
       makePrimary: false,
-      localNameVi: "Tên local",
-      localVariantNameVi: "Gói local",
-      localPriceVnd: 99_000n,
-      localDescriptionVi: "Local",
+      localNameVi: "another overwrite A",
+      localVariantNameVi: "another overwrite B",
+      localPriceVnd: 2n,
+      localDescriptionVi: "another overwrite C",
       enabled: true,
       expectedVersion: vokhongRow.version,
       actorId: "123456789",
-      correlationId: "supplier-multi-attach",
+      correlationId: "supplier-multi-vokhong-attach",
     });
-    expect(attached.variantId).toBe(local.variantId);
-    expect(attached.primary).toBe(false);
+    expect(vokhongAttached).toMatchObject({ variantId, primary: false });
+
+    const local = await sql<{
+      product_name_vi: string;
+      short_description_vi: string | null;
+      product_description_vi: string | null;
+      variant_name_vi: string;
+      price_vnd: string;
+      primary_supplier_id: string | null;
+    }>`
+      select p.name_vi as product_name_vi, p.short_description_vi,
+             p.description_vi as product_description_vi, v.name_vi as variant_name_vi,
+             v.price_vnd::text as price_vnd, ss.supplier_id as primary_supplier_id
+      from product p
+      join product_variant v on v.product_id = p.id
+      left join supplier_sku ss on ss.id = v.supplier_sku_id
+      where v.id = ${variantId}
+    `.execute(ctx.db);
+    expect(local.rows[0]).toMatchObject({
+      product_name_vi: "A",
+      short_description_vi: "C",
+      product_description_vi: "C",
+      variant_name_vi: "B",
+      price_vnd: "159000",
+      primary_supplier_id: "qcst",
+    });
+
     const mappings = await sql<{ count: number }>`
-      select count(*)::int as count from supplier_sku where variant_id = ${local.variantId}
+      select count(*)::int as count from supplier_sku where variant_id = ${variantId}
     `.execute(ctx.db);
     expect(mappings.rows[0]?.count).toBe(2);
+
     await syncSupplierCatalog(
       ctx.db,
       "qcst",
@@ -290,7 +342,7 @@ describe("generic supplier curation persistence", () => {
       select ss.supplier_id
       from product_variant v
       join supplier_sku ss on ss.id = v.supplier_sku_id
-      where v.id = ${local.variantId}
+      where v.id = ${variantId}
     `.execute(ctx.db);
     expect(beforeExplicitSwitch.rows[0]?.supplier_id).toBe("qcst");
     const primary = await setSupplierCatalogPrimary(ctx.db, {
@@ -303,11 +355,11 @@ describe("generic supplier curation persistence", () => {
       actorId: "123456789",
       correlationId: "supplier-multi-primary",
     });
-    expect(primary.variantId).toBe(local.variantId);
+    expect(primary.variantId).toBe(variantId);
     const pointer = await sql<{ supplier_id: string }>`
       select ss.supplier_id from product_variant v
       join supplier_sku ss on ss.id = v.supplier_sku_id
-      where v.id = ${local.variantId}
+      where v.id = ${variantId}
     `.execute(ctx.db);
     expect(pointer.rows[0]?.supplier_id).toBe("vokhong");
   });

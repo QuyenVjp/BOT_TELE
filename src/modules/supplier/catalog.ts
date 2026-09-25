@@ -66,6 +66,7 @@ export interface SupplierLocalVariantTarget {
   variantId: string;
   productId: string;
   productNameVi: string;
+  descriptionVi: string | null;
   variantNameVi: string;
   sku: string;
   priceVnd: string;
@@ -82,21 +83,23 @@ function normalizeAvailability(value: string): SupplierAvailability {
   return "UNKNOWN";
 }
 
-function validateCurationInput(input: SupplierCurationInput): void {
+function validateCurationInput(input: SupplierCurationInput, requireLocalFields = true): void {
   if (!input.supplierId.trim() || !input.catalogId.trim()) {
     throw new Error("SUPPLIER_CATALOG_NOT_FOUND");
   }
-  if (!input.localNameVi.trim() || input.localNameVi.length > 200) {
-    throw new Error("SUPPLIER_LOCAL_NAME_INVALID");
-  }
-  if (!input.localVariantNameVi.trim() || input.localVariantNameVi.length > 200) {
-    throw new Error("SUPPLIER_LOCAL_VARIANT_NAME_INVALID");
-  }
-  if (input.localPriceVnd <= 0n || input.localPriceVnd > 1_000_000_000_000n) {
-    throw new Error("SUPPLIER_LOCAL_PRICE_INVALID");
-  }
-  if (input.localDescriptionVi.length > 2_000) {
-    throw new Error("SUPPLIER_LOCAL_DESCRIPTION_INVALID");
+  if (requireLocalFields) {
+    if (!input.localNameVi.trim() || input.localNameVi.length > 200) {
+      throw new Error("SUPPLIER_LOCAL_NAME_INVALID");
+    }
+    if (!input.localVariantNameVi.trim() || input.localVariantNameVi.length > 200) {
+      throw new Error("SUPPLIER_LOCAL_VARIANT_NAME_INVALID");
+    }
+    if (input.localPriceVnd <= 0n || input.localPriceVnd > 1_000_000_000_000n) {
+      throw new Error("SUPPLIER_LOCAL_PRICE_INVALID");
+    }
+    if (input.localDescriptionVi.length > 2_000) {
+      throw new Error("SUPPLIER_LOCAL_DESCRIPTION_INVALID");
+    }
   }
   if (!Number.isInteger(input.expectedVersion) || input.expectedVersion < 1) {
     throw new Error("SUPPLIER_VERSION_INVALID");
@@ -359,8 +362,8 @@ export async function listSupplierLocalVariantTargets(
   const offset = Math.max(0, Math.min(input.offset ?? 0, 10_000));
   const result = await sql<SupplierLocalVariantTarget>`
     select v.id as "variantId", p.id as "productId", p.name_vi as "productNameVi",
-           v.name_vi as "variantNameVi", v.sku, v.price_vnd::text as "priceVnd",
-           s.id as "primarySupplierId"
+           p.description_vi as "descriptionVi", v.name_vi as "variantNameVi",
+           v.sku, v.price_vnd::text as "priceVnd", s.id as "primarySupplierId"
     from product_variant v
     join product p on p.id = v.product_id
     left join supplier_sku ss on ss.id = v.supplier_sku_id
@@ -374,6 +377,23 @@ export async function listSupplierLocalVariantTargets(
     items: hasMore ? result.rows.slice(0, limit) : result.rows,
     nextOffset: hasMore ? offset + limit : null,
   };
+}
+export async function getSupplierLocalVariantTarget(
+  exec: Executor,
+  variantId: string,
+): Promise<SupplierLocalVariantTarget | null> {
+  const result = await sql<SupplierLocalVariantTarget>`
+    select v.id as "variantId", v.product_id as "productId", p.name_vi as "productNameVi",
+           p.description_vi as "descriptionVi", v.name_vi as "variantNameVi",
+           v.sku, v.price_vnd::text as "priceVnd", s.id as "primarySupplierId"
+    from product_variant v
+    join product p on p.id = v.product_id
+    left join supplier_sku ss on ss.id = v.supplier_sku_id
+    left join supplier s on s.id = ss.supplier_id
+    where v.id = ${variantId} and p.is_active and not p.is_archived and v.is_active
+    limit 1
+  `.execute(exec);
+  return result.rows[0] ?? null;
 }
 
 function slugPart(value: string): string {
@@ -406,7 +426,7 @@ export async function configureSupplierCatalogProduct(
   supplierSkuId: string;
   primary: boolean;
 }> {
-  validateCurationInput(input);
+  validateCurationInput(input, !input.targetVariantId);
   return withTransaction(db, async (trx) => {
     const locked = await sql<{
       id: string;
@@ -435,30 +455,56 @@ export async function configureSupplierCatalogProduct(
 
     let productId = row.local_product_id;
     let variantId = row.local_variant_id;
-    if (!variantId && input.targetVariantId) {
+    let localNameVi = input.localNameVi;
+    let localVariantNameVi = input.localVariantNameVi;
+    let localPriceVnd = input.localPriceVnd;
+    let localDescriptionVi = input.localDescriptionVi;
+    const requestedVariantId = input.targetVariantId ?? row.local_variant_id;
+
+    if (requestedVariantId) {
+      if (
+        input.targetVariantId &&
+        row.local_variant_id &&
+        row.local_variant_id !== input.targetVariantId
+      ) {
+        throw new Error("SUPPLIER_TARGET_VARIANT_CONFLICT");
+      }
       const target = await sql<{
         product_id: string;
+        product_name_vi: string;
+        product_description_vi: string | null;
+        variant_name_vi: string;
+        price_vnd: string;
         fulfillment_type: string;
         stock_policy: string;
       }>`
-        select product_id, fulfillment_type, stock_policy
-        from product_variant
-        where id = ${input.targetVariantId} and is_active
+        select v.product_id, p.name_vi as product_name_vi,
+               p.description_vi as product_description_vi, v.name_vi as variant_name_vi,
+               v.price_vnd::text as price_vnd, v.fulfillment_type, v.stock_policy
+        from product_variant v
+        join product p on p.id = v.product_id
+        where v.id = ${requestedVariantId} and v.is_active and p.is_active and not p.is_archived
         limit 1
       `.execute(trx);
-      if (!target.rows[0]) throw new Error("SUPPLIER_TARGET_VARIANT_NOT_FOUND");
+      const targetRow = target.rows[0];
+      if (!targetRow) throw new Error("SUPPLIER_TARGET_VARIANT_NOT_FOUND");
       if (
-        target.rows[0].fulfillment_type !== "SUPPLIER_API" ||
-        target.rows[0].stock_policy !== "SUPPLIER_ONLY"
+        targetRow.fulfillment_type !== "SUPPLIER_API" ||
+        targetRow.stock_policy !== "SUPPLIER_ONLY"
       ) {
         throw new Error("SUPPLIER_TARGET_VARIANT_INCOMPATIBLE");
       }
-      productId = target.rows[0].product_id;
-      variantId = input.targetVariantId;
+      productId = targetRow.product_id;
+      variantId = requestedVariantId;
+      localNameVi = targetRow.product_name_vi;
+      localVariantNameVi = targetRow.variant_name_vi;
+      localPriceVnd = BigInt(targetRow.price_vnd);
+      localDescriptionVi = targetRow.product_description_vi ?? "";
     }
 
-    const category = productId ? null : await getOrCreateUncategorizedCategory(trx);
-    if (!productId) {
+    if (!variantId) {
+      if (productId) throw new Error("SUPPLIER_TARGET_VARIANT_NOT_FOUND");
+      const category = await getOrCreateUncategorizedCategory(trx);
       productId = newId();
       variantId = newId();
       const suffix = newId().slice(-8).toLowerCase();
@@ -467,9 +513,9 @@ export async function configureSupplierCatalogProduct(
           (id, category_id, name_vi, slug, short_description_vi, description_vi,
            is_test, is_active, is_archived, is_featured, featured_rank, stock_display_mode)
         values
-          (${productId}, ${category!.id}, ${input.localNameVi.trim()},
+          (${productId}, ${category.id}, ${localNameVi.trim()},
            ${`supplier-${slugPart(row.external_product_id)}-${suffix}`.slice(0, 128)},
-           ${input.localDescriptionVi.trim() || null}, ${input.localDescriptionVi.trim() || null},
+           ${localDescriptionVi.trim() || null}, ${localDescriptionVi.trim() || null},
            false, true, false, false, null, 'BAND')
       `.execute(trx);
       await sql`
@@ -478,24 +524,9 @@ export async function configureSupplierCatalogProduct(
            warranty_days, stock_policy, fulfillment_type, inventory_fields,
            low_stock_threshold, preorder_enabled, is_active, warranty_enabled)
         values
-          (${variantId}, ${productId}, ${externalSku(row)}, ${input.localVariantNameVi.trim()},
-           ${input.localPriceVnd}, 'CUSTOM', 'CREDENTIAL', 0, 'SUPPLIER_ONLY',
+          (${variantId}, ${productId}, ${externalSku(row)}, ${localVariantNameVi.trim()},
+           ${localPriceVnd}, 'CUSTOM', 'CREDENTIAL', 0, 'SUPPLIER_ONLY',
            'SUPPLIER_API', '[]'::jsonb, null, false, true, false)
-      `.execute(trx);
-    } else {
-      await sql`
-        update product
-        set name_vi = ${input.localNameVi.trim()},
-            short_description_vi = ${input.localDescriptionVi.trim() || null},
-            description_vi = ${input.localDescriptionVi.trim() || null},
-            updated_at = now(), version = version + 1
-        where id = ${productId}
-      `.execute(trx);
-      await sql`
-        update product_variant
-        set name_vi = ${input.localVariantNameVi.trim()},
-            price_vnd = ${input.localPriceVnd}, updated_at = now(), version = version + 1
-        where id = ${variantId} and product_id = ${productId}
       `.execute(trx);
     }
 
@@ -550,9 +581,9 @@ export async function configureSupplierCatalogProduct(
       update supplier_catalog_product
       set selection_status = 'SELECTED', is_enabled = ${enabled},
           local_product_id = ${productId}, local_variant_id = ${variantId},
-          supplier_sku_id = ${supplierSkuId}, local_name_vi = ${input.localNameVi.trim()},
-          local_variant_name_vi = ${input.localVariantNameVi.trim()},
-          local_description_vi = ${input.localDescriptionVi.trim()}, updated_at = now(),
+          supplier_sku_id = ${supplierSkuId}, local_name_vi = ${localNameVi.trim()},
+          local_variant_name_vi = ${localVariantNameVi.trim()},
+          local_description_vi = ${localDescriptionVi.trim()}, updated_at = now(),
           version = version + 1
       where id = ${input.catalogId} and supplier_id = ${input.supplierId}
     `.execute(trx);
@@ -571,7 +602,7 @@ export async function configureSupplierCatalogProduct(
         supplierSkuId,
         enabled,
         primary: makePrimary,
-        priceVnd: input.localPriceVnd.toString(),
+        priceVnd: localPriceVnd.toString(),
       },
     });
     return { enabled, productId, variantId, supplierSkuId, primary: makePrimary };
