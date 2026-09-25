@@ -4,8 +4,8 @@ import { envSchema, SECRET_ENV_KEYS, type Env, type SecretEnvKey } from "./env.j
  * Validated configuration loader.
  *
  * - Parses and coerces `process.env` through the Zod schema (fail-closed).
- * - In production, forbids memory/fixture drivers that are only safe for local
- *   development and tests, so missing production values cannot silently ship.
+ * - In production, requires external Vault and provider-specific rollout gates
+ *   so missing production values cannot silently ship.
  * - Never throws with secret values in the message; only key names are surfaced.
  *
  * Phase 2 (T011) hardens diagnostics further; the schema itself lives in env.ts.
@@ -131,13 +131,10 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
       "VAULT_EGRESS_HOST_ALLOWLIST, VAULT_EGRESS_PORT_ALLOWLIST, and VAULT_EGRESS_CIDR_ALLOWLIST must be explicit in production",
     );
   }
-  if (config.SUPPLIER_DRIVER === "fixture") {
-    issues.push('SUPPLIER_DRIVER must not be "fixture" in production');
-  }
   if (config.SUPPLIER_AUTO_FAILOVER_ENABLED) {
     issues.push("SUPPLIER_AUTO_FAILOVER_ENABLED must remain false");
   }
-  for (const rawKey of ["SUPPLIER_API_TOKEN", "QCST_API_KEY", "VOKHONG_API_KEY"] as const) {
+  for (const rawKey of ["QCST_API_KEY", "VOKHONG_API_KEY"] as const) {
     if (source[rawKey]?.trim()) {
       issues.push(`${rawKey} is unsupported; use the provider Vault reference`);
     }
@@ -241,7 +238,6 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
     "SEPAY_WEBHOOK_HMAC_SECRET",
     "SEPAY_API_TOKEN",
     "VAULT_TOKEN",
-    "SUPPLIER_API_TOKEN",
   ] as const satisfies readonly (keyof AppConfig)[];
   for (const key of reusedDeliveryKey) {
     if (config.DELIVERY_SESSION_HMAC_KEY === config[key]) {

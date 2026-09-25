@@ -44,7 +44,7 @@ function product(overrides: Partial<NormalizedSupplierProduct> = {}): Normalized
     warrantyEn: "30 days",
     customerInputType: "NONE",
     requiresCustomerInput: false,
-    customerInputsPerItem: 1,
+    customerInputsPerItem: 0,
     customerPromptVi: "",
     customerPromptEn: "",
     fulfillmentMode: "AUTOMATIC",
@@ -58,6 +58,8 @@ function product(overrides: Partial<NormalizedSupplierProduct> = {}): Normalized
     pricingSource: "BASE",
     currency: "VND",
     upstreamUpdatedAt: "2026-09-24T00:00:00Z",
+    supportStatus: "SUPPORTED",
+    unsupportedReason: null,
     metadataSafe: {},
     ...overrides,
   };
@@ -182,6 +184,80 @@ describe("generic supplier curation persistence", () => {
         "supplier-sync-duplicate",
       ),
     ).rejects.toThrow("SUPPLIER_DUPLICATE_EXTERNAL_PRODUCT");
+  });
+
+  it("preserves an existing mapping when an upstream product becomes unsupported", async () => {
+    await ensure("qcst", "QCST");
+    await syncSupplierCatalog(ctx.db, "qcst", [product()], "supplier-unsupported-before");
+    const discovered = (
+      await listSupplierCatalog(ctx.db, { supplierId: "qcst", limit: 8, offset: 0 })
+    ).items[0]!;
+    const configured = await configureSupplierCatalogProduct(ctx.db, {
+      supplierId: "qcst",
+      catalogId: discovered.id,
+      localNameVi: "Tên local",
+      localVariantNameVi: "Gói local",
+      localPriceVnd: 199_000n,
+      localDescriptionVi: "Mô tả local",
+      enabled: true,
+      expectedVersion: discovered.version,
+      actorId: "123456789",
+      correlationId: "supplier-unsupported-configure",
+    });
+
+    await syncSupplierCatalog(
+      ctx.db,
+      "qcst",
+      [
+        product({
+          maxQuantity: 0,
+          supportStatus: "UNSUPPORTED",
+          unsupportedReason: "MAX_QUANTITY_SEMANTICS_UNKNOWN",
+        }),
+      ],
+      "supplier-unsupported-after",
+    );
+
+    const current = (await getSupplierCatalogProduct(ctx.db, {
+      supplierId: "qcst",
+      catalogId: discovered.id,
+    }))!;
+    expect(current).toMatchObject({
+      domain_status: "UNSUPPORTED",
+      domain_unsupported_reason: "MAX_QUANTITY_SEMANTICS_UNKNOWN",
+      is_missing: false,
+      is_enabled: false,
+      selection_status: "SELECTED",
+      local_variant_id: configured.variantId,
+    });
+    await expect(
+      setSupplierCatalogEnabled(ctx.db, {
+        supplierId: "qcst",
+        catalogId: discovered.id,
+        enabled: true,
+        expectedVersion: current.version,
+        actorId: "123456789",
+        correlationId: "supplier-unsupported-enable",
+      }),
+    ).rejects.toThrow("SUPPLIER_PRODUCT_UNSUPPORTED");
+  });
+
+  it("aborts invalid normalized input before marking existing mappings missing", async () => {
+    await ensure("qcst", "QCST");
+    await syncSupplierCatalog(ctx.db, "qcst", [product()], "supplier-invalid-before");
+
+    await expect(
+      syncSupplierCatalog(
+        ctx.db,
+        "qcst",
+        [product({ externalProductId: "qcst-invalid", customerInputsPerItem: -1 })],
+        "supplier-invalid-after",
+      ),
+    ).rejects.toThrow("SUPPLIER_PRODUCT_INVALID");
+
+    const current = (await listSupplierCatalog(ctx.db, { supplierId: "qcst", limit: 8, offset: 0 }))
+      .items[0]!;
+    expect(current).toMatchObject({ external_product_id: "qcst-product-1", is_missing: false });
   });
 
   it("keeps local selling price stable when supplier cost changes", async () => {

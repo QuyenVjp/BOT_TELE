@@ -4,7 +4,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import { getOrCreateUncategorizedCategory } from "../catalog/repository.js";
 import { newId } from "../../shared/ids/index.js";
-import type { NormalizedSupplierProduct } from "./port.js";
+import { assertNormalizedSupplierProduct, type NormalizedSupplierProduct } from "./port.js";
 
 export type SupplierAvailability = "AVAILABLE" | "LOW" | "OUT" | "UNKNOWN" | "MISSING";
 export type SupplierSelectionStatus = "DISCOVERED" | "SELECTED";
@@ -17,6 +17,8 @@ export interface SupplierCatalogRow {
   upstream_name_vi: string;
   upstream_description_vi: string | null;
   availability: SupplierAvailability;
+  domain_status: "SUPPORTED" | "UNSUPPORTED";
+  domain_unsupported_reason: string | null;
   stock_quantity: number | null;
   supplier_cost_vnd: string;
   currency: string;
@@ -182,6 +184,7 @@ export async function syncSupplierCatalog(
   const identityPairs: Array<readonly [string, string]> = [];
   for (const product of products) {
     if (product.providerKey !== supplierId) throw new Error("SUPPLIER_PROVIDER_MISMATCH");
+    assertNormalizedSupplierProduct(product);
     const externalVariantId = product.externalVariantId ?? "";
     const key = JSON.stringify([product.externalProductId, externalVariantId]);
     if (keys.has(key)) throw new Error("SUPPLIER_DUPLICATE_EXTERNAL_PRODUCT");
@@ -200,9 +203,10 @@ export async function syncSupplierCatalog(
            upstream_description_en, upstream_warranty_vi, upstream_warranty_en,
            customer_input_type, requires_customer_input, customer_inputs_per_item,
            customer_prompt_vi, customer_prompt_en, fulfillment_mode, availability,
-           stock_type, stock_quantity, min_quantity, max_quantity, fixed_quantity,
-           supplier_cost_vnd, currency, pricing_source, upstream_updated_at,
-           selection_status, is_enabled, is_missing, last_synced_at, updated_at)
+           domain_status, domain_unsupported_reason, stock_type, stock_quantity,
+           min_quantity, max_quantity, fixed_quantity, supplier_cost_vnd, currency,
+           pricing_source, upstream_updated_at, selection_status, is_enabled,
+           is_missing, last_synced_at, updated_at)
         values
           (${newId()}, ${supplierId}, ${product.externalProductId}, ${externalVariantId},
            ${product.nameVi}, ${product.nameEn}, ${product.descriptionVi},
@@ -210,11 +214,11 @@ export async function syncSupplierCatalog(
            ${product.customerInputType}, ${product.requiresCustomerInput},
            ${product.customerInputsPerItem}, ${product.customerPromptVi},
            ${product.customerPromptEn}, ${product.fulfillmentMode},
-           ${normalizeAvailability(product.availability)}, ${product.stockType},
-           ${product.stockQuantity}, ${product.minQuantity}, ${product.maxQuantity},
-           ${product.fixedQuantity}, ${product.costVnd}, ${product.currency},
-           ${product.pricingSource}, ${product.upstreamUpdatedAt}, 'DISCOVERED',
-           false, false, now(), now())
+           ${normalizeAvailability(product.availability)}, ${product.supportStatus},
+           ${product.unsupportedReason}, ${product.stockType}, ${product.stockQuantity},
+           ${product.minQuantity}, ${product.maxQuantity}, ${product.fixedQuantity},
+           ${product.costVnd}, ${product.currency}, ${product.pricingSource},
+           ${product.upstreamUpdatedAt}, 'DISCOVERED', false, false, now(), now())
         on conflict (supplier_id, external_product_id, external_variant_id) do update set
           upstream_name_vi = excluded.upstream_name_vi,
           upstream_name_en = excluded.upstream_name_en,
@@ -229,6 +233,8 @@ export async function syncSupplierCatalog(
           customer_prompt_en = excluded.customer_prompt_en,
           fulfillment_mode = excluded.fulfillment_mode,
           availability = excluded.availability,
+          domain_status = excluded.domain_status,
+          domain_unsupported_reason = excluded.domain_unsupported_reason,
           stock_type = excluded.stock_type,
           stock_quantity = excluded.stock_quantity,
           min_quantity = excluded.min_quantity,
@@ -238,6 +244,10 @@ export async function syncSupplierCatalog(
           currency = excluded.currency,
           pricing_source = excluded.pricing_source,
           upstream_updated_at = excluded.upstream_updated_at,
+          is_enabled = case
+            when excluded.domain_status = 'UNSUPPORTED' then false
+            else supplier_catalog_product.is_enabled
+          end,
           is_missing = false,
           last_synced_at = now(),
           updated_at = now(),
@@ -301,7 +311,8 @@ function catalogProjection(): string {
   return `
     cp.id, cp.supplier_id, cp.external_product_id, cp.external_variant_id,
     cp.upstream_name_vi, cp.upstream_description_vi, cp.availability,
-    cp.stock_quantity, cp.supplier_cost_vnd, cp.currency, cp.selection_status,
+    cp.domain_status, cp.domain_unsupported_reason, cp.stock_quantity,
+    cp.supplier_cost_vnd, cp.currency, cp.selection_status,
     cp.is_enabled, cp.is_missing, cp.local_product_id, cp.local_variant_id,
     cp.supplier_sku_id, cp.local_name_vi, cp.local_variant_name_vi,
     cp.local_description_vi, cp.updated_at, cp.version,
@@ -436,6 +447,7 @@ export async function configureSupplierCatalogProduct(
       external_variant_id: string;
       upstream_name_vi: string;
       availability: SupplierAvailability;
+      domain_status: "SUPPORTED" | "UNSUPPORTED";
       is_missing: boolean;
       local_product_id: string | null;
       local_variant_id: string | null;
@@ -443,7 +455,7 @@ export async function configureSupplierCatalogProduct(
       supplier_cost_vnd: string;
     }>`
       select id, version, supplier_id, external_product_id, external_variant_id,
-             upstream_name_vi, availability, is_missing, local_product_id,
+             upstream_name_vi, availability, domain_status, is_missing, local_product_id,
              local_variant_id, supplier_sku_id, supplier_cost_vnd
       from supplier_catalog_product
       where id = ${input.catalogId} and supplier_id = ${input.supplierId}
@@ -452,6 +464,9 @@ export async function configureSupplierCatalogProduct(
     const row = locked.rows[0];
     if (!row) throw new Error("SUPPLIER_CATALOG_NOT_FOUND");
     if (row.version !== input.expectedVersion) throw new Error("SUPPLIER_STALE_VERSION");
+    if (row.domain_status === "UNSUPPORTED") {
+      throw new Error("SUPPLIER_PRODUCT_UNSUPPORTED");
+    }
 
     let productId = row.local_product_id;
     let variantId = row.local_variant_id;
@@ -575,7 +590,9 @@ export async function configureSupplierCatalogProduct(
     }
 
     const canEnable =
-      !row.is_missing && (row.availability === "AVAILABLE" || row.availability === "LOW");
+      row.domain_status === "SUPPORTED" &&
+      !row.is_missing &&
+      (row.availability === "AVAILABLE" || row.availability === "LOW");
     const enabled = input.enabled && canEnable;
     await sql`
       update supplier_catalog_product
@@ -624,10 +641,11 @@ export async function setSupplierCatalogEnabled(
     const locked = await sql<{
       version: number;
       availability: SupplierAvailability;
+      domain_status: "SUPPORTED" | "UNSUPPORTED";
       is_missing: boolean;
       selection_status: SupplierSelectionStatus;
     }>`
-      select version, availability, is_missing, selection_status
+      select version, availability, domain_status, is_missing, selection_status
       from supplier_catalog_product
       where id = ${input.catalogId} and supplier_id = ${input.supplierId}
       for update
@@ -637,11 +655,16 @@ export async function setSupplierCatalogEnabled(
     if (row.version !== input.expectedVersion) throw new Error("SUPPLIER_STALE_VERSION");
     if (
       input.enabled &&
-      (row.selection_status !== "SELECTED" ||
+      (row.domain_status === "UNSUPPORTED" ||
+        row.selection_status !== "SELECTED" ||
         row.is_missing ||
         !["AVAILABLE", "LOW"].includes(row.availability))
     ) {
-      throw new Error("SUPPLIER_PRODUCT_UNAVAILABLE");
+      throw new Error(
+        row.domain_status === "UNSUPPORTED"
+          ? "SUPPLIER_PRODUCT_UNSUPPORTED"
+          : "SUPPLIER_PRODUCT_UNAVAILABLE",
+      );
     }
     await sql`
       update supplier_catalog_product
@@ -676,13 +699,14 @@ export async function setSupplierCatalogPrimary(
     const locked = await sql<{
       version: number;
       availability: SupplierAvailability;
+      domain_status: "SUPPORTED" | "UNSUPPORTED";
       is_missing: boolean;
       selection_status: SupplierSelectionStatus;
       is_enabled: boolean;
       local_variant_id: string | null;
       supplier_sku_id: string | null;
     }>`
-      select version, availability, is_missing, selection_status, is_enabled,
+      select version, availability, domain_status, is_missing, selection_status, is_enabled,
              local_variant_id, supplier_sku_id
       from supplier_catalog_product
       where id = ${input.catalogId} and supplier_id = ${input.supplierId}
@@ -692,6 +716,7 @@ export async function setSupplierCatalogPrimary(
     if (!row) throw new Error("SUPPLIER_CATALOG_NOT_FOUND");
     if (row.version !== input.expectedVersion) throw new Error("SUPPLIER_STALE_VERSION");
     if (
+      row.domain_status === "UNSUPPORTED" ||
       !row.local_variant_id ||
       !row.supplier_sku_id ||
       !row.is_enabled ||

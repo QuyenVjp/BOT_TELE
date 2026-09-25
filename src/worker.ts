@@ -1781,11 +1781,9 @@ async function bootstrap(): Promise<void> {
     throw new Error("QCST purchase is enabled but its provider is unavailable");
   }
   const supplier =
-    config.QCST_PURCHASE_ENABLED || supplierRegistry
+    config.NODE_ENV === "production" || config.QCST_PURCHASE_ENABLED || supplierRegistry
       ? null
-      : config.SUPPLIER_DRIVER === "fixture"
-        ? createSandboxSupplierAdapter({ mode: "fulfill" })
-        : null;
+      : createSandboxSupplierAdapter({ mode: "fulfill" });
   const sePayRecoveryPort =
     config.SEPAY_API_TOKEN.length > 0
       ? createSePayApiPort({

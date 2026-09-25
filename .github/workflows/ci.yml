@@ -47,7 +47,6 @@ jobs:
       VIETQR_BANK_NAME: MB Bank
       ADMIN_TELEGRAM_USER_ID: "0"
       VAULT_DRIVER: memory
-      SUPPLIER_DRIVER: fixture
 
     steps:
       # Every `uses:` below is pinned to a full commit SHA (supply-chain policy:

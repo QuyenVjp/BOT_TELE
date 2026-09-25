@@ -262,9 +262,13 @@ export async function getProductPublicationReadiness(
                     not exists (select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id)
                     or exists (
                       select 1 from supplier_catalog_product cp
-                      where cp.supplier_id = s.id and cp.supplier_sku_id = ss.id
-                        and cp.selection_status = 'SELECTED' and cp.is_enabled
-                        and not cp.is_missing and cp.availability in ('AVAILABLE', 'LOW')
+                      where cp.supplier_id = s.id
+                        and cp.supplier_sku_id = ss.id
+                        and cp.selection_status = 'SELECTED'
+                        and cp.domain_status = 'SUPPORTED'
+                        and cp.is_enabled
+                        and not cp.is_missing
+                        and cp.availability in ('AVAILABLE', 'LOW')
                     )
                   ))
              when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
@@ -281,8 +285,12 @@ export async function getProductPublicationReadiness(
                     not exists (select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id)
                     or exists (
                       select 1 from supplier_catalog_product cp
-                      where cp.supplier_id = s.id and cp.supplier_sku_id = ss.id
-                        and cp.selection_status = 'SELECTED' and cp.is_enabled and not cp.is_missing
+                      where cp.supplier_id = s.id
+                        and cp.supplier_sku_id = ss.id
+                        and cp.selection_status = 'SELECTED'
+                        and cp.domain_status = 'SUPPORTED'
+                        and cp.is_enabled
+                        and not cp.is_missing
                     )
                   )))) as route_ready,
            v.resale_evidence_id as evidence_id,

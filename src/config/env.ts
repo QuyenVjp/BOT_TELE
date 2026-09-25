@@ -124,10 +124,6 @@ export const envSchema = z.object({
   VAULT_EGRESS_PORT_ALLOWLIST: csvPortList,
   VAULT_EGRESS_CIDR_ALLOWLIST: csvList,
 
-  SUPPLIER_DRIVER: z.enum(["fixture", "http"]).default("fixture"),
-  SUPPLIER_API_BASE_URL: z.string().optional().default(""),
-  SUPPLIER_API_TOKEN: z.string().default(""),
-  SUPPLIER_TIMEOUT_MS: z.coerce.number().int().positive().default(8000),
   SUPPLIER_PURCHASE_ENABLED: booleanEnv,
   SUPPLIER_AUTO_FAILOVER_ENABLED: booleanEnv,
 
@@ -227,7 +223,6 @@ export const SECRET_ENV_KEYS = [
   "SEPAY_WEBHOOK_HMAC_SECRET",
   "SEPAY_API_TOKEN",
   "VAULT_TOKEN",
-  "SUPPLIER_API_TOKEN",
   "QCST_API_KEY_VAULT_REF",
   "VOKHONG_API_KEY_VAULT_REF",
   "DATABASE_URL",

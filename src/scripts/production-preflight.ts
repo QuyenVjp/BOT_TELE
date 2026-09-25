@@ -1,5 +1,4 @@
 import { pathToFileURL } from "node:url";
-import { lookup } from "node:dns/promises";
 import { createConnection, type Socket } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import pg from "pg";
@@ -55,9 +54,6 @@ export interface ProductionPreflightResult {
     vaultDriver: string | null;
     vaultEndpointHost: string | null;
     vaultHealth: "REACHABLE" | "UNREACHABLE" | "NOT_CHECKED";
-    supplierBaseHost: string | null;
-    supplierToken: "CONFIGURED" | "MISSING";
-    supplierDns: "RESOLVED" | "UNRESOLVED" | "NOT_CHECKED";
     storeStatus: string | null;
     migrationHead: { filename: string; count: number } | null;
   };
@@ -87,9 +83,6 @@ function emptyFingerprint(): ProductionPreflightResult["fingerprint"] {
     vaultDriver: null,
     vaultEndpointHost: null,
     vaultHealth: "NOT_CHECKED",
-    supplierBaseHost: null,
-    supplierToken: "MISSING",
-    supplierDns: "NOT_CHECKED",
     storeStatus: null,
     migrationHead: null,
   };
@@ -115,8 +108,6 @@ function fillSafeFingerprint(
   fingerprint.vietQrBankAlias = env.VIETQR_BANK_ALIAS?.trim() || null;
   fingerprint.vaultDriver = env.VAULT_DRIVER?.trim() || null;
   fingerprint.vaultEndpointHost = parseEndpointHost(env.VAULT_ENDPOINT ?? "");
-  fingerprint.supplierBaseHost = parseEndpointHost(env.SUPPLIER_API_BASE_URL ?? "");
-  fingerprint.supplierToken = secretStatus(env.SUPPLIER_API_TOKEN);
   fingerprint.redis = parseRedisUrl(env.REDIS_URL ?? "");
   fingerprint.redisStatus = fingerprint.redis ? "CONFIGURED" : "MISSING";
   const merchant = env.SEPAY_MERCHANT_ACCOUNT_ID?.trim() ?? "";
@@ -195,16 +186,6 @@ async function probeHttp(url: string, headers?: Record<string, string>): Promise
     if (headers) init.headers = headers;
     const response = await fetch(url, init);
     return response.ok;
-  } catch {
-    return false;
-  }
-}
-
-async function probeSupplierDns(host: string | null): Promise<boolean> {
-  if (!host) return false;
-  try {
-    await lookup(host);
-    return true;
   } catch {
     return false;
   }
@@ -434,18 +415,13 @@ export async function runProductionPreflight(
       await pool.end();
     }
   }
-  if (options.probeLiveDependencies && supplierRequired) {
-    if (
-      (env.SUPPLIER_DRIVER ?? "").trim() === "http" &&
-      (!fingerprint.supplierBaseHost || fingerprint.supplierToken === "MISSING")
-    ) {
-      issues.push("SUPPLIER_DRIVER=http requires base URL and token");
-    }
-    if ((env.SUPPLIER_DRIVER ?? "").trim() === "http") {
-      const supplierOk = await probeSupplierDns(fingerprint.supplierBaseHost);
-      fingerprint.supplierDns = supplierOk ? "RESOLVED" : "UNRESOLVED";
-      if (!supplierOk) issues.push("supplier API host DNS probe failed");
-    }
+  if (
+    options.probeLiveDependencies &&
+    supplierRequired &&
+    !config?.QCST_PROVIDER_ENABLED &&
+    !config?.VOKHONG_PROVIDER_ENABLED
+  ) {
+    issues.push("supplier variants require an enabled supplier provider");
   }
 
   return { ok: issues.length === 0, issues, fingerprint };

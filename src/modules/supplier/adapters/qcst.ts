@@ -4,6 +4,7 @@ import { createPinnedFetch } from "../../../infrastructure/net/pinned-fetch.js";
 import type { Vault } from "../../../infrastructure/vault/port.js";
 import {
   SupplierPortError,
+  assertNormalizedSupplierProduct,
   type AvailabilityResult,
   type CreateOrderInput,
   type CreateOrderResult,
@@ -22,38 +23,82 @@ const MAX_RESPONSE_BYTES = 128 * 1024;
 const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_TEXT = 8_000;
 
-const Text = z.string().min(1).max(MAX_TEXT);
+const BoundedText = z.string().max(MAX_TEXT);
 const NullableText = z.string().max(MAX_TEXT).nullable().optional();
+const RawInteger = z.number().int().safe();
+const RawTimestamp = z.string().max(512);
 
-export const QcstProductSchema = z
+export const RawQcstProductSchema = z
   .object({
     id: z.string().min(1).max(128),
-    name: Text,
-    name_en: Text,
-    description: z.string().max(MAX_TEXT),
-    description_en: z.string().max(MAX_TEXT),
-    warranty: z.string().max(MAX_TEXT),
-    warranty_en: z.string().max(MAX_TEXT),
-    customer_input_type: z.string().min(1).max(64),
+    name: BoundedText,
+    name_en: BoundedText,
+    description: BoundedText,
+    description_en: BoundedText,
+    warranty: BoundedText,
+    warranty_en: BoundedText,
+    customer_input_type: BoundedText.max(64),
     requires_customer_input: z.boolean(),
-    customer_inputs_per_item: z.number().int().min(1).max(100),
-    customer_prompt: z.string().max(MAX_TEXT),
-    customer_prompt_en: z.string().max(MAX_TEXT),
-    fulfillment_mode: z.string().min(1).max(64),
-    availability: z.string().min(1).max(64),
-    stock_type: z.string().min(1).max(64),
-    stock_quantity: z.number().int().min(0).nullable().optional(),
-    min_quantity: z.number().int().min(1).max(50).default(1),
-    max_quantity: z.number().int().min(1).max(50).nullable().optional(),
-    fixed_quantity: z.number().int().min(1).max(50).nullable().optional(),
-    price: z.number().int().min(0),
-    pricing_source: z.string().min(1).max(64).default("BASE"),
-    currency: z.string().min(1).max(16),
-    updated_at: z.string().datetime({ offset: true }),
+    customer_inputs_per_item: RawInteger,
+    customer_prompt: BoundedText,
+    customer_prompt_en: BoundedText,
+    fulfillment_mode: BoundedText.max(64),
+    availability: BoundedText.max(64),
+    stock_type: BoundedText.max(64),
+    stock_quantity: RawInteger.nullable().optional(),
+    min_quantity: RawInteger.optional().default(1),
+    max_quantity: RawInteger.nullable().optional(),
+    fixed_quantity: RawInteger.nullable().optional(),
+    price: RawInteger,
+    pricing_source: BoundedText.max(64).optional().default("BASE"),
+    currency: BoundedText.max(16),
+    updated_at: RawTimestamp,
   })
   .strip();
 
-export type QcstProduct = z.infer<typeof QcstProductSchema>;
+export type RawQcstProduct = z.infer<typeof RawQcstProductSchema>;
+
+function normalizeUpstreamTimestamp(value: string): string | null {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? new Date(parsed).toISOString() : null;
+}
+
+function productUnsupportedReason(
+  product: RawQcstProduct,
+): NormalizedSupplierProduct["unsupportedReason"] {
+  if (product.requires_customer_input && product.customer_inputs_per_item <= 0) {
+    return "CUSTOMER_INPUT_COUNT_INCONSISTENT";
+  }
+  if (product.max_quantity === 0) return "MAX_QUANTITY_SEMANTICS_UNKNOWN";
+  if (
+    product.max_quantity !== null &&
+    product.max_quantity !== undefined &&
+    product.max_quantity < product.min_quantity
+  ) {
+    return "QUANTITY_BOUNDS_INCONSISTENT";
+  }
+  if (product.fixed_quantity === 0) return "FIXED_QUANTITY_UNSUPPORTED";
+  return null;
+}
+
+function assertRawProductDomainSafety(product: RawQcstProduct): void {
+  if (
+    product.price < 0 ||
+    product.customer_inputs_per_item < 0 ||
+    product.min_quantity < 1 ||
+    (product.stock_quantity !== null &&
+      product.stock_quantity !== undefined &&
+      product.stock_quantity < 0) ||
+    (product.max_quantity !== null &&
+      product.max_quantity !== undefined &&
+      product.max_quantity < 0) ||
+    (product.fixed_quantity !== null &&
+      product.fixed_quantity !== undefined &&
+      product.fixed_quantity < 0)
+  ) {
+    throw new SupplierPortError("PRODUCT_INVALID", "QCST_PRODUCT_INVALID");
+  }
+}
 
 function normalizeAvailability(value: string): AvailabilityResult["status"] {
   const normalized = value.trim().toUpperCase();
@@ -65,8 +110,13 @@ function normalizeAvailability(value: string): AvailabilityResult["status"] {
   return "UNKNOWN";
 }
 
-export function normalizeQcstProduct(product: QcstProduct): NormalizedSupplierProduct {
-  return {
+export function normalizeQcstProduct(product: RawQcstProduct): NormalizedSupplierProduct {
+  assertRawProductDomainSafety(product);
+  const maxQuantity = product.max_quantity ?? null;
+  const fixedQuantity = product.fixed_quantity ?? null;
+  const upstreamUpdatedAt = normalizeUpstreamTimestamp(product.updated_at);
+  const unsupportedReason = productUnsupportedReason(product);
+  const normalized: NormalizedSupplierProduct = {
     providerKey: "qcst",
     externalProductId: product.id,
     externalVariantId: null,
@@ -86,14 +136,21 @@ export function normalizeQcstProduct(product: QcstProduct): NormalizedSupplierPr
     stockType: product.stock_type,
     stockQuantity: product.stock_quantity ?? null,
     minQuantity: product.min_quantity,
-    maxQuantity: product.max_quantity ?? null,
-    fixedQuantity: product.fixed_quantity ?? null,
+    maxQuantity,
+    fixedQuantity,
     costVnd: product.price,
     currency: product.currency,
     pricingSource: product.pricing_source,
-    upstreamUpdatedAt: product.updated_at,
-    metadataSafe: { pricingSource: product.pricing_source },
+    upstreamUpdatedAt,
+    supportStatus: unsupportedReason ? "UNSUPPORTED" : "SUPPORTED",
+    unsupportedReason,
+    metadataSafe: {
+      pricingSource: product.pricing_source,
+      upstreamUpdatedAtParseable: upstreamUpdatedAt !== null,
+    },
   };
+  assertNormalizedSupplierProduct(normalized);
+  return normalized;
 }
 
 const QcstBalanceSchema = z
@@ -130,10 +187,10 @@ export const QcstOrderSchema = z
 export type QcstOrder = z.infer<typeof QcstOrderSchema>;
 
 const ProductListResponseSchema = z
-  .object({ success: z.literal(true), data: z.array(QcstProductSchema).max(10_000) })
+  .object({ success: z.literal(true), data: z.array(RawQcstProductSchema).max(10_000) })
   .strip();
 const ProductResponseSchema = z
-  .object({ success: z.literal(true), data: QcstProductSchema })
+  .object({ success: z.literal(true), data: RawQcstProductSchema })
   .strip();
 const BalanceResponseSchema = z
   .object({ success: z.literal(true), data: QcstBalanceSchema })

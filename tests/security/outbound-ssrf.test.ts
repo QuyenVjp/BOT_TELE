@@ -1,4 +1,3 @@
-import { createServer } from "node:http";
 import { describe, expect, it, vi } from "vitest";
 import {
   assertOutboundTargetAllowed,
@@ -8,9 +7,6 @@ import {
   type AddressClass,
   type OutboundPolicyCode,
 } from "../../src/infrastructure/net/outbound-policy.js";
-import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
-import { createHttpSupplierPort } from "../../src/modules/supplier/adapters/http.js";
-import { SupplierPortError } from "../../src/modules/supplier/port.js";
 
 /**
  * Adversarial SSRF policy tests. Every DNS lookup is injected — no real
@@ -340,85 +336,5 @@ describe("loopback test-mode escape hatch", () => {
         assertOutboundTargetAllowed("http://127.0.0.1:9090/", { allowInsecureLoopback: true }),
       ),
     ).toBe("PORT_NOT_ALLOWED");
-  });
-});
-
-describe("http supplier adapter is wired to the policy", () => {
-  /** Fixture material only: never a real credential, and short enough not to be secret-shaped. */
-  const SUPPLIER_FIXTURE_TOKEN = "fixture-token";
-  function port(baseUrl: string, overrides: Record<string, unknown> = {}) {
-    return createHttpSupplierPort({
-      baseUrl,
-      token: SUPPLIER_FIXTURE_TOKEN,
-      timeoutMs: 500,
-      maxAttempts: 2,
-      vault: createInMemoryVault(),
-      ...overrides,
-    });
-  }
-
-  it("keeps rejecting embedded credentials and non-https base URLs at construction", () => {
-    expect(() => port("https://user:pass@supplier.example")).toThrow(SupplierPortError);
-    expect(() => port("http://supplier.example")).toThrow(SupplierPortError);
-  });
-
-  it("blocks a base URL pointing at loopback when the test escape hatch is off", async () => {
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
-    const supplier = port("https://127.0.0.1/", { testTransport: { fetch: fetchImpl } });
-    const error = await supplier.getAvailability({ supplierSku: "SKU-1" }).catch((e) => e);
-    expect(error).toBeInstanceOf(SupplierPortError);
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("blocks a supplier host that resolves to cloud metadata", async () => {
-    const fetchImpl = vi.fn(async () => new Response("{}", { status: 200 }));
-    const supplier = port("https://supplier.example/", {
-      testTransport: { fetch: fetchImpl, resolve: resolveTo(METADATA_IP) },
-    });
-    await expect(supplier.getAvailability({ supplierSku: "SKU-1" })).rejects.toBeInstanceOf(
-      SupplierPortError,
-    );
-    expect(fetchImpl).not.toHaveBeenCalled();
-  });
-
-  it("re-resolves the supplier host before every attempt (rebinding)", async () => {
-    let resolution = 0;
-    const fetchImpl = vi.fn(async () => {
-      throw new Error("connection reset");
-    });
-    const supplier = port("https://supplier.example/", {
-      testTransport: {
-        fetch: fetchImpl,
-        resolve: () => {
-          resolution += 1;
-          return Promise.resolve(resolution === 1 ? [PUBLIC_IP] : ["127.0.0.1"]);
-        },
-      },
-    });
-    await expect(supplier.getAvailability({ supplierSku: "SKU-1" })).rejects.toBeInstanceOf(
-      SupplierPortError,
-    );
-    expect(resolution).toBe(2);
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
-  });
-
-  it("still reaches loopback in explicit test mode", async () => {
-    const server = createServer((_request, response) => {
-      response.writeHead(200, { "content-type": "application/json" });
-      response.end(JSON.stringify({ status: "AVAILABLE", observedAt: "2026-07-18T00:00:00.000Z" }));
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const address = server.address();
-    if (!address || typeof address === "string") throw new Error("loopback server failed to bind");
-    try {
-      const supplier = port(`http://127.0.0.1:${address.port}`, {
-        testTransport: { allowInsecureLoopback: true },
-      });
-      await expect(supplier.getAvailability({ supplierSku: "SKU-1" })).resolves.toMatchObject({
-        status: "AVAILABLE",
-      });
-    } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
-    }
   });
 });

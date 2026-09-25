@@ -967,6 +967,8 @@ describe("admin operational presenters", () => {
       upstream_name_vi: "VPN upstream",
       upstream_description_vi: "upstream description",
       availability: "AVAILABLE",
+      domain_status: "SUPPORTED",
+      domain_unsupported_reason: null,
       stock_quantity: 4,
       supplier_cost_vnd: "100000",
       currency: "VND",
@@ -1049,5 +1051,47 @@ describe("admin operational presenters", () => {
         enabled: false,
       }).text,
     ).toContain("Đã lưu mapping ở trạng thái tắt");
+  });
+  it("shows unsupported reason without exposing owner mutation actions", () => {
+    const row: SupplierCatalogRow = {
+      id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      supplier_id: "qcst",
+      external_product_id: "qcst-product-unsupported",
+      external_variant_id: "",
+      upstream_name_vi: "Unsupported upstream",
+      upstream_description_vi: null,
+      availability: "AVAILABLE",
+      domain_status: "UNSUPPORTED",
+      domain_unsupported_reason: "MAX_QUANTITY_SEMANTICS_UNKNOWN",
+      stock_quantity: null,
+      supplier_cost_vnd: "100000",
+      currency: "VND",
+      selection_status: "DISCOVERED",
+      is_enabled: false,
+      is_missing: false,
+      local_product_id: null,
+      local_variant_id: null,
+      supplier_sku_id: null,
+      local_name_vi: null,
+      local_variant_name_vi: null,
+      local_description_vi: null,
+      is_primary: false,
+      version: 1,
+      updated_at: "2026-09-24T00:00:00Z",
+    };
+
+    const detail = presentAdminSupplierCatalogDetail({
+      providerKey: "qcst",
+      providerName: "QCST",
+      row,
+      ownerSelectionEnabled: true,
+    });
+    expect(detail.text).toContain("UNSUPPORTED · MAX_QUANTITY_SEMANTICS_UNKNOWN");
+    expect(detail.text).toContain("Lý do không hỗ trợ");
+    expect(detail.buttons.flat()).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ callbackData: expect.stringContaining(":configure:") }),
+      ]),
+    );
   });
 });

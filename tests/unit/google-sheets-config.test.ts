@@ -29,7 +29,6 @@ const productionSheetsEnv = {
   VAULT_EGRESS_HOST_ALLOWLIST: "127.0.0.1",
   VAULT_EGRESS_PORT_ALLOWLIST: "443",
   VAULT_EGRESS_CIDR_ALLOWLIST: "127.0.0.1/32",
-  SUPPLIER_DRIVER: "http",
   GOOGLE_SHEETS_ENABLED: "true",
   GOOGLE_SHEETS_SPREADSHEET_ID: "spreadsheet-id",
   GOOGLE_SHEETS_CREDENTIAL_VAULT_REF: "vault:google-sheets-service-account",

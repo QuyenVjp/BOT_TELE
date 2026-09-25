@@ -25,7 +25,6 @@ const SECRET_VALUES = {
   SEPAY_WEBHOOK_HMAC_SECRET: "placeholder-value-sepay-webhook-hmac-000",
   SEPAY_API_TOKEN: "placeholder-value-sepay-api-token-000000",
   VAULT_TOKEN: "placeholder-value-vault-token-000000000",
-  SUPPLIER_API_TOKEN: "placeholder-value-supplier-api-token-00",
   DATABASE_URL: "postgresql://shop:shop-local-only@localhost:5432/shop",
   TELEGRAM_BOT_TOKEN: "1234567890:placeholder-value-bot-token-000",
   TELEGRAM_WEBHOOK_SECRET: "placeholder-value-webhook-secret-000",
@@ -56,9 +55,6 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Node
     VAULT_EGRESS_HOST_ALLOWLIST: "vault.example",
     VAULT_EGRESS_PORT_ALLOWLIST: "443",
     VAULT_EGRESS_CIDR_ALLOWLIST: "203.0.113.0/24",
-    SUPPLIER_DRIVER: "http",
-    SUPPLIER_API_BASE_URL: "https://supplier.example",
-    SUPPLIER_API_TOKEN: undefined,
     ADMIN_STEP_UP_MODE: "required",
     ...overrides,
   };
@@ -119,8 +115,6 @@ describe("production step-up policy is explicit", () => {
         VAULT_DRIVER: "memory",
         VAULT_ENDPOINT: undefined,
         VAULT_TOKEN: "",
-        SUPPLIER_DRIVER: "fixture",
-        SUPPLIER_API_BASE_URL: undefined,
         ADMIN_STEP_UP_MODE: undefined,
       }),
     });

@@ -55,11 +55,14 @@ create table if not exists supplier_catalog_product (
   upstream_warranty_en       text,
   customer_input_type        text,
   requires_customer_input    boolean not null default false,
-  customer_inputs_per_item   integer not null default 1,
+  customer_inputs_per_item   integer not null default 0,
   customer_prompt_vi         text,
   customer_prompt_en         text,
   fulfillment_mode           text,
   availability               text not null check (availability in ('AVAILABLE','LOW','OUT','UNKNOWN','MISSING')),
+  domain_status              text not null default 'SUPPORTED'
+                               check (domain_status in ('SUPPORTED','UNSUPPORTED')),
+  domain_unsupported_reason  text,
   stock_type                 text,
   stock_quantity             integer,
   min_quantity               integer not null default 1,
@@ -68,7 +71,7 @@ create table if not exists supplier_catalog_product (
   supplier_cost_vnd          bigint not null check (supplier_cost_vnd >= 0),
   currency                   text not null,
   pricing_source             text,
-  upstream_updated_at        timestamptz not null,
+  upstream_updated_at        timestamptz,
   selection_status           text not null default 'DISCOVERED' check (selection_status in ('DISCOVERED','SELECTED')),
   is_enabled                 boolean not null default false,
   is_missing                 boolean not null default false,
@@ -85,9 +88,33 @@ create table if not exists supplier_catalog_product (
   unique (supplier_id, external_product_id, external_variant_id),
   check (stock_quantity is null or stock_quantity >= 0),
   check (min_quantity >= 1),
-  check (max_quantity is null or max_quantity >= min_quantity),
-  check (fixed_quantity is null or fixed_quantity >= 1),
-  check (customer_inputs_per_item >= 1)
+  check (max_quantity is null or max_quantity >= 0),
+  check (fixed_quantity is null or fixed_quantity >= 0),
+  check (customer_inputs_per_item >= 0),
+  check (
+    not requires_customer_input
+    or customer_inputs_per_item > 0
+    or domain_status = 'UNSUPPORTED'
+  ),
+  check (
+    domain_status = 'UNSUPPORTED'
+    or max_quantity is null
+    or max_quantity >= min_quantity
+  ),
+  check (
+    domain_status = 'UNSUPPORTED'
+    or fixed_quantity is null
+    or fixed_quantity >= 1
+  ),
+  check (
+    (domain_status = 'SUPPORTED' and domain_unsupported_reason is null)
+    or (domain_status = 'UNSUPPORTED' and domain_unsupported_reason is not null)
+  ),
+  check (
+    domain_unsupported_reason is null
+    or char_length(domain_unsupported_reason) between 1 and 128
+  ),
+  check (domain_status = 'SUPPORTED' or not is_enabled)
 );
 
 create index if not exists supplier_catalog_product_page_idx

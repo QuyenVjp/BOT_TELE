@@ -105,6 +105,7 @@ const SUPPLIER_READY_SQL = sql`
           where cp.supplier_id = s.id
             and cp.supplier_sku_id = ss.id
             and cp.selection_status = 'SELECTED'
+            and cp.domain_status = 'SUPPORTED'
             and cp.is_enabled
             and not cp.is_missing
             and cp.availability in ('AVAILABLE', 'LOW')
@@ -132,9 +133,10 @@ const SUPPLIER_ROUTE_SQL = sql`
           where cp.supplier_id = s.id
             and cp.supplier_sku_id = ss.id
             and cp.selection_status = 'SELECTED'
+            and cp.domain_status = 'SUPPORTED'
             and cp.is_enabled
             and not cp.is_missing
-        )
+      )
       )
   )
 `;

@@ -191,6 +191,7 @@ export async function searchCatalog(
                 select 1 from supplier_catalog_product cp
                 where cp.supplier_id = s.id and cp.supplier_sku_id = ss.id
                   and cp.selection_status = 'SELECTED' and cp.is_enabled
+                  and cp.domain_status = 'SUPPORTED'
                   and not cp.is_missing and cp.availability in ('AVAILABLE', 'LOW')
               )
             )
@@ -224,6 +225,7 @@ export async function searchCatalog(
                 select 1 from supplier_catalog_product cp
                 where cp.supplier_id = s.id and cp.supplier_sku_id = ss.id
                   and cp.selection_status = 'SELECTED' and cp.is_enabled and not cp.is_missing
+                  and cp.domain_status = 'SUPPORTED'
               )
             )
         ))

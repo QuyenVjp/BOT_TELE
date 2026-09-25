@@ -14,7 +14,7 @@ import {
  *  - loader fails closed on missing/invalid required values (SR-002 spirit: no
  *    silent defaults for security-relevant inputs);
  *  - no thrown diagnostic or redacted view ever contains a secret VALUE;
- *  - production refuses local-only stand-ins (VAULT/ SUPPLIER drivers, http base url).
+ *  - production rejects local-only vault configuration and raw provider credentials;
  */
 
 const SECRET_VALUES: Record<string, string> = {
@@ -26,7 +26,6 @@ const SECRET_VALUES: Record<string, string> = {
   SEPAY_WEBHOOK_HMAC_SECRET: "sepay-hmac-fixture-key-material-123456",
   SEPAY_API_TOKEN: "sepay-api-token-secret",
   VAULT_TOKEN: "vault-token-secret",
-  SUPPLIER_API_TOKEN: "supplier-token-secret",
   DATABASE_URL: "postgres://user:dbpassword-secret@localhost:5432/shop",
   REDIS_URL: "redis://:redispassword-secret@localhost:6379",
 };
@@ -77,8 +76,6 @@ describe("config loader fail-closed", () => {
       VAULT_DRIVER: "external",
       VAULT_ENDPOINT: "https://vault.example",
       VAULT_TOKEN: SECRET_VALUES.VAULT_TOKEN!,
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example",
       SEPAY_API_TOKEN: SECRET_VALUES.SEPAY_API_TOKEN!,
       DELIVERY_SESSION_HMAC_KEY: SECRET_VALUES.BUY_NOW_CALLBACK_HMAC_KEY!,
     });
@@ -91,14 +88,12 @@ describe("config loader fail-closed", () => {
     ["DELIVERY_SESSION_HMAC_KEY", "SEPAY_WEBHOOK_HMAC_SECRET"],
     ["DELIVERY_SESSION_HMAC_KEY", "SEPAY_API_TOKEN"],
     ["DELIVERY_SESSION_HMAC_KEY", "VAULT_TOKEN"],
-    ["DELIVERY_SESSION_HMAC_KEY", "SUPPLIER_API_TOKEN"],
     ["DELIVERY_SESSION_PREVIOUS_HMAC_KEY", "TELEGRAM_BOT_TOKEN"],
     ["DELIVERY_SESSION_PREVIOUS_HMAC_KEY", "TELEGRAM_WEBHOOK_SECRET"],
     ["DELIVERY_SESSION_PREVIOUS_HMAC_KEY", "BUY_NOW_CALLBACK_HMAC_KEY"],
     ["DELIVERY_SESSION_PREVIOUS_HMAC_KEY", "SEPAY_WEBHOOK_HMAC_SECRET"],
     ["DELIVERY_SESSION_PREVIOUS_HMAC_KEY", "SEPAY_API_TOKEN"],
     ["DELIVERY_SESSION_PREVIOUS_HMAC_KEY", "VAULT_TOKEN"],
-    ["DELIVERY_SESSION_PREVIOUS_HMAC_KEY", "SUPPLIER_API_TOKEN"],
   ] as const)("rejects %s reuse with %s without leaking the value", (deliveryKey, providerKey) => {
     const shared = "shared-cross-domain-key-material-123456";
     const env = validEnv({
@@ -107,9 +102,6 @@ describe("config loader fail-closed", () => {
       VAULT_DRIVER: "external",
       VAULT_ENDPOINT: "https://vault.example",
       VAULT_TOKEN: SECRET_VALUES.VAULT_TOKEN!,
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example",
-      SUPPLIER_API_TOKEN: SECRET_VALUES.SUPPLIER_API_TOKEN!,
       SEPAY_API_TOKEN: SECRET_VALUES.SEPAY_API_TOKEN!,
       DELIVERY_SESSION_PREVIOUS_HMAC_KEY: SECRET_VALUES.DELIVERY_SESSION_PREVIOUS_HMAC_KEY!,
       DELIVERY_SESSION_PREVIOUS_KEY_VERSION: "3",
@@ -153,8 +145,6 @@ describe("config loader fail-closed", () => {
       VAULT_DRIVER: "external",
       VAULT_ENDPOINT: "https://vault.example",
       VAULT_TOKEN: SECRET_VALUES.VAULT_TOKEN!,
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example",
       SEPAY_API_TOKEN: SECRET_VALUES.SEPAY_API_TOKEN!,
       DELIVERY_SESSION_PREVIOUS_HMAC_KEY: SECRET_VALUES.DELIVERY_SESSION_PREVIOUS_HMAC_KEY!,
       DELIVERY_SESSION_PREVIOUS_KEY_VERSION: "3",
@@ -206,8 +196,6 @@ describe("production hardening fails closed", () => {
       VAULT_DRIVER: "external",
       VAULT_ENDPOINT: "https://vault.example.com",
       VAULT_TOKEN: "vault-token-secret",
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example.com",
       SEPAY_API_TOKEN: "sepay-api-token-secret",
       [key]: value,
     });
@@ -215,12 +203,11 @@ describe("production hardening fails closed", () => {
     expect(() => loadConfig(env)).toThrow(new RegExp(key));
   });
 
-  it("rejects memory vault and fixture supplier drivers in production", () => {
+  it("rejects the memory vault in production", () => {
     const env = validEnv({
       NODE_ENV: "production",
       APP_BASE_URL: "https://shop.example.com",
       VAULT_DRIVER: "memory",
-      SUPPLIER_DRIVER: "fixture",
     });
     let thrown: ConfigError | undefined;
     try {
@@ -230,7 +217,6 @@ describe("production hardening fails closed", () => {
     }
     expect(thrown).toBeInstanceOf(ConfigError);
     expect(thrown?.issues.some((i) => i.includes("VAULT_DRIVER"))).toBe(true);
-    expect(thrown?.issues.some((i) => i.includes("SUPPLIER_DRIVER"))).toBe(true);
   });
 
   it("rejects an external production vault without an explicit egress policy", () => {
@@ -243,8 +229,6 @@ describe("production hardening fails closed", () => {
       VAULT_EGRESS_HOST_ALLOWLIST: "",
       VAULT_EGRESS_PORT_ALLOWLIST: "",
       VAULT_EGRESS_CIDR_ALLOWLIST: "",
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example.com",
       SEPAY_API_TOKEN: SECRET_VALUES.SEPAY_API_TOKEN!,
     });
 
@@ -258,8 +242,6 @@ describe("production hardening fails closed", () => {
       VAULT_DRIVER: "external",
       VAULT_ENDPOINT: "https://vault.example.com",
       VAULT_TOKEN: "vault-token-secret",
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example.com",
     });
     expect(() => loadConfig(env)).toThrow(/APP_BASE_URL must be https/);
   });
@@ -271,8 +253,6 @@ describe("production hardening fails closed", () => {
       VAULT_DRIVER: "external",
       VAULT_ENDPOINT: "https://vault.example.com",
       VAULT_TOKEN: "vault-token-secret",
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example.com",
       BUY_NOW_CALLBACK_HMAC_KEY: "local-dev-buy-now-callback-key-change-me-32bytes",
     });
 
@@ -289,8 +269,6 @@ describe("production hardening fails closed", () => {
         VAULT_DRIVER: "external",
         VAULT_ENDPOINT: "https://vault.example.com",
         VAULT_TOKEN: "vault-token-secret",
-        SUPPLIER_DRIVER: "http",
-        SUPPLIER_API_BASE_URL: "https://supplier.example.com",
         BUY_NOW_CALLBACK_HMAC_KEY: sharedSecret,
         [reusedKey]: sharedSecret,
       });
@@ -319,8 +297,6 @@ describe("production hardening fails closed", () => {
       VAULT_DRIVER: "external",
       VAULT_ENDPOINT: "https://vault.example.com",
       VAULT_TOKEN: "vault-token-secret",
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example.com",
       SEPAY_IP_ALLOWLIST: "",
       SEPAY_WEBHOOK_HMAC_SECRET: "local-dev-sepay-hmac-secret-change-me",
     });
@@ -342,8 +318,6 @@ describe("production hardening fails closed", () => {
       VAULT_DRIVER: "external",
       VAULT_ENDPOINT: "https://vault.example.com",
       VAULT_TOKEN: "vault-token-secret",
-      SUPPLIER_DRIVER: "http",
-      SUPPLIER_API_BASE_URL: "https://supplier.example.com",
       TELEGRAM_WEBHOOK_SECRET: shared,
       SEPAY_WEBHOOK_HMAC_SECRET: shared,
     });

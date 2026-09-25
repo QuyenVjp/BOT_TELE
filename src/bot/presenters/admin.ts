@@ -1110,6 +1110,9 @@ export interface AdminSupplierCatalogPageInput {
 
 function supplierStateLabel(row: SupplierCatalogRow): string {
   if (row.is_missing) return "MISSING";
+  if (row.domain_status === "UNSUPPORTED") {
+    return `UNSUPPORTED · ${row.domain_unsupported_reason ?? "reason unavailable"}`;
+  }
   if (row.selection_status === "DISCOVERED") return "DISCOVERED · tắt";
   return row.is_enabled ? "SELECTED · bật" : "SELECTED · tắt";
 }
@@ -1162,13 +1165,16 @@ export function presentAdminSupplierCatalogDetail(input: {
     `Availability: ${row.is_missing ? "MISSING" : row.availability}`,
     `Cost tham chiếu: ${BigInt(row.supplier_cost_vnd).toLocaleString("vi-VN")} ₫`,
     `Trạng thái: ${supplierStateLabel(row)}`,
+    ...(row.domain_status === "UNSUPPORTED" && row.domain_unsupported_reason
+      ? [`Lý do không hỗ trợ: ${row.domain_unsupported_reason}`]
+      : []),
     "",
     row.local_name_vi ? `Tên local: ${row.local_name_vi}` : "Chưa cấu hình local product.",
     row.local_variant_name_vi ? `Gói local: ${row.local_variant_name_vi}` : "",
     "Giá bán local chỉ do owner đặt; cost upstream không tự đổi giá bán.",
   ].filter(Boolean);
   const buttons: InlineButton[][] = [];
-  if (input.ownerSelectionEnabled) {
+  if (input.ownerSelectionEnabled && row.domain_status === "SUPPORTED") {
     buttons.push([
       {
         text: row.selection_status === "SELECTED" ? "✏️ Cấu hình lại" : "✅ Chọn & cấu hình",

@@ -1,0 +1,172 @@
+{
+  "source": "https://api.qcst.tech/openapi.json",
+  "retrieved_at_utc": "2026-09-25",
+  "openapi": "3.1.0",
+  "api_version": "1.1.0",
+  "credentials": "omitted",
+  "relevant_endpoints": {
+    "GET /v1/products": { "response": "ProductListResponse", "success_data": "array<ProductData>" },
+    "GET /v1/catalog": {
+      "response": "CatalogSnapshotResponse",
+      "query": "since_version: integer, optional"
+    },
+    "GET /v1/products/{product_id}": {
+      "response": "ProductResponse",
+      "path": "product_id: string, required"
+    },
+    "GET /v1/balance": { "response": "BalanceResponse", "success_data": "BalanceData" },
+    "GET /v1/orders": {
+      "response": "OrderListResponse",
+      "query": "client_order_id/limit/cursor as documented"
+    },
+    "GET /v1/orders/{order_id}": {
+      "response": "OrderResponse",
+      "path": "order_id: string, required"
+    }
+  },
+  "schemas": {
+    "ProductData": {
+      "required": [
+        "id",
+        "name",
+        "name_en",
+        "description",
+        "description_en",
+        "warranty",
+        "warranty_en",
+        "customer_input_type",
+        "requires_customer_input",
+        "customer_inputs_per_item",
+        "customer_prompt",
+        "customer_prompt_en",
+        "fulfillment_mode",
+        "availability",
+        "stock_type",
+        "price",
+        "currency",
+        "updated_at"
+      ],
+      "fields": {
+        "customer_inputs_per_item": {
+          "type": "integer",
+          "nullable": false,
+          "required": true,
+          "minimum": null,
+          "maximum": null,
+          "description": null,
+          "examples": null
+        },
+        "min_quantity": {
+          "type": "integer",
+          "nullable": false,
+          "required": false,
+          "minimum": null,
+          "maximum": null,
+          "default": 1,
+          "description": null,
+          "examples": null
+        },
+        "max_quantity": {
+          "type": ["integer", "null"],
+          "nullable": true,
+          "required": false,
+          "minimum": null,
+          "maximum": null,
+          "description": null,
+          "examples": null
+        },
+        "fixed_quantity": {
+          "type": ["integer", "null"],
+          "nullable": true,
+          "required": false,
+          "minimum": null,
+          "maximum": null,
+          "description": null,
+          "examples": null
+        },
+        "updated_at": {
+          "type": "string",
+          "nullable": false,
+          "required": true,
+          "minimum": null,
+          "maximum": null,
+          "description": null,
+          "examples": null
+        },
+        "availability": {
+          "type": "string",
+          "nullable": false,
+          "required": true,
+          "minimum": null,
+          "maximum": null,
+          "description": null,
+          "examples": null
+        },
+        "stock_type": {
+          "type": "string",
+          "nullable": false,
+          "required": true,
+          "minimum": null,
+          "maximum": null,
+          "description": null,
+          "examples": null
+        },
+        "stock_quantity": {
+          "type": ["integer", "null"],
+          "nullable": true,
+          "required": false,
+          "minimum": null,
+          "maximum": null,
+          "description": null,
+          "examples": null
+        }
+      }
+    },
+    "BalanceData": {
+      "required": ["available", "currency"],
+      "fields": {
+        "available": { "type": "integer", "nullable": false },
+        "currency": { "type": "string", "nullable": false }
+      }
+    },
+    "OrderListData": {
+      "required": ["items", "has_more"],
+      "fields": {
+        "items": { "type": "array<OrderData>", "nullable": false },
+        "has_more": { "type": "boolean", "nullable": false },
+        "next_cursor": { "type": ["string", "null"], "nullable": true, "required": false }
+      }
+    },
+    "OrderData": {
+      "required": [
+        "id",
+        "client_order_id",
+        "product_id",
+        "quantity",
+        "unit_price",
+        "total_amount",
+        "currency",
+        "status",
+        "payment_status",
+        "cancellable",
+        "delivery_available",
+        "status_url",
+        "poll_after_seconds",
+        "created_at",
+        "updated_at"
+      ],
+      "fields": {
+        "created_at": { "type": "string", "nullable": false },
+        "updated_at": { "type": "string", "nullable": false },
+        "delivery": { "type": "untyped/null", "nullable": true },
+        "delivery_expires_at": { "type": "string/null", "nullable": true },
+        "error": { "type": "OrderErrorData/null", "nullable": true }
+      }
+    }
+  },
+  "documented_semantics": {
+    "customer_inputs_per_item_zero": "not documented",
+    "max_quantity_zero": "not documented",
+    "updated_at_non_rfc3339": "allowed by declared string type; no parsing semantics documented"
+  }
+}

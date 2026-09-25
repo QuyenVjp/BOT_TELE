@@ -155,6 +155,7 @@ export async function getStoreOpenReadiness(exec: Executor): Promise<StoreOpenRe
                     select 1 from supplier_catalog_product cp
                     where cp.supplier_id = s.id and cp.supplier_sku_id = ss.id
                       and cp.selection_status = 'SELECTED' and cp.is_enabled and not cp.is_missing
+                      and cp.domain_status = 'SUPPORTED'
                   )
                 ))))
          and exists (

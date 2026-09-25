@@ -1,7 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
-import { createQcstSupplierPort } from "../../src/modules/supplier/adapters/qcst.js";
+import {
+  normalizeQcstProduct,
+  RawQcstProductSchema,
+  createQcstSupplierPort,
+} from "../../src/modules/supplier/adapters/qcst.js";
 
 const API_KEY = ["qcst", "live", "x".repeat(32)].join("_");
 const PRODUCT = {
@@ -14,7 +18,7 @@ const PRODUCT = {
   warranty_en: "warranty",
   customer_input_type: "NONE",
   requires_customer_input: false,
-  customer_inputs_per_item: 1,
+  customer_inputs_per_item: 0,
   customer_prompt: "",
   customer_prompt_en: "",
   fulfillment_mode: "AUTOMATIC",
@@ -135,6 +139,67 @@ describe("QCST supplier adapter", () => {
     expect(products[0]).not.toHaveProperty("secret_material");
     expect(port.capabilities.has("CATALOG_LIST")).toBe(true);
     expect(port.capabilities.has("ORDER_CREATE")).toBe(true);
+  });
+
+  it("accepts zero customer inputs when QCST says customer input is not required", () => {
+    const product = RawQcstProductSchema.parse(PRODUCT);
+
+    expect(normalizeQcstProduct(product)).toMatchObject({
+      customerInputsPerItem: 0,
+      supportStatus: "SUPPORTED",
+      unsupportedReason: null,
+    });
+  });
+
+  it("quarantines a required-customer-input product with zero inputs", () => {
+    const product = RawQcstProductSchema.parse({
+      ...PRODUCT,
+      requires_customer_input: true,
+      customer_inputs_per_item: 0,
+    });
+
+    expect(normalizeQcstProduct(product)).toMatchObject({
+      customerInputsPerItem: 0,
+      supportStatus: "UNSUPPORTED",
+      unsupportedReason: "CUSTOMER_INPUT_COUNT_INCONSISTENT",
+    });
+  });
+
+  it("quarantines max_quantity zero without inventing its meaning", () => {
+    const product = RawQcstProductSchema.parse({ ...PRODUCT, max_quantity: 0 });
+
+    expect(normalizeQcstProduct(product)).toMatchObject({
+      maxQuantity: 0,
+      supportStatus: "UNSUPPORTED",
+      unsupportedReason: "MAX_QUANTITY_SEMANTICS_UNKNOWN",
+    });
+  });
+
+  it("preserves a documented nullable max quantity without inventing a bound", () => {
+    const product = RawQcstProductSchema.parse({
+      ...PRODUCT,
+      max_quantity: null,
+      fixed_quantity: null,
+    });
+
+    expect(normalizeQcstProduct(product)).toMatchObject({
+      maxQuantity: null,
+      fixedQuantity: null,
+      supportStatus: "SUPPORTED",
+      unsupportedReason: null,
+    });
+  });
+
+  it("uses null when the bounded upstream timestamp is not parseable", () => {
+    const product = RawQcstProductSchema.parse({ ...PRODUCT, updated_at: "vendor-time-unknown" });
+
+    expect(normalizeQcstProduct(product).upstreamUpdatedAt).toBeNull();
+  });
+
+  it("rejects impossible negative price at the normalized boundary", () => {
+    const product = RawQcstProductSchema.parse({ ...PRODUCT, price: -1 });
+
+    expect(() => normalizeQcstProduct(product)).toThrow("QCST_PRODUCT_INVALID");
   });
 
   it("maps availability and sends the durable client idempotency key with a price ceiling", async () => {

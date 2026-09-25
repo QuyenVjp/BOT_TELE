@@ -1,0 +1,95 @@
+{
+  "artifact": "qcst-readonly-live-test",
+  "captured_at_utc": "2026-09-25",
+  "worktree": {
+    "path": "/Users/quyen/Developer/BOT_TELE-qcst",
+    "branch": "feat/qcst-external-supplier",
+    "head_before_fix": "2705917d7d4e318b753b43eb5c308eb78a52da96"
+  },
+  "credential_setup": {
+    "raw_env_candidate_moved_to_vault": true,
+    "vault_ref": "vault:telegram-shop:asset:qcst-api-key",
+    "raw_material_output": false,
+    "vault_health": "PASS",
+    "vault_endpoint": "https://127.0.0.1:8443"
+  },
+  "pre_fix_evidence": {
+    "products_http_status": 200,
+    "products_raw_count": 51,
+    "adapter_status": "SCHEMA_INVALID",
+    "invalid_items": 48,
+    "violations": {
+      "customer_inputs_per_item:too_small": 46,
+      "max_quantity:too_small": 28,
+      "updated_at:invalid_format": 1
+    },
+    "balance_adapter_status": "PASS",
+    "orders_adapter_status": "PASS",
+    "orders_item_count": 0
+  },
+  "post_fix_normalization": {
+    "method": "GET",
+    "path": "/v1/products",
+    "http_status": 200,
+    "raw_product_count": 51,
+    "normalized_product_count": 51,
+    "latest_domain_unsupported_count": 27,
+    "latest_supported_count": 24,
+    "latest_hard_invalid_count": 0,
+    "latest_unsupported_reasons": {
+      "MAX_QUANTITY_SEMANTICS_UNKNOWN": 27
+    },
+    "latest_unparseable_upstream_timestamp_count": 0,
+    "observed_unsupported_counts_across_fresh_pulls": [29, 28, 27],
+    "count_variation_note": "QCST catalog changed between authenticated GETs; latest pull and sync below are authoritative for this artifact.",
+    "raw_material_output": false,
+    "purchase_requests": "NOT_RUN"
+  },
+  "balance": {
+    "method": "GET",
+    "path": "/v1/balance",
+    "http_status": 200,
+    "available": 0,
+    "currency": "VND"
+  },
+  "orders": {
+    "method": "GET",
+    "path": "/v1/orders?limit=20",
+    "http_status": 200,
+    "observations": 0,
+    "next_cursor": null
+  },
+  "sync": {
+    "environment": "disposable PostgreSQL test container",
+    "attempted": true,
+    "before": { "total": 0, "selected": 0, "enabled": 0 },
+    "upstream_raw_count": 51,
+    "normalized_count": 51,
+    "discovered": 51,
+    "updated": 0,
+    "missing": 0,
+    "after": {
+      "total": 51,
+      "discovered": 51,
+      "selected": 0,
+      "enabled": 0,
+      "missing": 0,
+      "unsupported": 27
+    },
+    "authoritative_sync_preserved_mappings": true,
+    "local_price_mutation": false,
+    "primary_supplier_mutation": false
+  },
+  "safety": {
+    "purchase_requests": "NOT_RUN",
+    "order_create_post": "NOT_RUN",
+    "cancel_post": "NOT_RUN",
+    "refund": "NOT_RUN",
+    "delivery_material_output": false,
+    "purchase_gate": false,
+    "supplier_purchase_enabled": false,
+    "qcst_purchase_enabled": false
+  },
+  "decision": "NORMALIZATION_SAFE_READ_ONLY_SYNC_NO_PURCHASE",
+  "next_action": "Owner Telegram curation remains blocked pending an owner-authenticated browser session; purchase remains disabled."
+}
