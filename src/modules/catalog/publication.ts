@@ -4,6 +4,7 @@ import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId, isId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
+import { SUPPLIER_READY_SQL, SUPPLIER_ROUTE_SQL } from "./supplier-readiness-sql.js";
 
 export const RESALE_EVIDENCE_SOURCES = [
   "SUPPLIER_AUTHORIZATION",
@@ -254,45 +255,15 @@ export async function getProductPublicationReadiness(
              when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0) > 0
              when v.fulfillment_type = 'DIGITAL_FILE' then exists (
                select 1 from variant_file_artifact f where f.variant_id = v.id and f.is_active)
-             when v.fulfillment_type = 'SUPPLIER_API' then exists (
-               select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-                where ss.variant_id = v.id and ss.id = v.supplier_sku_id
-                  and ss.is_active and s.status = 'ACTIVE'
-                  and (
-                    not exists (select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id)
-                    or exists (
-                      select 1 from supplier_catalog_product cp
-                      where cp.supplier_id = s.id
-                        and cp.supplier_sku_id = ss.id
-                        and cp.selection_status = 'SELECTED'
-                        and cp.domain_status = 'SUPPORTED'
-                        and cp.is_enabled
-                        and not cp.is_missing
-                        and cp.availability in ('AVAILABLE', 'LOW')
-                    )
-                  ))
+             when v.fulfillment_type = 'SUPPLIER_API' then ${SUPPLIER_READY_SQL}
              when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
                select 1 from variant_service_fulfillment sf where sf.variant_id = v.id
                  and sf.fulfillment_type = v.fulfillment_type and sf.is_active)
              else false
            end as ready,
            ((v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
-             or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
-               select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-                where ss.variant_id = v.id and ss.id = v.supplier_sku_id
-                  and ss.is_active and s.status = 'ACTIVE'
-                  and (
-                    not exists (select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id)
-                    or exists (
-                      select 1 from supplier_catalog_product cp
-                      where cp.supplier_id = s.id
-                        and cp.supplier_sku_id = ss.id
-                        and cp.selection_status = 'SELECTED'
-                        and cp.domain_status = 'SUPPORTED'
-                        and cp.is_enabled
-                        and not cp.is_missing
-                    )
-                  )))) as route_ready,
+             or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API'
+                 and ${SUPPLIER_ROUTE_SQL})) as route_ready,
            v.resale_evidence_id as evidence_id,
            exists (select 1 from resale_evidence re where re.id = v.resale_evidence_id and re.variant_id = v.id and re.status = 'ACTIVE') as evidence_active,
            v.publication_evidence_id,

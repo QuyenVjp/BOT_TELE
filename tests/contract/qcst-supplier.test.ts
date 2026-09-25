@@ -202,6 +202,17 @@ describe("QCST supplier adapter", () => {
     expect(() => normalizeQcstProduct(product)).toThrow("QCST_PRODUCT_INVALID");
   });
 
+  it("rejects purchase-ready availability for an unsupported product", async () => {
+    const server = await startServer((_request, response) => {
+      sendJson(response, { success: true, data: [{ ...PRODUCT, max_quantity: 0 }] });
+    });
+    const { port } = await createPort(server.baseUrl);
+
+    await expect(port.getAvailability({ supplierSku: PRODUCT.id })).rejects.toMatchObject({
+      supplierCode: "PRODUCT_UNSUPPORTED",
+    });
+  });
+
   it("maps availability and sends the durable client idempotency key with a price ceiling", async () => {
     let body: unknown;
     let idempotencyKey: string | undefined;

@@ -10,6 +10,7 @@ import {
   PUBLIC_BRAND_CATEGORY_SLUGS,
   PUBLIC_ROOT_CATEGORY_SLUGS,
 } from "./taxonomy.js";
+import { SUPPLIER_READY_SQL, SUPPLIER_ROUTE_SQL } from "./supplier-readiness-sql.js";
 
 const PUBLIC_BRAND_SLUG_SQL = sql.join(
   PUBLIC_BRAND_CATEGORY_SLUGS.map((slug) => sql`${slug}`),
@@ -85,61 +86,6 @@ export interface Page<T> {
   items: T[];
   nextCursor: string | null;
 }
-
-const SUPPLIER_READY_SQL = sql`
-  exists (
-    select 1
-    from supplier_sku ss
-    join supplier s on s.id = ss.supplier_id
-    where ss.variant_id = v.id
-      and ss.id = v.supplier_sku_id
-      and ss.is_active
-      and s.status = 'ACTIVE'
-      and (
-        not exists (
-          select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id
-        )
-        or exists (
-          select 1
-          from supplier_catalog_product cp
-          where cp.supplier_id = s.id
-            and cp.supplier_sku_id = ss.id
-            and cp.selection_status = 'SELECTED'
-            and cp.domain_status = 'SUPPORTED'
-            and cp.is_enabled
-            and not cp.is_missing
-            and cp.availability in ('AVAILABLE', 'LOW')
-        )
-      )
-  )
-`;
-
-const SUPPLIER_ROUTE_SQL = sql`
-  exists (
-    select 1
-    from supplier_sku ss
-    join supplier s on s.id = ss.supplier_id
-    where ss.variant_id = v.id
-      and ss.id = v.supplier_sku_id
-      and ss.is_active
-      and s.status = 'ACTIVE'
-      and (
-        not exists (
-          select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id
-        )
-        or exists (
-          select 1
-          from supplier_catalog_product cp
-          where cp.supplier_id = s.id
-            and cp.supplier_sku_id = ss.id
-            and cp.selection_status = 'SELECTED'
-            and cp.domain_status = 'SUPPORTED'
-            and cp.is_enabled
-            and not cp.is_missing
-      )
-      )
-  )
-`;
 
 export const VARIANT_READY_SQL = sql`
   case

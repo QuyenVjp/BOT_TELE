@@ -14,6 +14,7 @@ import {
   type SupplierPort,
   type SupplierProvider,
 } from "./port.js";
+import { checkSupplierPurchaseReadiness } from "./readiness.js";
 /**
  * Supplier provisioning service (T069, FR-015/FR-016).
  *
@@ -318,20 +319,42 @@ export async function provisionFromSupplier(
     };
   }
 
+  const readiness = await checkSupplierPurchaseReadiness(db, {
+    variantId: order.variantId,
+    supplierId: input.supplierId,
+    supplierSkuId: input.supplierSkuId,
+    provider: input.port,
+    purchaseEnabled: input.purchaseEnabled,
+  });
+  if (!readiness.ok) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Mapping nhà cung cấp hiện không đủ điều kiện mua.",
+    };
+  }
+  let purchaseInput: ProvisionInput = {
+    ...input,
+    externalSku: readiness.externalSku,
+    expectedSku: input.expectedSku,
+    costCeilingVnd: readiness.costVnd,
+    region: readiness.region,
+  };
+
   // Insert the durable winner before external I/O. ON CONFLICT waits for a concurrent
   // winner, then the loser returns that in-flight state without creating or querying.
   const supplierOrderId = newId();
-  const costSnapshot = input.costCeilingVnd;
-  const margin = input.salePriceVnd - costSnapshot;
+  const costSnapshot = purchaseInput.costCeilingVnd;
+  const margin = purchaseInput.salePriceVnd - costSnapshot;
   const inserted = await sql<{ id: string }>`
     insert into supplier_order
       (id, supplier_id, supplier_sku_id, order_id, idempotency_key, provider_client_order_id,
        request_fingerprint, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
        margin_vnd_snapshot, submitted_at, last_attempt_at, attempt_count)
     values
-      (${supplierOrderId}, ${input.supplierId}, ${input.supplierSkuId}, ${input.orderId},
-       ${idempotencyKey}, ${idempotencyKey}, ${requestFingerprint(input, idempotencyKey)}, 'SUBMITTED',
-       ${costSnapshot}, ${input.salePriceVnd}, ${margin}, now(), now(), 0)
+      (${supplierOrderId}, ${purchaseInput.supplierId}, ${purchaseInput.supplierSkuId}, ${purchaseInput.orderId},
+       ${idempotencyKey}, ${idempotencyKey}, ${requestFingerprint(purchaseInput, idempotencyKey)}, 'SUBMITTED',
+       ${costSnapshot}, ${purchaseInput.salePriceVnd}, ${margin}, now(), now(), 0)
     on conflict (supplier_id, idempotency_key) do nothing
     returning id
   `.execute(db);
@@ -352,6 +375,45 @@ export async function provisionFromSupplier(
       }
     );
   }
+  const latestReadiness = await checkSupplierPurchaseReadiness(db, {
+    variantId: order.variantId,
+    supplierId: input.supplierId,
+    supplierSkuId: input.supplierSkuId,
+    provider: input.port,
+    purchaseEnabled: input.purchaseEnabled,
+  });
+  if (!latestReadiness.ok) {
+    await sql`
+      update supplier_order
+      set status = 'REJECTED',
+          last_error_code = ${latestReadiness.reason},
+          next_reconcile_at = null,
+          version = version + 1
+      where id = ${supplierOrderId}
+    `.execute(db);
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Mapping nhà cung cấp hiện không đủ điều kiện mua.",
+    };
+  }
+  purchaseInput = {
+    ...purchaseInput,
+    externalSku: latestReadiness.externalSku,
+    expectedSku:
+      input.expectedSku === input.externalSku
+        ? latestReadiness.externalSku
+        : purchaseInput.expectedSku,
+    costCeilingVnd: latestReadiness.costVnd,
+    region: latestReadiness.region,
+  };
+  await sql`
+    update supplier_order
+    set cost_vnd_snapshot = ${purchaseInput.costCeilingVnd},
+        margin_vnd_snapshot = ${purchaseInput.salePriceVnd - purchaseInput.costCeilingVnd},
+        version = version + 1
+    where id = ${supplierOrderId}
+  `.execute(db);
 
   await sql`
     update supplier_order
@@ -363,12 +425,12 @@ export async function provisionFromSupplier(
 
   let result: CreateOrderResult;
   try {
-    result = await input.port.createOrder({
+    result = await purchaseInput.port.createOrder({
       idempotencyKey,
-      supplierSku: input.externalSku,
-      costCeilingVnd: input.costCeilingVnd,
-      orderId: input.orderId,
-      ...(input.region !== null ? { region: input.region } : {}),
+      supplierSku: purchaseInput.externalSku,
+      costCeilingVnd: purchaseInput.costCeilingVnd,
+      orderId: purchaseInput.orderId,
+      ...(purchaseInput.region !== null ? { region: purchaseInput.region } : {}),
     });
   } catch (error) {
     const retryAfterSeconds = retryAfterFromError(error);
@@ -400,14 +462,14 @@ export async function provisionFromSupplier(
     case "FULFILLED": {
       const { assetId, quarantined } = await ingestFulfilledAsset(db, {
         supplierOrderId,
-        orderId: input.orderId,
+        orderId: purchaseInput.orderId,
         variantId: order.variantId,
         externalOrderId: result.externalOrderId,
         envelope: result.assetEnvelope,
-        expectedSku: input.expectedSku,
-        deliveryType: input.deliveryType,
-        durationCode: input.durationCode,
-        region: input.region,
+        expectedSku: purchaseInput.expectedSku,
+        deliveryType: purchaseInput.deliveryType,
+        durationCode: purchaseInput.durationCode,
+        region: purchaseInput.region,
       });
       if (quarantined) {
         return { ok: true, kind: "NEEDS_REVIEW", supplierOrderId, assetId };

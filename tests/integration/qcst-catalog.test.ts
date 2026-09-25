@@ -440,7 +440,44 @@ describe("generic supplier curation persistence", () => {
     expect(pointer.rows[0]?.supplier_id).toBe("vokhong");
   });
 
-  it("keeps unselected and missing mappings out while out-of-stock is not ready", async () => {
+  it("hides a catalog-managed route when its selected snapshot is absent", async () => {
+    await ensure("qcst", "QCST");
+    await syncSupplierCatalog(ctx.db, "qcst", [product()], "supplier-route-missing");
+    const discovered = (
+      await listSupplierCatalog(ctx.db, { supplierId: "qcst", limit: 8, offset: 0 })
+    ).items[0]!;
+    const configured = await configureSupplierCatalogProduct(ctx.db, {
+      supplierId: "qcst",
+      catalogId: discovered.id,
+      localNameVi: "Missing snapshot",
+      localVariantNameVi: "Missing snapshot variant",
+      localPriceVnd: 99_000n,
+      localDescriptionVi: "Missing snapshot test",
+      enabled: true,
+      expectedVersion: discovered.version,
+      actorId: "123456789",
+      correlationId: "supplier-route-missing",
+    });
+    await sql`update product set is_test = true where id = ${configured.productId}`.execute(ctx.db);
+
+    const visible = await listSellableVariants(ctx.db, {
+      limit: 8,
+      productId: configured.productId,
+      audience: "test",
+    });
+    expect(visible.items).toHaveLength(1);
+
+    await sql`delete from supplier_catalog_product where id = ${discovered.id}`.execute(ctx.db);
+    await expect(
+      listSellableVariants(ctx.db, {
+        limit: 8,
+        productId: configured.productId,
+        audience: "test",
+      }),
+    ).resolves.toMatchObject({ items: [] });
+  });
+
+  it("keeps unselected and missing mappings out while out-of-stock is hidden", async () => {
     await ensure("qcst", "QCST");
     await syncSupplierCatalog(ctx.db, "qcst", [product()], "supplier-route-1");
     const discovered = (
@@ -521,8 +558,7 @@ describe("generic supplier curation persistence", () => {
       productId: configured.productId,
       audience: "test",
     });
-    expect(outOfStock.items).toHaveLength(1);
-    expect(outOfStock.items[0]?.is_ready).toBe(false);
+    expect(outOfStock.items).toEqual([]);
 
     await syncSupplierCatalog(ctx.db, "qcst", [], "supplier-route-3");
     await expect(

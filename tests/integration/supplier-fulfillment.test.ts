@@ -70,7 +70,138 @@ async function seedSupplierPaidOrder() {
     values (${supplierSkuId}, ${supplierId}, ${variantId}, ${externalSku}, 120000, 'VN', 'CREDENTIAL', true)
   `.execute(ctx.db);
 
-  return { orderId, customerId, variantId, supplierId, supplierSkuId };
+  return { orderId, customerId, productId, variantId, supplierId, supplierSkuId, externalSku };
+}
+
+type CatalogState = {
+  availability: "AVAILABLE" | "LOW" | "OUT" | "UNKNOWN" | "MISSING";
+  domainStatus: "SUPPORTED" | "UNSUPPORTED";
+  selectionStatus: "DISCOVERED" | "SELECTED";
+  enabled: boolean;
+  missing: boolean;
+  reason: string | null;
+};
+type MappingMutation = "SUPPLIER_DISABLED" | "SKU_DISABLED" | "PRIMARY_CLEARED";
+
+async function makeCatalogManaged(
+  fixture: Awaited<ReturnType<typeof seedSupplierPaidOrder>>,
+): Promise<void> {
+  await sql`
+    update supplier
+    set provider_capabilities = '["CATALOG_LIST","ORDER_CREATE"]'::jsonb
+    where id = ${fixture.supplierId}
+  `.execute(ctx.db);
+  await sql`
+    insert into supplier_catalog_product
+      (id, supplier_id, external_product_id, external_variant_id, upstream_name_vi,
+       availability, domain_status, domain_unsupported_reason, supplier_cost_vnd, currency,
+       selection_status, is_enabled, is_missing, local_product_id, local_variant_id, supplier_sku_id)
+    values
+      (${newId()}, ${fixture.supplierId}, ${fixture.externalSku}, '', 'Upstream product',
+       'AVAILABLE', 'SUPPORTED', null, 120000, 'VND',
+       'SELECTED', true, false, ${fixture.productId}, ${fixture.variantId}, ${fixture.supplierSkuId})
+  `.execute(ctx.db);
+}
+
+async function setCatalogState(
+  fixture: Awaited<ReturnType<typeof seedSupplierPaidOrder>>,
+  state: CatalogState,
+): Promise<void> {
+  await sql`
+    update supplier_catalog_product
+    set availability = ${state.availability},
+        domain_status = ${state.domainStatus},
+        domain_unsupported_reason = ${state.reason},
+        selection_status = ${state.selectionStatus},
+        is_enabled = ${state.enabled},
+        is_missing = ${state.missing}
+    where supplier_id = ${fixture.supplierId}
+      and supplier_sku_id = ${fixture.supplierSkuId}
+  `.execute(ctx.db);
+}
+
+async function catalogFulfillmentAttempt(
+  state?: Partial<CatalogState>,
+  includeCatalog = true,
+  mutation?: MappingMutation,
+): Promise<{
+  fixture: Awaited<ReturnType<typeof seedSupplierPaidOrder>>;
+  result: Awaited<ReturnType<typeof fulfillPaidOrder>>;
+  createCalls: number;
+  supplierOrders: number;
+  assets: number;
+  bundles: number;
+}> {
+  const fixture = await seedSupplierPaidOrder();
+  await sql`
+    update supplier
+    set provider_capabilities = '["CATALOG_LIST","ORDER_CREATE"]'::jsonb
+    where id = ${fixture.supplierId}
+  `.execute(ctx.db);
+  if (includeCatalog) {
+    await makeCatalogManaged(fixture);
+    if (state) {
+      await setCatalogState(fixture, {
+        availability: "AVAILABLE",
+        domainStatus: "SUPPORTED",
+        selectionStatus: "SELECTED",
+        enabled: true,
+        missing: false,
+        reason: null,
+        ...state,
+      });
+    }
+  }
+  if (mutation === "SUPPLIER_DISABLED") {
+    await sql`update supplier set status = 'DISABLED' where id = ${fixture.supplierId}`.execute(
+      ctx.db,
+    );
+  } else if (mutation === "SKU_DISABLED") {
+    await sql`update supplier_sku set is_active = false where id = ${fixture.supplierSkuId}`.execute(
+      ctx.db,
+    );
+  } else if (mutation === "PRIMARY_CLEARED") {
+    await sql`update product_variant set supplier_sku_id = null where id = ${fixture.variantId}`.execute(
+      ctx.db,
+    );
+  }
+  const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+  let createCalls = 0;
+  const supplier = {
+    ...sandbox,
+    providerKey: fixture.supplierId,
+    displayName: "Catalog provider",
+    capabilities: new Set(["CATALOG_LIST", "ORDER_CREATE"] as const),
+    async createOrder(input: Parameters<typeof sandbox.createOrder>[0]) {
+      createCalls += 1;
+      return sandbox.createOrder(input);
+    },
+  };
+  const result = await fulfillPaidOrder(ctx.db, {
+    orderId: fixture.orderId,
+    correlationId: "catalog-readiness-regression",
+    deps: {
+      vault: createInMemoryVault(),
+      supplier,
+      supplierPurchaseEnabled: () => true,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+    },
+  });
+  const counts = await sql<{ supplier_orders: number; assets: number; bundles: number }>`
+    select
+      (select count(*)::int from supplier_order where order_id = ${fixture.orderId}) as supplier_orders,
+      (select count(*)::int from digital_asset where reserved_order_id = ${fixture.orderId}) as assets,
+      (select count(*)::int from delivery_bundle where order_id = ${fixture.orderId}) as bundles
+  `.execute(ctx.db);
+  return {
+    fixture,
+    result,
+    createCalls,
+    supplierOrders: counts.rows[0]?.supplier_orders ?? 0,
+    assets: counts.rows[0]?.assets ?? 0,
+    bundles: counts.rows[0]?.bundles ?? 0,
+  };
 }
 
 async function enqueueOrderPaid(orderId: string, correlationId: string) {
@@ -140,6 +271,160 @@ describe("supplier fulfillment from OrderPaid", () => {
     expect(attempt.result.ok).toBe(true);
     expect(attempt.createCalls).toBe(1);
     expect(await supplierOrderCount(attempt.fixture.orderId)).toBe(1);
+  });
+
+  it.each([
+    [
+      "UNSUPPORTED",
+      {
+        domainStatus: "UNSUPPORTED",
+        reason: "MAX_QUANTITY_SEMANTICS_UNKNOWN",
+        enabled: false,
+      },
+    ],
+    ["OUT", { availability: "OUT", enabled: false }],
+    ["MISSING", { availability: "MISSING", enabled: false, missing: true }],
+    ["disabled", { enabled: false }],
+    ["DISCOVERED", { selectionStatus: "DISCOVERED", enabled: false }],
+  ] as const)("blocks a paid order when current catalog mapping is %s", async (_label, state) => {
+    const attempt = await catalogFulfillmentAttempt(state);
+
+    expect(attempt.result).toMatchObject({ ok: false, code: "SUPPLIER_UNSUPPORTED" });
+    expect(attempt.createCalls).toBe(0);
+    expect(attempt.supplierOrders).toBe(0);
+    expect(attempt.assets).toBe(0);
+    expect(attempt.bundles).toBe(0);
+  });
+  it.each(["SUPPLIER_DISABLED", "SKU_DISABLED"] as const)(
+    "blocks a paid order when the current %s mapping is inactive",
+    async (mutation) => {
+      const attempt = await catalogFulfillmentAttempt(undefined, true, mutation);
+
+      expect(attempt.result).toMatchObject({ ok: false, code: "SUPPLIER_UNSUPPORTED" });
+      expect(attempt.createCalls).toBe(0);
+      expect(attempt.supplierOrders).toBe(0);
+      expect(attempt.assets).toBe(0);
+      expect(attempt.bundles).toBe(0);
+    },
+  );
+
+  it("blocks a paid order when the current primary mapping is cleared", async () => {
+    const attempt = await catalogFulfillmentAttempt(undefined, true, "PRIMARY_CLEARED");
+
+    expect(attempt.result).toMatchObject({ ok: false, code: "NEEDS_REVIEW" });
+    expect(attempt.createCalls).toBe(0);
+    expect(attempt.supplierOrders).toBe(0);
+    expect(attempt.assets).toBe(0);
+    expect(attempt.bundles).toBe(0);
+  });
+
+  it.each(["AVAILABLE", "LOW"] as const)(
+    "allows a paid order for a current catalog mapping that is %s",
+    async (availability) => {
+      const attempt = await catalogFulfillmentAttempt({ availability });
+
+      expect(attempt.result).toMatchObject({ ok: true, kind: "DELIVERY_BUNDLE" });
+      expect(attempt.createCalls).toBe(1);
+      expect(attempt.supplierOrders).toBe(1);
+      expect(attempt.assets).toBe(1);
+      expect(attempt.bundles).toBe(1);
+    },
+  );
+
+  it("requires a matching catalog row for a catalog-managed provider", async () => {
+    const attempt = await catalogFulfillmentAttempt(undefined, false);
+
+    expect(attempt.result).toMatchObject({ ok: false, code: "SUPPLIER_UNSUPPORTED" });
+    expect(attempt.createCalls).toBe(0);
+    expect(attempt.supplierOrders).toBe(0);
+    expect(attempt.assets).toBe(0);
+    expect(attempt.bundles).toBe(0);
+  });
+
+  it("uses the current explicit primary after an owner primary switch", async () => {
+    const first = await seedSupplierPaidOrder();
+    await makeCatalogManaged(first);
+    const secondSupplierId = newId();
+    const secondSkuId = newId();
+    const secondExternalSku = `SUP-${newId().slice(-8)}`;
+    await sql`
+      insert into supplier
+        (id, name, adapter_type, credential_vault_ref, status, provider_capabilities)
+      values
+        (${secondSupplierId}, 'Secondary', 'sandbox', 'vault:sup-cred-2', 'ACTIVE',
+         '["CATALOG_LIST","ORDER_CREATE"]'::jsonb)
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_sku
+        (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type, is_active)
+      values
+        (${secondSkuId}, ${secondSupplierId}, ${first.variantId}, ${secondExternalSku},
+         121000, 'VN', 'CREDENTIAL', true)
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_catalog_product
+        (id, supplier_id, external_product_id, external_variant_id, upstream_name_vi,
+         availability, domain_status, supplier_cost_vnd, currency, selection_status,
+         is_enabled, is_missing, local_product_id, local_variant_id, supplier_sku_id)
+      values
+        (${newId()}, ${secondSupplierId}, ${secondExternalSku}, '', 'Secondary upstream',
+         'AVAILABLE', 'SUPPORTED', 121000, 'VND', 'SELECTED',
+         true, false, ${first.productId}, ${first.variantId}, ${secondSkuId})
+    `.execute(ctx.db);
+    await sql`
+      update product_variant set supplier_sku_id = ${secondSkuId} where id = ${first.variantId}
+    `.execute(ctx.db);
+
+    const firstBase = createSandboxSupplierAdapter({ mode: "fulfill" });
+    const secondBase = createSandboxSupplierAdapter({ mode: "fulfill" });
+    let firstCalls = 0;
+    let secondCalls = 0;
+    const firstProvider = {
+      ...firstBase,
+      providerKey: first.supplierId,
+      displayName: "Primary before switch",
+      capabilities: new Set(["CATALOG_LIST", "ORDER_CREATE"] as const),
+      async createOrder(input: Parameters<typeof firstBase.createOrder>[0]) {
+        firstCalls += 1;
+        return firstBase.createOrder(input);
+      },
+    };
+    const secondProvider = {
+      ...secondBase,
+      providerKey: secondSupplierId,
+      displayName: "Current primary",
+      capabilities: new Set(["CATALOG_LIST", "ORDER_CREATE"] as const),
+      async createOrder(input: Parameters<typeof secondBase.createOrder>[0]) {
+        secondCalls += 1;
+        return secondBase.createOrder(input);
+      },
+    };
+
+    const result = await fulfillPaidOrder(ctx.db, {
+      orderId: first.orderId,
+      correlationId: "primary-switch-regression",
+      deps: {
+        vault: createInMemoryVault(),
+        supplier: null,
+        supplierResolver: (supplierId) =>
+          supplierId === secondSupplierId
+            ? secondProvider
+            : supplierId === first.supplierId
+              ? firstProvider
+              : null,
+        supplierPurchaseEnabled: () => true,
+        deliveryBaseUrl: "https://shop.example/d",
+        bundleTtlSeconds: 900,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: true, kind: "DELIVERY_BUNDLE" });
+    expect(firstCalls).toBe(0);
+    expect(secondCalls).toBe(1);
+    const orders = await sql<{ supplier_id: string }>`
+      select supplier_id from supplier_order where order_id = ${first.orderId}
+    `.execute(ctx.db);
+    expect(orders.rows).toEqual([{ supplier_id: secondSupplierId }]);
   });
 
   it("drains a paid supplier order into one supplier asset and delivery bundle", async () => {

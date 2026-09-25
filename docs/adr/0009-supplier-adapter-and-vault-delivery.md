@@ -23,3 +23,22 @@ Calls to other shops are modeled as Supplier Adapters with catalog/availability/
   input, and never marks existing mappings missing after a skipped row.
 - Supplier catalog rows are discovered disabled by default; unsupported rows
   cannot be selected, enabled, made primary, or published.
+
+## PR #24 supplier purchase readiness boundary
+
+Before a new upstream purchase, the current mapping must be the explicit
+`product_variant.supplier_sku_id`, with an active supplier and SKU, a provider
+that supports `ORDER_CREATE`, and the effective purchase gate enabled. A
+provider that declares `CATALOG_LIST` is catalog-managed: its matching
+`supplier_catalog_product` row is mandatory and must be `SELECTED`, enabled,
+`SUPPORTED`, not missing, and `AVAILABLE` or `LOW`. The check runs before the
+durable `supplier_order` insert and is repeated after winning idempotency, immediately
+before `createOrder`; the second check refreshes the canonical upstream SKU/cost
+snapshot. Unsafe mappings do not fail over or perform upstream I/O; a race after
+the durable insert is recorded as a rejected local supplier order.
+
+The compatibility rule is capability-based, not provider-name-based. A
+capability-aware provider with `CATALOG_LIST` requires the catalog row; a
+legacy injected `SupplierPort` without capability metadata keeps the existing
+non-catalog behavior, while still requiring the explicit primary mapping and
+active supplier/SKU.

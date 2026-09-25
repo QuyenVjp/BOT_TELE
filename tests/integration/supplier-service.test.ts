@@ -78,6 +78,9 @@ async function seedPaidOrderWithSupplierSku(): Promise<Fixture> {
     insert into supplier_sku (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type, is_active)
     values (${supplierSkuId}, ${supplierId}, ${variantId}, ${externalSku}, 120000, 'VN', 'CREDENTIAL', true)
   `.execute(ctx.db);
+  await sql`
+    update product_variant set supplier_sku_id = ${supplierSkuId} where id = ${variantId}
+  `.execute(ctx.db);
 
   return { orderId, customerId, variantId, supplierId, supplierSkuId, externalSku };
 }

@@ -515,6 +515,9 @@ export function createQcstSupplierPort(
       const products = await listProducts();
       const product = products.find((item) => item.externalProductId === input.supplierSku);
       if (!product) throw new SupplierPortError("NOT_FOUND", "QCST product was not found");
+      if (product.supportStatus === "UNSUPPORTED") {
+        throw new SupplierPortError("PRODUCT_UNSUPPORTED", "QCST product is unsupported");
+      }
       return {
         status: product.availability,
         observedAt: new Date().toISOString(),

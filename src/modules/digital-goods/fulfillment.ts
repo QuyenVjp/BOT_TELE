@@ -185,8 +185,6 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
       join supplier s on s.id = ss.supplier_id
       where ss.variant_id = ${order.variantId}
         and ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId})
-        and ss.is_active
-        and s.status = 'ACTIVE'
       limit 1
     `.execute(db);
     const sku = supplierSku.rows[0];
