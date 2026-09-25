@@ -126,6 +126,8 @@ export const envSchema = z.object({
 
   SUPPLIER_PURCHASE_ENABLED: booleanEnv,
   SUPPLIER_AUTO_FAILOVER_ENABLED: booleanEnv,
+  SUPPLIER_CANARY_ENABLED: booleanEnv,
+  SUPPLIER_CANARY_MAX_COST_VND: z.coerce.number().int().nonnegative().default(100_000),
 
   // QCST uses a Vault reference, never a raw API key in environment/config.
   QCST_PROVIDER_ENABLED: booleanEnv,

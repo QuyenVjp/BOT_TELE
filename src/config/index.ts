@@ -173,6 +173,17 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
       "VOKHONG_PURCHASE_ENABLED is blocked until an authenticated order contract is verified",
     );
   }
+  if (config.SUPPLIER_CANARY_ENABLED) {
+    if (!config.SUPPLIER_PURCHASE_ENABLED || !config.QCST_PURCHASE_ENABLED) {
+      issues.push("SUPPLIER_CANARY_ENABLED requires generic and QCST purchase gates");
+    }
+    if (
+      config.SUPPLIER_CANARY_MAX_COST_VND <= 0 ||
+      config.SUPPLIER_CANARY_MAX_COST_VND > 1_000_000
+    ) {
+      issues.push("SUPPLIER_CANARY_MAX_COST_VND must stay between 1 and 1000000 in production");
+    }
+  }
   if (config.ADMIN_TELEGRAM_USER_ID === 0) {
     issues.push("ADMIN_TELEGRAM_USER_ID must be a real numeric Telegram id in production");
   }

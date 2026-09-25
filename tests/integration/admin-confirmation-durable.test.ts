@@ -4,6 +4,7 @@ import { createAdminCallbacks } from "../../src/bot/callbacks/admin.js";
 import {
   createAdminConfirmation,
   DURABLE_ADMIN_COMMAND_REFS,
+  isGenericDurableAdminCommandRef,
 } from "../../src/modules/identity/admin-confirmation.js";
 import {
   getProductPublicationReadiness,
@@ -323,7 +324,7 @@ describe("durable AdminConfirmation (T163/T164)", () => {
     const seeded = await seed();
     const admin = callbacks(seeded.rootChannelIdentityId);
 
-    for (const command of DURABLE_ADMIN_COMMAND_REFS) {
+    for (const command of DURABLE_ADMIN_COMMAND_REFS.filter(isGenericDurableAdminCommandRef)) {
       const issued = await admin.handle({
         command,
         actor,

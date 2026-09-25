@@ -581,6 +581,12 @@ export interface TelegramDomainDispatcherDeps {
       supplierSkuId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    supplierCanaryPreview?(input: {
+      telegramUserId: string;
+      chatType: string;
+      supplierSkuId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     supplierCatalogProducts?(input: {
       telegramUserId: string;
       chatType: string;
@@ -2629,6 +2635,15 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Xác nhận thủ công không khả dụng.");
+        } else if (route.startsWith("supcan:")) {
+          message = admin.supplierCanaryPreview
+            ? await admin.supplierCanaryPreview({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                supplierSkuId: route.slice("supcan:".length),
+                correlationId,
+              })
+            : safeError("Canary nhà cung cấp chưa được cấu hình.");
         } else if (route.startsWith("supc:")) {
           message = admin.supplierClear
             ? await admin.supplierClear({

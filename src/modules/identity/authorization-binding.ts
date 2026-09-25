@@ -109,6 +109,47 @@ export async function loadSensitiveAuthorizationBinding(
           localVariantId: value.local_variant_id,
         }
       : null;
+  } else if (input.actionKey === "supplier.canary.purchase") {
+    const row = await sql<{
+      version: string;
+      status: string;
+      supplier_id: string;
+      supplier_sku_id: string;
+      variant_id: string;
+      provider_key: string;
+      external_sku: string;
+      region: string | null;
+      approved_cost_vnd: string;
+      cost_vnd_snapshot: string;
+      balance_vnd_snapshot: string | null;
+      currency: string;
+      created_by: string;
+    }>`
+      select version::text, status, supplier_id, supplier_sku_id, variant_id, provider_key,
+             external_sku, region, approved_cost_vnd::text, cost_vnd_snapshot::text,
+             balance_vnd_snapshot::text, currency, created_by
+      from supplier_canary_run
+      where id = ${input.resourceId}
+      limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value?.version ?? "missing";
+    current = value
+      ? {
+          status: value.status,
+          supplierId: value.supplier_id,
+          supplierSkuId: value.supplier_sku_id,
+          variantId: value.variant_id,
+          providerKey: value.provider_key,
+          externalSku: value.external_sku,
+          region: value.region,
+          approvedCostVnd: value.approved_cost_vnd,
+          costVndSnapshot: value.cost_vnd_snapshot,
+          balanceVndSnapshot: value.balance_vnd_snapshot,
+          currency: value.currency,
+          createdBy: value.created_by,
+        }
+      : null;
   } else if (input.actionKey.startsWith("supplier.mapping.")) {
     const variantId = requestedString(requested, "variantId");
     const candidateBinding =

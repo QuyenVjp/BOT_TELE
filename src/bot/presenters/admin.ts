@@ -1372,6 +1372,16 @@ export function presentAdminSupplierVariant(input: {
         callbackData: `admin:supm:${mapping.supplierSkuId}`,
       },
     ],
+    ...(mapping.selected
+      ? [
+          [
+            {
+              text: `Canary nhỏ ${mapping.externalSku}`,
+              callbackData: `admin:supcan:${mapping.supplierSkuId}`,
+            },
+          ],
+        ]
+      : []),
   ]);
   if (input.mappings.some((mapping) => mapping.selected))
     buttons.push([{ text: "Bỏ chọn mapping", callbackData: `admin:supc:${input.variantId}` }]);
@@ -1394,6 +1404,56 @@ export function presentAdminSupplierActionDone(input: {
       [{ text: ADMIN_COPY.suppliers, callbackData: `admin:supv:${input.variantId}` }],
       adminNav("admin:suppliers"),
     ],
+  };
+}
+
+export function presentAdminSupplierCanaryChallenge(input: {
+  runId: string;
+  confirmationId: string;
+  challenge: string;
+  expiresAt: string;
+  providerName: string;
+  externalSku: string;
+  costVnd: number;
+  balanceVnd: number;
+  currency: string;
+}): PresentedMessage {
+  return {
+    text: [
+      "Supplier canary preview",
+      "",
+      `Provider: ${input.providerName}`,
+      `SKU: ${input.externalSku}`,
+      `Chi phí tối đa: ${input.costVnd.toLocaleString("vi-VN")} ${input.currency}`,
+      `Số dư đọc được: ${input.balanceVnd.toLocaleString("vi-VN")} ${input.currency}`,
+      "Chưa gửi POST. Xác nhận bằng /confirm <ID> <mã> để chạy canary.",
+      `Run: ${input.runId}`,
+      `ID: ${input.confirmationId}`,
+      `Mã: ${input.challenge}`,
+      `Hết hạn: ${input.expiresAt}`,
+    ].join("\n"),
+    buttons: [[{ text: "⌂ Nhà cung cấp", callbackData: "admin:suppliers" }]],
+  };
+}
+
+export function presentAdminSupplierCanaryResult(input: {
+  runId: string;
+  status?: string;
+  externalOrderId?: string;
+  code?: string;
+  message?: string;
+}): PresentedMessage {
+  return {
+    text: [
+      input.code ? `Canary bị chặn: ${input.code}` : "Supplier canary",
+      input.message ?? (input.status ? `Trạng thái: ${input.status}` : ""),
+      input.externalOrderId ? `Mã provider: ${input.externalOrderId}` : "",
+      `Run: ${input.runId}`,
+      "Không tạo đơn thương mại, payment, wallet, digital asset hoặc customer delivery.",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    buttons: [[{ text: "⌂ Nhà cung cấp", callbackData: "admin:suppliers" }]],
   };
 }
 
