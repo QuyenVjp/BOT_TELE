@@ -29,7 +29,6 @@ const productionSheetsEnv = {
   VAULT_EGRESS_HOST_ALLOWLIST: "127.0.0.1",
   VAULT_EGRESS_PORT_ALLOWLIST: "443",
   VAULT_EGRESS_CIDR_ALLOWLIST: "127.0.0.1/32",
-  SUPPLIER_DRIVER: "http",
   GOOGLE_SHEETS_ENABLED: "true",
   GOOGLE_SHEETS_SPREADSHEET_ID: "spreadsheet-id",
   GOOGLE_SHEETS_CREDENTIAL_VAULT_REF: "vault:google-sheets-service-account",
@@ -99,5 +98,104 @@ describe("Google Sheets configuration", () => {
         GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED: "true",
       }),
     ).toThrow("GOOGLE_SHEETS_OIDC_AUDIENCE is required when inventory intake is enabled");
+  });
+});
+
+describe("QCST configuration", () => {
+  it("defaults every external purchase and curation gate off", () => {
+    const config = envSchema.parse(baseEnv);
+    expect(config.QCST_PROVIDER_ENABLED).toBe(false);
+    expect(config.QCST_CATALOG_SYNC).toBe(false);
+    expect(config.QCST_ADMIN_PRODUCT_BROWSER).toBe(false);
+    expect(config.QCST_OWNER_SELECTION).toBe(false);
+    expect(config.QCST_LOCAL_PRICE_CONTROL).toBe(false);
+    expect(config.QCST_PURCHASE_ENABLED).toBe(false);
+  });
+
+  it("requires actual provider rollout gates before production purchase enablement", () => {
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        QCST_PROVIDER_ENABLED: "true",
+        QCST_PURCHASE_ENABLED: "true",
+        QCST_API_KEY_VAULT_REF: "vault:qcst-api-key",
+      }),
+    ).toThrow("QCST_PURCHASE_ENABLED requires the generic and QCST provider gates");
+  });
+
+  it("accepts production QCST with actual rollout gates and a Vault reference", () => {
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        QCST_PROVIDER_ENABLED: "true",
+        SUPPLIER_PURCHASE_ENABLED: "true",
+        QCST_CATALOG_SYNC: "true",
+        QCST_ADMIN_PRODUCT_BROWSER: "true",
+        QCST_OWNER_SELECTION: "true",
+        QCST_LOCAL_PRICE_CONTROL: "true",
+        QCST_PURCHASE_ENABLED: "true",
+        QCST_API_KEY_VAULT_REF: "vault:qcst-api-key",
+      }),
+    ).not.toThrow();
+  });
+
+  it("rejects raw QCST credentials in production", () => {
+    const rawKeyField = ["QCST", "API_KEY"].join("_");
+    const rawKey = ["test", "only", "value"].join("-");
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        [rawKeyField]: rawKey,
+      }),
+    ).toThrow("QCST_API_KEY is unsupported");
+  });
+});
+
+describe("generic supplier platform configuration", () => {
+  it("defaults generic purchase, failover, and Vô Không gates off", () => {
+    const config = envSchema.parse(baseEnv);
+    expect(config.SUPPLIER_PURCHASE_ENABLED).toBe(false);
+    expect(config.SUPPLIER_AUTO_FAILOVER_ENABLED).toBe(false);
+    expect(config.VOKHONG_PROVIDER_ENABLED).toBe(false);
+    expect(config.VOKHONG_PURCHASE_ENABLED).toBe(false);
+    expect(config.VOKHONG_API_BASE_URL).toBe("https://vokhong.xyz/api");
+  });
+
+  it("keeps Vô Không disabled without a Vault credential", () => {
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        VOKHONG_PROVIDER_ENABLED: "true",
+      }),
+    ).toThrow("VOKHONG_API_KEY_VAULT_REF must be a Vault reference");
+  });
+
+  it("allows authenticated health-only Vô Không registration but blocks purchase", () => {
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        VOKHONG_PROVIDER_ENABLED: "true",
+        VOKHONG_API_KEY_VAULT_REF: "vault:vokhong-api-key",
+      }),
+    ).not.toThrow();
+    resetConfigCache();
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        SUPPLIER_PURCHASE_ENABLED: "true",
+        VOKHONG_PROVIDER_ENABLED: "true",
+        VOKHONG_API_KEY_VAULT_REF: "vault:vokhong-api-key",
+        VOKHONG_PURCHASE_ENABLED: "true",
+      }),
+    ).toThrow("VOKHONG_PURCHASE_ENABLED is blocked");
+  });
+
+  it("rejects automatic supplier failover in production", () => {
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        SUPPLIER_AUTO_FAILOVER_ENABLED: "true",
+      }),
+    ).toThrow("SUPPLIER_AUTO_FAILOVER_ENABLED must remain false");
   });
 });

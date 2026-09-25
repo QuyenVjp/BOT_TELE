@@ -38,6 +38,11 @@ import type {
 import { isId } from "../../shared/ids/index.js";
 import { REASON_LABEL } from "./support.js";
 import { renderAdminProductList, type AdminProductView } from "./admin-product-list.js";
+import type {
+  SupplierCatalogRow,
+  SupplierLocalVariantTarget,
+} from "../../modules/supplier/catalog.js";
+import type { SupplierCapability } from "../../modules/supplier/port.js";
 
 /**
  * Owner-safe Vietnamese admin presenters (T098, FR-021–FR-023).
@@ -1023,8 +1028,10 @@ export function presentAdminNotePrompt(input: {
 
 export interface AdminSupplierOverview {
   id: string;
+  providerKey?: string;
   name: string;
   adapterType: string;
+  capabilities?: readonly SupplierCapability[];
   status: string;
   activeMappings: number;
   variantId?: string;
@@ -1045,8 +1052,24 @@ export interface AdminSupplierVariantMapping {
 export function presentAdminSuppliersMenu(
   suppliers: AdminSupplierOverview[] = [],
 ): PresentedMessage {
+  const providerButtons = suppliers.slice(0, 20).flatMap((supplier) => {
+    const providerKey = supplier.providerKey ?? supplier.name;
+    const base = `admin:supplier:${providerKey}`;
+    const capabilities = new Set(supplier.capabilities ?? []);
+    const buttons: InlineButton[][] = [];
+    if (capabilities.has("CATALOG_LIST")) {
+      buttons.push([{ text: `${supplier.name} · Catalog`, callbackData: `${base}:products` }]);
+    }
+    if (capabilities.has("BALANCE_READ")) {
+      buttons.push([{ text: `${supplier.name} · Balance`, callbackData: `${base}:balance` }]);
+    }
+    if (capabilities.has("HEALTH_READ")) {
+      buttons.push([{ text: `${supplier.name} · Health`, callbackData: `${base}:health` }]);
+    }
+    return buttons;
+  });
   if (suppliers.length === 0) {
-    return presentAdminSection(ADMIN_COPY.suppliers, "Chưa có nhà cung cấp đang hoạt động.");
+    return presentAdminSection(ADMIN_COPY.suppliers, "Chưa có nhà cung cấp đang hoạt động.", []);
   }
   const visible = suppliers.slice(0, 20);
   return presentAdminSection(
@@ -1058,19 +1081,264 @@ export function presentAdminSuppliersMenu(
           `• ${supplier.name} — ${supplier.status} — ${supplier.activeMappings} mapping${supplier.variantName ? ` — ${supplier.variantName}` : ""}`,
       ),
     ].join("\n"),
-    visible.flatMap((supplier) =>
-      supplier.variantId
-        ? [
-            [
-              {
-                text: supplier.variantName ?? supplier.name,
-                callbackData: `admin:supv:${supplier.variantId}`,
-              },
-            ],
-          ]
-        : [],
-    ),
+    [
+      ...visible.flatMap((supplier) =>
+        supplier.variantId
+          ? [
+              [
+                {
+                  text: supplier.variantName ?? supplier.name,
+                  callbackData: `admin:supv:${supplier.variantId}`,
+                },
+              ],
+            ]
+          : [],
+      ),
+      ...providerButtons,
+    ],
   );
+}
+export interface AdminSupplierCatalogPageInput {
+  providerKey: string;
+  providerName: string;
+  capabilities: readonly SupplierCapability[];
+  items: SupplierCatalogRow[];
+  nextOffset: number | null;
+  total: number;
+  syncEnabled: boolean;
+}
+
+function supplierStateLabel(row: SupplierCatalogRow): string {
+  if (row.is_missing) return "MISSING";
+  if (row.domain_status === "UNSUPPORTED") {
+    return `UNSUPPORTED · ${row.domain_unsupported_reason ?? "reason unavailable"}`;
+  }
+  if (row.selection_status === "DISCOVERED") return "DISCOVERED · tắt";
+  return row.is_enabled ? "SELECTED · bật" : "SELECTED · tắt";
+}
+
+function supplierBase(providerKey: string): string {
+  return `admin:supplier:${providerKey}`;
+}
+
+export function presentAdminSupplierCatalogPage(
+  input: AdminSupplierCatalogPageInput,
+): PresentedMessage {
+  const base = supplierBase(input.providerKey);
+  const lines = [
+    `Nhà cung cấp: ${input.providerName}`,
+    `Tổng upstream: ${input.total}`,
+    `Capabilities: ${input.capabilities.join(", ") || "HEALTH_READ"}`,
+    "",
+    ...(input.items.length
+      ? input.items.map(
+          (row, index) =>
+            `${index + 1}. ${row.upstream_name_vi} — ${row.availability} — ${supplierStateLabel(row)} — cost ${BigInt(row.supplier_cost_vnd).toLocaleString("vi-VN")} ₫`,
+        )
+      : ["Chưa có catalog upstream. Hãy đồng bộ read-only sau khi cấu hình Vault reference."]),
+  ];
+  const buttons: InlineButton[][] = input.items.map((row) => [
+    { text: `⚙️ ${row.upstream_name_vi.slice(0, 42)}`, callbackData: `${base}:item:${row.id}` },
+  ]);
+  if (input.syncEnabled)
+    buttons.push([{ text: "🔄 Đồng bộ upstream", callbackData: `${base}:sync` }]);
+  if (input.nextOffset !== null) {
+    buttons.push([{ text: "➡️ Trang tiếp", callbackData: `${base}:page:${input.nextOffset}` }]);
+  }
+  buttons.push(adminNav("admin:suppliers"));
+  return { text: lines.join("\n"), buttons };
+}
+
+export function presentAdminSupplierCatalogDetail(input: {
+  providerKey: string;
+  providerName: string;
+  row: SupplierCatalogRow;
+  ownerSelectionEnabled: boolean;
+}): PresentedMessage {
+  const { row } = input;
+  const base = supplierBase(input.providerKey);
+  const lines = [
+    `Nhà cung cấp: ${input.providerName}`,
+    `Upstream ID: ${row.external_product_id}`,
+    `Upstream variant ID: ${row.external_variant_id || "default"}`,
+    `Tên upstream: ${row.upstream_name_vi}`,
+    `Availability: ${row.is_missing ? "MISSING" : row.availability}`,
+    `Cost tham chiếu: ${BigInt(row.supplier_cost_vnd).toLocaleString("vi-VN")} ₫`,
+    `Trạng thái: ${supplierStateLabel(row)}`,
+    ...(row.domain_status === "UNSUPPORTED" && row.domain_unsupported_reason
+      ? [`Lý do không hỗ trợ: ${row.domain_unsupported_reason}`]
+      : []),
+    "",
+    row.local_name_vi ? `Tên local: ${row.local_name_vi}` : "Chưa cấu hình local product.",
+    row.local_variant_name_vi ? `Gói local: ${row.local_variant_name_vi}` : "",
+    "Giá bán local chỉ do owner đặt; cost upstream không tự đổi giá bán.",
+  ].filter(Boolean);
+  const buttons: InlineButton[][] = [];
+  if (input.ownerSelectionEnabled && row.domain_status === "SUPPORTED") {
+    buttons.push([
+      {
+        text: row.selection_status === "SELECTED" ? "✏️ Cấu hình lại" : "✅ Chọn & cấu hình",
+        callbackData: `${base}:configure:${row.id}`,
+      },
+    ]);
+    if (!row.local_variant_id) {
+      buttons.push([
+        {
+          text: "🔗 Gắn vào SKU local",
+          callbackData: `${base}:targets:${row.id}`,
+        },
+      ]);
+    }
+    if (row.selection_status === "SELECTED") {
+      buttons.push([
+        {
+          text: row.is_enabled ? "⏸ Tắt bán" : "▶️ Bật bán",
+          callbackData: `${base}:${row.is_enabled ? "disable" : "enable"}:${row.id}`,
+        },
+      ]);
+    }
+    if (row.supplier_sku_id && row.local_variant_id && !row.is_primary) {
+      buttons.push([
+        {
+          text: "⭐ Chọn làm primary",
+          callbackData: `${base}:primary:${row.id}`,
+        },
+      ]);
+    }
+  }
+  buttons.push(
+    [{ text: "↩️ Danh sách upstream", callbackData: `${base}:products` }],
+    adminHomeOnly,
+  );
+  return { text: lines.join("\n"), buttons };
+}
+
+export function presentAdminSupplierVariantTargets(input: {
+  providerKey: string;
+  providerName: string;
+  catalogId: string;
+  items: SupplierLocalVariantTarget[];
+  nextOffset: number | null;
+}): PresentedMessage {
+  const base = supplierBase(input.providerKey);
+  const lines = [
+    `Gắn ${input.providerName} vào SKU local`,
+    "Chọn đúng một variant local. Giá bán và tồn local hiện tại không bị đổi.",
+    "",
+    ...(input.items.length
+      ? input.items.map(
+          (target, index) =>
+            `${index + 1}. ${target.productNameVi} — ${target.variantNameVi} (${target.sku})${target.primarySupplierId ? ` — primary ${target.primarySupplierId}` : ""}`,
+        )
+      : ["Không có variant local khả dụng."]),
+  ];
+  const buttons: InlineButton[][] = input.items.map((target) => [
+    {
+      text: `🔗 ${target.productNameVi.slice(0, 24)} / ${target.variantNameVi.slice(0, 24)}`,
+      callbackData: `${base}:attach-target:${input.catalogId}:${target.variantId}`,
+    },
+  ]);
+  if (input.nextOffset !== null) {
+    buttons.push([
+      {
+        text: "➡️ Trang tiếp",
+        callbackData: `${base}:targets:${input.catalogId}:${input.nextOffset}`,
+      },
+    ]);
+  }
+  buttons.push(
+    [{ text: "↩️ Chi tiết upstream", callbackData: `${base}:item:${input.catalogId}` }],
+    adminHomeOnly,
+  );
+  return { text: lines.join("\n"), buttons };
+}
+
+export function presentAdminSupplierConfigPrompt(input: {
+  providerKey: string;
+  providerName: string;
+  targetVariantId?: string;
+}): PresentedMessage {
+  const base = supplierBase(input.providerKey);
+  return {
+    text: [
+      `Nhà cung cấp: ${input.providerName}`,
+      input.targetVariantId ? `Variant local đích: ${input.targetVariantId}` : "",
+      "",
+      "Gửi đúng 4 phần, ngăn bằng dấu |:",
+      "Tên local | Tên gói local | Giá bán VND | Mô tả ngắn",
+      `Ví dụ: ${input.providerName} | Gói 1 tháng | 199000 | Kích hoạt tự động sau thanh toán.`,
+      "Giá là số nguyên VND. Cost upstream không được dùng làm giá bán.",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    buttons: [[{ text: "↩️ Danh sách upstream", callbackData: `${base}:products` }], adminHomeOnly],
+  };
+}
+export function presentAdminSupplierConfigPreview(input: {
+  providerKey: string;
+  providerName: string;
+  stateId: string;
+  localNameVi: string;
+  localVariantNameVi: string;
+  localPriceVnd: bigint;
+  localDescriptionVi: string;
+  attachOnly?: boolean;
+}): PresentedMessage {
+  const base = supplierBase(input.providerKey);
+  return {
+    text: [
+      `Nhà cung cấp: ${input.providerName}`,
+      "",
+      input.attachOnly
+        ? "Gắn mapping vào SKU local; các giá trị local dưới đây là chỉ đọc:"
+        : "Xem trước cấu hình local:",
+      `Tên: ${input.localNameVi}`,
+      `Gói: ${input.localVariantNameVi}`,
+      `Giá bán: ${input.localPriceVnd.toLocaleString("vi-VN")} ₫`,
+      `Mô tả: ${input.localDescriptionVi}`,
+      "",
+      "Chọn lưu và bật bán chỉ khi upstream đang AVAILABLE/LOW. Lưu tắt vẫn giữ mapping và lịch sử.",
+    ].join("\n"),
+    buttons: [
+      [
+        { text: "✅ Lưu & bật bán", callbackData: `${base}:confirm:${input.stateId}:on` },
+        { text: "💾 Lưu tắt", callbackData: `${base}:confirm:${input.stateId}:off` },
+      ],
+      [{ text: "❌ Huỷ", callbackData: `${base}:products` }],
+    ],
+  };
+}
+
+export function presentAdminSupplierCatalogActionDone(input: {
+  providerKey: string;
+  providerName: string;
+  catalogId: string;
+  enabled: boolean;
+  productId?: string;
+  variantId?: string;
+}): PresentedMessage {
+  const base = supplierBase(input.providerKey);
+  return {
+    text: [
+      `✅ ${input.providerName} curation`,
+      input.enabled
+        ? "Đã lưu mapping và bật bán theo trạng thái upstream."
+        : "Đã lưu mapping ở trạng thái tắt.",
+      input.productId ? `Local product: ${input.productId}` : "",
+      input.variantId ? `Local variant: ${input.variantId}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n"),
+    buttons: [
+      [
+        {
+          text: `Mở sản phẩm ${input.providerName}`,
+          callbackData: `${base}:item:${input.catalogId}`,
+        },
+      ],
+      [{ text: "Danh sách upstream", callbackData: `${base}:products` }, ...adminHomeOnly],
+    ],
+  };
 }
 
 export function presentAdminSupplierVariant(input: {

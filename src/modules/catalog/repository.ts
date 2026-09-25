@@ -10,6 +10,7 @@ import {
   PUBLIC_BRAND_CATEGORY_SLUGS,
   PUBLIC_ROOT_CATEGORY_SLUGS,
 } from "./taxonomy.js";
+import { SUPPLIER_READY_SQL, SUPPLIER_ROUTE_SQL } from "./supplier-readiness-sql.js";
 
 const PUBLIC_BRAND_SLUG_SQL = sql.join(
   PUBLIC_BRAND_CATEGORY_SLUGS.map((slug) => sql`${slug}`),
@@ -95,10 +96,7 @@ export const VARIANT_READY_SQL = sql`
     when v.fulfillment_type = 'DIGITAL_FILE' then exists (
       select 1 from variant_file_artifact f where f.variant_id = v.id and f.is_active
     )
-    when v.fulfillment_type = 'SUPPLIER_API' then exists (
-      select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-      where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-    )
+    when v.fulfillment_type = 'SUPPLIER_API' then ${SUPPLIER_READY_SQL}
     when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
       select 1 from variant_service_fulfillment sf
       where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
@@ -110,10 +108,7 @@ export const VARIANT_READY_SQL = sql`
 export const SELLABLE_ROUTE_SQL = sql`
   (
     (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
-    or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
-      select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-      where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-    ))
+    or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and ${SUPPLIER_ROUTE_SQL})
   )
 `;
 
@@ -474,8 +469,7 @@ export async function listStorefrontProducts(
             select count(*)::int from variant_file_artifact f where f.variant_id = v.id and f.is_active
           )
           when v.fulfillment_type = 'SUPPLIER_API' then (
-            select count(*)::int from supplier_sku ss join supplier s on s.id = ss.supplier_id
-            where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
+            case when ${SUPPLIER_READY_SQL} then 1 else 0 end
           )
           when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then (
             select count(*)::int from variant_service_fulfillment sf
@@ -551,7 +545,8 @@ export async function listTestCatalogProducts(
             (select count(*)::int from variant_file_artifact f where f.variant_id = v.id and f.is_active)
           when v.fulfillment_type = 'SUPPLIER_API' then
             (select count(*)::int from supplier_sku ss join supplier s on s.id = ss.supplier_id
-             where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE')
+             where ss.variant_id = v.id and ss.id = v.supplier_sku_id
+               and ss.is_active and s.status = 'ACTIVE')
           when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then
             (select count(*)::int from variant_service_fulfillment sf
              where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active)

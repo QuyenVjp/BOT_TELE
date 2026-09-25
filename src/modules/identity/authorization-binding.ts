@@ -81,6 +81,34 @@ export async function loadSensitiveAuthorizationBinding(
     current = value
       ? { version: value.version, status: value.status, reservedOrderId: value.reserved_order_id }
       : null;
+  } else if (input.actionKey === "supplier.catalog.curate") {
+    const supplierId = requestedString(requested, "supplierId");
+    const row = await sql<{
+      version: string;
+      supplier_id: string;
+      selection_status: string;
+      is_enabled: boolean;
+      is_missing: boolean;
+      availability: string;
+      local_variant_id: string | null;
+    }>`
+      select version::text, supplier_id, selection_status, is_enabled, is_missing, availability, local_variant_id
+      from supplier_catalog_product
+      where id = ${input.resourceId} and supplier_id = ${supplierId ?? ""}
+      limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value?.version ?? "missing";
+    current = value
+      ? {
+          supplierId: value.supplier_id,
+          selectionStatus: value.selection_status,
+          enabled: value.is_enabled,
+          missing: value.is_missing,
+          availability: value.availability,
+          localVariantId: value.local_variant_id,
+        }
+      : null;
   } else if (input.actionKey.startsWith("supplier.mapping.")) {
     const variantId = requestedString(requested, "variantId");
     const candidateBinding =

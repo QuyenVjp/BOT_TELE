@@ -58,7 +58,6 @@ vi.mock("../../src/infrastructure/vault/adapter.js", () => ({
 }));
 
 const DB_PASS = ["shop", "local", "only"].join("-");
-const SUPPLIER_TOKEN = ["supplier", "token", "with", "spaces"].join(" ");
 
 function productionEnv(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
@@ -91,9 +90,6 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Node
     VAULT_EGRESS_HOST_ALLOWLIST: "127.0.0.1",
     VAULT_EGRESS_PORT_ALLOWLIST: "8443",
     VAULT_EGRESS_CIDR_ALLOWLIST: "127.0.0.1/32",
-    SUPPLIER_DRIVER: "http",
-    SUPPLIER_API_BASE_URL: "https://supplier.example.com",
-    SUPPLIER_API_TOKEN: SUPPLIER_TOKEN,
     BOT_TELE_EXPECTED_DB: "localhost:5432/shop",
     ...overrides,
   };
@@ -194,10 +190,8 @@ describe("production preflight", () => {
     expect(result.fingerprint.vietQrBankAlias).toBe("MB");
     expect(result.fingerprint.vaultDriver).toBe("external");
     expect(result.fingerprint.vaultEndpointHost).toBe("127.0.0.1");
-    expect(result.fingerprint.supplierToken).toBe("CONFIGURED");
     expect(JSON.stringify(result)).not.toContain(DB_PASS);
     expect(JSON.stringify(result)).not.toContain("AA-SECRET-BOT-TOKEN");
-    expect(JSON.stringify(result)).not.toContain(SUPPLIER_TOKEN);
     expect(loadConfig(productionEnv()).VIETQR_ACCOUNT_NAME).toBe("NGUYEN VAN TEST");
   });
 

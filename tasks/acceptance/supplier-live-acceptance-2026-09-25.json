@@ -1,0 +1,67 @@
+{
+  "artifact": "supplier-live-acceptance",
+  "captured_at_utc": "2026-09-25T04:58:13Z",
+  "repository": {
+    "head": "2705917d7d4e318b753b43eb5c308eb78a52da96",
+    "branch": "feat/qcst-external-supplier",
+    "dirty_tracked_files": false
+  },
+  "credential_checkpoint": {
+    "qcst_vault_reference": "ABSENT",
+    "vokhong_vault_reference": "ABSENT",
+    "fresh_material": "NOT_AVAILABLE",
+    "raw_credentials_observed": false,
+    "required_owner_action": "Rotate exposed supplier keys; enter fresh QCST/Vokhong material directly into the external Vault; configure opaque vault references without sending values through chat or files."
+  },
+  "qcst_live": {
+    "status": "BLOCKED",
+    "authenticated_get_products": "NOT_RUN",
+    "authenticated_get_balance": "NOT_RUN",
+    "authenticated_get_orders": "NOT_RUN",
+    "state_changing_supplier_requests": "NOT_RUN",
+    "reason": "No fresh QCST Vault reference/material is configured."
+  },
+  "qcst_curation": {
+    "status": "BLOCKED",
+    "catalog_sync": "NOT_RUN",
+    "owner_create_or_attach": "NOT_RUN",
+    "enable_disable_toggle": "NOT_RUN",
+    "reason": "Requires fresh QCST credentials and an owner-authenticated Telegram session."
+  },
+  "vokhong_health": {
+    "status": "BLOCKED",
+    "authenticated_get_health": "NOT_RUN",
+    "catalog_or_order_requests": "NOT_RUN",
+    "reason": "No fresh VOKHONG Vault reference/material is configured."
+  },
+  "owner_ui": {
+    "status": "BLOCKED",
+    "playwright_agent": "FAILED_BEFORE_SESSION",
+    "failure_class": "provider_account_verification_403",
+    "authenticated_owner_session": "NOT_OBSERVED",
+    "screenshots": []
+  },
+  "purchase_safety": {
+    "SUPPLIER_PURCHASE_ENABLED": false,
+    "QCST_PURCHASE_ENABLED": false,
+    "VOKHONG_PURCHASE_ENABLED": false,
+    "QCST_PROVIDER_ENABLED": false,
+    "VOKHONG_PROVIDER_ENABLED": false,
+    "QCST_CATALOG_SYNC_ENABLED": false,
+    "VOKHONG_CATALOG_SYNC_ENABLED": false,
+    "SUPPLIER_AUTO_FAILOVER_ENABLED": false,
+    "paid_production_order_created_by_acceptance": false,
+    "supplier_create_order_called_by_acceptance": false
+  },
+  "configuration_note": "The production env contains a legacy unsupported SUPPLIER_API_TOKEN entry. It was not read, printed, reused, or modified; the gate assertion removed that variable only in memory before loading config. Production env cleanup remains an owner-controlled follow-up.",
+  "verification": {
+    "full_verify_gate": "PASS",
+    "full_verify_gate_commands": 11,
+    "secret_scan": "PASS",
+    "migration_head": "093_supplier_catalog_platform.sql",
+    "migration_file_count": 91,
+    "duplicate_migration_ordinals": [],
+    "build_identity_commit": "2705917d7d4e318b753b43eb5c308eb78a52da96",
+    "build_identity_dirty": false
+  }
+}

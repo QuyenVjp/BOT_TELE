@@ -16,6 +16,135 @@ import { AppError } from "../../shared/errors/index.js";
  * review case, never a silent delivery.
  */
 
+export const SUPPLIER_CAPABILITIES = [
+  "HEALTH_READ",
+  "CATALOG_LIST",
+  "CATALOG_DETAIL",
+  "BALANCE_READ",
+  "ORDER_CREATE",
+  "ORDER_READ",
+  "ORDER_LIST",
+  "NATIVE_IDEMPOTENCY",
+  "CANCEL",
+  "REFUND",
+  "STOCK_QUANTITY",
+  "DELIVERY_PAYLOAD",
+  "RATE_LIMIT_RETRY_AFTER",
+] as const;
+export type SupplierCapability = (typeof SUPPLIER_CAPABILITIES)[number];
+
+export type SupplierProductSupportStatus = "SUPPORTED" | "UNSUPPORTED";
+
+export const SUPPLIER_PRODUCT_UNSUPPORTED_REASONS = [
+  "CUSTOMER_INPUT_COUNT_INCONSISTENT",
+  "MAX_QUANTITY_SEMANTICS_UNKNOWN",
+  "QUANTITY_BOUNDS_INCONSISTENT",
+  "FIXED_QUANTITY_UNSUPPORTED",
+] as const;
+
+export type SupplierProductUnsupportedReason =
+  (typeof SUPPLIER_PRODUCT_UNSUPPORTED_REASONS)[number];
+
+export interface NormalizedSupplierProduct {
+  providerKey: string;
+  externalProductId: string;
+  externalVariantId: string | null;
+  nameVi: string;
+  nameEn: string | null;
+  descriptionVi: string | null;
+  descriptionEn: string | null;
+  warrantyVi: string | null;
+  warrantyEn: string | null;
+  customerInputType: string | null;
+  requiresCustomerInput: boolean;
+  customerInputsPerItem: number;
+  customerPromptVi: string | null;
+  customerPromptEn: string | null;
+  fulfillmentMode: string | null;
+  availability: AvailabilityStatus;
+  stockType: string | null;
+  stockQuantity: number | null;
+  minQuantity: number;
+  maxQuantity: number | null;
+  fixedQuantity: number | null;
+  costVnd: number;
+  currency: string;
+  pricingSource: string | null;
+  upstreamUpdatedAt: string | null;
+  supportStatus: SupplierProductSupportStatus;
+  unsupportedReason: SupplierProductUnsupportedReason | null;
+  metadataSafe: Readonly<Record<string, string | number | boolean | null>>;
+}
+
+const POSTGRES_INT_MIN = -2_147_483_648;
+const POSTGRES_INT_MAX = 2_147_483_647;
+
+function isStoredInteger(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= POSTGRES_INT_MIN && value <= POSTGRES_INT_MAX;
+}
+
+export function assertNormalizedSupplierProduct(product: NormalizedSupplierProduct): void {
+  if (
+    (product.supportStatus !== "SUPPORTED" && product.supportStatus !== "UNSUPPORTED") ||
+    (product.unsupportedReason !== null &&
+      !SUPPLIER_PRODUCT_UNSUPPORTED_REASONS.includes(product.unsupportedReason)) ||
+    !product.currency.trim() ||
+    product.currency.length > 16
+  ) {
+    throw new Error("SUPPLIER_PRODUCT_INVALID");
+  }
+  if (
+    !product.providerKey.trim() ||
+    !product.externalProductId.trim() ||
+    !product.nameVi.trim() ||
+    !Number.isSafeInteger(product.costVnd) ||
+    product.costVnd < 0 ||
+    !isStoredInteger(product.customerInputsPerItem) ||
+    product.customerInputsPerItem < 0 ||
+    !isStoredInteger(product.minQuantity) ||
+    product.minQuantity < 1 ||
+    (product.stockQuantity !== null &&
+      (!isStoredInteger(product.stockQuantity) || product.stockQuantity < 0)) ||
+    (product.maxQuantity !== null &&
+      (!isStoredInteger(product.maxQuantity) || product.maxQuantity < 0)) ||
+    (product.fixedQuantity !== null &&
+      (!isStoredInteger(product.fixedQuantity) || product.fixedQuantity < 0))
+  ) {
+    throw new Error("SUPPLIER_PRODUCT_INVALID");
+  }
+  if (
+    product.upstreamUpdatedAt !== null &&
+    (product.upstreamUpdatedAt.length > 512 ||
+      !Number.isFinite(Date.parse(product.upstreamUpdatedAt)))
+  ) {
+    throw new Error("SUPPLIER_PRODUCT_INVALID");
+  }
+  if (product.supportStatus === "UNSUPPORTED") {
+    if (!product.unsupportedReason) throw new Error("SUPPLIER_PRODUCT_INVALID");
+    return;
+  }
+  if (product.unsupportedReason !== null) throw new Error("SUPPLIER_PRODUCT_INVALID");
+  if (product.requiresCustomerInput && product.customerInputsPerItem <= 0) {
+    throw new Error("SUPPLIER_PRODUCT_INVALID");
+  }
+  if (product.maxQuantity !== null && product.maxQuantity < product.minQuantity) {
+    throw new Error("SUPPLIER_PRODUCT_INVALID");
+  }
+  if (product.fixedQuantity !== null && product.fixedQuantity < 1) {
+    throw new Error("SUPPLIER_PRODUCT_INVALID");
+  }
+}
+
+export interface NormalizedSupplierBalance {
+  available: number;
+  currency: string;
+}
+
+export interface NormalizedSupplierHealth {
+  ready: boolean;
+  service: string | null;
+}
+
 export class SupplierPortError extends AppError {
   /** Supplier-specific reason code (SCHEMA_INVALID, TIMEOUT, …). */
   readonly supplierCode: string;
@@ -195,4 +324,21 @@ export interface SupplierPort {
   cancelOrder(input: SupplierActionInput): Promise<SupplierActionResult>;
   requestRefund(input: SupplierActionInput): Promise<SupplierActionResult>;
   reconcile(input: ReconcileInput): Promise<ReconcileResult>;
+}
+
+export interface SupplierProvider extends SupplierPort {
+  readonly providerKey: string;
+  readonly displayName: string;
+  readonly capabilities: ReadonlySet<SupplierCapability>;
+  readonly listProducts?: () => Promise<readonly NormalizedSupplierProduct[]>;
+  readonly getProduct?: (externalProductId: string) => Promise<NormalizedSupplierProduct>;
+  readonly getBalance?: () => Promise<NormalizedSupplierBalance>;
+  readonly health?: () => Promise<NormalizedSupplierHealth>;
+}
+
+export function hasSupplierCapability(
+  provider: Pick<SupplierProvider, "capabilities">,
+  capability: SupplierCapability,
+): boolean {
+  return provider.capabilities.has(capability);
 }

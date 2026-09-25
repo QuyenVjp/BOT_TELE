@@ -89,12 +89,10 @@ export interface FulfillmentOutcome {
 /**
  * Classify a fulfillment outcome into a dispatch decision.
  *
- * - success → PUBLISHED
  * - OUT_OF_STOCK / NEEDS_REVIEW / ISSUE_FAILED → RETRY (stock may land, supplier
  *   may recover, vault may recover)
- * - NOT_PAID / NOT_FOUND / DELIVERY_HANDOFF_* → TERMINAL_REVIEW (domain
- *   invariant or missing delivery route; spinning forever will not help and
- *   hides the real defect from the operator)
+ * - SUPPLIER_UNSUPPORTED / NOT_PAID / NOT_FOUND / DELIVERY_HANDOFF_* → TERMINAL_REVIEW
+ *   (the configured route cannot satisfy the event)
  */
 export function classifyFulfillmentOutcome(result: FulfillmentOutcome): DispatchDecision {
   if (result.ok) return { kind: "PUBLISHED" };
@@ -107,6 +105,7 @@ export function classifyFulfillmentOutcome(result: FulfillmentOutcome): Dispatch
     // No order/bundle to hand off and no retry can synthesize one: the delivery
     // handoff path parks the row for operator review instead of burning the
     // attempt budget on an outcome that is already deterministic.
+    case "SUPPLIER_UNSUPPORTED":
     case "NOT_PAID":
     case "NOT_FOUND":
     case "DELIVERY_HANDOFF_NOT_READY":

@@ -370,6 +370,20 @@ block checkout, payment or fulfillment.
   reopens the adapter, it requires a separate security and live-acceptance gate
   while the store remains `CLOSED`.
 
+### Staged intake enablement
+
+- `GOOGLE_SHEETS_ENABLED` controls the existing secret-free projection lane and may remain
+  enabled before the owner intake boundary is commissioned.
+- `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED` is a separate opt-in gate, defaulting to `false`.
+  It is the only switch that enables Apps Script catalog/preview/confirm routes and challenge
+  expiry/recovery.
+- Production requires `GOOGLE_SHEETS_OIDC_AUDIENCE` only when the intake gate is enabled.
+  Missing intake configuration must disable only the intake lane; it must not crash the worker
+  or stop PostgreSQL commerce lanes and projection reconciliation.
+- The intake gate may become `true` only after the migration, Apps Script manifest/owner setup,
+  exact audience, and live owner acceptance are ready. The store remains `CLOSED` during this
+  sequence.
+
 ### Module seams
 
 - `infrastructure/google-sheets/client.ts` owns the official Google Sheets API
@@ -568,3 +582,83 @@ are reused rather than forked.
 - `risked_invariants`: concurrent promotion usage, stale Buy Again references, review eligibility
   proof, referral abuse and aggregate metric drift. Focused transaction, security and acceptance
   tests must cover each boundary before release.
+
+## 18. Multi-provider supplier platform and owner curation (2026-09)
+
+External shops are independent providers behind one supplier platform. QCST is
+the first real adapter; Vô Không and future shops must not force provider names
+into catalog, purchase, payment, or customer modules.
+
+`SupplierProvider` is the provider-neutral boundary. Each adapter declares a
+provider key and capabilities (`CATALOG_LIST`, `CATALOG_DETAIL`,
+`BALANCE_READ`, `ORDER_CREATE`, `ORDER_READ`, `ORDER_LIST`,
+`NATIVE_IDEMPOTENCY`, `CANCEL`, `REFUND`, `STOCK_QUANTITY`,
+`DELIVERY_PAYLOAD`, and `RATE_LIMIT_RETRY_AFTER`) and implements only supported
+operations. Adapters validate raw responses and return normalized product,
+availability, order, action, and reconciliation results. Raw provider payloads
+never cross the adapter boundary.
+
+The registry is the only provider-specific selection point. Generic supplier
+catalog, durable purchase, recovery, fulfillment, audit, and customer routing
+code consume the provider-neutral contracts and capability checks; they do not
+branch on `QCST` or `VOKHONG`. Unsupported financial actions return
+`UNSUPPORTED` or remain `NEEDS_REVIEW`; they are never emulated.
+
+Migration `093` is the next unused forward source ordinal after scanning the
+complete tree through `092`. It keeps `supplier`, `supplier_sku`, and
+`supplier_order` provider-neutral, namespaces external product/order identity
+by provider and optional external variant, and stores only safe catalog
+snapshots, local mapping state, supplier-cost observations, and durable
+purchase fingerprints. One local variant may have multiple supplier mappings;
+`product_variant.supplier_sku_id` is the explicit primary source. Non-primary
+mappings may retain local metadata but are not routable fallback candidates until
+an owner explicitly changes primary policy. Automatic cross-provider failover is
+permanently off for this rollout.
+
+Upstream existence never publishes a product. Every provider sync creates or
+updates `DISCOVERED`/unselected disabled rows. The owner explicitly chooses the
+provider mapping and enabled state. Creating a new local product may set its
+Vietnamese presentation and local selling price; attaching a provider mapping
+to an existing local variant is mapping-only and preserves every local product,
+variant, description, and selling-price field. Supplier cost is reference data
+and never rewrites the local selling price. Only an owner-selected enabled
+primary mapping with an active local product/variant and provider availability
+rules may enter customer routing. Missing or out-of-stock mappings preserve
+history and are hidden or buy-blocked.
+Supplier purchase requires the generic purchase gate, the specific provider
+purchase gate, `ORDER_CREATE`, and paid/settled fulfillment prerequisites.
+Missing authorization is false; no upstream POST is permitted otherwise.
+
+QCST uses the documented raw `X-API-Key` from Vault at request time, pinned
+`https://api.qcst.tech`, and separate read-only/purchase gates. QCST
+cancellation is supported only through its documented endpoint; no separate
+refund route is assumed. Owner-provided documentation now identifies an
+authenticated Vô Không API under `https://vokhong.xyz/api`, including
+`GET /health`, `/products`, `/balance`, and `/orders` plus API-key,
+idempotency, and rate-limit behavior. The adapter currently adopts only
+authenticated `HEALTH_READ` using a fresh Vault reference; catalog, balance,
+order, delivery, cancellation, refund, and reconciliation remain unsupported
+until bounded read-only evidence and implementation exist. The chat-exposed
+credential is not used.
+
+Telegram private owner UX is the only supplier surface: supplier hub, provider
+screen, capability-specific controls, paginated safe metadata, explicit
+create/attach mapping, and primary selection. Customers choose only BOT_TELE
+products and never provider IDs. No Mini App, public admin HTTP surface, raw key,
+credential, or provider delivery payload enters Telegram, logs, Sheets, fixtures,
+or screenshots.
+
+### Invariant ledger
+
+- `invariants_preserved`: Vault-only secrets; Telegram-only UX; generic durable
+  idempotency and timeout ambiguity; local price authority; mapping-only
+  existing-SKU attachment; fail-closed supplier purchase; root/step-up
+  authorization; explicit primary mapping; existing publication/evidence gates;
+  audit, versions, and fail-closed customer routing.
+- `intentional_breaks`: none to payment, fulfillment, or store-mode semantics;
+  provider-specific catalog data is now represented through a generic boundary.
+- `risked_invariants`: provider capability drift, stale pages, duplicate
+  provider identities, owner mispricing, ambiguous delivery, and provider
+  outages. Schema validation, namespaced uniqueness, optimistic binding,
+  capability checks, bounded transport, reconciliation, and no automatic
+  failover bound these risks.

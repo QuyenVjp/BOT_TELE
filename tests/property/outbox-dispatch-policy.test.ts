@@ -42,6 +42,13 @@ describe("classifyFulfillmentOutcome", () => {
     );
   });
 
+  it("parks unsupported supplier capabilities for owner review", () => {
+    expect(classifyFulfillmentOutcome({ ok: false, code: "SUPPLIER_UNSUPPORTED" })).toMatchObject({
+      kind: "TERMINAL_REVIEW",
+      errorCode: "SUPPLIER_UNSUPPORTED",
+    });
+  });
+
   it("retries an issue failure (transient infra) with backoff", () => {
     expect(classifyFulfillmentOutcome({ ok: false, code: "ISSUE_FAILED" }).kind).toBe("RETRY");
   });

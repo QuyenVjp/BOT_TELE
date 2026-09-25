@@ -142,6 +142,12 @@ async function seed(): Promise<SeedIds> {
     values (${configuredSupplierSkuId}, ${configuredSupplierId}, ${configuredSupplierVariantId}, 'EXT-SUP-OK', 50000, 'LICENSE', true)
   `.execute(ctx.db);
 
+  await sql`
+    update product_variant
+       set supplier_sku_id = ${configuredSupplierSkuId}
+     where id = ${configuredSupplierVariantId}
+  `.execute(ctx.db);
+
   // Unsellable variants (must all be hidden).
   await sql`
     insert into product_variant

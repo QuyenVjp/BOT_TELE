@@ -35,15 +35,22 @@ import { provisionFromSupplier } from "../supplier/service.js";
 
 export interface FulfillmentDeps {
   vault: Vault;
-  /** Optional supplier port; null disables the supplier path. */
+  /** Legacy single supplier fallback for fixtures; production uses supplierResolver. */
   supplier: SupplierPort | null;
+  supplierResolver?: ((supplierId: string) => SupplierPort | null) | undefined;
+  supplierPurchaseEnabled?: ((supplierId: string) => boolean) | undefined;
   deliveryBaseUrl: string;
   bundleTtlSeconds: number;
   deliveryTokenKeys?: readonly string[];
 }
-
 export type FulfillErrorCode =
-  "NOT_FOUND" | "NOT_PAID" | "OUT_OF_STOCK" | "NEEDS_REVIEW" | "SUPPLIER_PENDING" | "ISSUE_FAILED";
+  | "NOT_FOUND"
+  | "NOT_PAID"
+  | "OUT_OF_STOCK"
+  | "NEEDS_REVIEW"
+  | "SUPPLIER_PENDING"
+  | "SUPPLIER_UNSUPPORTED"
+  | "ISSUE_FAILED";
 
 export type FulfillResult =
   | {
@@ -164,14 +171,8 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
   }
 
   let assetId: string | null = null;
+  let selectedSupplier: SupplierPort | null = null;
   if (order.fulfillmentType === "SUPPLIER_API") {
-    if (!deps.supplier) {
-      return {
-        ok: false,
-        code: "NEEDS_REVIEW",
-        message: "Chưa cấu hình nhà cung cấp cho đơn hàng này.",
-      };
-    }
     const supplierSku = await sql<{
       supplier_id: string;
       supplier_sku_id: string;
@@ -183,17 +184,33 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
       from supplier_sku ss
       join supplier s on s.id = ss.supplier_id
       where ss.variant_id = ${order.variantId}
-        and (ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId}) or (select supplier_sku_id from product_variant where id = ${order.variantId}) is null)
-        and ss.is_active
-        and s.status = 'ACTIVE'
-      order by case when ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId}) then 0 else 1 end, ss.id asc
+        and ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId})
+      limit 1
     `.execute(db);
     const sku = supplierSku.rows[0];
     if (!sku) {
       return {
         ok: false,
         code: "NEEDS_REVIEW",
-        message: "Không tìm thấy SKU nhà cung cấp đang hoạt động.",
+        message: "Không tìm thấy SKU nhà cung cấp chính đang hoạt động.",
+      };
+    }
+    const purchaseEnabled = deps.supplierPurchaseEnabled?.(sku.supplier_id) ?? false;
+    if (!purchaseEnabled) {
+      return {
+        ok: false,
+        code: "SUPPLIER_UNSUPPORTED",
+        message: "Mua từ nhà cung cấp đang bị khóa.",
+      };
+    }
+    selectedSupplier = deps.supplierResolver
+      ? deps.supplierResolver(sku.supplier_id)
+      : deps.supplier;
+    if (!selectedSupplier) {
+      return {
+        ok: false,
+        code: "NEEDS_REVIEW",
+        message: "Nhà cung cấp chính chưa được cấu hình.",
       };
     }
     const provision = await provisionFromSupplier(db, {
@@ -208,11 +225,17 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
       durationCode: order.durationCode,
       region: sku.region,
       correlationId,
-      port: deps.supplier,
+      port: selectedSupplier,
       vault: deps.vault,
       idempotencyKey: `${orderId}:${sku.supplier_sku_id}`,
+      purchaseEnabled,
     });
-    if (!provision.ok) return provision;
+    if (!provision.ok) {
+      return {
+        ...provision,
+        code: provision.code === "UNSUPPORTED" ? "SUPPLIER_UNSUPPORTED" : provision.code,
+      };
+    }
     if (provision.kind === "UNKNOWN") {
       return {
         ok: false,
@@ -275,7 +298,7 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
     });
 
     if (!prepared.ok) {
-      if (deps.supplier === null) {
+      if (selectedSupplier === null) {
         return {
           ok: false,
           code: "OUT_OF_STOCK",

@@ -118,7 +118,6 @@ describe("secret registry", () => {
       TELEGRAM_BOT_TOKEN: BOT_MATERIAL,
       VAULT_TOKEN: VAULT_MATERIAL,
       TELEGRAM_WEBHOOK_SECRET: "short",
-      SUPPLIER_API_TOKEN: undefined,
       DATABASE_URL: 42,
     };
     const keys = Object.keys(config);

@@ -7,7 +7,7 @@ import {
   validateRecoveryBatchSize,
   type RecoveryTelemetry,
 } from "../recovery-result.js";
-import type { SupplierPort } from "./port.js";
+import { hasSupplierCapability, type SupplierPort, type SupplierProvider } from "./port.js";
 import { recoverUnknownSupplierOrder } from "./service.js";
 
 interface SupplierRecoveryRow {
@@ -49,8 +49,11 @@ export async function recoverSupplierOrdersBatch(
         from supplier_order so
         join supplier_sku ss on ss.id = so.supplier_sku_id
         join "order" o on o.id = so.order_id
-        where (so.status in ('UNKNOWN','PENDING')
-            or (so.status = 'SUBMITTED' and so.submitted_at <= ${new Date(now.getTime() - retryDelaySeconds * 1000).toISOString()}))
+        where so.needs_review_at is null
+          and (
+            so.status in ('UNKNOWN','PENDING')
+            or (so.status = 'SUBMITTED' and so.submitted_at <= ${new Date(now.getTime() - retryDelaySeconds * 1000).toISOString()})
+          )
           and coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at, now())
               <= ${now.toISOString()}
         order by coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at) asc nulls first,
@@ -73,6 +76,19 @@ export async function recoverSupplierOrdersBatch(
     try {
       const port = options.resolvePort(candidate.supplier_id);
       if (!port) throw new Error("supplier recovery port unavailable");
+      if (
+        "capabilities" in port &&
+        !hasSupplierCapability(port as SupplierProvider, "ORDER_READ")
+      ) {
+        await sql`
+          update supplier_order
+          set last_error_code = 'UNSUPPORTED', needs_review_at = now(), next_reconcile_at = null,
+              version = version + 1
+          where id = ${candidate.id}
+        `.execute(db);
+        failed += 1;
+        continue;
+      }
       const result = await recoverUnknownSupplierOrder(db, {
         supplierOrderId: candidate.id,
         queryKey: candidate.external_order_id ?? candidate.idempotency_key,
@@ -94,7 +110,8 @@ export async function recoverSupplierOrdersBatch(
   const remaining = await sql<{ backlog: number; oldest: Date | string | null }>`
     select count(*)::int as backlog, min(coalesce(submitted_at, last_queried_at)) as oldest
     from supplier_order
-    where status in ('UNKNOWN','PENDING','SUBMITTED')
+    where needs_review_at is null
+      and status in ('UNKNOWN','PENDING','SUBMITTED')
   `.execute(db);
   const row = remaining.rows[0];
   return {

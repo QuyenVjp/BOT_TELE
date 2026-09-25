@@ -4,8 +4,8 @@ import { envSchema, SECRET_ENV_KEYS, type Env, type SecretEnvKey } from "./env.j
  * Validated configuration loader.
  *
  * - Parses and coerces `process.env` through the Zod schema (fail-closed).
- * - In production, forbids memory/fixture drivers that are only safe for local
- *   development and tests, so missing production values cannot silently ship.
+ * - In production, requires external Vault and provider-specific rollout gates
+ *   so missing production values cannot silently ship.
  * - Never throws with secret values in the message; only key names are surfaced.
  *
  * Phase 2 (T011) hardens diagnostics further; the schema itself lives in env.ts.
@@ -56,6 +56,23 @@ export function resetConfigCache(): void {
 function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv): string[] {
   if (config.NODE_ENV !== "production") return [];
   const issues: string[] = [];
+  const isPinnedSupplierUrl = (value: string, hostname: string, path: string): boolean => {
+    try {
+      const url = new URL(value);
+      return (
+        url.protocol === "https:" &&
+        url.hostname === hostname &&
+        (url.port === "" || url.port === "443") &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash &&
+        url.pathname.replace(/\/$/, "") === path
+      );
+    } catch {
+      return false;
+    }
+  };
   if (config.GOOGLE_SHEETS_ENABLED) {
     if (!config.GOOGLE_SHEETS_SPREADSHEET_ID) {
       issues.push("GOOGLE_SHEETS_SPREADSHEET_ID is required when Google Sheets is enabled");
@@ -67,6 +84,14 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
     }
     if (!config.GOOGLE_SHEETS_OWNER_ID) {
       issues.push("GOOGLE_SHEETS_OWNER_ID is required when Google Sheets is enabled");
+    }
+  }
+  if (config.GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED) {
+    if (!config.GOOGLE_SHEETS_ENABLED) {
+      issues.push("GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED requires Google Sheets to be enabled");
+    }
+    if (!config.GOOGLE_SHEETS_OIDC_AUDIENCE) {
+      issues.push("GOOGLE_SHEETS_OIDC_AUDIENCE is required when inventory intake is enabled");
     }
   }
   if (config.GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED) {
@@ -106,8 +131,47 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
       "VAULT_EGRESS_HOST_ALLOWLIST, VAULT_EGRESS_PORT_ALLOWLIST, and VAULT_EGRESS_CIDR_ALLOWLIST must be explicit in production",
     );
   }
-  if (config.SUPPLIER_DRIVER === "fixture") {
-    issues.push('SUPPLIER_DRIVER must not be "fixture" in production');
+  if (config.SUPPLIER_AUTO_FAILOVER_ENABLED) {
+    issues.push("SUPPLIER_AUTO_FAILOVER_ENABLED must remain false");
+  }
+  for (const rawKey of ["QCST_API_KEY", "VOKHONG_API_KEY"] as const) {
+    if (source[rawKey]?.trim()) {
+      issues.push(`${rawKey} is unsupported; use the provider Vault reference`);
+    }
+  }
+  if (config.QCST_PROVIDER_ENABLED) {
+    if (!config.QCST_API_KEY_VAULT_REF.startsWith("vault:")) {
+      issues.push("QCST_API_KEY_VAULT_REF must be a Vault reference when QCST is enabled");
+    }
+    if (!isPinnedSupplierUrl(config.QCST_API_BASE_URL, "api.qcst.tech", "")) {
+      issues.push("QCST_API_BASE_URL must use the official HTTPS QCST host");
+    }
+  }
+  if (config.VOKHONG_PROVIDER_ENABLED) {
+    if (!config.VOKHONG_API_KEY_VAULT_REF.startsWith("vault:")) {
+      issues.push("VOKHONG_API_KEY_VAULT_REF must be a Vault reference when Vokhong is enabled");
+    }
+    if (!isPinnedSupplierUrl(config.VOKHONG_API_BASE_URL, "vokhong.xyz", "/api")) {
+      issues.push("VOKHONG_API_BASE_URL must use the official HTTPS Vokhong API path");
+    }
+  }
+  if (config.QCST_PURCHASE_ENABLED) {
+    if (!config.SUPPLIER_PURCHASE_ENABLED || !config.QCST_PROVIDER_ENABLED) {
+      issues.push("QCST_PURCHASE_ENABLED requires the generic and QCST provider gates");
+    }
+    if (
+      !config.QCST_CATALOG_SYNC ||
+      !config.QCST_ADMIN_PRODUCT_BROWSER ||
+      !config.QCST_OWNER_SELECTION ||
+      !config.QCST_LOCAL_PRICE_CONTROL
+    ) {
+      issues.push("QCST purchase requires its actual provider rollout gates");
+    }
+  }
+  if (config.VOKHONG_PURCHASE_ENABLED) {
+    issues.push(
+      "VOKHONG_PURCHASE_ENABLED is blocked until an authenticated order contract is verified",
+    );
   }
   if (config.ADMIN_TELEGRAM_USER_ID === 0) {
     issues.push("ADMIN_TELEGRAM_USER_ID must be a real numeric Telegram id in production");
@@ -174,7 +238,6 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
     "SEPAY_WEBHOOK_HMAC_SECRET",
     "SEPAY_API_TOKEN",
     "VAULT_TOKEN",
-    "SUPPLIER_API_TOKEN",
   ] as const satisfies readonly (keyof AppConfig)[];
   for (const key of reusedDeliveryKey) {
     if (config.DELIVERY_SESSION_HMAC_KEY === config[key]) {

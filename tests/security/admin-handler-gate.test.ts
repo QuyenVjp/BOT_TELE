@@ -28,6 +28,7 @@ const REAL_GATES = [
   "authorizeSensitiveAdminAction(",
   "authorizeRootAction(",
   "guardRootAction(",
+  "requireSupplierOwner(",
 ] as const;
 
 /**

@@ -126,8 +126,26 @@ import {
   createPostgresTelegramInbox,
 } from "./infrastructure/inbox/telegram.js";
 import type { SePayReconciliationPort } from "./modules/payments/reconciliation.js";
-import type { SupplierPort } from "./modules/supplier/port.js";
+import type {
+  SupplierCapability,
+  SupplierPort,
+  SupplierProvider,
+} from "./modules/supplier/port.js";
+import type { SupplierProviderRegistry } from "./modules/supplier/registry.js";
 import type { RecoveryTelemetry } from "./modules/recovery-result.js";
+import {
+  configureSupplierCatalogProduct,
+  ensureSupplierProvider,
+  getSupplierCatalogProduct,
+  getSupplierLocalVariantTarget,
+  listSupplierCatalog,
+  listSupplierLocalVariantTargets,
+  parseSupplierCurationText,
+  setSupplierCatalogEnabled,
+  setSupplierCatalogPrimary,
+  syncSupplierCatalog,
+  type SupplierCurationText,
+} from "./modules/supplier/catalog.js";
 import type { PreorderStatus } from "./modules/commerce/preorder.js";
 import { recoverExpiredOrdersBatch } from "./modules/commerce/recovery.js";
 import {
@@ -248,6 +266,7 @@ export async function runRecoveryJobsOnce(input: {
   now?: Date;
   sePayPort: SePayReconciliationPort | null;
   supplierPort: SupplierPort | null;
+  supplierRegistry?: SupplierProviderRegistry | null;
   vault: Vault;
   inboxRetention?: Partial<TelegramInboxRetention>;
 }): Promise<RecoveryCycleResult> {
@@ -293,14 +312,16 @@ export async function runRecoveryJobsOnce(input: {
   const sePay = input.sePayPort
     ? await recoverSePayBatch(input.db, { batchSize: input.batchSize, now, port: input.sePayPort })
     : null;
-  const supplier = input.supplierPort
-    ? await recoverSupplierOrdersBatch(input.db, {
-        batchSize: input.batchSize,
-        now,
-        resolvePort: () => input.supplierPort,
-        vault: input.vault,
-      })
-    : null;
+  const supplier =
+    input.supplierPort || input.supplierRegistry
+      ? await recoverSupplierOrdersBatch(input.db, {
+          batchSize: input.batchSize,
+          now,
+          resolvePort: (supplierId) =>
+            input.supplierRegistry?.get(supplierId) ?? input.supplierPort,
+          vault: input.vault,
+        })
+      : null;
   return {
     orders,
     reservations,
@@ -1406,7 +1427,10 @@ async function bootstrap(): Promise<void> {
   const { createLogger } = await import("./infrastructure/observability/logger.js");
   const logger = createLogger(config);
 
-  // Value-scanning redaction: path censoring only covers known keys, so the resolved
+  const { createSandboxSupplierAdapter } = await import("./modules/supplier/adapters/primary.js");
+  const { createQcstSupplierPort } = await import("./modules/supplier/adapters/qcst.js");
+  const { createVokhongSupplierPort } = await import("./modules/supplier/adapters/vokhong.js");
+  const { createSupplierProviderRegistry } = await import("./modules/supplier/registry.js");
   // secret values are registered once here and scrubbed everywhere after.
   const { registerConfigSecrets } = await import("./infrastructure/observability/redact.js");
   registerConfigSecrets(config, SECRET_ENV_KEYS);
@@ -1416,7 +1440,6 @@ async function bootstrap(): Promise<void> {
   const { drainOutboxOnce } = await import("./infrastructure/outbox/worker.js");
   const { createFulfillmentOutboxHandler } = await import("./modules/digital-goods/handlers.js");
   const { createFulfillmentTelemetry } = await import("./modules/digital-goods/telemetry.js");
-  const { createSandboxSupplierAdapter } = await import("./modules/supplier/adapters/primary.js");
   const { createSePayApiPort } = await import("./modules/payments/sepay-api.js");
   const {
     consumeTelegramUsernameObservation,
@@ -1587,6 +1610,12 @@ async function bootstrap(): Promise<void> {
     presentAdminSupplierActionDone,
     presentAdminSupplierVariant,
     presentAdminSuppliersMenu,
+    presentAdminSupplierCatalogPage,
+    presentAdminSupplierCatalogDetail,
+    presentAdminSupplierVariantTargets,
+    presentAdminSupplierConfigPrompt,
+    presentAdminSupplierConfigPreview,
+    presentAdminSupplierCatalogActionDone,
     presentAdminSupportQueue,
     presentAdminSupportTickets,
     presentAdminSupportTicket,
@@ -1680,9 +1709,81 @@ async function bootstrap(): Promise<void> {
       });
   }
   const telemetry = createFulfillmentTelemetry();
-  // Fixture supplier for local/dev; production swaps an HTTP adapter (T143).
+  let qcst: ReturnType<typeof createQcstSupplierPort> | null = null;
+  const providers: SupplierProvider[] = [];
+  const supplierAdminFlags = new Map<
+    string,
+    { browser: boolean; sync: boolean; ownerSelection: boolean; localPriceControl: boolean }
+  >();
+  const supplierPurchaseFlags = new Map<string, boolean>();
+  if (config.QCST_PROVIDER_ENABLED) {
+    if (!config.QCST_API_KEY_VAULT_REF.startsWith("vault:")) {
+      throw new Error("QCST provider is enabled but its Vault reference is incomplete");
+    }
+    qcst = createQcstSupplierPort({
+      baseUrl: config.QCST_API_BASE_URL,
+      apiKeyVaultRef: config.QCST_API_KEY_VAULT_REF,
+      timeoutMs: config.QCST_TIMEOUT_MS,
+      vault,
+    });
+    providers.push(qcst);
+    await ensureSupplierProvider(dbHandle.db, {
+      providerKey: qcst.providerKey,
+      displayName: qcst.displayName,
+      adapterType: "QCST",
+      credentialVaultRef: config.QCST_API_KEY_VAULT_REF,
+      baseUrl: config.QCST_API_BASE_URL,
+      capabilities: [...qcst.capabilities],
+    });
+    supplierAdminFlags.set(qcst.providerKey, {
+      browser: config.QCST_ADMIN_PRODUCT_BROWSER,
+      sync: config.QCST_CATALOG_SYNC,
+      ownerSelection: config.QCST_OWNER_SELECTION,
+      localPriceControl: config.QCST_LOCAL_PRICE_CONTROL,
+    });
+    supplierPurchaseFlags.set(qcst.providerKey, config.QCST_PURCHASE_ENABLED);
+  }
+  if (config.VOKHONG_PROVIDER_ENABLED) {
+    if (!config.VOKHONG_API_KEY_VAULT_REF.startsWith("vault:")) {
+      throw new Error("Vokhong provider is enabled but its Vault reference is incomplete");
+    }
+    const vokhong = createVokhongSupplierPort({
+      baseUrl: config.VOKHONG_API_BASE_URL,
+      apiKeyVaultRef: config.VOKHONG_API_KEY_VAULT_REF,
+      vault,
+      timeoutMs: config.VOKHONG_TIMEOUT_MS,
+    });
+    providers.push(vokhong);
+    await ensureSupplierProvider(dbHandle.db, {
+      providerKey: vokhong.providerKey,
+      displayName: vokhong.displayName,
+      adapterType: "VOKHONG",
+      credentialVaultRef: config.VOKHONG_API_KEY_VAULT_REF,
+      baseUrl: config.VOKHONG_API_BASE_URL,
+      capabilities: [...vokhong.capabilities],
+    });
+    supplierAdminFlags.set(vokhong.providerKey, {
+      browser: config.VOKHONG_ADMIN_PRODUCT_BROWSER,
+      sync: config.VOKHONG_CATALOG_SYNC,
+      ownerSelection: config.VOKHONG_OWNER_SELECTION,
+      localPriceControl: config.VOKHONG_LOCAL_PRICE_CONTROL,
+    });
+    supplierPurchaseFlags.set(vokhong.providerKey, config.VOKHONG_PURCHASE_ENABLED);
+  }
+  if (
+    (config.QCST_PURCHASE_ENABLED || config.VOKHONG_PURCHASE_ENABLED) &&
+    !config.SUPPLIER_PURCHASE_ENABLED
+  ) {
+    throw new Error("supplier purchase requires SUPPLIER_PURCHASE_ENABLED");
+  }
+  const supplierRegistry = providers.length ? createSupplierProviderRegistry(providers) : null;
+  if (config.QCST_PURCHASE_ENABLED && !qcst) {
+    throw new Error("QCST purchase is enabled but its provider is unavailable");
+  }
   const supplier =
-    config.SUPPLIER_DRIVER === "fixture" ? createSandboxSupplierAdapter({ mode: "fulfill" }) : null;
+    config.NODE_ENV === "production" || config.QCST_PURCHASE_ENABLED || supplierRegistry
+      ? null
+      : createSandboxSupplierAdapter({ mode: "fulfill" });
   const sePayRecoveryPort =
     config.SEPAY_API_TOKEN.length > 0
       ? createSePayApiPort({
@@ -1701,8 +1802,15 @@ async function bootstrap(): Promise<void> {
 
   const handler = createFulfillmentOutboxHandler({
     db: dbHandle.db,
+    ...(supplierRegistry
+      ? {
+          supplierPurchaseEnabled: (supplierId: string) =>
+            config.SUPPLIER_PURCHASE_ENABLED && (supplierPurchaseFlags.get(supplierId) ?? false),
+        }
+      : {}),
     vault,
     supplier,
+    suppliers: supplierRegistry,
     deliveryBaseUrl: `${config.APP_BASE_URL.replace(/\/$/, "")}/d`,
     bundleTtlSeconds: config.DELIVERY_BUNDLE_TTL_SECONDS,
     deliverySession: {
@@ -2282,6 +2390,35 @@ async function bootstrap(): Promise<void> {
         },
       })
     : null;
+  const requireSupplierOwner = async (
+    input: { telegramUserId: string; chatType: string; correlationId: string },
+    targetId: string,
+  ): Promise<PresentedMessage | null> => {
+    if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+    if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+    const gate = await adminCallbacks.handle({
+      command: "order.inspect",
+      actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+      targetId,
+      reason: "Supplier owner catalog access",
+      correlationId: input.correlationId,
+    });
+    if (!gate.ok) {
+      return presentAdminDenied(gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN");
+    }
+    return null;
+  };
+  const supplierAdminConfig = (providerKey: string) => {
+    const provider = supplierRegistry?.get(providerKey) ?? null;
+    const providerFlags = supplierAdminFlags.get(providerKey);
+    if (!provider || !providerFlags) return null;
+    return {
+      provider,
+      ...providerFlags,
+      catalogSupported:
+        provider.capabilities.has("CATALOG_LIST") && typeof provider.listProducts === "function",
+    };
+  };
   const productDraftWorkflow = createDurableProductDraftWorkflow(
     createProductDraftRepository(dbHandle.db),
   );
@@ -4443,7 +4580,7 @@ async function bootstrap(): Promise<void> {
           select id, kind, payload_redacted as payload
             from admin_callback_state
            where admin_telegram_user_id = ${input.telegramUserId}
-             and kind in ('ADMIN_RESALE_EVIDENCE_PROMPT','ADMIN_PAYMENT_DISPOSITION_PROMPT','ADMIN_OUTBOX_DISPOSITION_PROMPT')
+             and kind in ('ADMIN_RESALE_EVIDENCE_PROMPT','ADMIN_PAYMENT_DISPOSITION_PROMPT','ADMIN_OUTBOX_DISPOSITION_PROMPT','SUPPLIER_CURATE_PROMPT')
              and expires_at > now()
            order by created_at desc, id desc
            limit 1
@@ -4452,6 +4589,53 @@ async function bootstrap(): Promise<void> {
         if (!state || !adminCallbacks) return null;
         const payload = state.payload ?? {};
         const actor = { numericUserId: Number(input.telegramUserId), chatType: "private" as const };
+        if (state.kind === "SUPPLIER_CURATE_PROMPT") {
+          const providerKey = typeof payload.providerKey === "string" ? payload.providerKey : null;
+          const catalogId = typeof payload.catalogId === "string" ? payload.catalogId : null;
+          const targetVariantId =
+            typeof payload.targetVariantId === "string" ? payload.targetVariantId : undefined;
+          const provider = providerKey ? supplierRegistry?.get(providerKey) : null;
+          if (!providerKey || !provider || !catalogId) return null;
+          const providerConfig = supplierAdminConfig(providerKey);
+          if (!providerConfig?.ownerSelection || !providerConfig.localPriceControl) {
+            return presentAdminDenied("NOT_ROOT_ADMIN");
+          }
+          let parsed: SupplierCurationText;
+          try {
+            parsed = parseSupplierCurationText(input.text);
+          } catch {
+            return presentAdminSupplierConfigPrompt({
+              providerKey,
+              providerName: provider.displayName,
+              ...(targetVariantId ? { targetVariantId } : {}),
+            });
+          }
+          await sql`
+            delete from admin_callback_state
+            where id = ${state.id} and admin_telegram_user_id = ${input.telegramUserId}
+          `.execute(dbHandle.db);
+          const previewStateId = await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "SUPPLIER_CURATE_PREVIEW",
+            payload: {
+              providerKey,
+              catalogId,
+              localNameVi: parsed.localNameVi,
+              localVariantNameVi: parsed.localVariantNameVi,
+              localPriceVnd: parsed.localPriceVnd.toString(),
+              ...(targetVariantId ? { targetVariantId } : {}),
+              localDescriptionVi: parsed.localDescriptionVi,
+            },
+            ttlMinutes: 10,
+          });
+          return presentAdminSupplierConfigPreview({
+            providerKey,
+            providerName: provider.displayName,
+            stateId: previewStateId,
+            ...parsed,
+            ...(targetVariantId ? { attachOnly: true } : {}),
+          });
+        }
         if (state.kind === "ADMIN_RESALE_EVIDENCE_PROMPT" && payload.intent !== "REVOKE") {
           const variantId = typeof payload.variantId === "string" ? payload.variantId : null;
           const productId = typeof payload.productId === "string" ? payload.productId : null;
@@ -4866,11 +5050,12 @@ async function bootstrap(): Promise<void> {
           name: string;
           adapter_type: string;
           status: string;
+          provider_capabilities: unknown;
           active_mappings: number;
           variant_id: string | null;
           variant_name: string | null;
         }>`
-          select s.id, s.name, s.adapter_type, s.status,
+          select s.id, s.name, s.adapter_type, s.status, s.provider_capabilities,
             count(ss.id) over (partition by s.id)::int as active_mappings,
             ss.variant_id,
             v.name_vi as variant_name
@@ -4884,14 +5069,529 @@ async function bootstrap(): Promise<void> {
         return presentAdminSuppliersMenu(
           result.rows.map((supplier) => ({
             id: supplier.id,
+            providerKey: supplier.id,
             name: supplier.name,
             adapterType: supplier.adapter_type,
+            capabilities: (Array.isArray(supplier.provider_capabilities)
+              ? supplier.provider_capabilities.filter(
+                  (value): value is string => typeof value === "string",
+                )
+              : []) as SupplierCapability[],
             status: supplier.status,
             activeMappings: supplier.active_mappings,
             ...(supplier.variant_id ? { variantId: supplier.variant_id } : {}),
             ...(supplier.variant_name ? { variantName: supplier.variant_name } : {}),
           })),
         );
+      },
+      async supplierHealth(input) {
+        const denied = await requireSupplierOwner(
+          input,
+          `admin-supplier-health:${input.providerKey}`,
+        );
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.provider.capabilities.has("HEALTH_READ") || !cfg.provider.health) {
+          return {
+            text: "Provider chưa công bố capability HEALTH_READ.",
+            buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
+          };
+        }
+        try {
+          const health = await cfg.provider.health();
+          await sql`
+            update supplier
+            set last_health_check = now(), updated_at = now()
+            where id = ${input.providerKey}
+          `.execute(dbHandle.db);
+          return {
+            text: [
+              `Health ${cfg.provider.displayName}`,
+              `Ready: ${health.ready ? "YES" : "NO"}`,
+              health.service ? `Service: ${health.service}` : "",
+            ]
+              .filter(Boolean)
+              .join("\n"),
+            buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
+          };
+        } catch {
+          return {
+            text: `Health ${cfg.provider.displayName}: không đọc được; giữ nguyên trạng thái local.`,
+            buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
+          };
+        }
+      },
+      async supplierBalance(input) {
+        const denied = await requireSupplierOwner(
+          input,
+          `admin-supplier-balance:${input.providerKey}`,
+        );
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.provider.capabilities.has("BALANCE_READ") || !cfg.provider.getBalance) {
+          return {
+            text: "Provider chưa công bố capability BALANCE_READ.",
+            buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
+          };
+        }
+        try {
+          const balance = await cfg.provider.getBalance();
+          return {
+            text: `Balance ${cfg.provider.displayName}: ${balance.available.toLocaleString("vi-VN")} ${balance.currency}`,
+            buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
+          };
+        } catch {
+          return {
+            text: `Balance ${cfg.provider.displayName}: không đọc được; không thay đổi dữ liệu.`,
+            buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
+          };
+        }
+      },
+      async supplierCatalogProducts(input) {
+        const denied = await requireSupplierOwner(
+          input,
+          `admin-supplier-products:${input.providerKey}`,
+        );
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.browser || !cfg.catalogSupported) {
+          return {
+            text: "Catalog nhà cung cấp chưa được cấu hình hoặc provider chưa công bố capability này.",
+            buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
+          };
+        }
+        const page = await listSupplierCatalog(dbHandle.db, {
+          supplierId: input.providerKey,
+          limit: 8,
+          offset: input.offset ?? 0,
+        });
+        return presentAdminSupplierCatalogPage({
+          ...page,
+          providerKey: input.providerKey,
+          providerName: cfg.provider.displayName,
+          capabilities: [...cfg.provider.capabilities],
+          syncEnabled: cfg.sync,
+        });
+      },
+      async supplierCatalogSync(input) {
+        const denied = await requireSupplierOwner(
+          input,
+          `admin-supplier-sync:${input.providerKey}`,
+        );
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.browser || !cfg.sync || !cfg.catalogSupported) {
+          return {
+            text: "Đồng bộ nhà cung cấp đang tắt. Không gọi upstream.",
+            buttons: [[{ text: "🚚 Nhà cung cấp", callbackData: "admin:suppliers" }]],
+          };
+        }
+        try {
+          const products = await cfg.provider.listProducts!();
+          const summary = await syncSupplierCatalog(
+            dbHandle.db,
+            input.providerKey,
+            products,
+            input.correlationId,
+          );
+          const page = await listSupplierCatalog(dbHandle.db, {
+            supplierId: input.providerKey,
+            limit: 8,
+            offset: 0,
+          });
+          const rendered = presentAdminSupplierCatalogPage({
+            ...page,
+            providerKey: input.providerKey,
+            providerName: cfg.provider.displayName,
+            capabilities: [...cfg.provider.capabilities],
+            syncEnabled: true,
+          });
+          return {
+            text: `✅ ${cfg.provider.displayName} sync: ${summary.discovered} mới, ${summary.updated} cập nhật, ${summary.missing} missing.\n\n${rendered.text}`,
+            buttons: rendered.buttons,
+          };
+        } catch {
+          return {
+            text: "Không đồng bộ được nhà cung cấp. Giữ nguyên catalog local và thử lại sau.",
+            buttons: [
+              [
+                {
+                  text: "Danh sách upstream",
+                  callbackData: `admin:supplier:${input.providerKey}:products`,
+                },
+              ],
+            ],
+          };
+        }
+      },
+      async supplierCatalogItem(input) {
+        const denied = await requireSupplierOwner(input, input.catalogId);
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.browser) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const row = await getSupplierCatalogProduct(dbHandle.db, {
+          supplierId: input.providerKey,
+          catalogId: input.catalogId,
+        });
+        return row
+          ? presentAdminSupplierCatalogDetail({
+              providerKey: input.providerKey,
+              providerName: cfg.provider.displayName,
+              row,
+              ownerSelectionEnabled: cfg.ownerSelection && cfg.localPriceControl,
+            })
+          : {
+              text: "Catalog nhà cung cấp không còn mục này.",
+              buttons: [
+                [
+                  {
+                    text: "Danh sách upstream",
+                    callbackData: `admin:supplier:${input.providerKey}:products`,
+                  },
+                ],
+              ],
+            };
+      },
+      async supplierCatalogTargets(input) {
+        const denied = await requireSupplierOwner(input, input.catalogId);
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.browser || !cfg.ownerSelection || !cfg.localPriceControl) {
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        }
+        const page = await listSupplierLocalVariantTargets(dbHandle.db, {
+          limit: 8,
+          offset: input.offset ?? 0,
+        });
+        return presentAdminSupplierVariantTargets({
+          providerKey: input.providerKey,
+          providerName: cfg.provider.displayName,
+          catalogId: input.catalogId,
+          ...page,
+        });
+      },
+      async supplierCatalogAttach(input) {
+        const denied = await requireSupplierOwner(input, input.catalogId);
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.browser || !cfg.ownerSelection || !cfg.localPriceControl) {
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        }
+        const row = await getSupplierCatalogProduct(dbHandle.db, {
+          supplierId: input.providerKey,
+          catalogId: input.catalogId,
+        });
+        if (!row || row.local_variant_id) {
+          return {
+            text: "Catalog đã có mapping local hoặc không còn tồn tại.",
+            buttons: [
+              [
+                {
+                  text: "Danh sách upstream",
+                  callbackData: `admin:supplier:${input.providerKey}:products`,
+                },
+              ],
+            ],
+          };
+        }
+        const target = await getSupplierLocalVariantTarget(dbHandle.db, input.targetVariantId);
+        if (!target) {
+          return { text: "SKU local không còn tồn tại hoặc không khả dụng.", buttons: [] };
+        }
+        const previewStateId = await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "SUPPLIER_CURATE_PREVIEW",
+          payload: {
+            providerKey: input.providerKey,
+            catalogId: row.id,
+            targetVariantId: target.variantId,
+            localNameVi: target.productNameVi,
+            localVariantNameVi: target.variantNameVi,
+            localPriceVnd: target.priceVnd,
+            localDescriptionVi: target.descriptionVi ?? "",
+          },
+          ttlMinutes: 10,
+        });
+        return presentAdminSupplierConfigPreview({
+          providerKey: input.providerKey,
+          providerName: cfg.provider.displayName,
+          stateId: previewStateId,
+          localNameVi: target.productNameVi,
+          localVariantNameVi: target.variantNameVi,
+          localPriceVnd: BigInt(target.priceVnd),
+          localDescriptionVi: target.descriptionVi ?? "",
+          attachOnly: true,
+        });
+      },
+      async supplierCatalogPrimary(input) {
+        const denied = await requireSupplierOwner(input, input.catalogId);
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.browser || !cfg.ownerSelection || !cfg.localPriceControl) {
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        }
+        const row = await getSupplierCatalogProduct(dbHandle.db, {
+          supplierId: input.providerKey,
+          catalogId: input.catalogId,
+        });
+        if (!row) return { text: "Catalog nhà cung cấp không còn mục này.", buttons: [] };
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "supplier.catalog.curate",
+          resourceType: "SupplierCatalogProduct",
+          resourceId: input.catalogId,
+          requestedData: {
+            supplierId: input.providerKey,
+            catalogId: input.catalogId,
+            primary: true,
+          },
+          consumeGrant: true,
+        });
+        if (!authorization.ok) {
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "supplier.catalog.curate",
+            category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
+          });
+        }
+        try {
+          const result = await setSupplierCatalogPrimary(dbHandle.db, {
+            supplierId: input.providerKey,
+            catalogId: input.catalogId,
+            expectedVersion: row.version,
+            actorId: input.telegramUserId,
+            correlationId: input.correlationId,
+          });
+          return presentAdminSupplierCatalogActionDone({
+            providerKey: input.providerKey,
+            providerName: cfg.provider.displayName,
+            catalogId: input.catalogId,
+            enabled: row.is_enabled,
+            variantId: result.variantId,
+          });
+        } catch (error) {
+          return {
+            text:
+              error instanceof Error && error.message === "SUPPLIER_STALE_VERSION"
+                ? "Catalog nhà cung cấp đã thay đổi. Mở lại sản phẩm rồi thử lại."
+                : "Không chọn được primary: mapping phải được chọn, bật và upstream AVAILABLE/LOW.",
+            buttons: [
+              [
+                {
+                  text: "Danh sách upstream",
+                  callbackData: `admin:supplier:${input.providerKey}:products`,
+                },
+              ],
+            ],
+          };
+        }
+      },
+      async supplierCatalogConfigure(input) {
+        const denied = await requireSupplierOwner(input, input.catalogId);
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.browser || !cfg.ownerSelection || !cfg.localPriceControl) {
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        }
+        const row = await getSupplierCatalogProduct(dbHandle.db, {
+          supplierId: input.providerKey,
+          catalogId: input.catalogId,
+        });
+        if (!row) {
+          return {
+            text: "Catalog nhà cung cấp không còn mục này.",
+            buttons: [
+              [
+                {
+                  text: "Danh sách upstream",
+                  callbackData: `admin:supplier:${input.providerKey}:products`,
+                },
+              ],
+            ],
+          };
+        }
+        await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "SUPPLIER_CURATE_PROMPT",
+          payload: { providerKey: input.providerKey, catalogId: row.id },
+          ttlMinutes: 10,
+        });
+        return presentAdminSupplierConfigPrompt({
+          providerKey: input.providerKey,
+          providerName: cfg.provider.displayName,
+        });
+      },
+      async supplierCatalogConfirm(input) {
+        const denied = await requireSupplierOwner(input, input.stateId);
+        if (denied) return denied;
+        const state = await resolveAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          stateId: input.stateId,
+        });
+        if (!state || state.kind !== "SUPPLIER_CURATE_PREVIEW") {
+          return { text: "Phiên cấu hình nhà cung cấp đã hết hạn.", buttons: [] };
+        }
+        const payload = state.payload;
+        const providerKey = typeof payload.providerKey === "string" ? payload.providerKey : null;
+        const catalogId = typeof payload.catalogId === "string" ? payload.catalogId : null;
+        const targetVariantId =
+          typeof payload.targetVariantId === "string" ? payload.targetVariantId : undefined;
+        const cfg = providerKey ? supplierAdminConfig(providerKey) : null;
+        if (!cfg || providerKey !== input.providerKey || !catalogId) {
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        }
+        const localNameVi = typeof payload.localNameVi === "string" ? payload.localNameVi : null;
+        const localVariantNameVi =
+          typeof payload.localVariantNameVi === "string" ? payload.localVariantNameVi : null;
+        const localDescriptionVi =
+          typeof payload.localDescriptionVi === "string" ? payload.localDescriptionVi : null;
+        const priceRaw = typeof payload.localPriceVnd === "string" ? payload.localPriceVnd : null;
+        if (!localNameVi || !localVariantNameVi || localDescriptionVi === null || !priceRaw) {
+          return { text: "Phiên cấu hình nhà cung cấp không hợp lệ.", buttons: [] };
+        }
+        let localPriceVnd: bigint;
+        try {
+          localPriceVnd = BigInt(priceRaw);
+        } catch {
+          return { text: "Giá local không hợp lệ.", buttons: [] };
+        }
+        const currentCatalog = await getSupplierCatalogProduct(dbHandle.db, {
+          supplierId: providerKey,
+          catalogId,
+        });
+        if (!currentCatalog)
+          return { text: "Catalog nhà cung cấp không còn mục này.", buttons: [] };
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "supplier.catalog.curate",
+          resourceType: "SupplierCatalogProduct",
+          resourceId: catalogId,
+          requestedData: {
+            supplierId: providerKey,
+            catalogId,
+            ...(targetVariantId ? { targetVariantId } : {}),
+            localNameVi,
+            localVariantNameVi,
+            localPriceVnd: localPriceVnd.toString(),
+            enabled: input.enabled,
+          },
+          consumeGrant: true,
+        });
+        if (!authorization.ok) {
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "supplier.catalog.curate",
+            category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
+          });
+        }
+        try {
+          const result = await configureSupplierCatalogProduct(dbHandle.db, {
+            supplierId: providerKey,
+            catalogId,
+            ...(targetVariantId ? { targetVariantId } : {}),
+            localNameVi,
+            localVariantNameVi,
+            localPriceVnd,
+            localDescriptionVi,
+            enabled: input.enabled,
+            expectedVersion: currentCatalog.version,
+            actorId: input.telegramUserId,
+            correlationId: input.correlationId,
+          });
+          await sql`
+            delete from admin_callback_state
+            where id = ${input.stateId} and admin_telegram_user_id = ${input.telegramUserId}
+          `.execute(dbHandle.db);
+          return presentAdminSupplierCatalogActionDone({
+            providerKey,
+            providerName: cfg.provider.displayName,
+            catalogId,
+            enabled: result.enabled,
+            productId: result.productId,
+            variantId: result.variantId,
+          });
+        } catch (error) {
+          return {
+            text:
+              error instanceof Error && error.message === "SUPPLIER_PRODUCT_UNAVAILABLE"
+                ? "Đã lưu mapping nhưng upstream chưa sẵn sàng; sản phẩm vẫn tắt."
+                : error instanceof Error && error.message === "SUPPLIER_STALE_VERSION"
+                  ? "Catalog nhà cung cấp đã thay đổi. Mở lại sản phẩm rồi xác nhận lại."
+                  : "Không lưu được cấu hình nhà cung cấp. Dữ liệu local chưa được đổi.",
+            buttons: [
+              [
+                {
+                  text: "Danh sách upstream",
+                  callbackData: `admin:supplier:${providerKey}:products`,
+                },
+              ],
+            ],
+          };
+        }
+      },
+      async supplierCatalogToggle(input) {
+        const denied = await requireSupplierOwner(input, input.catalogId);
+        if (denied) return denied;
+        const cfg = supplierAdminConfig(input.providerKey);
+        if (!cfg || !cfg.browser || !cfg.ownerSelection || !cfg.localPriceControl) {
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        }
+        const currentCatalog = await getSupplierCatalogProduct(dbHandle.db, {
+          supplierId: input.providerKey,
+          catalogId: input.catalogId,
+        });
+        if (!currentCatalog)
+          return { text: "Catalog nhà cung cấp không còn mục này.", buttons: [] };
+        const authorization = await authorizeSensitiveFor(input, {
+          actionKey: "supplier.catalog.curate",
+          resourceType: "SupplierCatalogProduct",
+          resourceId: input.catalogId,
+          requestedData: {
+            supplierId: input.providerKey,
+            catalogId: input.catalogId,
+            enabled: input.enabled,
+          },
+          consumeGrant: true,
+        });
+        if (!authorization.ok) {
+          return presentSensitiveRefusal({
+            code: authorization.code,
+            action: "supplier.catalog.curate",
+            category: "SUPPLIER_CONFIG",
+            challengeId: input.correlationId,
+          });
+        }
+        try {
+          const result = await setSupplierCatalogEnabled(dbHandle.db, {
+            supplierId: input.providerKey,
+            catalogId: input.catalogId,
+            enabled: input.enabled,
+            actorId: input.telegramUserId,
+            expectedVersion: currentCatalog.version,
+            correlationId: input.correlationId,
+          });
+          return presentAdminSupplierCatalogActionDone({
+            providerKey: input.providerKey,
+            providerName: cfg.provider.displayName,
+            catalogId: input.catalogId,
+            enabled: result.enabled,
+          });
+        } catch (error) {
+          return {
+            text:
+              error instanceof Error && error.message === "SUPPLIER_STALE_VERSION"
+                ? "Catalog nhà cung cấp đã thay đổi. Mở lại sản phẩm rồi thử lại."
+                : "Không bật được sản phẩm: upstream chưa AVAILABLE/LOW hoặc mapping không còn hợp lệ.",
+            buttons: [
+              [
+                {
+                  text: "Danh sách upstream",
+                  callbackData: `admin:supplier:${input.providerKey}:products`,
+                },
+              ],
+            ],
+          };
+        }
       },
       async supplierVariant(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -5178,7 +5878,7 @@ async function bootstrap(): Promise<void> {
               case
                 when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce((select q.available_quantity from variant_quantity_stock q where q.variant_id = v.id), 0)::int
                 when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
-                when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
+                when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.id = v.supplier_sku_id and ss.is_active), 0)::int
                 else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
               end as available
             from product_variant v
@@ -5280,7 +5980,7 @@ async function bootstrap(): Promise<void> {
             case
               when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
               when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
-              when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
+                when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.id = v.supplier_sku_id and ss.is_active), 0)::int
               else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
             end as available,
             coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int as reserved,
@@ -5358,7 +6058,7 @@ async function bootstrap(): Promise<void> {
             case
               when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
               when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
-              when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
+                when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.id = v.supplier_sku_id and ss.is_active), 0)::int
               else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
             end as available,
             coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int as reserved,
@@ -8936,6 +9636,7 @@ async function bootstrap(): Promise<void> {
       batchSize: 20,
       sePayPort: sePayRecoveryPort,
       supplierPort: supplier,
+      supplierRegistry,
       vault,
       inboxRetention: {
         processedRetentionDays: config.TELEGRAM_INBOX_PROCESSED_RETENTION_DAYS,

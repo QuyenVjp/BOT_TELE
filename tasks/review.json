@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "reviewed_head_sha": "e26d3753479faa82313408e48e013106ed860156",
+  "reviewed_worktree_base_sha": "2705917d7d4e318b753b43eb5c308eb78a52da96",
+  "working_tree_review": true,
+  "independent_review_status": "UNAVAILABLE",
+  "independent_review_blocker": "code-reviewer and security-reviewer jobs both exited before review because the external Gemini lane returned account-verification HTTP 403; no reviewer findings were accepted as evidence.",
+  "self_audit": {
+    "status": "PASS",
+    "scope": "QCST raw/normalized boundary, catalog persistence and readiness, migration constraints, Vault-only credential cleanup, workflow, tests, and acceptance artifacts",
+    "evidence": [
+      "npm test: 219 files, 1811 tests passed",
+      "npm run typecheck: exit 0",
+      "npm run build: exit 0",
+      "npm run lint: exit 0",
+      "npm run format:check: exit 0",
+      "npm run secret-scan: exit 0",
+      "npm audit --omit=dev --audit-level=high: 0 vulnerabilities",
+      "actionlint: exit 0",
+      "zizmor --offline .github/workflows/ci.yml: no findings",
+      "focused Semgrep 1.172.0: results=[], errors=[]",
+      "python3 ~/.omp/agent/scripts/verify-gate.py .: VERDICT PASS, exit 0",
+      "authenticated QCST GET /v1/products, /v1/balance, /v1/orders: sanitized read-only evidence",
+      "disposable PostgreSQL QCST catalog sync: 51 discovered, 27 unsupported, 0 missing, 0 enabled"
+    ]
+  },
+  "file_dispositions": [
+    { "file": ".env.example", "disposition": "reviewed" },
+    { "file": ".github/workflows/ci.yml", "disposition": "reviewed" },
+    { "file": "docs/adr/0009-supplier-adapter-and-vault-delivery.md", "disposition": "reviewed" },
+    { "file": "src/bot/presenters/admin.ts", "disposition": "reviewed" },
+    { "file": "src/config/env.ts", "disposition": "reviewed" },
+    { "file": "src/config/index.ts", "disposition": "reviewed" },
+    {
+      "file": "src/infrastructure/db/migrations/093_supplier_catalog_platform.sql",
+      "disposition": "reviewed"
+    },
+    { "file": "src/modules/catalog/publication.ts", "disposition": "reviewed" },
+    { "file": "src/modules/catalog/repository.ts", "disposition": "reviewed" },
+    { "file": "src/modules/catalog/search.ts", "disposition": "reviewed" },
+    { "file": "src/modules/commerce/store-mode.ts", "disposition": "reviewed" },
+    { "file": "src/modules/supplier/adapters/http.ts", "disposition": "reviewed-deleted" },
+    { "file": "src/modules/supplier/adapters/qcst.ts", "disposition": "reviewed" },
+    { "file": "src/modules/supplier/catalog.ts", "disposition": "reviewed" },
+    { "file": "src/modules/supplier/port.ts", "disposition": "reviewed" },
+    { "file": "src/scripts/production-preflight.ts", "disposition": "reviewed" },
+    { "file": "src/worker.ts", "disposition": "reviewed" },
+    { "file": "tests/contract/admin-dashboard-presenter.test.ts", "disposition": "reviewed" },
+    { "file": "tests/contract/http-supplier.test.ts", "disposition": "reviewed-deleted" },
+    { "file": "tests/contract/payment-beneficiary-config.test.ts", "disposition": "reviewed" },
+    { "file": "tests/contract/production-preflight.test.ts", "disposition": "reviewed" },
+    { "file": "tests/contract/qcst-supplier.test.ts", "disposition": "reviewed" },
+    { "file": "tests/integration/qcst-catalog.test.ts", "disposition": "reviewed" },
+    { "file": "tests/security/config-redaction.test.ts", "disposition": "reviewed" },
+    { "file": "tests/security/outbound-ssrf.test.ts", "disposition": "reviewed" },
+    { "file": "tests/security/production-step-up-config.test.ts", "disposition": "reviewed" },
+    { "file": "tests/security/secret-redaction.test.ts", "disposition": "reviewed" },
+    { "file": "tests/unit/google-sheets-config.test.ts", "disposition": "reviewed" },
+    {
+      "file": "tasks/acceptance/qcst-openapi-contract-2026-09-25.json",
+      "disposition": "evidence-reviewed"
+    },
+    {
+      "file": "tasks/acceptance/qcst-readonly-2026-09-25.json",
+      "disposition": "evidence-reviewed"
+    },
+    {
+      "file": "tasks/acceptance/supplier-live-acceptance-2026-09-25.json",
+      "disposition": "historical-evidence-reviewed"
+    },
+    { "file": "tasks/review-manifest.json", "disposition": "reviewed" },
+    { "file": "tasks/review.json", "disposition": "reviewed" }
+  ],
+  "findings": [],
+  "review_notes": [
+    "No unaddressed self-audit finding remains.",
+    "Delegated code and security reviews were attempted but unavailable; this is a residual review-process risk, not a code finding."
+  ]
+}

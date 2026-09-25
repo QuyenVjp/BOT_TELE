@@ -581,6 +581,84 @@ export interface TelegramDomainDispatcherDeps {
       supplierSkuId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
+    supplierCatalogProducts?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      offset?: number;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierCatalogSync?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierCatalogItem?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      catalogId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierCatalogConfigure?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      catalogId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierCatalogConfirm?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      stateId: string;
+      enabled: boolean;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierCatalogToggle?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      catalogId: string;
+      enabled: boolean;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierCatalogTargets?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      catalogId: string;
+      offset?: number;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierCatalogAttach?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      catalogId: string;
+      targetVariantId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierCatalogPrimary?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      catalogId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierHealth?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    supplierBalance?(input: {
+      telegramUserId: string;
+      chatType: string;
+      providerKey: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
     importPreview?(input: {
       telegramUserId: string;
       chatType: string;
@@ -2542,15 +2620,6 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Mapping nhà cung cấp không khả dụng.");
-        } else if (route.startsWith("supc:")) {
-          message = admin.supplierClear
-            ? await admin.supplierClear({
-                telegramUserId: envelope.actorUserId,
-                chatType: envelope.chatType,
-                variantId: route.slice("supc:".length),
-                correlationId,
-              })
-            : safeError("Mapping nhà cung cấp không khả dụng.");
         } else if (route.startsWith("supm:")) {
           message = admin.supplierVerify
             ? await admin.supplierVerify({
@@ -2560,6 +2629,170 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Xác nhận thủ công không khả dụng.");
+        } else if (route.startsWith("supc:")) {
+          message = admin.supplierClear
+            ? await admin.supplierClear({
+                telegramUserId: envelope.actorUserId,
+                chatType: envelope.chatType,
+                variantId: route.slice("supc:".length),
+                correlationId,
+              })
+            : safeError("Mapping nhà cung cấp không khả dụng.");
+        } else if (route.startsWith("supplier:")) {
+          const parts = route.split(":");
+          const providerKey = parts[1] ?? "";
+          const action = parts[2] ?? "";
+          const value = parts[3] ?? "";
+          const validProvider = /^[a-z0-9_-]{1,32}$/.test(providerKey);
+          if (!validProvider) {
+            message = safeError("Nhà cung cấp không hợp lệ.");
+          } else if (action === "health" && parts.length === 3) {
+            message = admin.supplierHealth
+              ? await admin.supplierHealth({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  providerKey,
+                  correlationId,
+                })
+              : safeError("Health nhà cung cấp chưa được cấu hình.");
+          } else if (action === "balance" && parts.length === 3) {
+            message = admin.supplierBalance
+              ? await admin.supplierBalance({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  providerKey,
+                  correlationId,
+                })
+              : safeError("Balance nhà cung cấp chưa được cấu hình.");
+          } else if (action === "products" && parts.length === 3) {
+            message = admin.supplierCatalogProducts
+              ? await admin.supplierCatalogProducts({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  providerKey,
+                  correlationId,
+                })
+              : safeError("Catalog nhà cung cấp chưa được cấu hình.");
+          } else if (action === "sync" && parts.length === 3) {
+            message = admin.supplierCatalogSync
+              ? await admin.supplierCatalogSync({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  providerKey,
+                  correlationId,
+                })
+              : safeError("Đồng bộ nhà cung cấp chưa được bật.");
+          } else if (action === "page" && parts.length === 4) {
+            const offset = Number(value);
+            message =
+              admin.supplierCatalogProducts && Number.isInteger(offset) && offset >= 0
+                ? await admin.supplierCatalogProducts({
+                    telegramUserId: envelope.actorUserId,
+                    chatType: envelope.chatType,
+                    providerKey,
+                    offset,
+                    correlationId,
+                  })
+                : safeError("Trang catalog không hợp lệ.");
+          } else if (
+            action === "targets" &&
+            (parts.length === 4 || parts.length === 5) &&
+            isId(value)
+          ) {
+            const offset = parts.length === 5 ? Number(parts[4]) : 0;
+            message =
+              admin.supplierCatalogTargets && Number.isInteger(offset) && offset >= 0
+                ? await admin.supplierCatalogTargets({
+                    telegramUserId: envelope.actorUserId,
+                    chatType: envelope.chatType,
+                    providerKey,
+                    catalogId: value,
+                    offset,
+                    correlationId,
+                  })
+                : safeError("Danh sách SKU local không hợp lệ.");
+          } else if (
+            action === "attach-target" &&
+            parts.length === 5 &&
+            isId(value) &&
+            isId(parts[4] ?? "")
+          ) {
+            message = admin.supplierCatalogAttach
+              ? await admin.supplierCatalogAttach({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  providerKey,
+                  catalogId: value,
+                  targetVariantId: parts[4]!,
+                  correlationId,
+                })
+              : safeError("Gắn mapping nhà cung cấp chưa được bật.");
+          } else if (action === "primary" && parts.length === 4 && isId(value)) {
+            message = admin.supplierCatalogPrimary
+              ? await admin.supplierCatalogPrimary({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  providerKey,
+                  catalogId: value,
+                  correlationId,
+                })
+              : safeError("Chọn primary nhà cung cấp chưa được bật.");
+          } else if (
+            (action === "item" || action === "configure") &&
+            parts.length === 4 &&
+            isId(value)
+          ) {
+            message =
+              action === "item"
+                ? admin.supplierCatalogItem
+                  ? await admin.supplierCatalogItem({
+                      telegramUserId: envelope.actorUserId,
+                      chatType: envelope.chatType,
+                      providerKey,
+                      catalogId: value,
+                      correlationId,
+                    })
+                  : safeError("Catalog nhà cung cấp chưa có dữ liệu.")
+                : admin.supplierCatalogConfigure
+                  ? await admin.supplierCatalogConfigure({
+                      telegramUserId: envelope.actorUserId,
+                      chatType: envelope.chatType,
+                      providerKey,
+                      catalogId: value,
+                      correlationId,
+                    })
+                  : safeError("Curation nhà cung cấp chưa được bật.");
+          } else if (action === "confirm" && parts.length === 5 && isId(value)) {
+            const enabled = parts[4] === "on";
+            message =
+              admin.supplierCatalogConfirm && (enabled || parts[4] === "off")
+                ? await admin.supplierCatalogConfirm({
+                    telegramUserId: envelope.actorUserId,
+                    chatType: envelope.chatType,
+                    providerKey,
+                    stateId: value,
+                    enabled,
+                    correlationId,
+                  })
+                : safeError("Xác nhận curation không hợp lệ.");
+          } else if (
+            (action === "enable" || action === "disable") &&
+            parts.length === 4 &&
+            isId(value)
+          ) {
+            message = admin.supplierCatalogToggle
+              ? await admin.supplierCatalogToggle({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  providerKey,
+                  catalogId: value,
+                  enabled: action === "enable",
+                  correlationId,
+                })
+              : safeError("Curation nhà cung cấp chưa được bật.");
+          } else {
+            message = safeError("Callback nhà cung cấp không hợp lệ.");
+          }
         } else if (route === "support") {
           message = admin.support
             ? await admin.support({
