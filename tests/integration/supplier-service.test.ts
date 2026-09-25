@@ -417,15 +417,23 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     const upstream = createSandboxSupplierAdapter({ mode: "timeout-then-fulfill" });
     let creates = 0;
     let queries = 0;
+    let createSku: string | undefined;
+    let recoveredSku: string | undefined;
+    const queryInputs: Array<Parameters<SupplierPort["queryOrder"]>[0]> = [];
     const port: SupplierPort = {
       ...upstream,
       createOrder(input) {
         creates += 1;
+        createSku = input.supplierSku;
         return upstream.createOrder(input);
       },
       queryOrder(input) {
         queries += 1;
-        return upstream.queryOrder(input);
+        queryInputs.push(input);
+        return upstream.queryOrder(input).then((result) => {
+          if (result.status === "FULFILLED") recoveredSku = result.assetEnvelope.expectedSku;
+          return result;
+        });
       },
     };
     const input = {
@@ -455,6 +463,16 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     const second = await provisionFromSupplier(ctx.db, input);
     expect(second.ok).toBe(true);
     if (!second.ok) return;
+    expect(queryInputs).toEqual([{ queryKey: "qk-idem-timeout-1" }]);
+    expect({ createSku, recoveredSku }).toEqual({
+      createSku: f.externalSku,
+      recoveredSku: f.externalSku,
+    });
+    const asset = await sql<{ validation_summary: unknown }>`
+      select validation_summary from digital_asset
+      where supplier_order_id = ${first.supplierOrderId}
+    `.execute(ctx.db);
+    expect(asset.rows[0]?.validation_summary).toEqual({ validated: true });
     expect(second.kind).toBe("FULFILLED");
     expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
 
@@ -515,7 +533,7 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
   });
 
-  it("in-flight SUBMITTED idempotency loser does not create or query", async () => {
+  it("recovers a SUBMITTED idempotency record through query-only execution", async () => {
     const f = await seedPaidOrderWithSupplierSku();
     const vault = createInMemoryVault();
     const idempotencyKey = "idem-submitted-1";
@@ -528,14 +546,20 @@ describe("supplier provision service (FR-015/FR-016)", () => {
         (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId}, ${idempotencyKey}, 'fp-submitted',
          'SUBMITTED', 150000, 199000, 49000, now())
     `.execute(ctx.db);
+    let queries = 0;
     const port: SupplierPort = {
       getAvailability: () =>
         Promise.resolve({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
       createOrder: () => {
-        throw new Error("create must not be called by an idempotency loser");
+        throw new Error("create must not be called while recovering SUBMITTED");
       },
-      queryOrder: () => {
-        throw new Error("query must not run while create is in-flight");
+      queryOrder: ({ queryKey, externalOrderId }) => {
+        queries += 1;
+        expect({ queryKey, externalOrderId }).toEqual({
+          queryKey: idempotencyKey,
+          externalOrderId: undefined,
+        });
+        return Promise.resolve({ status: "PENDING", externalOrderId: "ext-submitted-1" });
       },
       cancelOrder: () => Promise.resolve({ status: "UNSUPPORTED" }),
       requestRefund: () => Promise.resolve({ status: "UNSUPPORTED" }),
@@ -556,7 +580,7 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       correlationId: "sup-submitted",
       port,
       vault,
-      purchaseEnabled: true,
+      purchaseEnabled: false,
       idempotencyKey,
     });
     expect(result).toEqual({
@@ -565,6 +589,7 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       supplierOrderId,
       queryKey: idempotencyKey,
     });
+    expect(queries).toBe(1);
   });
 
   it("a rejected supplier response does not create an asset", async () => {

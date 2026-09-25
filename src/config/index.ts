@@ -13,6 +13,22 @@ import { envSchema, SECRET_ENV_KEYS, type Env, type SecretEnvKey } from "./env.j
 
 export type AppConfig = Env;
 
+export function supplierCommercePurchaseEnabled(
+  config: Pick<AppConfig, "SUPPLIER_PURCHASE_ENABLED" | "SUPPLIER_COMMERCE_PURCHASE_ENABLED">,
+  providerEnabled: boolean,
+): boolean {
+  return (
+    config.SUPPLIER_PURCHASE_ENABLED && config.SUPPLIER_COMMERCE_PURCHASE_ENABLED && providerEnabled
+  );
+}
+
+export function supplierCanaryPurchaseEnabled(
+  config: Pick<AppConfig, "SUPPLIER_PURCHASE_ENABLED" | "SUPPLIER_CANARY_ENABLED">,
+  providerEnabled: boolean,
+): boolean {
+  return config.SUPPLIER_PURCHASE_ENABLED && config.SUPPLIER_CANARY_ENABLED && providerEnabled;
+}
+
 export class ConfigError extends Error {
   readonly issues: string[];
   constructor(issues: string[]) {
@@ -167,6 +183,17 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
     ) {
       issues.push("QCST purchase requires its actual provider rollout gates");
     }
+  }
+  if (
+    config.SUPPLIER_COMMERCE_PURCHASE_ENABLED &&
+    (!config.SUPPLIER_PURCHASE_ENABLED || !config.QCST_PURCHASE_ENABLED)
+  ) {
+    issues.push("SUPPLIER_COMMERCE_PURCHASE_ENABLED requires master and QCST purchase gates");
+  }
+  if (config.SUPPLIER_COMMERCE_PURCHASE_ENABLED && config.SUPPLIER_CANARY_ENABLED) {
+    issues.push(
+      "SUPPLIER_COMMERCE_PURCHASE_ENABLED must remain false while SUPPLIER_CANARY_ENABLED is true",
+    );
   }
   if (config.VOKHONG_PURCHASE_ENABLED) {
     issues.push(

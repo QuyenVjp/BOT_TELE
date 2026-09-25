@@ -674,24 +674,44 @@ foreign key to the commerce `"order"` table. A canary MUST NOT create a fake
 customer delivery bundle.
 
 The canary lifecycle is `PREVIEWED -> AUTHORIZED -> SUBMITTED -> PENDING`,
-`FULFILLED`, `UNKNOWN`, `REJECTED`, or `BLOCKED`. Preview is read-only and
-performs no upstream `POST`. Final confirmation re-reads the authoritative
-provider, primary mapping, catalog support/availability, automatic fulfillment
-with no customer input, local cost, provider balance, rollout gates, and the
-durable run row in the last pre-submit gate. The confirmation transaction binds
-the run and actor before that gate. A changed
-unsupported catalog row, unavailable provider, insufficient balance, disabled
-`SUPPLIER_CANARY_ENABLED`, disabled `SUPPLIER_PURCHASE_ENABLED`, disabled
-provider purchase gate, missing `ORDER_CREATE`, non-private/non-root actor, or
-stale/expired confirmation rejects before external I/O.
+`FULFILLED`, `UNKNOWN`, `REJECTED`, or `BLOCKED`. `PREVIEWED` is read-only.
+The explicit durable `/confirm` transitions the run to `AUTHORIZED`; only
+`AUTHORIZED` may claim and issue the first provider create. `SUBMITTED` means
+the provider may already have received the request. `SUBMITTED`, `PENDING`,
+and `UNKNOWN` recover only by querying with the stable idempotency/client order
+key or a known external order ID. A replay or process restart from those states
+MUST NOT create again. Query-only recovery remains available after spend gates
+are disabled.
+Query-only recovery requires the provider registration, its `ORDER_READ`
+capability, and the existing Vault-backed credential to remain available until
+the row is terminal; purchase gates may be disabled during recovery.
+
+Final confirmation re-reads the authoritative provider, primary mapping,
+catalog support/availability, automatic fulfillment with no customer input,
+local cost, provider balance, rollout gates, and durable run row. The
+confirmation transaction binds the run and actor before that gate. Commerce
+and canary spend gates are independent: `SUPPLIER_PURCHASE_ENABLED` is the
+master kill switch; `SUPPLIER_COMMERCE_PURCHASE_ENABLED` gates normal paid-order
+fulfillment; `SUPPLIER_CANARY_ENABLED` gates owner canary purchases; and
+`QCST_PURCHASE_ENABLED` is the QCST provider spend gate. Effective commerce
+purchases require master + commerce + provider gates. Effective canary
+purchases require master + canary + provider gates and do not require the
+commerce lane. Production canary enablement requires the master and QCST
+purchase gates, not the commerce gate. Vô Không purchase remains blocked.
+Production hardening rejects simultaneous canary and commerce purchase
+enablement to preserve the one-shot isolation contract.
+A changed unsupported catalog row, unavailable provider, insufficient
+balance, disabled master/canary/provider gate, missing `ORDER_CREATE`,
+non-private/non-root actor, or stale/expired confirmation rejects before a
+new external create.
 
 The durable executor owns the exactly-once boundary: one stable provider
 idempotency key, one persisted intent before external I/O, a unique
-`(supplier_id, idempotency_key)` claim, and a recovery rule that queries an
-existing `UNKNOWN`/`PENDING` run instead of creating again. A transport timeout
-is `UNKNOWN`; recovery is query-only. Repeated confirmation, worker restart,
-Telegram retry, and concurrent confirmation all converge on the existing durable
-run and cannot issue a second create request.
+`(supplier_id, idempotency_key)` claim, and query-only recovery for existing
+`SUBMITTED`, `PENDING`, or `UNKNOWN` runs. A transport timeout is `UNKNOWN`;
+recovery is query-only. Repeated confirmation, worker restart, Telegram retry,
+and concurrent confirmation all converge on the existing durable run and
+cannot issue a second create request.
 
 The owner surface is private Telegram only. It displays safe product/provider,
 SKU, current cost, maximum approved cost, balance sufficiency, gate results,
@@ -712,9 +732,10 @@ resale evidence exists.
 ### Canary invariant and rollout ledger
 
 - `invariants_preserved`: no fake commerce payment; provider-neutral adapter;
-  Vault-only secrets; durable idempotency; timeout-to-UNKNOWN; query-only
-  recovery; strict delivery schema; root/private authorization; local price and
-  resale-evidence authority; fail-closed customer routing.
+  Vault-only secrets; durable idempotency; query-only `SUBMITTED`/`PENDING`/
+  `UNKNOWN` recovery; strict delivery schema; root/private authorization;
+  isolated commerce and canary spend lanes; local price and resale-evidence
+  authority; fail-closed customer routing.
 - `intentional_breaks`: none to customer payment, SePay, store mode, or
   fulfillment semantics; the canary adds only an owner commissioning aggregate
   and a reuse seam around existing supplier purchase I/O.
@@ -723,6 +744,9 @@ resale evidence exists.
   Re-read-at-submit gates, unique durable claims, version/payload binding,
   provider balance reads, strict schemas, and query-only recovery bound them.
 - `kill_switches`: `SUPPLIER_CANARY_ENABLED=false`,
-  `SUPPLIER_PURCHASE_ENABLED=false`, provider purchase gate false, and the
-  existing QCST provider/catalog/owner-selection/local-price gates. All default
-  to disabled for the canary rollout.
+  `SUPPLIER_COMMERCE_PURCHASE_ENABLED=false`,
+  `SUPPLIER_PURCHASE_ENABLED=false`, and provider purchase gates false.
+  Keep `QCST_PROVIDER_ENABLED=true` with `ORDER_READ` and its Vault-backed
+  credential until every ambiguous run is terminal; disabling provider
+  registration prevents query-only recovery. Catalog/curation gates are
+  separate from spend gates and default false outside the commissioning window.

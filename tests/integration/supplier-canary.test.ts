@@ -5,7 +5,17 @@ import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adap
 import { createAdminConfirmation } from "../../src/modules/identity/admin-confirmation.js";
 import { createSupplierCanaryService } from "../../src/modules/supplier/canary.js";
 import { createSupplierProviderRegistry } from "../../src/modules/supplier/registry.js";
-import type { SupplierProvider } from "../../src/modules/supplier/port.js";
+import { provisionFromSupplier } from "../../src/modules/supplier/service.js";
+import {
+  supplierCanaryPurchaseEnabled,
+  supplierCommercePurchaseEnabled,
+  type AppConfig,
+} from "../../src/config/index.js";
+import type {
+  QueryOrderInput,
+  QueryOrderResult,
+  SupplierProvider,
+} from "../../src/modules/supplier/port.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 let ctx: PgTestContext;
@@ -13,6 +23,7 @@ const ROOT_ID = 7788990011;
 
 interface Fixture {
   rootChannelIdentityId: string;
+  customerId: string;
   supplierId: string;
   supplierSkuId: string;
   variantId: string;
@@ -22,7 +33,15 @@ interface ProviderState {
   creates: number;
   queries: number;
   balance: number;
+  queryInputs?: QueryOrderInput[];
+  queryResult?: QueryOrderResult;
+  queryError?: Error;
 }
+
+type PurchaseFlags = Pick<
+  AppConfig,
+  "SUPPLIER_PURCHASE_ENABLED" | "SUPPLIER_COMMERCE_PURCHASE_ENABLED" | "SUPPLIER_CANARY_ENABLED"
+>;
 
 beforeAll(async () => {
   ctx = await startPostgresContainer();
@@ -97,7 +116,13 @@ async function seed(): Promise<Fixture> {
        false, ${productId}, ${variantId}, ${supplierSkuId})
   `.execute(ctx.db);
 
-  return { rootChannelIdentityId, supplierId, supplierSkuId, variantId };
+  return {
+    rootChannelIdentityId,
+    customerId: rootCustomerId,
+    supplierId,
+    supplierSkuId,
+    variantId,
+  };
 }
 
 function makeProvider(fixture: Fixture, state: ProviderState): SupplierProvider {
@@ -121,9 +146,11 @@ function makeProvider(fixture: Fixture, state: ProviderState): SupplierProvider 
         status: "PENDING",
       };
     },
-    queryOrder: async () => {
+    queryOrder: async (input) => {
       state.queries += 1;
-      return { status: "PENDING", externalOrderId: "qcst-order-1" };
+      state.queryInputs?.push(input);
+      if (state.queryError) throw state.queryError;
+      return state.queryResult ?? { status: "PENDING", externalOrderId: "qcst-order-1" };
     },
     cancelOrder: async () => ({ status: "UNSUPPORTED" }),
     requestRefund: async () => ({ status: "UNSUPPORTED" }),
@@ -131,11 +158,20 @@ function makeProvider(fixture: Fixture, state: ProviderState): SupplierProvider 
   };
 }
 
-function makeService(fixture: Fixture, state: ProviderState, canaryEnabled = true) {
+function makeService(
+  fixture: Fixture,
+  state: ProviderState,
+  flags: PurchaseFlags = {
+    SUPPLIER_PURCHASE_ENABLED: true,
+    SUPPLIER_COMMERCE_PURCHASE_ENABLED: false,
+    SUPPLIER_CANARY_ENABLED: true,
+  },
+  registerProvider = true,
+) {
   const provider = makeProvider(fixture, state);
   const confirmation = createAdminConfirmation(ctx.db);
   const rootConfig = { adminTelegramUserId: ROOT_ID, expectedUsername: "Quyenvjp" };
-  const registry = createSupplierProviderRegistry([provider]);
+  const registry = createSupplierProviderRegistry(registerProvider ? [provider] : []);
   return createSupplierCanaryService({
     db: ctx.db,
     registry,
@@ -149,11 +185,75 @@ function makeService(fixture: Fixture, state: ProviderState, canaryEnabled = tru
       stepUpEnabled: false,
       stepUpOptions: { ttlSeconds: 120, lockoutMinutes: 10, maxAttempts: 5 },
     },
-    canaryEnabled,
-    genericPurchaseEnabled: true,
-    providerPurchaseEnabled: () => true,
+    canaryEnabled: flags.SUPPLIER_CANARY_ENABLED,
+    canaryPurchaseEnabled: (providerKey) =>
+      supplierCanaryPurchaseEnabled(flags, providerKey === fixture.supplierId),
     maxCostVnd: 100000,
   });
+}
+
+async function seedPaidCommerceOrder(fixture: Fixture): Promise<string> {
+  const orderId = newId();
+  await sql`
+    insert into "order"
+      (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
+       price_vnd, duration_code, delivery_type, status, paid_at)
+    values
+      (${orderId}, ${`ORD-${orderId}`}, ${fixture.customerId}, ${fixture.variantId},
+       'Canary product', 'Canary variant', 99000, 'P1M', 'CREDENTIAL', 'PAID', now())
+  `.execute(ctx.db);
+  return orderId;
+}
+
+async function provisionCommerceOrder(
+  fixture: Fixture,
+  state: ProviderState,
+  orderId: string,
+  purchaseEnabled: boolean,
+) {
+  return provisionFromSupplier(ctx.db, {
+    orderId,
+    supplierId: fixture.supplierId,
+    supplierSkuId: fixture.supplierSkuId,
+    externalSku: "CANARY-SKU",
+    costCeilingVnd: 23000,
+    salePriceVnd: 99000,
+    expectedSku: "CANARY-SKU",
+    deliveryType: "CREDENTIAL",
+    durationCode: "P1M",
+    region: "VN",
+    correlationId: "supplier-lane-isolation",
+    port: makeProvider(fixture, state),
+    vault: createInMemoryVault(),
+    purchaseEnabled,
+  });
+}
+
+async function deliveryCounts() {
+  const result = await sql<{ assets: string; bundles: string; notifications: string }>`
+    select
+      (select count(*)::text from digital_asset) as assets,
+      (select count(*)::text from delivery_bundle) as bundles,
+      (select count(*)::text from delivery_notification_handoff) as notifications
+  `.execute(ctx.db);
+  return result.rows[0]!;
+}
+
+async function seedSubmittedRun(fixture: Fixture, state: ProviderState) {
+  const service = makeService(fixture, state);
+  const preview = await service.prepare({
+    actor: { numericUserId: ROOT_ID, chatType: "private" },
+    supplierSkuId: fixture.supplierSkuId,
+    correlationId: "submitted-recovery",
+  });
+  if (!preview.ok) throw new Error(preview.code);
+  await sql`
+    update supplier_canary_run
+    set status = 'SUBMITTED', query_key = idempotency_key, submitted_at = now(),
+        external_order_id = null
+    where id = ${preview.runId}
+  `.execute(ctx.db);
+  return { runId: preview.runId, service };
 }
 
 async function commerceCounts() {
@@ -167,6 +267,223 @@ async function commerceCounts() {
 }
 
 describe("owner supplier canary", () => {
+  it("recovers SUBMITTED query-only even after every purchase gate is off", async () => {
+    const fixture = await seed();
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      queryInputs: [],
+      queryError: new Error("provider query temporarily unavailable"),
+    };
+    const { runId } = await seedSubmittedRun(fixture, state);
+    const service = makeService(fixture, state, {
+      SUPPLIER_PURCHASE_ENABLED: false,
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: false,
+      SUPPLIER_CANARY_ENABLED: false,
+    });
+
+    await expect(service.executePending(runId)).rejects.toThrow(
+      "provider query temporarily unavailable",
+    );
+    expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 0, queries: 1 });
+    expect(state.queryInputs).toEqual([{ queryKey: `supplier-canary:${runId}` }]);
+    const row = await sql<{ status: string; query_key: string | null }>`
+      select status, query_key from supplier_canary_run where id = ${runId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toEqual({
+      status: "SUBMITTED",
+      query_key: `supplier-canary:${runId}`,
+    });
+  });
+  it("keeps SUBMITTED recoverable when its provider is not registered", async () => {
+    const fixture = await seed();
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const { runId } = await seedSubmittedRun(fixture, state);
+    const service = makeService(fixture, state, undefined, false);
+
+    const result = await service.executePending(runId);
+    expect(result).toMatchObject({ ok: false, code: "PROVIDER_UNAVAILABLE" });
+    expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 0, queries: 0 });
+    const row = await sql<{ status: string }>`
+      select status from supplier_canary_run where id = ${runId}
+    `.execute(ctx.db);
+    expect(row.rows[0]?.status).toBe("SUBMITTED");
+  });
+
+  it("adopts an upstream-accepted order on restart and then queries by external ID", async () => {
+    const fixture = await seed();
+    const acceptedOrderId = "qcst-order-already-accepted";
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      queryInputs: [],
+      queryResult: { status: "PENDING", externalOrderId: acceptedOrderId },
+    };
+    const { runId } = await seedSubmittedRun(fixture, state);
+    const restartedService = makeService(fixture, state);
+
+    const first = await restartedService.executePending(runId);
+    expect(first).toMatchObject({
+      ok: true,
+      status: "UNKNOWN",
+      externalOrderId: acceptedOrderId,
+    });
+    const replay = await restartedService.executePending(runId);
+    expect(replay).toMatchObject({
+      ok: true,
+      status: "UNKNOWN",
+      externalOrderId: acceptedOrderId,
+    });
+    expect(state.queryInputs).toEqual([
+      { queryKey: `supplier-canary:${runId}` },
+      { externalOrderId: acceptedOrderId },
+    ]);
+    expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 0, queries: 2 });
+    const row = await sql<{
+      status: string;
+      external_order_id: string | null;
+      query_key: string | null;
+    }>`
+      select status, external_order_id, query_key from supplier_canary_run where id = ${runId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toEqual({
+      status: "PENDING",
+      external_order_id: acceptedOrderId,
+      query_key: null,
+    });
+  });
+
+  it("keeps repeated SUBMITTED resumes query-only when the provider stays ambiguous", async () => {
+    const fixture = await seed();
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      queryError: new Error("query still ambiguous"),
+    };
+    const { runId, service } = await seedSubmittedRun(fixture, state);
+
+    await expect(service.executePending(runId)).rejects.toThrow("query still ambiguous");
+    await expect(service.executePending(runId)).rejects.toThrow("query still ambiguous");
+    expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 0, queries: 2 });
+  });
+
+  it("resumes SUBMITTED query-only after recreating the service", async () => {
+    const fixture = await seed();
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      queryError: new Error("query unavailable"),
+    };
+    const { runId, service } = await seedSubmittedRun(fixture, state);
+
+    await expect(service.executePending(runId)).rejects.toThrow("query unavailable");
+    await expect(makeService(fixture, state).executePending(runId)).rejects.toThrow(
+      "query unavailable",
+    );
+    expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 0, queries: 2 });
+  });
+
+  it("keeps commerce closed while allowing one owner-confirmed canary and no customer delivery", async () => {
+    const fixture = await seed();
+    const orderId = await seedPaidCommerceOrder(fixture);
+    const flags: PurchaseFlags = {
+      SUPPLIER_PURCHASE_ENABLED: true,
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: false,
+      SUPPLIER_CANARY_ENABLED: true,
+    };
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const beforeCommerce = await commerceCounts();
+    const beforeDelivery = await deliveryCounts();
+
+    const commerce = await provisionCommerceOrder(
+      fixture,
+      state,
+      orderId,
+      supplierCommercePurchaseEnabled(flags, true),
+    );
+    expect(commerce).toMatchObject({ ok: false, code: "UNSUPPORTED" });
+    expect(state.creates).toBe(0);
+
+    const service = makeService(fixture, state, flags);
+    const actor = { numericUserId: ROOT_ID, chatType: "private" as const };
+    const preview = await service.prepare({
+      actor,
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "commerce-closed-preview",
+    });
+    if (!preview.ok) throw new Error(preview.code);
+    const confirmed = await service.confirmIfCanary({
+      confirmationId: preview.confirmationId,
+      challenge: preview.challenge,
+      actor,
+      correlationId: "commerce-closed-confirm",
+    });
+    expect(confirmed).toMatchObject({
+      ok: true,
+      execution: { ok: true, status: "PENDING" },
+    });
+    expect(state.creates).toBe(1);
+    expect(await commerceCounts()).toEqual(beforeCommerce);
+    expect(await deliveryCounts()).toEqual(beforeDelivery);
+  });
+
+  it("allows commerce without enabling the canary lane", async () => {
+    const fixture = await seed();
+    const orderId = await seedPaidCommerceOrder(fixture);
+    const flags: PurchaseFlags = {
+      SUPPLIER_PURCHASE_ENABLED: true,
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: true,
+      SUPPLIER_CANARY_ENABLED: false,
+    };
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+
+    const commerce = await provisionCommerceOrder(
+      fixture,
+      state,
+      orderId,
+      supplierCommercePurchaseEnabled(flags, true),
+    );
+    expect(commerce).toMatchObject({ ok: true, kind: "UNKNOWN" });
+    expect(state.creates).toBe(1);
+
+    const blockedPreview = await makeService(fixture, state, flags).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "canary-disabled",
+    });
+    expect(blockedPreview).toMatchObject({ ok: false, code: "CANARY_DISABLED" });
+    expect(state.creates).toBe(1);
+  });
+
+  it("keeps both supplier purchase lanes closed when the master gate is off", async () => {
+    const fixture = await seed();
+    const orderId = await seedPaidCommerceOrder(fixture);
+    const flags: PurchaseFlags = {
+      SUPPLIER_PURCHASE_ENABLED: false,
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: true,
+      SUPPLIER_CANARY_ENABLED: true,
+    };
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+
+    const commerce = await provisionCommerceOrder(
+      fixture,
+      state,
+      orderId,
+      supplierCommercePurchaseEnabled(flags, true),
+    );
+    expect(commerce).toMatchObject({ ok: false, code: "UNSUPPORTED" });
+    const canary = await makeService(fixture, state, flags).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "master-disabled",
+    });
+    expect(canary).toMatchObject({ ok: false, code: "PURCHASE_GATE_DISABLED" });
+    expect(state.creates).toBe(0);
+  });
   it("previews without POST, then creates exactly one pending run without commerce delivery", async () => {
     const fixture = await seed();
     const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
@@ -357,7 +674,11 @@ describe("owner supplier canary", () => {
   it("rejects disabled and expired confirmations without POST", async () => {
     const fixture = await seed();
     const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
-    const disabled = makeService(fixture, state, false);
+    const disabled = makeService(fixture, state, {
+      SUPPLIER_PURCHASE_ENABLED: true,
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: false,
+      SUPPLIER_CANARY_ENABLED: false,
+    });
     const actor = { numericUserId: ROOT_ID, chatType: "private" as const };
     const blocked = await disabled.prepare({
       actor,

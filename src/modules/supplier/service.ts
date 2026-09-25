@@ -197,7 +197,8 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
     async markAttempt(id) {
       const result = await sql<{ id: string }>`
         update supplier_order
-        set status = 'SUBMITTED', attempt_count = attempt_count + 1, last_attempt_at = now(),
+        set status = 'SUBMITTED', query_key = coalesce(query_key, idempotency_key),
+            attempt_count = attempt_count + 1, last_attempt_at = now(),
             last_error_code = null, retry_after_seconds = null, next_reconcile_at = null,
             version = version + 1
         where id = ${id} and status in ('SUBMITTED','AUTHORIZED') and attempt_count = 0
@@ -383,20 +384,6 @@ export async function provisionFromSupplier(
   if (!order) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
-  if (input.purchaseEnabled !== true) {
-    return {
-      ok: false,
-      code: "UNSUPPORTED",
-      message: "Mua từ nhà cung cấp đang bị khóa.",
-    };
-  }
-  if ("capabilities" in input.port && !hasSupplierCapability(input.port, "ORDER_CREATE")) {
-    return {
-      ok: false,
-      code: "UNSUPPORTED",
-      message: "Nhà cung cấp chưa công bố capability đặt hàng.",
-    };
-  }
   if (order.status !== "PAID" && order.status !== "PROCESSING" && order.status !== "COMPLETED") {
     return { ok: false, code: "NOT_PAID", message: "Đơn hàng chưa được thanh toán." };
   }
@@ -422,10 +409,14 @@ export async function provisionFromSupplier(
   }
 
   if (existingRecord) {
-    if (existingRecord.status === "UNKNOWN" || existingRecord.status === "PENDING") {
+    if (
+      existingRecord.status === "UNKNOWN" ||
+      existingRecord.status === "PENDING" ||
+      existingRecord.status === "SUBMITTED"
+    ) {
       const recovered = await recoverUnknownSupplierOrder(db, {
         supplierOrderId: existingRecord.id,
-        queryKey: existingRecord.queryKey ?? existingRecord.externalOrderId ?? idempotencyKey,
+        queryKey: existingRecord.queryKey ?? idempotencyKey,
         expectedSku: input.expectedSku,
         deliveryType: input.deliveryType,
         durationCode: input.durationCode,
@@ -458,14 +449,28 @@ export async function provisionFromSupplier(
         ok: true,
         kind: "UNKNOWN",
         supplierOrderId: existingRecord.id,
-        queryKey: existingRecord.queryKey ?? existingRecord.externalOrderId ?? idempotencyKey,
+        queryKey: existingRecord.queryKey ?? idempotencyKey,
       };
     }
     return {
       ok: true,
       kind: "UNKNOWN",
       supplierOrderId: existingRecord.id,
-      queryKey: existingRecord.queryKey ?? existingRecord.externalOrderId ?? idempotencyKey,
+      queryKey: existingRecord.queryKey ?? idempotencyKey,
+    };
+  }
+  if (input.purchaseEnabled !== true) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Mua từ nhà cung cấp đang bị khóa.",
+    };
+  }
+  if ("capabilities" in input.port && !hasSupplierCapability(input.port, "ORDER_CREATE")) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Nhà cung cấp chưa công bố capability đặt hàng.",
     };
   }
 
@@ -570,10 +575,11 @@ export async function provisionFromSupplier(
 }
 
 /**
- * Recover an UNKNOWN (or pending) supplier order by querying the provider.
+ * Recover an UNKNOWN, SUBMITTED, or pending supplier order by querying the provider.
  * Never re-creates upstream — query is the only path forward. A fulfilled
  * result is validated and ingested exactly like the create path.
  */
+
 export async function recoverUnknownSupplierOrder(
   db: Db,
   input: RecoverInput,

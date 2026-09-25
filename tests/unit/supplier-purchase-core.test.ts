@@ -81,7 +81,8 @@ function makeStore(): SupplierPurchaseRecordStore & { rows: Map<string, Supplier
     async markAttempt(id) {
       if (claimed.has(id)) return false;
       claimed.add(id);
-      await patch(id, {});
+      const record = rows.get(id);
+      await patch(id, { status: "SUBMITTED", queryKey: record?.idempotencyKey ?? null });
       return true;
     },
     async markTransportFailure(id) {
@@ -91,10 +92,10 @@ function makeStore(): SupplierPurchaseRecordStore & { rows: Map<string, Supplier
       await patch(id, { responseFingerprint: fingerprint });
     },
     async markUnknown(id, input) {
-      await patch(id, { status: "UNKNOWN", externalOrderId: input.queryKey });
+      await patch(id, { status: "UNKNOWN", queryKey: input.queryKey });
     },
     async markPending(id, externalOrderId) {
-      await patch(id, { status: "PENDING", externalOrderId });
+      await patch(id, { status: "PENDING", externalOrderId, queryKey: null });
     },
     async markFulfilled(id, externalOrderId) {
       await patch(id, { status: "FULFILLED", externalOrderId });
@@ -190,6 +191,87 @@ describe("durable supplier purchase core", () => {
     });
     expect(recovered).toMatchObject({ kind: "FULFILLED", externalOrderId: "ext-1" });
     expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
+  });
+
+  it("recovers a SUBMITTED record by stable query key even with spending disabled", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    let creates = 0;
+    let queries = 0;
+    const port = makePort({
+      createOrder: async () => {
+        creates += 1;
+        return { kind: "REJECTED", code: "unexpected", retryable: false };
+      },
+      queryOrder: async ({ queryKey, externalOrderId }) => {
+        queries += 1;
+        expect({ queryKey, externalOrderId }).toEqual({
+          queryKey: "canary-1",
+          externalOrderId: undefined,
+        });
+        return { status: "PENDING", externalOrderId: "ext-submitted-1" };
+      },
+    });
+
+    const result = await executeSupplierPurchase(input(store, { purchaseEnabled: false, port }));
+
+    expect(result).toMatchObject({ kind: "UNKNOWN", queryKey: "ext-submitted-1" });
+    expect(store.rows.get(seeded.record.id)).toMatchObject({
+      status: "PENDING",
+      externalOrderId: "ext-submitted-1",
+    });
+    expect({ creates, queries }).toEqual({ creates: 0, queries: 1 });
+  });
+
+  it("does not POST after a crash leaves the durable record SUBMITTED", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    seeded.record.status = "AUTHORIZED";
+    const markAttempt = store.markAttempt.bind(store);
+    store.markAttempt = async (id) => {
+      const claimed = await markAttempt(id);
+      if (claimed) throw new Error("simulated crash after durable claim");
+      return claimed;
+    };
+    let creates = 0;
+    let queries = 0;
+    const port = makePort({
+      createOrder: async () => {
+        creates += 1;
+        return { kind: "REJECTED", code: "unexpected", retryable: false };
+      },
+      queryOrder: async () => {
+        queries += 1;
+        return { status: "PENDING", externalOrderId: "ext-crash-1" };
+      },
+    });
+
+    await expect(executeSupplierPurchase(input(store, { port }))).rejects.toThrow(
+      "simulated crash after durable claim",
+    );
+    expect(creates).toBe(0);
+    expect(store.rows.get(seeded.record.id)).toMatchObject({
+      status: "SUBMITTED",
+      queryKey: "canary-1",
+    });
+
+    const resumed = await executeSupplierPurchase(input(store, { purchaseEnabled: false, port }));
+    expect(resumed).toMatchObject({ kind: "UNKNOWN", queryKey: "ext-crash-1" });
+    expect({ creates, queries }).toEqual({ creates: 0, queries: 1 });
   });
 
   it("claims an authorized canary exactly once under concurrent execution", async () => {

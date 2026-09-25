@@ -144,6 +144,42 @@ decision. Apps Script commissioning, OIDC audience configuration and workbook
 acceptance are optional future work, not release or store-opening blockers. Do
 not edit older migration files.
 
+## Owner supplier canary commissioning
+
+This is a future, separately owner-approved one-shot procedure, not permission
+to change production flags during PR review. Keep the store `CLOSED`; customer
+publication and delivery remain disabled.
+
+The isolated canary configuration is:
+
+```text
+STORE=CLOSED
+SUPPLIER_PURCHASE_ENABLED=true
+SUPPLIER_COMMERCE_PURCHASE_ENABLED=false
+QCST_PROVIDER_ENABLED=true
+SUPPLIER_CANARY_ENABLED=true
+QCST_PURCHASE_ENABLED=true
+VOKHONG_PURCHASE_ENABLED=false
+SUPPLIER_AUTO_FAILOVER_ENABLED=false
+```
+
+Only the owner canary lane may create a QCST order; historical PAID commerce
+orders must remain unable to use the supplier path. After one canary completes
+or becomes ambiguous (`SUBMITTED`, `PENDING`, or `UNKNOWN`), immediately set
+`SUPPLIER_CANARY_ENABLED=false`; preferably also set
+`SUPPLIER_PURCHASE_ENABLED=false` and `QCST_PURCHASE_ENABLED=false`. Keep the
+commerce gate false throughout. Recovery of an existing ambiguous purchase is
+query-only and must never issue another create. Keep `QCST_PROVIDER_ENABLED=true`
+and its existing Vault-backed `ORDER_READ` path available until no canary run
+remains `SUBMITTED`, `PENDING`, or `UNKNOWN`; disabling provider registration
+blocks query-only recovery.
+
+Keep `QCST_DELIVERY_SCHEMA_ACCEPTED=NO`. If QCST returns
+`delivery_available=true` or a non-null `delivery`, fail closed as
+`DELIVERY_UNSUPPORTED` / `NEEDS_REVIEW`; do not decode, persist, or send raw
+delivery data. Migration `094_supplier_owner_canary.sql` is branch-only until
+separately approved and must not be applied to production as part of this PR.
+
 ## Historical migrations 072–076 — post-merge production procedure
 
 This procedure is **not executed by review**. Run it only after this branch has

@@ -125,6 +125,7 @@ export const envSchema = z.object({
   VAULT_EGRESS_CIDR_ALLOWLIST: csvList,
 
   SUPPLIER_PURCHASE_ENABLED: booleanEnv,
+  SUPPLIER_COMMERCE_PURCHASE_ENABLED: booleanEnv,
   SUPPLIER_AUTO_FAILOVER_ENABLED: booleanEnv,
   SUPPLIER_CANARY_ENABLED: booleanEnv,
   SUPPLIER_CANARY_MAX_COST_VND: z.coerce.number().int().nonnegative().default(100_000),

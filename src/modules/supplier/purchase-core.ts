@@ -149,35 +149,28 @@ function unknownResult(record: SupplierPurchaseRecord, queryKey: string): Suppli
 export async function executeSupplierPurchase(
   input: SupplierPurchaseInput,
 ): Promise<SupplierPurchaseResult> {
-  if (input.purchaseEnabled !== true) {
-    return { kind: "BLOCKED", code: "PURCHASE_DISABLED", record: null };
-  }
-  if (!hasCreateCapability(input.port)) {
-    return { kind: "BLOCKED", code: "ORDER_CREATE_UNSUPPORTED", record: null };
-  }
-
   const existing = await input.store.findByIdempotency({
     supplierId: input.supplierId,
     idempotencyKey: input.idempotencyKey,
   });
+  const recoverExisting = (record: SupplierPurchaseRecord) =>
+    recoverSupplierPurchase({
+      store: input.store,
+      recordId: record.id,
+      queryKey: input.idempotencyKey,
+      port: input.port,
+      ...(input.onFulfilled ? { onFulfilled: input.onFulfilled } : {}),
+    });
   if (existing) {
     if (existing.status === "FULFILLED" || existing.status === "REJECTED") {
       return { kind: "REPLAY", record: existing };
     }
-    if (existing.status === "UNKNOWN" || existing.status === "PENDING") {
-      return recoverSupplierPurchase({
-        store: input.store,
-        recordId: existing.id,
-        queryKey: existing.queryKey ?? existing.externalOrderId ?? input.idempotencyKey,
-        port: input.port,
-        ...(input.onFulfilled ? { onFulfilled: input.onFulfilled } : {}),
-      });
-    }
-    if (existing.status === "SUBMITTED") {
-      return unknownResult(
-        existing,
-        existing.queryKey ?? existing.externalOrderId ?? input.idempotencyKey,
-      );
+    if (
+      existing.status === "UNKNOWN" ||
+      existing.status === "PENDING" ||
+      existing.status === "SUBMITTED"
+    ) {
+      return recoverExisting(existing);
     }
     // AUTHORIZED is the canary post-confirmation state. It is the only existing
     // state that may proceed to create without inserting a second intent.
@@ -187,6 +180,12 @@ export async function executeSupplierPurchase(
         existing.queryKey ?? existing.externalOrderId ?? input.idempotencyKey,
       );
     }
+  }
+  if (input.purchaseEnabled !== true) {
+    return { kind: "BLOCKED", code: "PURCHASE_DISABLED", record: null };
+  }
+  if (!hasCreateCapability(input.port)) {
+    return { kind: "BLOCKED", code: "ORDER_CREATE_UNSUPPORTED", record: null };
   }
 
   let record: SupplierPurchaseRecord;
@@ -207,6 +206,13 @@ export async function executeSupplierPurchase(
     if (!inserted) {
       if (record.status === "FULFILLED" || record.status === "REJECTED") {
         return { kind: "REPLAY", record };
+      }
+      if (
+        record.status === "UNKNOWN" ||
+        record.status === "PENDING" ||
+        record.status === "SUBMITTED"
+      ) {
+        return recoverExisting(record);
       }
       return unknownResult(
         record,
@@ -323,7 +329,7 @@ export async function recoverSupplierPurchase(input: {
 
   let observed: QueryOrderResult;
   try {
-    const queryKey = record.queryKey ?? (record.status === "UNKNOWN" ? input.queryKey : null);
+    const queryKey = record.externalOrderId ? null : (record.queryKey ?? input.queryKey);
     observed = await input.port.queryOrder({
       ...(record.externalOrderId && queryKey === null
         ? { externalOrderId: record.externalOrderId }

@@ -12,6 +12,7 @@
  *
  * See plan.md "Delivery Phases" and contracts/application-commands.md.
  */
+import { supplierCanaryPurchaseEnabled, supplierCommercePurchaseEnabled } from "./config/index.js";
 import {
   listCategoriesWithCounts,
   createCategory,
@@ -1808,7 +1809,7 @@ async function bootstrap(): Promise<void> {
     ...(supplierRegistry
       ? {
           supplierPurchaseEnabled: (supplierId: string) =>
-            config.SUPPLIER_PURCHASE_ENABLED && (supplierPurchaseFlags.get(supplierId) ?? false),
+            supplierCommercePurchaseEnabled(config, supplierPurchaseFlags.get(supplierId) ?? false),
         }
       : {}),
     vault,
@@ -2404,8 +2405,8 @@ async function bootstrap(): Promise<void> {
           rootConfig,
           sensitiveDeps,
           canaryEnabled: config.SUPPLIER_CANARY_ENABLED,
-          genericPurchaseEnabled: config.SUPPLIER_PURCHASE_ENABLED,
-          providerPurchaseEnabled: (providerKey) => supplierPurchaseFlags.get(providerKey) ?? false,
+          canaryPurchaseEnabled: (providerKey) =>
+            supplierCanaryPurchaseEnabled(config, supplierPurchaseFlags.get(providerKey) ?? false),
           maxCostVnd: config.SUPPLIER_CANARY_MAX_COST_VND,
         })
       : null;

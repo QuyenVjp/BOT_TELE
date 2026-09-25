@@ -75,8 +75,7 @@ export interface SupplierCanaryOptions {
   rootConfig: RootAdminConfig;
   sensitiveDeps: SensitiveActionDeps;
   canaryEnabled: boolean;
-  genericPurchaseEnabled: boolean;
-  providerPurchaseEnabled: (providerKey: string) => boolean;
+  canaryPurchaseEnabled: (providerKey: string) => boolean;
   maxCostVnd: number;
 }
 
@@ -274,7 +273,8 @@ function canaryStore(db: Db): SupplierPurchaseRecordStore {
     async markAttempt(id) {
       const result = await sql<{ id: string }>`
         update supplier_canary_run
-        set status = 'SUBMITTED', submitted_at = coalesce(submitted_at, now()),
+        set status = 'SUBMITTED', query_key = coalesce(query_key, idempotency_key),
+            submitted_at = coalesce(submitted_at, now()),
             last_error_code = null, retry_after_seconds = null, next_reconcile_at = null,
             updated_at = now(), version = version + 1
         where id = ${id} and status = 'AUTHORIZED'
@@ -403,7 +403,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
     if (!provider) return safeFailure("PROVIDER_UNAVAILABLE");
     if (!hasSupplierCapability(provider, "ORDER_CREATE"))
       return safeFailure("ORDER_CREATE_UNSUPPORTED");
-    if (!options.genericPurchaseEnabled || !options.providerPurchaseEnabled(row.supplier_id)) {
+    if (!options.canaryPurchaseEnabled(row.supplier_id)) {
       return safeFailure("PURCHASE_GATE_DISABLED");
     }
     const readiness = await checkSupplierPurchaseReadiness(options.db, {
@@ -546,16 +546,15 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
         ...(row.external_order_id ? { externalOrderId: row.external_order_id } : {}),
       };
     }
-    if (row.status === "PENDING" || row.status === "UNKNOWN") {
+    if (row.status === "SUBMITTED" || row.status === "PENDING" || row.status === "UNKNOWN") {
       const provider = options.registry.get(row.provider_key);
       if (!provider) {
-        await markCanaryBlocked(options.db, runId, "PROVIDER_UNAVAILABLE");
         return { runId, ...safeFailure("PROVIDER_UNAVAILABLE") };
       }
       const recovered = await recoverSupplierPurchase({
         store: canaryStore(options.db),
         recordId: row.id,
-        queryKey: row.query_key ?? row.external_order_id ?? row.idempotency_key,
+        queryKey: row.query_key ?? row.idempotency_key,
         port: provider,
       });
       if (recovered.kind === "BLOCKED") {
@@ -584,11 +583,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       return { ok: true, runId, status: "FULFILLED", externalOrderId: recovered.externalOrderId };
     }
     if (row.status !== "AUTHORIZED") return { runId, ...safeFailure("CANARY_NOT_AUTHORIZED") };
-    if (
-      !options.canaryEnabled ||
-      !options.genericPurchaseEnabled ||
-      !options.providerPurchaseEnabled(row.provider_key)
-    ) {
+    if (!options.canaryEnabled || !options.canaryPurchaseEnabled(row.provider_key)) {
       await markCanaryBlocked(options.db, runId, "PURCHASE_GATE_DISABLED");
       return { runId, ...safeFailure("PURCHASE_GATE_DISABLED") };
     }
