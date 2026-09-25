@@ -16,6 +16,63 @@ import { AppError } from "../../shared/errors/index.js";
  * review case, never a silent delivery.
  */
 
+export const SUPPLIER_CAPABILITIES = [
+  "HEALTH_READ",
+  "CATALOG_LIST",
+  "CATALOG_DETAIL",
+  "BALANCE_READ",
+  "ORDER_CREATE",
+  "ORDER_READ",
+  "ORDER_LIST",
+  "NATIVE_IDEMPOTENCY",
+  "CANCEL",
+  "REFUND",
+  "STOCK_QUANTITY",
+  "DELIVERY_PAYLOAD",
+  "RATE_LIMIT_RETRY_AFTER",
+] as const;
+
+export type SupplierCapability = (typeof SUPPLIER_CAPABILITIES)[number];
+
+export interface NormalizedSupplierProduct {
+  providerKey: string;
+  externalProductId: string;
+  externalVariantId: string | null;
+  nameVi: string;
+  nameEn: string | null;
+  descriptionVi: string | null;
+  descriptionEn: string | null;
+  warrantyVi: string | null;
+  warrantyEn: string | null;
+  customerInputType: string | null;
+  requiresCustomerInput: boolean;
+  customerInputsPerItem: number;
+  customerPromptVi: string | null;
+  customerPromptEn: string | null;
+  fulfillmentMode: string | null;
+  availability: AvailabilityStatus;
+  stockType: string | null;
+  stockQuantity: number | null;
+  minQuantity: number;
+  maxQuantity: number | null;
+  fixedQuantity: number | null;
+  costVnd: number;
+  currency: string;
+  pricingSource: string | null;
+  upstreamUpdatedAt: string;
+  metadataSafe: Readonly<Record<string, string | number | boolean | null>>;
+}
+
+export interface NormalizedSupplierBalance {
+  available: number;
+  currency: string;
+}
+
+export interface NormalizedSupplierHealth {
+  ready: boolean;
+  service: string | null;
+}
+
 export class SupplierPortError extends AppError {
   /** Supplier-specific reason code (SCHEMA_INVALID, TIMEOUT, …). */
   readonly supplierCode: string;
@@ -195,4 +252,21 @@ export interface SupplierPort {
   cancelOrder(input: SupplierActionInput): Promise<SupplierActionResult>;
   requestRefund(input: SupplierActionInput): Promise<SupplierActionResult>;
   reconcile(input: ReconcileInput): Promise<ReconcileResult>;
+}
+
+export interface SupplierProvider extends SupplierPort {
+  readonly providerKey: string;
+  readonly displayName: string;
+  readonly capabilities: ReadonlySet<SupplierCapability>;
+  readonly listProducts?: () => Promise<readonly NormalizedSupplierProduct[]>;
+  readonly getProduct?: (externalProductId: string) => Promise<NormalizedSupplierProduct>;
+  readonly getBalance?: () => Promise<NormalizedSupplierBalance>;
+  readonly health?: () => Promise<NormalizedSupplierHealth>;
+}
+
+export function hasSupplierCapability(
+  provider: Pick<SupplierProvider, "capabilities">,
+  capability: SupplierCapability,
+): boolean {
+  return provider.capabilities.has(capability);
 }

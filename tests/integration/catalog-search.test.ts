@@ -128,6 +128,13 @@ async function seed() {
     from product_variant where sku = 'SUP-OK'
   `.execute(ctx.db);
 
+  await sql`
+    update product_variant v
+       set supplier_sku_id = ss.id
+      from supplier_sku ss
+     where v.sku = 'SUP-OK' and ss.variant_id = v.id
+  `.execute(ctx.db);
+
   return { catId, chatgptId, claudeId };
 }
 

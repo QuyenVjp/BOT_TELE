@@ -7,6 +7,7 @@ import {
 } from "../../infrastructure/outbox/dispatch-policy.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
 import type { SupplierPort } from "../supplier/port.js";
+import type { SupplierProviderRegistry } from "../supplier/registry.js";
 import { fulfillPaidOrder, type FulfillmentDeps } from "./fulfillment.js";
 import type { FulfillmentTelemetry } from "./telemetry.js";
 import { createDeliveryNotificationHandoff } from "./delivery-notification.js";
@@ -51,6 +52,8 @@ export interface FulfillmentHandlerDeps {
   db: Db;
   vault: Vault;
   supplier: SupplierPort | null;
+  suppliers?: SupplierProviderRegistry | null;
+  supplierPurchaseEnabled?: ((supplierId: string) => boolean) | undefined;
   deliveryBaseUrl: string;
   bundleTtlSeconds: number;
   notifier?: DeliveryNotifier;
@@ -80,6 +83,14 @@ export function createFulfillmentOutboxHandler(
   const fulfillmentDeps: FulfillmentDeps = {
     vault: deps.vault,
     supplier: deps.supplier,
+    ...(deps.suppliers
+      ? {
+          supplierResolver: (supplierId: string) => deps.suppliers?.get(supplierId) ?? null,
+          supplierPurchaseEnabled: deps.supplierPurchaseEnabled ?? (() => false),
+        }
+      : deps.supplierPurchaseEnabled
+        ? { supplierPurchaseEnabled: deps.supplierPurchaseEnabled }
+        : {}),
     deliveryBaseUrl: deps.deliveryBaseUrl,
     bundleTtlSeconds: deps.bundleTtlSeconds,
     ...(deps.deliverySession

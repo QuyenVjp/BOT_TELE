@@ -84,17 +84,17 @@ npm run migrate:production
 
 ## Current production migration head
 
-The source tree currently contains **90** SQL files under `src/infrastructure/db/migrations/`.
+The source tree currently contains **92** SQL files under `src/infrastructure/db/migrations/`.
 The latest source migration is:
 
-- **filename:** `091_growth_migration_repair.sql`
-- **count:** `90`
+- **filename:** `093_supplier_catalog_platform.sql`
+- **count:** `92`
 
-The growth deployment recorded production at
-`090_payment_reminders.sql` (**95** migrations) after applying the canonical 085–090
-files plus six legacy migration receipts that were already present in the compiled
-artifact. Migration 091 is a forward-only repair for the legacy payment-reminder
-schema and is already recorded after the repair window.
+The latest protected production record places production at
+`091_growth_migration_repair.sql` (**96** migrations). The prior `090_payment_reminders.sql`
+record was **95** migrations after applying canonical 085–090 plus six legacy migration
+receipts already present in the compiled artifact; migration 091 is the forward-only repair
+recorded after that window.
 
 The production ledger retains these six legacy receipt names from the compiled
 artifact. They are accounted for by the preflight compatibility count; do not add
@@ -116,6 +116,14 @@ The canonical growth migrations remain ordered:
 5. `089_funnel_events.sql`
 6. `090_payment_reminders.sql`
 7. `091_growth_migration_repair.sql`
+
+The next forward-only source migrations after the protected production head are:
+
+1. `092_group_publication_admin_command.sql`
+2. `093_supplier_catalog_platform.sql`
+
+Both are additive and must be applied in filename order from a clean release
+artifact; no older migration file may be edited or replaced.
 
 The release sequence is linear: automated CI and security gates → protected PR merge →
 build the exact clean SHA with an empty compiled migration directory → keep the store

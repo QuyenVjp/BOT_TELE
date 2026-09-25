@@ -56,6 +56,23 @@ export function resetConfigCache(): void {
 function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv): string[] {
   if (config.NODE_ENV !== "production") return [];
   const issues: string[] = [];
+  const isPinnedSupplierUrl = (value: string, hostname: string, path: string): boolean => {
+    try {
+      const url = new URL(value);
+      return (
+        url.protocol === "https:" &&
+        url.hostname === hostname &&
+        (url.port === "" || url.port === "443") &&
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash &&
+        url.pathname.replace(/\/$/, "") === path
+      );
+    } catch {
+      return false;
+    }
+  };
   if (config.GOOGLE_SHEETS_ENABLED) {
     if (!config.GOOGLE_SHEETS_SPREADSHEET_ID) {
       issues.push("GOOGLE_SHEETS_SPREADSHEET_ID is required when Google Sheets is enabled");
@@ -116,6 +133,51 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
   }
   if (config.SUPPLIER_DRIVER === "fixture") {
     issues.push('SUPPLIER_DRIVER must not be "fixture" in production');
+  }
+  if (config.SUPPLIER_AUTO_FAILOVER_ENABLED) {
+    issues.push("SUPPLIER_AUTO_FAILOVER_ENABLED must remain false");
+  }
+  for (const rawKey of ["SUPPLIER_API_TOKEN", "QCST_API_KEY", "VOKHONG_API_KEY"] as const) {
+    if (source[rawKey]?.trim()) {
+      issues.push(`${rawKey} is unsupported; use the provider Vault reference`);
+    }
+  }
+  if (config.QCST_PROVIDER_ENABLED) {
+    if (!config.QCST_API_KEY_VAULT_REF.startsWith("vault:")) {
+      issues.push("QCST_API_KEY_VAULT_REF must be a Vault reference when QCST is enabled");
+    }
+    if (!isPinnedSupplierUrl(config.QCST_API_BASE_URL, "api.qcst.tech", "")) {
+      issues.push("QCST_API_BASE_URL must use the official HTTPS QCST host");
+    }
+  }
+  if (config.VOKHONG_PROVIDER_ENABLED) {
+    if (!config.VOKHONG_API_KEY_VAULT_REF.startsWith("vault:")) {
+      issues.push("VOKHONG_API_KEY_VAULT_REF must be a Vault reference when Vokhong is enabled");
+    }
+    if (!isPinnedSupplierUrl(config.VOKHONG_API_BASE_URL, "vokhong.xyz", "/api")) {
+      issues.push("VOKHONG_API_BASE_URL must use the official HTTPS Vokhong API path");
+    }
+  }
+  if (config.QCST_PURCHASE_ENABLED) {
+    if (!config.SUPPLIER_PURCHASE_ENABLED || !config.QCST_PROVIDER_ENABLED) {
+      issues.push("QCST_PURCHASE_ENABLED requires the generic and QCST provider gates");
+    }
+    if (
+      !config.QCST_CATALOG_SYNC ||
+      !config.QCST_ADMIN_PRODUCT_BROWSER ||
+      !config.QCST_OWNER_SELECTION ||
+      !config.QCST_LOCAL_PRICE_CONTROL ||
+      !config.QCST_UNSELECTED_PRODUCTS_HIDDEN ||
+      !config.QCST_DUPLICATE_MAPPING_PROTECTED ||
+      !config.QCST_PRICE_CHANGE_SAFE
+    ) {
+      issues.push("QCST purchase requires catalog curation safety gates");
+    }
+  }
+  if (config.VOKHONG_PURCHASE_ENABLED) {
+    issues.push(
+      "VOKHONG_PURCHASE_ENABLED is blocked until an authenticated order contract is verified",
+    );
   }
   if (config.ADMIN_TELEGRAM_USER_ID === 0) {
     issues.push("ADMIN_TELEGRAM_USER_ID must be a real numeric Telegram id in production");

@@ -133,7 +133,7 @@ export async function getStoreOpenReadiness(exec: Executor): Promise<StoreOpenRe
     critical_support_tickets: number;
   }>`
     with public_variants as (
-      select v.id, v.fulfillment_type, v.stock_policy
+      select v.id, v.fulfillment_type, v.stock_policy, v.supplier_sku_id
         from product_variant v
         join product p on p.id = v.product_id
         join category c on c.id = p.category_id
@@ -147,7 +147,16 @@ export async function getStoreOpenReadiness(exec: Executor): Promise<StoreOpenRe
          and ((v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
            or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
              select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-              where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE')))
+              where ss.variant_id = v.id and ss.id = v.supplier_sku_id
+                and ss.is_active and s.status = 'ACTIVE'
+                and (
+                  not exists (select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id)
+                  or exists (
+                    select 1 from supplier_catalog_product cp
+                    where cp.supplier_id = s.id and cp.supplier_sku_id = ss.id
+                      and cp.selection_status = 'SELECTED' and cp.is_enabled and not cp.is_missing
+                  )
+                ))))
          and exists (
            select 1 from resale_evidence re
             where re.id = v.publication_evidence_id and re.variant_id = v.id and re.status = 'ACTIVE'
@@ -167,8 +176,9 @@ export async function getStoreOpenReadiness(exec: Executor): Promise<StoreOpenRe
           )
           when pv.fulfillment_type = 'SUPPLIER_API' then (
             select count(*)::int from supplier_sku ss join supplier s on s.id = ss.supplier_id
-             where ss.variant_id = pv.id and ss.is_active and s.status = 'ACTIVE'
-          )
+             where ss.variant_id = pv.id and ss.id = pv.supplier_sku_id
+               and ss.is_active and s.status = 'ACTIVE'
+               )
           when pv.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then (
             select count(*)::int from variant_service_fulfillment sf
              where sf.variant_id = pv.id and sf.fulfillment_type = pv.fulfillment_type and sf.is_active

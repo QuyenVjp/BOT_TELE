@@ -1,0 +1,32 @@
+# Multi-supplier supplier platform
+
+- [x] Rebase branch and scan migration ordinals
+- [x] Update architecture contract for multi-provider platform
+- [x] Define normalized supplier provider contracts
+- [x] Add explicit provider capability registry
+- [x] Refactor migration 093 to generic schema
+- [x] Refactor QCST into generic provider adapter
+- [x] Discover Vô Không contract through safe routes
+- [x] Add capability-limited Vô Không adapter
+- [x] Build reusable provider contract tests
+- [x] Enforce capability-aware purchase orchestration
+- [x] Generalize supplier catalog sync and curation
+- [x] Namespace external product/order identities
+- [x] Support multiple mappings per local SKU
+- [x] Preserve local selling price authority
+- [x] Keep automatic supplier failover disabled
+- [x] Add supplier hub and capability-specific controls
+- [x] Add generic per-provider curation
+- [x] Add owner create/attach mapping flows
+- [x] Add explicit primary supplier selection
+- [x] Enforce Vault-only credentials
+- [x] Enforce SSRF host and port pinning
+- [x] Preserve customer isolation
+- [x] Add bounded health/retry behavior
+- [x] Run QCST invariants and regression verification
+- [x] Record Vokhong discovery evidence and purchase blocker
+- [x] Run migration fresh/upgrade verification
+- [x] Run focused and full regression checks
+- [ ] Complete independent code and security review and dispositions
+- [ ] Open or update draft PR
+- [ ] Produce final evidence report

@@ -73,7 +73,6 @@ describe("payment beneficiary configuration contract (T171)", () => {
         VAULT_EGRESS_CIDR_ALLOWLIST: "127.0.0.1/32",
         SUPPLIER_DRIVER: "http",
         SUPPLIER_API_BASE_URL: "https://supplier.example.com",
-        SUPPLIER_API_TOKEN: "supplier-token-material-1234567890",
         SEPAY_API_TOKEN: "sepay-api-token-material-1234567890",
         DELIVERY_SESSION_HMAC_KEY: "delivery-session-key-material-12345678",
         BUY_NOW_CALLBACK_HMAC_KEY: "buy-now-callback-key-material-12345678",

@@ -6,8 +6,14 @@ import type { Vault } from "../../infrastructure/vault/port.js";
 import { newId } from "../../shared/ids/index.js";
 import { findOrderById } from "../commerce/repository.js";
 import { validateAssetEnvelope } from "../digital-goods/asset-validation.js";
-import type { AssetEnvelope, SupplierPort } from "./port.js";
-
+import {
+  hasSupplierCapability,
+  SupplierPortError,
+  type AssetEnvelope,
+  type CreateOrderResult,
+  type SupplierPort,
+  type SupplierProvider,
+} from "./port.js";
 /**
  * Supplier provisioning service (T069, FR-015/FR-016).
  *
@@ -39,10 +45,12 @@ export interface ProvisionInput {
   durationCode: string;
   region: string | null;
   correlationId: string;
-  port: SupplierPort;
+  port: SupplierPort | SupplierProvider;
   vault: Vault;
   /** Stable idempotency key; derived from the order+sku when omitted. */
   idempotencyKey?: string;
+  /** Required runtime launch gate; false must prevent all upstream purchase I/O. */
+  purchaseEnabled: boolean;
 }
 
 export type ProvisionResult =
@@ -50,7 +58,7 @@ export type ProvisionResult =
   | { ok: true; kind: "UNKNOWN"; supplierOrderId: string; queryKey: string }
   | { ok: true; kind: "REJECTED"; supplierOrderId: string }
   | { ok: true; kind: "NEEDS_REVIEW"; supplierOrderId: string; assetId: string }
-  | { ok: false; code: "NOT_FOUND" | "NOT_PAID"; message: string };
+  | { ok: false; code: "NOT_FOUND" | "NOT_PAID" | "UNSUPPORTED"; message: string };
 
 export interface RecoverInput {
   supplierOrderId: string;
@@ -60,7 +68,7 @@ export interface RecoverInput {
   durationCode: string;
   region: string | null;
   correlationId: string;
-  port: SupplierPort;
+  port: SupplierPort | SupplierProvider;
   vault: Vault;
 }
 
@@ -69,7 +77,7 @@ export type RecoverResult =
   | { ok: true; kind: "PENDING" }
   | { ok: true; kind: "REJECTED" }
   | { ok: true; kind: "NEEDS_REVIEW"; assetId: string }
-  | { ok: false; code: "NOT_FOUND"; message: string };
+  | { ok: false; code: "NOT_FOUND" | "UNSUPPORTED"; message: string };
 
 interface SupplierOrderRow {
   id: string;
@@ -83,6 +91,14 @@ function requestFingerprint(input: ProvisionInput, idempotencyKey: string): stri
   return createHash("sha256")
     .update(`${input.supplierId}|${input.supplierSkuId}|${input.orderId}|${idempotencyKey}`, "utf8")
     .digest("hex");
+}
+
+function retryAfterFromError(error: unknown): number | null {
+  if (!(error instanceof SupplierPortError)) return null;
+  const value = (error as SupplierPortError & { retryAfterSeconds?: unknown }).retryAfterSeconds;
+  return typeof value === "number" && Number.isInteger(value) && value >= 0
+    ? Math.min(value, 86_400)
+    : null;
 }
 
 async function findSupplierOrderByIdempotency(
@@ -200,6 +216,7 @@ async function ingestFulfilledAsset(
       update supplier_order
       set status = 'FULFILLED',
           external_order_id = ${params.externalOrderId},
+          needs_review_at = ${quarantined ? new Date().toISOString() : null},
           version = version + 1
       where id = ${params.supplierOrderId}
     `.execute(trx);
@@ -215,6 +232,20 @@ export async function provisionFromSupplier(
   const order = await findOrderById(db, input.orderId);
   if (!order) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
+  }
+  if (input.purchaseEnabled === false) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Mua từ nhà cung cấp đang bị khóa.",
+    };
+  }
+  if ("capabilities" in input.port && !hasSupplierCapability(input.port, "ORDER_CREATE")) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Nhà cung cấp chưa công bố capability đặt hàng.",
+    };
   }
 
   if (order.status !== "PAID" && order.status !== "PROCESSING" && order.status !== "COMPLETED") {
@@ -294,12 +325,13 @@ export async function provisionFromSupplier(
   const margin = input.salePriceVnd - costSnapshot;
   const inserted = await sql<{ id: string }>`
     insert into supplier_order
-      (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
-       status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at)
+      (id, supplier_id, supplier_sku_id, order_id, idempotency_key, provider_client_order_id,
+       request_fingerprint, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
+       margin_vnd_snapshot, submitted_at, last_attempt_at, attempt_count)
     values
       (${supplierOrderId}, ${input.supplierId}, ${input.supplierSkuId}, ${input.orderId},
-       ${idempotencyKey}, ${requestFingerprint(input, idempotencyKey)}, 'SUBMITTED',
-       ${costSnapshot}, ${input.salePriceVnd}, ${margin}, now())
+       ${idempotencyKey}, ${idempotencyKey}, ${requestFingerprint(input, idempotencyKey)}, 'SUBMITTED',
+       ${costSnapshot}, ${input.salePriceVnd}, ${margin}, now(), now(), 0)
     on conflict (supplier_id, idempotency_key) do nothing
     returning id
   `.execute(db);
@@ -321,13 +353,48 @@ export async function provisionFromSupplier(
     );
   }
 
-  const result = await input.port.createOrder({
-    idempotencyKey,
-    supplierSku: input.externalSku,
-    costCeilingVnd: input.costCeilingVnd,
-    orderId: input.orderId,
-    ...(input.region !== null ? { region: input.region } : {}),
-  });
+  await sql`
+    update supplier_order
+    set attempt_count = attempt_count + 1, last_attempt_at = now(),
+        last_error_code = null, retry_after_seconds = null, next_reconcile_at = null,
+        version = version + 1
+    where id = ${supplierOrderId}
+  `.execute(db);
+
+  let result: CreateOrderResult;
+  try {
+    result = await input.port.createOrder({
+      idempotencyKey,
+      supplierSku: input.externalSku,
+      costCeilingVnd: input.costCeilingVnd,
+      orderId: input.orderId,
+      ...(input.region !== null ? { region: input.region } : {}),
+    });
+  } catch (error) {
+    const retryAfterSeconds = retryAfterFromError(error);
+    const nextReconcileAt =
+      retryAfterSeconds === null
+        ? null
+        : new Date(Date.now() + retryAfterSeconds * 1_000).toISOString();
+    await sql`
+      update supplier_order
+      set last_error_code = ${error instanceof SupplierPortError ? error.supplierCode : "PORT_ERROR"},
+          retry_after_seconds = ${retryAfterSeconds},
+          next_reconcile_at = ${nextReconcileAt},
+          version = version + 1
+      where id = ${supplierOrderId}
+    `.execute(db);
+    throw error;
+  }
+
+  const responseFingerprint = createHash("sha256")
+    .update(JSON.stringify(result), "utf8")
+    .digest("hex");
+  await sql`
+    update supplier_order
+    set response_fingerprint = ${responseFingerprint}, version = version + 1
+    where id = ${supplierOrderId}
+  `.execute(db);
 
   switch (result.kind) {
     case "FULFILLED": {
@@ -351,7 +418,8 @@ export async function provisionFromSupplier(
       await sql`
         update supplier_order
         set status = 'UNKNOWN', external_order_id = coalesce(external_order_id, ${result.queryKey}),
-            last_queried_at = now(), version = version + 1
+            last_queried_at = now(), uncertain_at = now(), last_error_code = ${result.reason},
+            version = version + 1
         where id = ${supplierOrderId}
       `.execute(db);
       return { ok: true, kind: "UNKNOWN", supplierOrderId, queryKey: result.queryKey };
@@ -369,7 +437,7 @@ export async function provisionFromSupplier(
       await sql`
         update supplier_order
         set status = 'PENDING', external_order_id = ${result.kind === "ACCEPTED" ? result.externalOrderId : null},
-            version = version + 1
+            last_error_code = null, version = version + 1
         where id = ${supplierOrderId}
       `.execute(db);
       return { ok: true, kind: "UNKNOWN", supplierOrderId, queryKey: idempotencyKey };
@@ -390,6 +458,19 @@ export async function recoverUnknownSupplierOrder(
   if (!so) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn nhà cung cấp." };
   }
+  if ("capabilities" in input.port && !hasSupplierCapability(input.port, "ORDER_READ")) {
+    await sql`
+      update supplier_order
+      set last_error_code = 'UNSUPPORTED', needs_review_at = coalesce(needs_review_at, now()),
+          next_reconcile_at = null, version = version + 1
+      where id = ${so.id} and needs_review_at is null
+    `.execute(db);
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Nhà cung cấp chưa công bố capability truy vấn đơn hàng.",
+    };
+  }
   // Already recovered.
   if (so.status === "FULFILLED") {
     const asset = await findAssetBySupplierOrder(db, so.id);
@@ -401,7 +482,25 @@ export async function recoverUnknownSupplierOrder(
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
 
-  const observed = await input.port.queryOrder({ queryKey: input.queryKey });
+  let observed: Awaited<ReturnType<SupplierPort["queryOrder"]>>;
+  try {
+    observed = await input.port.queryOrder({ queryKey: input.queryKey });
+  } catch (error) {
+    if (error instanceof SupplierPortError && error.supplierCode === "DELIVERY_UNSUPPORTED") {
+      await sql`
+        update supplier_order
+        set last_error_code = 'DELIVERY_UNSUPPORTED', needs_review_at = coalesce(needs_review_at, now()),
+            next_reconcile_at = null, version = version + 1
+        where id = ${so.id} and needs_review_at is null
+      `.execute(db);
+      return {
+        ok: false,
+        code: "UNSUPPORTED",
+        message: "Nhà cung cấp trả về payload giao hàng chưa được hỗ trợ.",
+      };
+    }
+    throw error;
+  }
 
   switch (observed.status) {
     case "FULFILLED": {

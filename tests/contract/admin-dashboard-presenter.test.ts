@@ -25,11 +25,16 @@ import {
   presentAdminSupplierVariant,
   presentAdminSuppliersMenu,
   presentAdminSupportMenu,
+  presentAdminSupplierCatalogActionDone,
+  presentAdminSupplierCatalogDetail,
+  presentAdminSupplierCatalogPage,
+  presentAdminSupplierConfigPreview,
   presentAdminOperations,
   presentAdminStoreOpenBlocked,
   presentAdminStoreOpenConfirmation,
   presentProductDraftPreview,
 } from "../../src/bot/presenters/admin.js";
+import type { SupplierCatalogRow } from "../../src/modules/supplier/catalog.js";
 
 describe("admin operational presenters", () => {
   it("only exposes live admin route keys in the root menu", () => {
@@ -952,5 +957,86 @@ describe("admin operational presenters", () => {
       { text: "↩️ Quay lại", callbackData: "admin:products" },
       { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
     ]);
+  });
+  it("renders supplier metadata separately from local curation", () => {
+    const row: SupplierCatalogRow = {
+      id: "01ARZ3NDEKTSV4RRFFQ69G5FAV",
+      supplier_id: "qcst",
+      external_product_id: "qcst-product-1",
+      external_variant_id: "",
+      upstream_name_vi: "VPN upstream",
+      upstream_description_vi: "upstream description",
+      availability: "AVAILABLE",
+      stock_quantity: 4,
+      supplier_cost_vnd: "100000",
+      currency: "VND",
+      selection_status: "DISCOVERED",
+      is_enabled: false,
+      is_missing: false,
+      local_product_id: null,
+      local_variant_id: null,
+      supplier_sku_id: null,
+      local_name_vi: null,
+      local_variant_name_vi: null,
+      local_description_vi: null,
+      is_primary: false,
+      version: 1,
+      updated_at: "2026-09-24T00:00:00Z",
+    };
+    const page = presentAdminSupplierCatalogPage({
+      providerKey: "qcst",
+      providerName: "QCST",
+      capabilities: ["CATALOG_LIST"],
+      items: [row],
+      nextOffset: 8,
+      total: 9,
+      syncEnabled: true,
+    });
+    expect(page.text).toContain("DISCOVERED · tắt");
+    expect(page.text).toContain("cost 100.000 ₫");
+    expect(page.buttons.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ callbackData: `admin:supplier:qcst:item:${row.id}` }),
+        expect.objectContaining({ callbackData: "admin:supplier:qcst:sync" }),
+        expect.objectContaining({ callbackData: "admin:supplier:qcst:page:8" }),
+      ]),
+    );
+
+    const detail = presentAdminSupplierCatalogDetail({
+      providerKey: "qcst",
+      providerName: "QCST",
+      row,
+      ownerSelectionEnabled: true,
+    });
+    expect(detail.text).toContain("Cost tham chiếu");
+    expect(detail.text).toContain("Giá bán local chỉ do owner đặt");
+    expect(detail.buttons.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ callbackData: `admin:supplier:qcst:configure:${row.id}` }),
+      ]),
+    );
+    const preview = presentAdminSupplierConfigPreview({
+      providerKey: "qcst",
+      providerName: "QCST",
+      stateId: "01ARZ3NDEKTSV4RRFFQ69G5FAX",
+      localNameVi: "VPN local",
+      localVariantNameVi: "1 tháng",
+      localPriceVnd: 199000n,
+      localDescriptionVi: "Mô tả local",
+    });
+    expect(preview.text).toContain("199.000 ₫");
+    const previewCallbacks = preview.buttons.flat().map((button) => button.callbackData);
+    expect(previewCallbacks).toContain("admin:supplier:qcst:confirm:01ARZ3NDEKTSV4RRFFQ69G5FAX:on");
+    expect(previewCallbacks).toContain(
+      "admin:supplier:qcst:confirm:01ARZ3NDEKTSV4RRFFQ69G5FAX:off",
+    );
+    expect(
+      presentAdminSupplierCatalogActionDone({
+        providerKey: "qcst",
+        providerName: "QCST",
+        catalogId: row.id,
+        enabled: false,
+      }).text,
+    ).toContain("Đã lưu mapping ở trạng thái tắt");
   });
 });

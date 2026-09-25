@@ -86,6 +86,59 @@ export interface Page<T> {
   nextCursor: string | null;
 }
 
+const SUPPLIER_READY_SQL = sql`
+  exists (
+    select 1
+    from supplier_sku ss
+    join supplier s on s.id = ss.supplier_id
+    where ss.variant_id = v.id
+      and ss.id = v.supplier_sku_id
+      and ss.is_active
+      and s.status = 'ACTIVE'
+      and (
+        not exists (
+          select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id
+        )
+        or exists (
+          select 1
+          from supplier_catalog_product cp
+          where cp.supplier_id = s.id
+            and cp.supplier_sku_id = ss.id
+            and cp.selection_status = 'SELECTED'
+            and cp.is_enabled
+            and not cp.is_missing
+            and cp.availability in ('AVAILABLE', 'LOW')
+        )
+      )
+  )
+`;
+
+const SUPPLIER_ROUTE_SQL = sql`
+  exists (
+    select 1
+    from supplier_sku ss
+    join supplier s on s.id = ss.supplier_id
+    where ss.variant_id = v.id
+      and ss.id = v.supplier_sku_id
+      and ss.is_active
+      and s.status = 'ACTIVE'
+      and (
+        not exists (
+          select 1 from supplier_catalog_product cp where cp.supplier_sku_id = ss.id
+        )
+        or exists (
+          select 1
+          from supplier_catalog_product cp
+          where cp.supplier_id = s.id
+            and cp.supplier_sku_id = ss.id
+            and cp.selection_status = 'SELECTED'
+            and cp.is_enabled
+            and not cp.is_missing
+        )
+      )
+  )
+`;
+
 export const VARIANT_READY_SQL = sql`
   case
     when v.fulfillment_type in ('STOCK_ACCOUNT','STOCK_CODE') then exists (
@@ -95,10 +148,7 @@ export const VARIANT_READY_SQL = sql`
     when v.fulfillment_type = 'DIGITAL_FILE' then exists (
       select 1 from variant_file_artifact f where f.variant_id = v.id and f.is_active
     )
-    when v.fulfillment_type = 'SUPPLIER_API' then exists (
-      select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-      where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-    )
+    when v.fulfillment_type = 'SUPPLIER_API' then ${SUPPLIER_READY_SQL}
     when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
       select 1 from variant_service_fulfillment sf
       where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
@@ -110,10 +160,7 @@ export const VARIANT_READY_SQL = sql`
 export const SELLABLE_ROUTE_SQL = sql`
   (
     (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
-    or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
-      select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-      where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-    ))
+    or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and ${SUPPLIER_ROUTE_SQL})
   )
 `;
 
@@ -474,8 +521,7 @@ export async function listStorefrontProducts(
             select count(*)::int from variant_file_artifact f where f.variant_id = v.id and f.is_active
           )
           when v.fulfillment_type = 'SUPPLIER_API' then (
-            select count(*)::int from supplier_sku ss join supplier s on s.id = ss.supplier_id
-            where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
+            case when ${SUPPLIER_READY_SQL} then 1 else 0 end
           )
           when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then (
             select count(*)::int from variant_service_fulfillment sf
@@ -551,7 +597,8 @@ export async function listTestCatalogProducts(
             (select count(*)::int from variant_file_artifact f where f.variant_id = v.id and f.is_active)
           when v.fulfillment_type = 'SUPPLIER_API' then
             (select count(*)::int from supplier_sku ss join supplier s on s.id = ss.supplier_id
-             where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE')
+             where ss.variant_id = v.id and ss.id = v.supplier_sku_id
+               and ss.is_active and s.status = 'ACTIVE')
           when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then
             (select count(*)::int from variant_service_fulfillment sf
              where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active)

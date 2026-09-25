@@ -58,7 +58,7 @@ function productionEnv(overrides: Record<string, string | undefined> = {}): Node
     VAULT_EGRESS_CIDR_ALLOWLIST: "203.0.113.0/24",
     SUPPLIER_DRIVER: "http",
     SUPPLIER_API_BASE_URL: "https://supplier.example",
-    SUPPLIER_API_TOKEN: SECRET_VALUES.SUPPLIER_API_TOKEN,
+    SUPPLIER_API_TOKEN: undefined,
     ADMIN_STEP_UP_MODE: "required",
     ...overrides,
   };

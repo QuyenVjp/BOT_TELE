@@ -14,7 +14,11 @@ import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import type { SePayReconciliationPort } from "../../src/modules/payments/reconciliation.js";
 import { SePayApiError } from "../../src/modules/payments/sepay-api.js";
 import { createInMemoryRateLimiter } from "../../src/modules/risk/service.js";
-import type { SupplierPort } from "../../src/modules/supplier/port.js";
+import {
+  SupplierPortError,
+  type SupplierPort,
+  type SupplierProvider,
+} from "../../src/modules/supplier/port.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
 import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
@@ -798,6 +802,154 @@ describe("bounded recovery jobs (T167/T168)", () => {
     expect(createCalls).toBe(0);
     expect(queryCalls).toBe(2);
     expect(result).toMatchObject({ claimed: 2, succeeded: 1, failed: 1, backlog: 2 });
+  });
+
+  it("quarantines deterministic unsupported delivery responses", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed, { status: "PAID" });
+    const supplierId = newId();
+    const supplierSkuId = newId();
+    const supplierOrderId = newId();
+    await sql`
+      insert into supplier (id, name, adapter_type, credential_vault_ref)
+      values (${supplierId}, 'Delivery review', 'qcst', 'vault:supplier')
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_sku
+        (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type)
+      values (${supplierSkuId}, ${supplierId}, ${seed.variantId}, 'DELIVERY-REVIEW', 100000, 'VN', 'CREDENTIAL')
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
+         submitted_at, next_reconcile_at)
+      values
+        (${supplierOrderId}, ${supplierId}, ${supplierSkuId}, ${order.orderId},
+         'delivery-review', 'fp-delivery-review', 'UNKNOWN', 100000, 150000, 50000,
+         now() - interval '10 minutes', now() - interval '1 minute')
+    `.execute(ctx.db);
+
+    const port: SupplierPort = {
+      getAvailability: async () => ({ status: "UNKNOWN", observedAt: new Date().toISOString() }),
+      createOrder: async () => {
+        throw new Error("create must not be called by recovery");
+      },
+      queryOrder: async () => {
+        throw new SupplierPortError("DELIVERY_UNSUPPORTED", "unsupported delivery payload");
+      },
+      cancelOrder: async () => ({ status: "UNSUPPORTED" }),
+      requestRefund: async () => ({ status: "UNSUPPORTED" }),
+      reconcile: async () => ({ observations: [], nextCursor: null }),
+    };
+
+    const result = await recoverSupplierOrdersBatch(ctx.db, {
+      batchSize: 1,
+      now: new Date(),
+      retryDelaySeconds: 60,
+      resolvePort: () => port,
+      vault: createInMemoryVault(),
+    });
+    expect(result).toMatchObject({ claimed: 1, succeeded: 0, failed: 1, backlog: 0 });
+    const row = await sql<{
+      last_error_code: string | null;
+      needs_review_at: Date | string | null;
+      next_reconcile_at: Date | string | null;
+    }>`
+      select last_error_code, needs_review_at, next_reconcile_at
+      from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toMatchObject({
+      last_error_code: "DELIVERY_UNSUPPORTED",
+      next_reconcile_at: null,
+    });
+    expect(row.rows[0]?.needs_review_at).not.toBeNull();
+  });
+
+  it("quarantines providers without ORDER_READ instead of retrying them", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed, { status: "PAID" });
+    const supplierId = newId();
+    const supplierSkuId = newId();
+    const supplierOrderId = newId();
+    await sql`
+      insert into supplier (id, name, adapter_type, credential_vault_ref)
+      values (${supplierId}, 'Health only', 'health-only', 'vault:supplier')
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_sku
+        (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type)
+      values (${supplierSkuId}, ${supplierId}, ${seed.variantId}, 'HEALTH-SKU', 100000, 'VN', 'CREDENTIAL')
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
+         submitted_at, next_reconcile_at)
+      values
+        (${supplierOrderId}, ${supplierId}, ${supplierSkuId}, ${order.orderId},
+         'health-only-recovery', 'fp-health-only', 'UNKNOWN', 100000, 150000, 50000,
+         now() - interval '10 minutes', now() - interval '1 minute')
+    `.execute(ctx.db);
+
+    const provider: SupplierProvider = {
+      providerKey: "health-only",
+      displayName: "Health only",
+      capabilities: new Set(["HEALTH_READ"]),
+      getAvailability: async () => ({
+        status: "UNKNOWN",
+        observedAt: new Date().toISOString(),
+      }),
+      createOrder: async () => {
+        throw new Error("create must not be called");
+      },
+      queryOrder: async () => {
+        throw new Error("query must not be called");
+      },
+      cancelOrder: async () => ({ status: "UNSUPPORTED" }),
+      requestRefund: async () => ({ status: "UNSUPPORTED" }),
+      reconcile: async () => ({ observations: [], nextCursor: null }),
+      health: async () => ({
+        providerKey: "health-only",
+        status: "UP",
+        ready: true,
+        service: "health-only",
+        observedAt: new Date().toISOString(),
+      }),
+    };
+
+    const result = await recoverSupplierOrdersBatch(ctx.db, {
+      batchSize: 1,
+      now: new Date(),
+      retryDelaySeconds: 60,
+      resolvePort: () => provider,
+      vault: createInMemoryVault(),
+    });
+
+    expect(result).toMatchObject({ claimed: 1, succeeded: 0, failed: 1, backlog: 0 });
+    const row = await sql<{
+      last_error_code: string | null;
+      needs_review_at: Date | string | null;
+      next_reconcile_at: Date | string | null;
+    }>`
+      select last_error_code, needs_review_at, next_reconcile_at
+      from supplier_order
+      where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toMatchObject({
+      last_error_code: "UNSUPPORTED",
+      next_reconcile_at: null,
+    });
+    expect(row.rows[0]?.needs_review_at).not.toBeNull();
+
+    const retry = await recoverSupplierOrdersBatch(ctx.db, {
+      batchSize: 1,
+      now: new Date(),
+      retryDelaySeconds: 60,
+      resolvePort: () => provider,
+      vault: createInMemoryVault(),
+    });
+    expect(retry).toMatchObject({ claimed: 0, succeeded: 0, failed: 0 });
   });
 
   it("claims stale SUBMITTED supplier rows only after the retry threshold", async () => {

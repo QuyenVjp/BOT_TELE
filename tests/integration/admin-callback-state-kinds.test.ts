@@ -42,6 +42,8 @@ const ALL_KINDS = Object.keys({
   ADMIN_RESALE_EVIDENCE_PROMPT: true,
   ADMIN_PAYMENT_DISPOSITION_PROMPT: true,
   ADMIN_OUTBOX_DISPOSITION_PROMPT: true,
+  SUPPLIER_CURATE_PROMPT: true,
+  SUPPLIER_CURATE_PREVIEW: true,
 } satisfies Record<AdminStateKind, true>) as AdminStateKind[];
 
 let ctx: PgTestContext;

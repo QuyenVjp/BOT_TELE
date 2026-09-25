@@ -59,6 +59,7 @@ export type SensitiveActionKey =
   | "supplier.mapping.select"
   | "supplier.mapping.clear"
   | "supplier.mapping.verify"
+  | "supplier.catalog.curate"
   | "broadcast.confirm"
   | "warranty.refund.approve"
   | "warranty.refund.adjust"
@@ -102,9 +103,9 @@ export const SENSITIVE_ACTION_POLICY: Record<SensitiveActionKey, StepUpActionCat
   "supplier.mapping.select": "SUPPLIER_CONFIG",
   "supplier.mapping.clear": "SUPPLIER_CONFIG",
   "supplier.mapping.verify": "SUPPLIER_CONFIG",
+  "supplier.catalog.curate": "SUPPLIER_CONFIG",
   "broadcast.confirm": "BROADCAST",
 };
-
 /** Runtime membership test for the policy table (callers hold a plain command string). */
 export function isSensitiveActionKey(value: string): value is SensitiveActionKey {
   return Object.hasOwn(SENSITIVE_ACTION_POLICY, value);

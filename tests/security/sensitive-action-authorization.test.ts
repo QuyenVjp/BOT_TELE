@@ -94,6 +94,7 @@ describe("sensitive action policy table", () => {
         "supplier.mapping.select",
         "supplier.mapping.clear",
         "supplier.mapping.verify",
+        "supplier.catalog.curate",
         "broadcast.confirm",
         "warranty.refund.approve",
         "warranty.refund.adjust",
@@ -135,6 +136,7 @@ describe("sensitive action policy table", () => {
       "supplier.mapping.select": "SUPPLIER_CONFIG",
       "supplier.mapping.clear": "SUPPLIER_CONFIG",
       "supplier.mapping.verify": "SUPPLIER_CONFIG",
+      "supplier.catalog.curate": "SUPPLIER_CONFIG",
       "broadcast.confirm": "BROADCAST",
       "catalog.variant.price.change": "BULK_PRICE_CHANGE",
       "catalog.variant.deposit.change": "BULK_PRICE_CHANGE",
@@ -212,6 +214,54 @@ describe("authorizeSensitiveAdminAction identity and dev posture", () => {
     expect(result).toEqual({ ok: true, stepUpConsumed: false });
     // Identity and audit still ran; the grant table was never touched.
     expect(statements).toHaveLength(0);
+    expect(auditRows).toHaveLength(1);
+  });
+
+  it("keeps supplier curation identity and audit protected when step-up is disabled", async () => {
+    const { db, statements, auditRows } = stubDb(() => []);
+    const result = await authorizeSensitiveAdminAction(
+      { ...DEPS, db, stepUpEnabled: false },
+      {
+        actor: { numericUserId: ADMIN_ID, chatType: "private" },
+        actionKey: "supplier.catalog.curate",
+        resourceType: "SupplierCatalogProduct",
+        resourceId: "qcst-catalog-1",
+        requestedData: {
+          supplierId: "qcst",
+          catalogId: "qcst-catalog-1",
+          enabled: true,
+        },
+        correlationId: "supplier-disabled",
+        consumeGrant: true,
+      },
+    );
+
+    expect(result).toEqual({ ok: true, stepUpConsumed: false });
+    expect(statements).toHaveLength(0);
+    expect(auditRows).toHaveLength(1);
+  });
+
+  it("keeps supplier curation behind the existing step-up flow when required", async () => {
+    const { db, statements, auditRows } = stubDb(() => []);
+    const result = await authorizeSensitiveAdminAction(
+      { ...DEPS, db, stepUpEnabled: true },
+      {
+        actor: { numericUserId: ADMIN_ID, chatType: "private" },
+        actionKey: "supplier.catalog.curate",
+        resourceType: "SupplierCatalogProduct",
+        resourceId: "qcst-catalog-1",
+        requestedData: {
+          supplierId: "qcst",
+          catalogId: "qcst-catalog-1",
+          enabled: true,
+        },
+        correlationId: "supplier-required",
+        consumeGrant: false,
+      },
+    );
+
+    expect(result).toEqual({ ok: false, code: "STEP_UP_NOT_ENROLLED" });
+    expect(statements.length).toBeGreaterThan(0);
     expect(auditRows).toHaveLength(1);
   });
 
