@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
-  "reviewed_head_sha": "2705917d7d4e318b753b43eb5c308eb78a52da96",
+  "reviewed_head_sha": "e26d3753479faa82313408e48e013106ed860156",
+  "reviewed_worktree_base_sha": "2705917d7d4e318b753b43eb5c308eb78a52da96",
   "working_tree_review": true,
   "independent_review_status": "UNAVAILABLE",
   "independent_review_blocker": "code-reviewer and security-reviewer jobs both exited before review because the external Gemini lane returned account-verification HTTP 403; no reviewer findings were accepted as evidence.",

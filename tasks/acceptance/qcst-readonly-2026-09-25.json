@@ -4,7 +4,8 @@
   "worktree": {
     "path": "/Users/quyen/Developer/BOT_TELE-qcst",
     "branch": "feat/qcst-external-supplier",
-    "head_before_fix": "2705917d7d4e318b753b43eb5c308eb78a52da96"
+    "head_before_fix": "2705917d7d4e318b753b43eb5c308eb78a52da96",
+    "head_after_fix": "e26d3753479faa82313408e48e013106ed860156"
   },
   "credential_setup": {
     "raw_env_candidate_moved_to_vault": true,
