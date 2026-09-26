@@ -685,6 +685,12 @@ are disabled.
 Query-only recovery requires the provider registration, its `ORDER_READ`
 capability, and the existing Vault-backed credential to remain available until
 the row is terminal; purchase gates may be disabled during recovery.
+The worker dispatches this recovery through `runRecoveryJobsOnce` in the
+existing 60-second recovery lane; it does not add a timer or depend on owner
+identity or purchase gates. Batches claim due rows with `FOR UPDATE SKIP LOCKED`,
+defer each row before querying, and keep transient failures nonterminal with a
+bounded retry delay. `SUBMITTED` receives a 60-second grace period before its
+first query; `PENDING` and `UNKNOWN` use the durable `next_reconcile_at` schedule.
 
 Final confirmation re-reads the authoritative provider, primary mapping,
 catalog support/availability, automatic fulfillment with no customer input,

@@ -163,6 +163,7 @@ import { recoverSePayBatch } from "./modules/payments/recovery.js";
 import { reconcileForPaymentCheck } from "./modules/payments/check-now.js";
 import { setTimeout as delayNotification } from "node:timers/promises";
 import { recoverSupplierOrdersBatch } from "./modules/supplier/recovery.js";
+import { recoverSupplierCanariesBatch } from "./modules/supplier/canary.js";
 import type { LatencyMetrics } from "./infrastructure/observability/tracing.js";
 import { subscribeRestock, unsubscribeRestock } from "./modules/catalog/restock.js";
 import {
@@ -242,6 +243,7 @@ export interface RecoveryCycleResult {
   inboxRetention: { payloadsRedacted: number; rowsPruned: number };
   sePay: RecoveryTelemetry | null;
   supplier: RecoveryTelemetry | null;
+  supplierCanary: RecoveryTelemetry | null;
 }
 
 /** Conservative, documented retention defaults for the Telegram inbox. */
@@ -323,6 +325,13 @@ export async function runRecoveryJobsOnce(input: {
           vault: input.vault,
         })
       : null;
+  const supplierCanary = input.supplierRegistry
+    ? await recoverSupplierCanariesBatch(input.db, {
+        batchSize: input.batchSize,
+        now,
+        registry: input.supplierRegistry,
+      })
+    : null;
   return {
     orders,
     reservations,
@@ -333,6 +342,7 @@ export async function runRecoveryJobsOnce(input: {
     inboxRetention: { payloadsRedacted, rowsPruned },
     sePay,
     supplier,
+    supplierCanary,
   };
 }
 
