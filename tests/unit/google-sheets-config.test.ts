@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { envSchema } from "../../src/config/env.js";
-import { loadConfig, resetConfigCache } from "../../src/config/index.js";
+import {
+  loadConfig,
+  resetConfigCache,
+  supplierCanaryPurchaseEnabled,
+  supplierCommercePurchaseEnabled,
+} from "../../src/config/index.js";
 
 const baseEnv = {
   DATABASE_URL: "postgres://localhost:5432/shop",
@@ -152,13 +157,65 @@ describe("QCST configuration", () => {
 });
 
 describe("generic supplier platform configuration", () => {
-  it("defaults generic purchase, failover, and Vô Không gates off", () => {
+  it("defaults all supplier spend lanes and provider purchases off", () => {
     const config = envSchema.parse(baseEnv);
     expect(config.SUPPLIER_PURCHASE_ENABLED).toBe(false);
+    expect(config.SUPPLIER_COMMERCE_PURCHASE_ENABLED).toBe(false);
+    expect(config.SUPPLIER_CANARY_ENABLED).toBe(false);
     expect(config.SUPPLIER_AUTO_FAILOVER_ENABLED).toBe(false);
-    expect(config.VOKHONG_PROVIDER_ENABLED).toBe(false);
+    expect(config.QCST_PURCHASE_ENABLED).toBe(false);
     expect(config.VOKHONG_PURCHASE_ENABLED).toBe(false);
-    expect(config.VOKHONG_API_BASE_URL).toBe("https://vokhong.xyz/api");
+  });
+
+  it("keeps commerce and canary effective gates isolated", () => {
+    const canaryOnly = {
+      SUPPLIER_PURCHASE_ENABLED: true,
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: false,
+      SUPPLIER_CANARY_ENABLED: true,
+    };
+    expect(supplierCommercePurchaseEnabled(canaryOnly, true)).toBe(false);
+    expect(supplierCanaryPurchaseEnabled(canaryOnly, true)).toBe(true);
+
+    const commerceOnly = {
+      ...canaryOnly,
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: true,
+      SUPPLIER_CANARY_ENABLED: false,
+    };
+    expect(supplierCommercePurchaseEnabled(commerceOnly, true)).toBe(true);
+    expect(supplierCanaryPurchaseEnabled(commerceOnly, true)).toBe(false);
+
+    const masterOff = { ...canaryOnly, SUPPLIER_PURCHASE_ENABLED: false };
+    expect(supplierCommercePurchaseEnabled(masterOff, true)).toBe(false);
+    expect(supplierCanaryPurchaseEnabled(masterOff, true)).toBe(false);
+    expect(supplierCanaryPurchaseEnabled(canaryOnly, false)).toBe(false);
+  });
+
+  it("requires the master and QCST gates for commerce without coupling canary to commerce", () => {
+    expect(() =>
+      loadConfig({
+        ...productionSheetsEnv,
+        SUPPLIER_COMMERCE_PURCHASE_ENABLED: "true",
+      }),
+    ).toThrow("SUPPLIER_COMMERCE_PURCHASE_ENABLED requires master and QCST purchase gates");
+
+    const canaryEnv = {
+      ...productionSheetsEnv,
+      SUPPLIER_PURCHASE_ENABLED: "true",
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: "false",
+      SUPPLIER_CANARY_ENABLED: "true",
+      QCST_PROVIDER_ENABLED: "true",
+      QCST_CATALOG_SYNC: "true",
+      QCST_ADMIN_PRODUCT_BROWSER: "true",
+      QCST_OWNER_SELECTION: "true",
+      QCST_LOCAL_PRICE_CONTROL: "true",
+      QCST_PURCHASE_ENABLED: "true",
+      QCST_API_KEY_VAULT_REF: "vault:qcst-api-key",
+    };
+    expect(() => loadConfig(canaryEnv)).not.toThrow();
+    resetConfigCache();
+    expect(() => loadConfig({ ...canaryEnv, SUPPLIER_COMMERCE_PURCHASE_ENABLED: "true" })).toThrow(
+      "SUPPLIER_COMMERCE_PURCHASE_ENABLED must remain false while SUPPLIER_CANARY_ENABLED is true",
+    );
   });
 
   it("keeps Vô Không disabled without a Vault credential", () => {

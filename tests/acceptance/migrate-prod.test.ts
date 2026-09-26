@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { sql } from "kysely";
-import { runMigrations } from "../../src/infrastructure/db/migrate.js";
+import { listMigrationFiles, runMigrations } from "../../src/infrastructure/db/migrate.js";
 import { dockerAvailable, startPostgres } from "../helpers/pg-container.js";
 
 const repoRoot = resolve(import.meta.dirname, "..", "..");
@@ -175,6 +175,68 @@ describe("compiled production migration entrypoint (T173)", () => {
       await started.stop();
     }
   }, 180_000);
+  it("upgrades a pre-094 database with the durable supplier canary schema", async () => {
+    if (!hasDocker) return;
+    const started = await startPostgres();
+    const baselineDir = await createPreCanaryMigrationDir();
+    try {
+      await sql`drop schema public cascade`.execute(started.handle.db);
+      await sql`create schema public`.execute(started.handle.db);
+      const baseline = await runMigrations(started.handle.db, baselineDir);
+      expect(baseline.applied.some((file) => file.startsWith("093_"))).toBe(true);
+      expect(baseline.applied).not.toContain("094_supplier_owner_canary.sql");
+      await sql`insert into customer (id) values ('pre-canary-customer')`.execute(
+        started.handle.db,
+      );
+
+      const before = await sql<{ canary_table: string | null; query_key_column: string | null }>`
+        select
+          to_regclass('public.supplier_canary_run')::text as canary_table,
+          (select column_name from information_schema.columns
+           where table_schema = 'public' and table_name = 'supplier_order'
+             and column_name = 'query_key' limit 1) as query_key_column
+      `.execute(started.handle.db);
+      expect(before.rows[0]).toEqual({ canary_table: null, query_key_column: null });
+
+      const upgrade = await runMigrations(started.handle.db);
+      expect(upgrade.applied).toContain("094_supplier_owner_canary.sql");
+      const proof = await sql<{
+        canary_table: string | null;
+        query_key_column: string | null;
+        command_constraint: string | null;
+        canary_status_constraint: string | null;
+        preserved_customers: string;
+        applied_count: string;
+      }>`
+        select
+          to_regclass('public.supplier_canary_run')::text as canary_table,
+          (select column_name from information_schema.columns
+           where table_schema = 'public' and table_name = 'supplier_order'
+             and column_name = 'query_key' limit 1) as query_key_column,
+          (select pg_get_constraintdef(oid) from pg_constraint
+           where conrelid = 'admin_confirmation'::regclass
+             and conname = 'admin_confirmation_command_ref_ck') as command_constraint,
+          (select pg_get_constraintdef(oid) from pg_constraint
+           where conrelid = 'supplier_canary_run'::regclass and contype = 'c'
+             and pg_get_constraintdef(oid) like '%PREVIEWED%') as canary_status_constraint,
+          (select count(*)::text from customer where id = 'pre-canary-customer') as preserved_customers,
+          (select count(*)::text from schema_migrations
+           where filename = '094_supplier_owner_canary.sql') as applied_count
+      `.execute(started.handle.db);
+      expect(proof.rows[0]).toMatchObject({
+        canary_table: "supplier_canary_run",
+        query_key_column: "query_key",
+        preserved_customers: "1",
+        applied_count: "1",
+      });
+      expect(proof.rows[0]?.command_constraint).toContain("supplier.canary.purchase");
+      expect(proof.rows[0]?.canary_status_constraint).toContain("SUBMITTED");
+      expect(proof.rows[0]?.canary_status_constraint).toContain("UNKNOWN");
+    } finally {
+      await rm(baselineDir, { recursive: true, force: true });
+      await started.stop();
+    }
+  }, 180_000);
 });
 
 async function createBaselineMigrationDir(): Promise<string> {
@@ -300,4 +362,14 @@ async function runCompiledMigration(
     });
     child.on("close", (code) => resolvePromise({ code, stdout, stderr }));
   });
+}
+async function createPreCanaryMigrationDir(): Promise<string> {
+  const dir = await mkdtemp(resolve(tmpdir(), "telegram-shop-pre-canary-migrations-"));
+  const source = resolve(repoRoot, "src", "infrastructure", "db", "migrations");
+  const files = await listMigrationFiles(source);
+  for (const file of files) {
+    if (file.localeCompare("094_supplier_owner_canary.sql") >= 0) break;
+    await cp(resolve(source, file), resolve(dir, file));
+  }
+  return dir;
 }

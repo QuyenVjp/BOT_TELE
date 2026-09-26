@@ -60,6 +60,7 @@ export type SensitiveActionKey =
   | "supplier.mapping.clear"
   | "supplier.mapping.verify"
   | "supplier.catalog.curate"
+  | "supplier.canary.purchase"
   | "broadcast.confirm"
   | "warranty.refund.approve"
   | "warranty.refund.adjust"
@@ -104,6 +105,7 @@ export const SENSITIVE_ACTION_POLICY: Record<SensitiveActionKey, StepUpActionCat
   "supplier.mapping.clear": "SUPPLIER_CONFIG",
   "supplier.mapping.verify": "SUPPLIER_CONFIG",
   "supplier.catalog.curate": "SUPPLIER_CONFIG",
+  "supplier.canary.purchase": "SUPPLIER_CONFIG",
   "broadcast.confirm": "BROADCAST",
 };
 /** Runtime membership test for the policy table (callers hold a plain command string). */

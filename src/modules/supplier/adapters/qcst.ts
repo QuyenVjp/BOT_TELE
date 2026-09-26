@@ -362,7 +362,11 @@ function mapOrderToCreate(order: QcstOrder): CreateOrderResult {
     };
   }
   if (hasUnsupportedDelivery(order)) {
-    return { kind: "UNKNOWN", queryKey: order.id, reason: "delivery_schema_unsupported" };
+    return {
+      kind: "UNKNOWN",
+      queryKey: order.client_order_id,
+      reason: "delivery_schema_unsupported",
+    };
   }
   return {
     kind: "ACCEPTED",

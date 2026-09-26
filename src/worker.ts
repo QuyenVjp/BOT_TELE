@@ -12,6 +12,7 @@
  *
  * See plan.md "Delivery Phases" and contracts/application-commands.md.
  */
+import { supplierCanaryPurchaseEnabled, supplierCommercePurchaseEnabled } from "./config/index.js";
 import {
   listCategoriesWithCounts,
   createCategory,
@@ -162,6 +163,7 @@ import { recoverSePayBatch } from "./modules/payments/recovery.js";
 import { reconcileForPaymentCheck } from "./modules/payments/check-now.js";
 import { setTimeout as delayNotification } from "node:timers/promises";
 import { recoverSupplierOrdersBatch } from "./modules/supplier/recovery.js";
+import { recoverSupplierCanariesBatch } from "./modules/supplier/canary.js";
 import type { LatencyMetrics } from "./infrastructure/observability/tracing.js";
 import { subscribeRestock, unsubscribeRestock } from "./modules/catalog/restock.js";
 import {
@@ -241,6 +243,7 @@ export interface RecoveryCycleResult {
   inboxRetention: { payloadsRedacted: number; rowsPruned: number };
   sePay: RecoveryTelemetry | null;
   supplier: RecoveryTelemetry | null;
+  supplierCanary: RecoveryTelemetry | null;
 }
 
 /** Conservative, documented retention defaults for the Telegram inbox. */
@@ -322,6 +325,13 @@ export async function runRecoveryJobsOnce(input: {
           vault: input.vault,
         })
       : null;
+  const supplierCanary = input.supplierRegistry
+    ? await recoverSupplierCanariesBatch(input.db, {
+        batchSize: input.batchSize,
+        now,
+        registry: input.supplierRegistry,
+      })
+    : null;
   return {
     orders,
     reservations,
@@ -332,6 +342,7 @@ export async function runRecoveryJobsOnce(input: {
     inboxRetention: { payloadsRedacted, rowsPruned },
     sePay,
     supplier,
+    supplierCanary,
   };
 }
 
@@ -1493,6 +1504,7 @@ async function bootstrap(): Promise<void> {
     await import("./modules/identity/customer-profile.js");
   const { createAdminConfirmation } = await import("./modules/identity/admin-confirmation.js");
   const { createAdminCallbacks, OWNER_COMMANDS } = await import("./bot/callbacks/admin.js");
+  const { createSupplierCanaryService } = await import("./modules/supplier/canary.js");
   const { importDigitalInventory } = await import("./modules/digital-goods/inventory-import.js");
   const {
     createInventoryImportTemplate,
@@ -1608,6 +1620,8 @@ async function bootstrap(): Promise<void> {
     presentAdminVariantMutationDone,
     presentKillSwitchDone,
     presentAdminSupplierActionDone,
+    presentAdminSupplierCanaryChallenge,
+    presentAdminSupplierCanaryResult,
     presentAdminSupplierVariant,
     presentAdminSuppliersMenu,
     presentAdminSupplierCatalogPage,
@@ -1805,7 +1819,7 @@ async function bootstrap(): Promise<void> {
     ...(supplierRegistry
       ? {
           supplierPurchaseEnabled: (supplierId: string) =>
-            config.SUPPLIER_PURCHASE_ENABLED && (supplierPurchaseFlags.get(supplierId) ?? false),
+            supplierCommercePurchaseEnabled(config, supplierPurchaseFlags.get(supplierId) ?? false),
         }
       : {}),
     vault,
@@ -2356,13 +2370,14 @@ async function bootstrap(): Promise<void> {
       ...action,
       requestedData: action.requestedData ?? { targetId: action.resourceId },
     });
+  const adminConfirmation = createAdminConfirmation(dbHandle.db);
   const adminCallbacks = rootIdentity
     ? createAdminCallbacks({
         db: dbHandle.db,
         vault,
         rootConfig,
         rootChannelIdentityId: rootIdentity.channelIdentityId,
-        confirmation: createAdminConfirmation(dbHandle.db),
+        confirmation: adminConfirmation,
         stepUpEnabled: config.ADMIN_STEP_UP_MODE === "required",
         stepUpOptions,
         inventoryImport: async (input) => {
@@ -2390,6 +2405,21 @@ async function bootstrap(): Promise<void> {
         },
       })
     : null;
+  const supplierCanary =
+    supplierRegistry && rootIdentity
+      ? createSupplierCanaryService({
+          db: dbHandle.db,
+          registry: supplierRegistry,
+          confirmation: adminConfirmation,
+          rootChannelIdentityId: rootIdentity.channelIdentityId,
+          rootConfig,
+          sensitiveDeps,
+          canaryEnabled: config.SUPPLIER_CANARY_ENABLED,
+          canaryPurchaseEnabled: (providerKey) =>
+            supplierCanaryPurchaseEnabled(config, supplierPurchaseFlags.get(providerKey) ?? false),
+          maxCostVnd: config.SUPPLIER_CANARY_MAX_COST_VND,
+        })
+      : null;
   const requireSupplierOwner = async (
     input: { telegramUserId: string; chatType: string; correlationId: string },
     targetId: string,
@@ -5778,6 +5808,30 @@ async function bootstrap(): Promise<void> {
               result.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
             );
       },
+      async supplierCanaryPreview(input) {
+        const denied = await requireSupplierOwner(input, `supplier-canary:${input.supplierSkuId}`);
+        if (denied) return denied;
+        if (!supplierCanary) {
+          return presentAdminSupplierCanaryResult({
+            runId: "not-created",
+            code: "CANARY_DISABLED",
+            message: "Canary nhà cung cấp chưa được cấu hình.",
+          });
+        }
+        const result = await supplierCanary.prepare({
+          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
+          supplierSkuId: input.supplierSkuId,
+          correlationId: input.correlationId,
+        });
+        if (!result.ok) {
+          return presentAdminSupplierCanaryResult({
+            runId: "not-created",
+            code: result.code,
+            message: result.message,
+          });
+        }
+        return presentAdminSupplierCanaryChallenge(result);
+      },
       async handleToken(input) {
         const command = OWNER_COMMANDS[input.option];
         if (!command || !adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
@@ -5814,8 +5868,38 @@ async function bootstrap(): Promise<void> {
             };
       },
       async confirm(input) {
-        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
+        if (supplierCanary) {
+          const canary = await supplierCanary.confirmIfCanary({
+            confirmationId: input.confirmationId,
+            challenge: input.challenge,
+            actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+            correlationId: input.correlationId,
+          });
+          if (canary !== null) {
+            if (!canary.ok) {
+              return presentAdminSupplierCanaryResult({
+                runId: "unknown",
+                code: canary.code,
+                message: canary.message,
+              });
+            }
+            return canary.execution.ok
+              ? presentAdminSupplierCanaryResult({
+                  runId: canary.runId,
+                  status: canary.execution.status,
+                  ...(canary.execution.externalOrderId
+                    ? { externalOrderId: canary.execution.externalOrderId }
+                    : {}),
+                })
+              : presentAdminSupplierCanaryResult({
+                  runId: canary.runId,
+                  code: canary.execution.code,
+                  message: canary.execution.message,
+                });
+          }
+        }
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
         const result = await adminCallbacks.confirm({
           confirmationId: input.confirmationId,
           challenge: input.challenge,

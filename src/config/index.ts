@@ -13,6 +13,22 @@ import { envSchema, SECRET_ENV_KEYS, type Env, type SecretEnvKey } from "./env.j
 
 export type AppConfig = Env;
 
+export function supplierCommercePurchaseEnabled(
+  config: Pick<AppConfig, "SUPPLIER_PURCHASE_ENABLED" | "SUPPLIER_COMMERCE_PURCHASE_ENABLED">,
+  providerEnabled: boolean,
+): boolean {
+  return (
+    config.SUPPLIER_PURCHASE_ENABLED && config.SUPPLIER_COMMERCE_PURCHASE_ENABLED && providerEnabled
+  );
+}
+
+export function supplierCanaryPurchaseEnabled(
+  config: Pick<AppConfig, "SUPPLIER_PURCHASE_ENABLED" | "SUPPLIER_CANARY_ENABLED">,
+  providerEnabled: boolean,
+): boolean {
+  return config.SUPPLIER_PURCHASE_ENABLED && config.SUPPLIER_CANARY_ENABLED && providerEnabled;
+}
+
 export class ConfigError extends Error {
   readonly issues: string[];
   constructor(issues: string[]) {
@@ -168,10 +184,32 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
       issues.push("QCST purchase requires its actual provider rollout gates");
     }
   }
+  if (
+    config.SUPPLIER_COMMERCE_PURCHASE_ENABLED &&
+    (!config.SUPPLIER_PURCHASE_ENABLED || !config.QCST_PURCHASE_ENABLED)
+  ) {
+    issues.push("SUPPLIER_COMMERCE_PURCHASE_ENABLED requires master and QCST purchase gates");
+  }
+  if (config.SUPPLIER_COMMERCE_PURCHASE_ENABLED && config.SUPPLIER_CANARY_ENABLED) {
+    issues.push(
+      "SUPPLIER_COMMERCE_PURCHASE_ENABLED must remain false while SUPPLIER_CANARY_ENABLED is true",
+    );
+  }
   if (config.VOKHONG_PURCHASE_ENABLED) {
     issues.push(
       "VOKHONG_PURCHASE_ENABLED is blocked until an authenticated order contract is verified",
     );
+  }
+  if (config.SUPPLIER_CANARY_ENABLED) {
+    if (!config.SUPPLIER_PURCHASE_ENABLED || !config.QCST_PURCHASE_ENABLED) {
+      issues.push("SUPPLIER_CANARY_ENABLED requires generic and QCST purchase gates");
+    }
+    if (
+      config.SUPPLIER_CANARY_MAX_COST_VND <= 0 ||
+      config.SUPPLIER_CANARY_MAX_COST_VND > 1_000_000
+    ) {
+      issues.push("SUPPLIER_CANARY_MAX_COST_VND must stay between 1 and 1000000 in production");
+    }
   }
   if (config.ADMIN_TELEGRAM_USER_ID === 0) {
     issues.push("ADMIN_TELEGRAM_USER_ID must be a real numeric Telegram id in production");

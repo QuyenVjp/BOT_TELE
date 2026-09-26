@@ -292,8 +292,12 @@ describe("QCST supplier adapter", () => {
       delivery_available: true,
       delivery: { credential: "opaque" },
     };
-    const server = await startServer((_request, response) => {
-      sendJson(response, { success: true, data: deliveredShape }, 201);
+    const server = await startServer((request, response) => {
+      const body =
+        request.method === "GET"
+          ? { success: true, data: { items: [deliveredShape], has_more: false, next_cursor: null } }
+          : { success: true, data: deliveredShape };
+      sendJson(response, body, request.method === "GET" ? 200 : 201);
     });
     const { port } = await createPort(server.baseUrl);
 
@@ -306,9 +310,12 @@ describe("QCST supplier adapter", () => {
       }),
     ).resolves.toEqual({
       kind: "UNKNOWN",
-      queryKey: deliveredShape.id,
+      queryKey: deliveredShape.client_order_id,
       reason: "delivery_schema_unsupported",
     });
+    await expect(
+      port.queryOrder({ queryKey: deliveredShape.client_order_id }),
+    ).rejects.toMatchObject({ supplierCode: "DELIVERY_UNSUPPORTED" });
   });
 
   it("does not echo QCST error bodies and preserves rate-limit classification", async () => {
