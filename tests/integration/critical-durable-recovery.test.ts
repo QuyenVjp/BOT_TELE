@@ -87,7 +87,7 @@ async function seedCommerce(status = "PAID") {
   return { categoryId, productId, variantId, customerId, orderId, assetId, bundleId };
 }
 
-async function deadOutbox(eventType = "OrderPaid", aggregateId?: string) {
+async function deadOutbox(eventType = "OrderPaid", aggregateId?: string, aggregateType = "Order") {
   const id = newId();
   const orderId = aggregateId ?? (await seedCommerce()).orderId;
   await sql`
@@ -96,8 +96,8 @@ async function deadOutbox(eventType = "OrderPaid", aggregateId?: string) {
        attempt_count, next_attempt_at, last_error_code, dead_lettered_at,
        claimed_by, claimed_at, claim_expires_at, claim_generation)
     values
-      (${id}, 'Order', ${orderId}, 1, ${eventType},
-       ${JSON.stringify({ orderId, token: "must-not-audit" })}::jsonb,
+      (${id}, ${aggregateType}, ${orderId}, 1, ${eventType},
+       ${JSON.stringify({ orderId, token: "redacted" })}::jsonb,
        8, now() + interval '1 hour', 'FixtureError', now() - interval '1 minute',
        null, null, null, 3)
   `.execute(ctx.db);
@@ -201,6 +201,19 @@ describe("critical durable recovery", () => {
       expect(JSON.stringify(audit)).not.toContain("FixtureError");
     },
   );
+
+  it("allows recovery of a durable manual-task-created outbox event", async () => {
+    const id = await deadOutbox("ManualFulfillmentTaskCreated", newId(), "ManualFulfillmentTask");
+
+    const result = await recoverCriticalJob(ctx.db, { family: "outbox", id, ...operator });
+
+    expect(result).toEqual({ ok: true, family: "outbox", id, recovered: true });
+    const row = await sql<{ dead_lettered_at: Date | null; claim_generation: string }>`
+      select dead_lettered_at, claim_generation::text from outbox_event where id = ${id}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toMatchObject({ dead_lettered_at: null, claim_generation: "4" });
+    expect(await auditFor(id)).toHaveLength(1);
+  });
 
   it("rejects unknown job families fail-closed", async () => {
     const result = await recoverCriticalJob(ctx.db, {

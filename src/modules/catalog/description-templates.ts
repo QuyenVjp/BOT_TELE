@@ -41,7 +41,8 @@ export const DESCRIPTION_TEMPLATES: Record<FulfillmentType, DescriptionTemplate>
   MANUAL_FULFILLMENT: {
     description: "Sản phẩm được xử lý thủ công bởi đội ngũ cửa hàng.",
     whatCustomerReceives: "Kết quả xử lý theo yêu cầu đơn hàng.",
-    usageInstructions: "Cung cấp thông tin cần thiết sau khi đặt hàng.",
+    usageInstructions:
+      "Sau khi thanh toán, shop sẽ liên hệ riêng qua Telegram nếu cần thêm thông tin.",
     warranty: "Hỗ trợ theo chính sách cửa hàng.",
   },
   SUPPLIER_API: {

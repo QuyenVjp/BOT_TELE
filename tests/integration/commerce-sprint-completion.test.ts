@@ -40,22 +40,23 @@ import { isStoreOpen } from "../../src/modules/commerce/buy-now.js";
 describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", () => {
   let ctx: PgTestContext;
   let commercialVariantId: string;
+  let commerceCategoryId = "";
+  let commerceProductId = "";
   beforeAll(async () => {
     ctx = await startPostgresContainer();
 
     // Seed test category and commercial products in isolated test DB
-    const categoryId = newId();
+    commerceCategoryId = newId();
     await sql`
       insert into category (id, name_vi, slug, is_active, sort_order)
-      values (${categoryId}, 'Tài khoản AI', 'tai-khoan-ai', true, 1)
+      values (${commerceCategoryId}, 'Tài khoản AI', 'tai-khoan-ai', true, 1)
     `.execute(ctx.db);
 
-    const prodId = newId();
+    commerceProductId = newId();
     await sql`
       insert into product (id, category_id, name_vi, slug, short_description_vi, is_active, sort_order, is_test, is_archived)
-      values (${prodId}, ${categoryId}, 'ChatGPT Plus Chính Chủ', 'chatgpt-plus', 'Tài khoản chính chủ', true, 1, false, false)
+      values (${commerceProductId}, ${commerceCategoryId}, 'ChatGPT Plus Chính Chủ', 'chatgpt-plus', 'Tài khoản chính chủ', true, 1, false, false)
     `.execute(ctx.db);
-
     commercialVariantId = newId();
     await sql`
       insert into product_variant (
@@ -64,7 +65,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         resale_evidence_id, preorder_enabled, deposit_mode, deposit_amount_vnd,
         min_deposit_vnd, hold_duration_hours, balance_due_hours
       ) values (
-        ${commercialVariantId}, ${prodId}, 'GPT-PLUS-1M', '1 Tháng BHF', 250000, 'P1M', 'CREDENTIAL',
+        ${commercialVariantId}, ${commerceProductId}, 'GPT-PLUS-1M', '1 Tháng BHF', 250000, 'P1M', 'CREDENTIAL',
         30, 'LOCAL_ONLY', true, 1, 'STOCK_ACCOUNT',
         'RES_TEST_1', true, 'FIXED', 50000,
         50000, 24, 24
@@ -89,7 +90,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
     const canaryProdId = newId();
     await sql`
       insert into product (id, category_id, name_vi, slug, is_active, sort_order, is_test, is_archived)
-      values (${canaryProdId}, ${categoryId}, 'Canary Fixture 250K', 'canary-fixture-250k', true, 2, true, false)
+      values (${canaryProdId}, ${commerceCategoryId}, 'Canary Fixture 250K', 'canary-fixture-250k', true, 2, true, false)
     `.execute(ctx.db);
   }, 180_000);
 
@@ -148,6 +149,45 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
       const adminBtnForOwner = adminHome.buttons.flat().find((b) => b.text.includes("Quản trị"));
       expect(adminBtnForOwner).toBeDefined();
       expect(adminBtnForOwner?.callbackData).toBe("admin:menu");
+    });
+
+    it("does not project manual service as numeric storefront stock", async () => {
+      const productId = newId();
+      const variantId = newId();
+      const evidenceId = newId();
+      const suffix = productId.slice(-8);
+      await sql`
+        insert into product (id, category_id, name_vi, slug, is_active, sort_order)
+        values (${productId}, ${commerceCategoryId}, 'Manual service fixture',
+          ${"manual-service-" + suffix}, true, 3)
+      `.execute(ctx.db);
+      await sql`
+        insert into product_variant
+          (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
+           stock_policy, fulfillment_type, resale_evidence_id)
+        values (${variantId}, ${productId}, ${"MANUAL-" + suffix}, 'Manual service',
+          250000, 'CUSTOM', 'MANUAL_REVIEW', 'LOCAL_ONLY', 'MANUAL_FULFILLMENT', ${evidenceId})
+      `.execute(ctx.db);
+      await sql`
+        insert into variant_service_fulfillment (variant_id, fulfillment_type, instructions)
+        values (${variantId}, 'MANUAL_FULFILLMENT', 'Owner fulfills after payment')
+      `.execute(ctx.db);
+      await sql`
+        insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+        values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION', ${"TEST-" + suffix},
+          'fixture publication evidence', 'test')
+      `.execute(ctx.db);
+      await sql`
+        update product_variant set publication_evidence_id = ${evidenceId},
+          publication_product_version = 1, publication_variant_version = 1,
+          published_at = now(), published_by = 'test'
+        where id = ${variantId}
+      `.execute(ctx.db);
+
+      const result = await listStorefrontProducts(ctx.db, 10, 0);
+      const manualProduct = result.items.find((item) => item.id === productId);
+
+      expect(manualProduct?.total_available).toBeNull();
     });
 
     it("renders customer warranty, notification preferences, and purchase thank you presenters", () => {

@@ -169,6 +169,7 @@ export interface AdminHomeSummary {
   lowStockVariants: number;
   paymentsNeedingReview: number;
   newTickets: number;
+  manualOrdersNeedingWork: number;
 }
 
 export function presentAdminMenu(
@@ -183,6 +184,7 @@ export function presentAdminMenu(
         `🧾 Đơn hôm nay: ${summary.ordersToday}`,
         `⏳ Chờ xử lý: ${summary.awaitingAction}`,
         `📦 Sắp hết: ${summary.lowStockVariants}`,
+        `🛠 Đơn manual cần hoàn tất: ${summary.manualOrdersNeedingWork}`,
         `⚠️ Thanh toán cần kiểm tra: ${summary.paymentsNeedingReview}`,
         `🛡 Ticket mới: ${summary.newTickets}`,
       ]
@@ -1650,6 +1652,7 @@ export function presentAdminBroadcastStatus(input: {
   sent: number;
   suppressed: number;
   dead: number;
+  uncertain: number;
 }): PresentedMessage {
   return {
     text: [
@@ -1663,6 +1666,7 @@ export function presentAdminBroadcastStatus(input: {
       `Đã gửi: ${input.sent}`,
       `Đã dừng/huỷ: ${input.suppressed}`,
       `Lỗi chết: ${input.dead}`,
+      `Gửi chưa xác nhận (không tự gửi lại): ${input.uncertain}`,
       "",
       "Dừng chỉ chặn phần chưa bắt đầu gửi. Tin đang gửi tới Telegram vẫn có thể đến người nhận.",
     ].join("\n"),
@@ -1892,10 +1896,10 @@ export interface AdminInventoryVariantSummary {
   name: string;
   sku: string;
   fulfillmentType: FulfillmentType;
-  available: number;
-  reserved: number;
-  delivered: number;
-  error: number;
+  available: number | null;
+  reserved: number | null;
+  delivered: number | null;
+  error: number | null;
   lowStockThreshold: number | null;
   importSupported: boolean;
   fileImportSupported?: boolean;
@@ -1904,7 +1908,17 @@ export interface AdminInventoryVariantSummary {
   active?: boolean;
 }
 
-function stockBadge(input: { available: number; lowStockThreshold: number | null }): string {
+function isNonStockFulfillment(type: FulfillmentType): boolean {
+  return type === "MANUAL_FULFILLMENT" || type === "UNLIMITED_SERVICE";
+}
+
+function stockBadge(input: {
+  fulfillmentType: FulfillmentType;
+  available: number | null;
+  lowStockThreshold: number | null;
+}): string {
+  if (isNonStockFulfillment(input.fulfillmentType) || input.available === null)
+    return "không theo dõi tồn kho";
   if (input.available <= 0) return "hết hàng";
   return input.lowStockThreshold !== null &&
     input.lowStockThreshold > 0 &&
@@ -1957,7 +1971,7 @@ export function presentAdminInventory(
         ? [
             "Tổng:",
             `• Sản phẩm: ${totals.products}`,
-            `• Biến thể: ${totals.variants}`,
+            `• Biến thể theo dõi kho: ${totals.variants}`,
             `• Còn hàng: ${totals.inStock}`,
             `• Sắp hết: ${totals.lowStock}`,
             `• Hết hàng: ${totals.outOfStock}`,
@@ -1971,7 +1985,11 @@ export function presentAdminInventory(
         : "Danh sách sản phẩm kho:",
       ...visibleRows.map((row) => {
         const status = row.active === false ? " · nháp/chưa mở bán" : "";
-        return `• ${row.name}${status}: ${row.variantCount} biến thể · còn ${row.inStock} · sắp hết ${row.lowStock} · hết ${row.outOfStock}`;
+        const stockSummary =
+          row.variantCount === 0
+            ? "không có biến thể theo dõi kho"
+            : `${row.variantCount} biến thể theo dõi kho · còn ${row.inStock} · sắp hết ${row.lowStock} · hết ${row.outOfStock}`;
+        return `• ${row.name}${status}: ${stockSummary}`;
       }),
     ].join("\n"),
     buttons: [
@@ -1979,7 +1997,7 @@ export function presentAdminInventory(
         ? [[{ text: "➕ Tạo sản phẩm", callbackData: "admin:products:create" }]]
         : visibleRows.map((row) => [
             {
-              text: `${row.name}${row.active === false ? " · nháp" : ""} · ${row.inStock}/${row.variantCount} còn`,
+              text: `${row.name}${row.active === false ? " · nháp" : ""} · ${row.variantCount === 0 ? "không theo dõi tồn kho" : `${row.inStock}/${row.variantCount} biến thể có hàng`}`,
               callbackData: `admin:inventory:product:${row.id}`,
             },
           ])),
@@ -2034,10 +2052,13 @@ export function presentAdminInventoryVariantPicker(
     name: string;
     sku: string;
     fulfillmentType: FulfillmentType;
-    available: number;
+    available: number | null;
   }>,
   action: "import" | "template" | "paste",
 ): PresentedMessage {
+  const selectableVariants = variants.filter(
+    (variant) => !isNonStockFulfillment(variant.fulfillmentType),
+  );
   const title =
     action === "template"
       ? "📥 Chọn biến thể để tải mẫu CSV"
@@ -2045,11 +2066,18 @@ export function presentAdminInventoryVariantPicker(
         ? "📋 Chọn biến thể để dán dữ liệu"
         : "➕ Chọn biến thể để nhập kho";
   return {
-    text: [title, "", `Sản phẩm: ${product.name}`, "Vui lòng chọn biến thể:"].join("\n"),
+    text: [
+      title,
+      "",
+      `Sản phẩm: ${product.name}`,
+      selectableVariants.length
+        ? "Vui lòng chọn biến thể:"
+        : "Không có biến thể để nhập kho; dịch vụ thủ công/không giới hạn không theo dõi tồn kho.",
+    ].join("\n"),
     buttons: [
-      ...variants.map((v) => [
+      ...selectableVariants.map((v) => [
         {
-          text: `🔹 ${v.name} (${v.sku}) — Còn: ${v.available}`,
+          text: `🔹 ${v.name} (${v.sku}) — Còn: ${v.available ?? 0}`,
           callbackData:
             action === "template"
               ? `admin:inventory:template:${v.id}`
@@ -2185,7 +2213,7 @@ export function presentAdminInventoryProduct(input: {
         : "Biến thể:",
       ...visibleVariants.map(
         (variant) =>
-          `• ${variant.name}${variant.active === false ? " · nháp/chưa mở bán" : ""} — ${variant.sku} — ${FULFILLMENT_TYPE_LABELS[variant.fulfillmentType]} — khả dụng ${variant.available} · giữ ${variant.reserved} · giao ${variant.delivered} · lỗi ${variant.error}${variant.lowStockThreshold === null ? "" : ` — ngưỡng ${variant.lowStockThreshold}`}`,
+          `• ${variant.name}${variant.active === false ? " · nháp/chưa mở bán" : ""} — ${variant.sku} — ${FULFILLMENT_TYPE_LABELS[variant.fulfillmentType]} — ${isNonStockFulfillment(variant.fulfillmentType) ? "không theo dõi tồn kho" : `khả dụng ${variant.available} · giữ ${variant.reserved} · giao ${variant.delivered} · lỗi ${variant.error}`}${variant.lowStockThreshold === null || isNonStockFulfillment(variant.fulfillmentType) ? "" : ` — ngưỡng ${variant.lowStockThreshold}`}`,
       ),
     ].join("\n"),
     buttons: [
@@ -2208,10 +2236,10 @@ export function presentAdminInventoryVariant(input: {
   name: string;
   sku: string;
   fulfillmentType: FulfillmentType;
-  available: number;
-  reserved?: number;
-  delivered?: number;
-  error?: number;
+  available: number | null;
+  reserved?: number | null;
+  delivered?: number | null;
+  error?: number | null;
   lowStockThreshold: number | null;
   importSupported: boolean;
   fileImportSupported?: boolean;
@@ -2221,6 +2249,15 @@ export function presentAdminInventoryVariant(input: {
   supplierSupported?: boolean;
   active?: boolean;
 }): PresentedMessage {
+  const stockLines = isNonStockFulfillment(input.fulfillmentType)
+    ? ["Tồn kho: không theo dõi; đơn đã thanh toán được shop xử lý thủ công."]
+    : [
+        `Khả dụng: ${input.available ?? 0}`,
+        `Đang giữ: ${input.reserved ?? 0}`,
+        `Đã giao: ${input.delivered ?? 0}`,
+        `Lỗi/khóa: ${input.error ?? 0}`,
+        `Ngưỡng cảnh báo: ${input.lowStockThreshold ?? "—"}`,
+      ];
   return {
     text: [
       ADMIN_COPY.inventory,
@@ -2228,11 +2265,7 @@ export function presentAdminInventoryVariant(input: {
       `SKU: ${input.sku}`,
       `Loại: ${FULFILLMENT_TYPE_LABELS[input.fulfillmentType]}`,
       `Trạng thái: ${input.active === false ? "nháp/chưa mở bán" : "đang quản lý"}`,
-      `Khả dụng: ${input.available}`,
-      `Đang giữ: ${input.reserved ?? 0}`,
-      `Đã giao: ${input.delivered ?? 0}`,
-      `Lỗi/khóa: ${input.error ?? 0}`,
-      `Ngưỡng cảnh báo: ${input.lowStockThreshold ?? "—"}`,
+      ...stockLines,
       importInstruction({
         fulfillmentType: input.fulfillmentType,
         ...(input.inventoryFields ? { fields: input.inventoryFields } : {}),
@@ -2274,8 +2307,12 @@ export function presentAdminInventoryVariant(input: {
             ],
           ]
         : []),
-      [{ text: "📋 Danh sách an toàn", callbackData: `admin:inventory:history:${input.id}` }],
-      [{ text: "🧰 Quản lý dữ liệu", callbackData: `admin:inventory:items:${input.id}` }],
+      ...(!isNonStockFulfillment(input.fulfillmentType)
+        ? [
+            [{ text: "📋 Danh sách an toàn", callbackData: `admin:inventory:history:${input.id}` }],
+            [{ text: "🧰 Quản lý dữ liệu", callbackData: `admin:inventory:items:${input.id}` }],
+          ]
+        : []),
       [{ text: ADMIN_COPY.back, callbackData: `admin:inventory:product:${input.productId}` }],
       adminHomeOnly,
     ],
@@ -3050,6 +3087,12 @@ export function presentAdminNotifications(input: {
   marketingRecipients: number;
   marketingOptOuts: number;
   outboxBacklog: number;
+  uncertainDeliveries: number;
+  uncertainProviderOutcomes: number;
+  uncertainSentPersistenceFailures: number;
+  uncertainFollowupIdentityFailures: number;
+  uncertainStaleAcknowledgements: number;
+  uncertainUnclassified: number;
 }): PresentedMessage {
   return {
     text: [
@@ -3062,6 +3105,12 @@ export function presentAdminNotifications(input: {
       `📣 Người nhận marketing: ${input.marketingRecipients}`,
       `🚫 Đã tắt nhận marketing: ${input.marketingOptOuts}`,
       `📤 Đang chờ gửi trong outbox: ${input.outboxBacklog}`,
+      `⚠️ Gửi chưa xác nhận (không tự gửi lại): ${input.uncertainDeliveries}`,
+      `  Telegram chưa rõ kết quả: ${input.uncertainProviderOutcomes}`,
+      `  Lỗi lưu trạng thái SENT: ${input.uncertainSentPersistenceFailures}`,
+      `  Follow-up thiếu message ID: ${input.uncertainFollowupIdentityFailures}`,
+      `  Xác nhận cũ không khớp: ${input.uncertainStaleAcknowledgements}`,
+      `  Chưa phân loại: ${input.uncertainUnclassified}`,
     ].join("\n"),
     buttons: [[{ text: "📢 Broadcast", callbackData: "admin:marketing" }], adminNav("admin:menu")],
   };

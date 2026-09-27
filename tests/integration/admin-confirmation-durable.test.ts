@@ -380,7 +380,12 @@ describe("durable AdminConfirmation (T163/T164)", () => {
     const seeded = await seed();
     const admin = callbacks(seeded.rootChannelIdentityId);
 
-    for (const command of DURABLE_ADMIN_COMMAND_REFS.filter(isGenericDurableAdminCommandRef)) {
+    // Manual completion requires an existing paid task, so its valid real-domain
+    // durable path is covered by manual-fulfillment.test.ts, not a random target probe.
+    for (const command of DURABLE_ADMIN_COMMAND_REFS.filter(
+      (command) =>
+        command !== "manual_fulfillment.complete" && isGenericDurableAdminCommandRef(command),
+    )) {
       const issued = await admin.handle({
         command,
         actor,

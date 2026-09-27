@@ -39,6 +39,7 @@ export interface CriticalRecoveryInput {
 }
 
 const RETRY_SAFE_OUTBOX_EVENTS: Record<string, true> = {
+  OrderCreated: true,
   DigitalAssetClaimed: true,
   DigitalAssetDelivered: true,
   ManualFulfillmentTaskCompleted: true,

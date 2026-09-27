@@ -13,8 +13,8 @@ import {
   getBroadcastStatus,
   getNotificationPreferences,
   handleNotificationOutboxEvent,
-  markNotificationFailure,
   markNotificationSent,
+  NotificationPreSubmitError,
   processNotificationDeliveryClaim,
   setNotificationPreferences,
   markBroadcastPreviewed,
@@ -532,6 +532,7 @@ describe("notification service", () => {
     const pendingCustomer = await seedCustomer("333333");
     const suppressedCustomer = await seedCustomer("444444");
     const deadCustomer = await seedCustomer("555555");
+    const uncertainCustomer = await seedCustomer("666666");
     const campaignId = await createBroadcast(ctx.db, {
       class: "CRITICAL_SERVICE",
       queued: true,
@@ -545,7 +546,8 @@ describe("notification service", () => {
              (${newId()}, ${campaignId}, ${retryCustomer}, '222222', 'RETRY'),
              (${newId()}, ${campaignId}, ${pendingCustomer}, '333333', 'PENDING'),
              (${newId()}, ${campaignId}, ${suppressedCustomer}, '444444', 'SUPPRESSED'),
-             (${newId()}, ${campaignId}, ${deadCustomer}, '555555', 'DEAD')
+             (${newId()}, ${campaignId}, ${deadCustomer}, '555555', 'DEAD'),
+             (${newId()}, ${campaignId}, ${uncertainCustomer}, '666666', 'SEND_UNCERTAIN')
     `.execute(ctx.db);
 
     await expect(getBroadcastStatus(ctx.db, newId())).resolves.toBeNull();
@@ -553,39 +555,14 @@ describe("notification service", () => {
       campaignId,
       status: "QUEUED",
       audience: "all",
-      total: 5,
+      total: 6,
       pending: 1,
       retry: 1,
       sent: 1,
       suppressed: 1,
       dead: 1,
+      uncertain: 1,
     });
-  });
-
-  it("records retry_after on notification send failure", async () => {
-    const customerId = await seedCustomer("111111");
-    const campaignId = await createBroadcast(ctx.db, {
-      class: "CRITICAL_SERVICE",
-      queued: true,
-      content: "hello",
-      createdBy: "admin",
-      idempotencyKey: "failure-retry-after",
-    });
-    const deliveryId = newId();
-    await sql`
-      insert into notification_delivery(id, campaign_id, customer_id, chat_id, status, attempts)
-      values (${deliveryId}, ${campaignId}, ${customerId}, '111111', 'RETRY', 1)
-    `.execute(ctx.db);
-
-    await markNotificationFailure(ctx.db, deliveryId, 0, "telegram unavailable", 5);
-    const row = await sql<{ status: string; retry_after: Date; last_error: string }>`
-      select status, next_attempt_at as retry_after, last_error
-      from notification_delivery where id = ${deliveryId}
-    `.execute(ctx.db);
-
-    expect(row.rows[0]?.status).toBe("RETRY");
-    expect(row.rows[0]?.retry_after.getTime()).toBeGreaterThan(Date.now());
-    expect(row.rows[0]?.last_error).toBe("telegram unavailable");
   });
 
   it("marks sent only after the responder accepts the outbound send", async () => {
@@ -763,7 +740,7 @@ describe("notification service", () => {
     expect(sent).toBe(4);
   });
 
-  it("keeps an accepted-but-stale responder send from overwriting a newer SENT generation", async () => {
+  it("does not overwrite a newer delivery message with a stale acknowledgement", async () => {
     const customerId = await seedCustomer("111111");
     const campaignId = await createBroadcast(ctx.db, {
       class: "CRITICAL_SERVICE",
@@ -773,11 +750,36 @@ describe("notification service", () => {
       idempotencyKey: "stale-send",
     });
     const deliveryId = newId();
-    await sql`insert into notification_delivery(id, campaign_id, customer_id, chat_id, status, claim_generation) values (${deliveryId}, ${campaignId}, ${customerId}, '111111', 'RETRY', 2)`.execute(
+    await sql`insert into notification_delivery(id, campaign_id, customer_id, chat_id, status, claim_generation) values (${deliveryId}, ${campaignId}, ${customerId}, '111111', 'SEND_UNCERTAIN', 2)`.execute(
       ctx.db,
     );
 
-    await markNotificationSent(ctx.db, deliveryId, 2);
+    expect(
+      await markNotificationSent(
+        ctx.db,
+        {
+          id: deliveryId,
+          campaignId,
+          generation: 2,
+          content: "hello",
+          buttons: [],
+        },
+        "newer-message",
+      ),
+    ).toBe("SENT");
+    expect(
+      await markNotificationSent(
+        ctx.db,
+        {
+          id: deliveryId,
+          campaignId,
+          generation: 1,
+          content: "hello",
+          buttons: [],
+        },
+        "late-older-message",
+      ),
+    ).toBe("STALE");
     const result = await processNotificationDeliveryClaim(
       ctx.db,
       {
@@ -798,15 +800,20 @@ describe("notification service", () => {
     const row = await sql<{
       status: string;
       claim_generation: string;
-    }>`select status, claim_generation from notification_delivery where id=${deliveryId}`.execute(
+      message_id: string | null;
+    }>`select status, claim_generation, message_id from notification_delivery where id=${deliveryId}`.execute(
       ctx.db,
     );
 
     expect(result).toBe("STALE");
-    expect(row.rows[0]).toEqual({ status: "SENT", claim_generation: "2" });
+    expect(row.rows[0]).toEqual({
+      status: "SENT",
+      claim_generation: "2",
+      message_id: "newer-message",
+    });
   });
 
-  it("honors an explicit retry_after delay for failed notification sends", async () => {
+  it("honors Retry-After only for an explicit provider 429", async () => {
     const customerId = await seedCustomer("111111");
     const campaignId = await createBroadcast(ctx.db, {
       class: "CRITICAL_SERVICE",
@@ -819,7 +826,7 @@ describe("notification service", () => {
       ctx.db,
     );
     const [claim] = await claimNotificationDeliveries(ctx.db, 1);
-    const error = new Error("rate limited");
+    const error = { error_code: 429, parameters: { retry_after: 2 } };
     const before = Date.now();
 
     const result = await processNotificationDeliveryClaim(
@@ -847,6 +854,47 @@ describe("notification service", () => {
     expect(delayMs).toBeLessThan(30_000);
   });
 
+  it("keeps an accepted send uncertain when a follow-up edit has no message identity", async () => {
+    const customerId = await seedCustomer("111112");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "initial alert",
+      createdBy: "admin",
+      idempotencyKey: "followup-without-message-id",
+    });
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${deliveryId}, ${campaignId}, ${customerId}, '111112')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    let providerSends = 0;
+
+    const result = await processNotificationDeliveryClaim(ctx.db, claim!, {
+      send: async () => {
+        providerSends += 1;
+        await sql`
+          update notification_campaign set content = 'follow-up alert'
+          where id = ${campaignId}
+        `.execute(ctx.db);
+        return undefined;
+      },
+    });
+    const row = await sql<{ status: string; message_id: string | null; last_error: string | null }>`
+      select status, message_id, last_error
+      from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+
+    expect(result).toBe("SEND_UNCERTAIN");
+    expect(row.rows[0]).toEqual({
+      status: "SEND_UNCERTAIN",
+      message_id: null,
+      last_error: "followup_message_identity_missing",
+    });
+    expect(await claimNotificationDeliveries(ctx.db, 1)).toEqual([]);
+    expect(providerSends).toBe(1);
+  });
   it("turns positive stock deltas into detailed restock deliveries for actual subscribers", async () => {
     const variantId = await seedVariant();
     const subscribed = await seedCustomer("111111");
@@ -1295,5 +1343,345 @@ describe("notification service", () => {
       select content from notification_campaign where id = ${`warranty-refund-paid:${claimId}`}
     `.execute(ctx.db);
     expect(paidCampaign.rows[0]!.content).toContain("Shop đã xác nhận chuyển khoản");
+  });
+  it("A. callback readiness failure makes no provider call and retains only its claim lease", async () => {
+    const customerId = await seedCustomer("444101");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "order update",
+      createdBy: "system",
+      idempotencyKey: "notification-preflight-readiness",
+    });
+    await sql`
+      update notification_campaign
+      set buttons = ${JSON.stringify([[{ text: "Order", callbackData: "ord:view:ORD-READY-1" }]])}::jsonb
+      where id = ${campaignId}
+    `.execute(ctx.db);
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${deliveryId}, ${campaignId}, ${customerId}, '444101')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    let providerSends = 0;
+    const responder = createSealedNotificationResponder({
+      codec: createCallbackTokenCodec({
+        key: "test-only-notification-readiness-key-123456",
+        keyVersion: 1,
+        ttlSeconds: 900,
+        clockSkewSeconds: 5,
+      }),
+      resolveOrderId: async () => {
+        throw new Error("callback target database is not ready");
+      },
+      responder: {
+        send: async () => {
+          providerSends += 1;
+        },
+      },
+    });
+
+    await expect(
+      processNotificationDeliveryClaim(ctx.db, claim!, responder),
+    ).rejects.toBeInstanceOf(NotificationPreSubmitError);
+    const persisted = await sql<{
+      status: string;
+      last_error: string | null;
+      claim_generation: string;
+      claim_active: boolean;
+    }>`
+      select status, last_error, claim_generation, claim_expires_at > now() as claim_active
+      from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+
+    expect(providerSends).toBe(0);
+    expect(persisted.rows[0]).toMatchObject({
+      status: "RETRY",
+      last_error: null,
+      claim_generation: "1",
+      claim_active: true,
+    });
+  });
+
+  it("B. explicit forbidden and chat-not-found replies suppress delivery and mark both targets unreachable", async () => {
+    const cases = [
+      {
+        chatId: "444102",
+        error: { error_code: 403, description: "Forbidden: bot was blocked by the user" },
+      },
+      {
+        chatId: "444103",
+        error: { error_code: 400, description: "Bad Request: chat not found" },
+      },
+    ] as const;
+
+    for (const [index, testCase] of cases.entries()) {
+      const customerId = await seedCustomer(testCase.chatId);
+      await sql`
+        insert into customer_profile_snapshot(customer_id, telegram_user_id, chat_id)
+        values (${customerId}, ${testCase.chatId}, ${testCase.chatId})
+      `.execute(ctx.db);
+      const campaignId = await createBroadcast(ctx.db, {
+        class: "CRITICAL_SERVICE",
+        queued: true,
+        content: "owner notice",
+        createdBy: "system",
+        idempotencyKey: `notification-unreachable-${index}`,
+      });
+      await sql`
+        insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+        values (${newId()}, ${campaignId}, ${customerId}, ${testCase.chatId})
+      `.execute(ctx.db);
+      const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+      const result = await processNotificationDeliveryClaim(ctx.db, claim!, {
+        send: async () => {
+          throw testCase.error;
+        },
+      });
+      const delivery = await sql<{ status: string; last_error: string | null }>`
+        select status, last_error from notification_delivery where id = ${claim!.id}
+      `.execute(ctx.db);
+      const profile = await sql<{ reachable: boolean }>`
+        select reachable from customer_profile_snapshot where customer_id = ${customerId}
+      `.execute(ctx.db);
+
+      expect(result).toBe("SUPPRESSED");
+      expect(delivery.rows[0]).toEqual({ status: "SUPPRESSED", last_error: "chat_unreachable" });
+      expect(profile.rows[0]?.reachable).toBe(false);
+    }
+
+    expect(await claimNotificationDeliveries(ctx.db, 10)).toEqual([]);
+  });
+
+  it("C. explicit 429 retries within the bound and applies Telegram Retry-After to the global pause", async () => {
+    const customerId = await seedCustomer("444104");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "rate limited notice",
+      createdBy: "system",
+      idempotencyKey: "notification-rate-limit",
+    });
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${deliveryId}, ${campaignId}, ${customerId}, '444104')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    const rateLimit = {
+      error_code: 429,
+      description: "Too Many Requests",
+      parameters: { retry_after: 12 },
+    };
+    const pauseRequests: number[] = [];
+    const result = await processNotificationDeliveryClaim(
+      ctx.db,
+      claim!,
+      {
+        send: async () => {
+          throw rateLimit;
+        },
+      },
+      {
+        retryAfterSeconds: (error) =>
+          error === rateLimit ? rateLimit.parameters.retry_after : null,
+        onRateLimit: async (seconds) => {
+          pauseRequests.push(seconds);
+        },
+      },
+    );
+    const retry = await sql<{ status: string; next_attempt_at: Date; last_error: string | null }>`
+      select status, next_attempt_at, last_error
+      from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+    const retryDelayMs = retry.rows[0]!.next_attempt_at.getTime() - Date.now();
+
+    expect(result).toBe("RETRY");
+    expect(retry.rows[0]?.status).toBe("RETRY");
+    expect(retry.rows[0]?.last_error).toBe("telegram_rate_limited");
+    expect(retryDelayMs).toBeGreaterThan(9_000);
+    expect(retryDelayMs).toBeLessThanOrEqual(12_000);
+    expect(pauseRequests).toEqual([12]);
+  });
+
+  it("D. only a typed proven-pre-submit transport failure returns the fenced delivery to safe retry", async () => {
+    const customerId = await seedCustomer("444105");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "safe retry notice",
+      createdBy: "system",
+      idempotencyKey: "notification-proven-pre-submit",
+    });
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${deliveryId}, ${campaignId}, ${customerId}, '444105')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    let providerSends = 0;
+    const responder = createSealedNotificationResponder({
+      codec: createCallbackTokenCodec({
+        key: "test-only-notification-pre-submit-key-123456",
+        keyVersion: 1,
+        ttlSeconds: 900,
+        clockSkewSeconds: 5,
+      }),
+      resolveOrderId: async () => null,
+      responder: {
+        send: async () => {
+          providerSends += 1;
+          throw Object.assign(new Error("connect failed"), { cause: { code: "ECONNREFUSED" } });
+        },
+      },
+    });
+    const result = await processNotificationDeliveryClaim(ctx.db, claim!, responder);
+    const retry = await sql<{
+      status: string;
+      last_error: string | null;
+      claim_expires_at: Date | null;
+    }>`
+      select status, last_error, claim_expires_at
+      from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+
+    expect(providerSends).toBe(1);
+    expect(result).toBe("RETRY");
+    expect(retry.rows[0]).toMatchObject({
+      status: "RETRY",
+      last_error: "pre_submit_failure",
+      claim_expires_at: null,
+    });
+  });
+
+  it("E. accepted provider send with SENT persistence failure remains durably uncertain", async () => {
+    const customerId = await seedCustomer("444106");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "accepted once",
+      createdBy: "system",
+      idempotencyKey: "notification-sent-write-failure",
+    });
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${deliveryId}, ${campaignId}, ${customerId}, '444106')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    await sql`
+      create function reject_notification_sent_write() returns trigger language plpgsql as $$
+      begin
+        raise exception 'simulated SENT persistence failure';
+      end;
+      $$
+    `.execute(ctx.db);
+    await sql`
+      create trigger reject_notification_sent_write
+      before update on notification_delivery
+      for each row when (new.status = 'SENT')
+      execute function reject_notification_sent_write()
+    `.execute(ctx.db);
+    let providerSends = 0;
+    let result: string | undefined;
+    try {
+      result = await processNotificationDeliveryClaim(ctx.db, claim!, {
+        send: async () => {
+          providerSends += 1;
+          return { messageId: "accepted-message-106" };
+        },
+      });
+    } finally {
+      await sql`drop trigger reject_notification_sent_write on notification_delivery`.execute(
+        ctx.db,
+      );
+      await sql`drop function reject_notification_sent_write()`.execute(ctx.db);
+    }
+    const persisted = await sql<{
+      status: string;
+      message_id: string | null;
+      sent_at: Date | null;
+      last_error: string | null;
+    }>`
+      select status, message_id, sent_at, last_error
+      from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+
+    expect(result).toBe("SEND_UNCERTAIN");
+    expect(providerSends).toBe(1);
+    expect(persisted.rows[0]).toEqual({
+      status: "SEND_UNCERTAIN",
+      message_id: null,
+      sent_at: null,
+      last_error: "sent_persistence_failed",
+    });
+    expect(await claimNotificationDeliveries(ctx.db, 1)).toEqual([]);
+  });
+
+  it("F. a fresh worker after an accepted send with failed SENT persistence does not resend", async () => {
+    const customerId = await seedCustomer("444107");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "ambiguous after acceptance",
+      createdBy: "system",
+      idempotencyKey: "notification-ambiguous-restart",
+    });
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${deliveryId}, ${campaignId}, ${customerId}, '444107')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    await sql`
+      create function reject_notification_sent_write() returns trigger language plpgsql as $$
+      begin
+        raise exception 'simulated SENT persistence failure';
+      end;
+      $$
+    `.execute(ctx.db);
+    await sql`
+      create trigger reject_notification_sent_write
+      before update on notification_delivery
+      for each row when (new.status = 'SENT')
+      execute function reject_notification_sent_write()
+    `.execute(ctx.db);
+    let providerSends = 0;
+    let result: string | undefined;
+    try {
+      result = await processNotificationDeliveryClaim(ctx.db, claim!, {
+        send: async () => {
+          providerSends += 1;
+          return { messageId: "accepted-message-107" };
+        },
+      });
+    } finally {
+      await sql`drop trigger reject_notification_sent_write on notification_delivery`.execute(
+        ctx.db,
+      );
+      await sql`drop function reject_notification_sent_write()`.execute(ctx.db);
+    }
+    const persisted = await sql<{
+      status: string;
+      message_id: string | null;
+      attempts: number;
+      last_error: string | null;
+    }>`
+      select status, message_id, attempts, last_error
+      from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+
+    const restartedWorkerClaims = await claimNotificationDeliveries(ctx.db, 10);
+
+    expect(result).toBe("SEND_UNCERTAIN");
+    expect(persisted.rows[0]).toEqual({
+      status: "SEND_UNCERTAIN",
+      message_id: null,
+      attempts: 1,
+      last_error: "sent_persistence_failed",
+    });
+    expect(restartedWorkerClaims).toEqual([]);
+    expect(providerSends).toBe(1);
   });
 });

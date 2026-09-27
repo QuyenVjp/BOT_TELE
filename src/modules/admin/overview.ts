@@ -18,6 +18,8 @@ export interface AdminOverview {
   ordersToday: number;
   /** Real orders still needing an operator: waiting payment, paid, processing, in review. */
   awaitingAction: number;
+  /** Paid manual orders awaiting owner fulfillment. */
+  manualOrdersNeedingWork: number;
   /** Sellable variants at or below their configured low-stock threshold. */
   lowStockVariants: number;
   /** Orders whose payment could not be matched confidently. */
@@ -25,7 +27,6 @@ export interface AdminOverview {
   /** Support tickets an operator has not closed yet. */
   newTickets: number;
 }
-
 const VIETNAM_OFFSET_MS = 7 * 60 * 60 * 1000;
 
 /** Start of the Vietnam calendar day containing `now`, as a UTC instant. */
@@ -52,6 +53,7 @@ export async function getAdminOverview(
     orders_today: number;
     awaiting_action: number;
     payments_needing_review: number;
+    manual_orders_needing_work: number;
   }>`
     select
       (select coalesce(sum(o.price_vnd), 0)::text from "order" o
@@ -63,7 +65,31 @@ export async function getAdminOverview(
            'PENDING_PAYMENT', 'PAID', 'PROCESSING', 'PAYMENT_NEEDS_REVIEW', 'FULFILLMENT_NEEDS_REVIEW'
          )) as awaiting_action,
       (select count(*)::int from "order" o
-         ${REAL_ORDER_SQL} and o.status = 'PAYMENT_NEEDS_REVIEW') as payments_needing_review
+         ${REAL_ORDER_SQL} and o.status = 'PAYMENT_NEEDS_REVIEW') as payments_needing_review,
+      (select count(*)::int from "order" o
+       join product_variant v on v.id = o.variant_id
+       join product p on p.id = v.product_id
+       join manual_fulfillment_task m on m.order_id = o.id
+       where o.fulfillment_type = 'MANUAL_FULFILLMENT'
+         and m.fulfillment_type = 'MANUAL_FULFILLMENT'
+         and o.status = 'PROCESSING' and m.status = 'OPEN'
+         and not p.is_test and not p.is_archived
+         and p.name_vi not ilike '%canary%'
+         and not exists (
+           select 1 from channel_identity ci
+           join test_customer_allowlist a on a.telegram_user_id = ci.channel_user_id
+           where ci.channel = 'TELEGRAM' and ci.customer_id = o.customer_id
+         )
+         and exists (
+           select 1 from payment_intent pi
+           join payment_allocation pa on pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
+           join bank_transaction bt on bt.id = pa.bank_transaction_id
+             and lower(bt.provider) = 'sepay' and bt.direction = 'IN'
+             and bt.signature_status = 'VERIFIED'
+           where pi.order_id = o.id and pi.status = 'SUCCEEDED'
+             and pa.allocated_amount_vnd = o.price_vnd
+         )
+      ) as manual_orders_needing_work
   `.execute(exec);
 
   const stock = await sql<{ low_stock_variants: number }>`
@@ -79,7 +105,7 @@ export async function getAdminOverview(
           when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce((
             select q.available_quantity from variant_quantity_stock q where q.variant_id = v.id
           ), 0)::int
-          when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then 1
+          when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null
           when v.fulfillment_type = 'DIGITAL_FILE' then (
             select count(*)::int from variant_file_artifact f
             where f.variant_id = v.id and f.is_active
@@ -94,7 +120,7 @@ export async function getAdminOverview(
     )
     select count(*)::int as low_stock_variants
     from sellable
-    where threshold > 0 and available <= threshold
+    where threshold > 0 and available is not null and available <= threshold
   `.execute(exec);
 
   const tickets = await sql<{ new_tickets: number }>`
@@ -115,6 +141,7 @@ export async function getAdminOverview(
     revenueTodayVnd: BigInt(head?.revenue_today_vnd ?? "0"),
     ordersToday: head?.orders_today ?? 0,
     awaitingAction: head?.awaiting_action ?? 0,
+    manualOrdersNeedingWork: head?.manual_orders_needing_work ?? 0,
     lowStockVariants: stock.rows[0]?.low_stock_variants ?? 0,
     paymentsNeedingReview: head?.payments_needing_review ?? 0,
     newTickets: tickets.rows[0]?.new_tickets ?? 0,

@@ -3,7 +3,9 @@ import {
   ADMIN_COPY,
   ADMIN_VISIBLE_ROUTE_KEYS,
   PUBLICATION_BLOCKER_LABEL,
+  presentAdminBroadcastStatus,
   presentAdminDashboard,
+  presentAdminNotifications,
   presentAdminInventory,
   presentAdminInventoryItemActions,
   presentAdminInventoryItemConfirm,
@@ -11,6 +13,7 @@ import {
   presentAdminInventoryItems,
   presentAdminInventoryProduct,
   presentAdminInventoryVariant,
+  presentAdminInventoryVariantPicker,
   presentInventoryImportPreview,
   presentProductFulfillmentTypeChoices,
   presentAdminInventoryMenu,
@@ -95,6 +98,41 @@ describe("admin operational presenters", () => {
     expect(labels).not.toMatch(
       /Dashboard|Products|Inventory|Orders|Payments|Suppliers|Restock|Health|Settings|Audit/,
     );
+  });
+  it("surfaces uncertain notification outcomes by failure phase for owner review", () => {
+    const screen = presentAdminNotifications({
+      transactionalKinds: [],
+      marketingRecipients: 0,
+      marketingOptOuts: 0,
+      outboxBacklog: 0,
+      uncertainDeliveries: 2,
+      uncertainProviderOutcomes: 1,
+      uncertainSentPersistenceFailures: 1,
+      uncertainFollowupIdentityFailures: 0,
+      uncertainStaleAcknowledgements: 0,
+      uncertainUnclassified: 0,
+    });
+
+    expect(screen.text).toContain("⚠️ Gửi chưa xác nhận (không tự gửi lại): 2");
+    expect(screen.text).toContain("Telegram chưa rõ kết quả: 1");
+    expect(screen.text).toContain("Lỗi lưu trạng thái SENT: 1");
+  });
+
+  it("shows uncertain campaign deliveries without promising automatic resend", () => {
+    const screen = presentAdminBroadcastStatus({
+      campaignId: "campaign-uncertain",
+      status: "QUEUED",
+      audience: "all",
+      total: 1,
+      pending: 0,
+      retry: 0,
+      sent: 0,
+      suppressed: 0,
+      dead: 0,
+      uncertain: 1,
+    });
+
+    expect(screen.text).toContain("Gửi chưa xác nhận (không tự gửi lại): 1");
   });
 
   it("provides back and home navigation for every visible admin submenu", () => {
@@ -429,15 +467,31 @@ describe("admin operational presenters", () => {
         lowStock: 0,
         outOfStock: 1,
       },
+      {
+        id: "p3",
+        name: "Manual",
+        active: true,
+        variantCount: 0,
+        inStock: 0,
+        lowStock: 0,
+        outOfStock: 0,
+      },
     ]);
-    expect(populated.text).toContain("Netflix: 2 biến thể · còn 1 · sắp hết 1 · hết 1");
     expect(populated.text).toContain(
-      "Canary · nháp/chưa mở bán: 1 biến thể · còn 0 · sắp hết 0 · hết 1",
+      "Netflix: 2 biến thể theo dõi kho · còn 1 · sắp hết 1 · hết 1",
     );
+    expect(populated.text).toContain(
+      "Canary · nháp/chưa mở bán: 1 biến thể theo dõi kho · còn 0 · sắp hết 0 · hết 1",
+    );
+    expect(populated.text).toContain("Manual: không có biến thể theo dõi kho");
     expect(populated.buttons[0]?.[0]).toMatchObject({ callbackData: "admin:inventory:product:p1" });
     expect(populated.buttons[1]?.[0]).toMatchObject({
-      text: "Canary · nháp · 0/1 còn",
+      text: "Canary · nháp · 0/1 biến thể có hàng",
       callbackData: "admin:inventory:product:p2",
+    });
+    expect(populated.buttons[2]?.[0]).toMatchObject({
+      text: "Manual · không theo dõi tồn kho",
+      callbackData: "admin:inventory:product:p3",
     });
   });
 
@@ -615,10 +669,23 @@ describe("admin operational presenters", () => {
       name: "Manual",
       sku: "MAN",
       fulfillmentType: "MANUAL_FULFILLMENT",
-      available: 0,
+      available: null,
       lowStockThreshold: null,
       importSupported: false,
     });
+    const manualPicker = presentAdminInventoryVariantPicker(
+      { id: "p1", name: "Services" },
+      [
+        {
+          id: "man1",
+          name: "Manual",
+          sku: "MAN",
+          fulfillmentType: "MANUAL_FULFILLMENT",
+          available: null,
+        },
+      ],
+      "import",
+    );
 
     expect(quantity.buttons.flat()).toEqual(
       expect.arrayContaining([
@@ -629,8 +696,14 @@ describe("admin operational presenters", () => {
     expect(supplier.buttons.flat()).toEqual(
       expect.arrayContaining([expect.objectContaining({ callbackData: "admin:supv:sup1" })]),
     );
+    expect(manual.text).toContain("Tồn kho: không theo dõi");
+    expect(manual.text).not.toMatch(/Khả dụng:|Đang giữ:|Đã giao:|Lỗi\/khóa:|Ngưỡng cảnh báo:/);
     expect(manual.buttons.flat().map((button) => button.callbackData)).not.toEqual(
-      expect.arrayContaining([expect.stringMatching(/^admin:inventory:import:/)]),
+      expect.arrayContaining([expect.stringMatching(/^admin:inventory:(?:import|items|history):/)]),
+    );
+    expect(manualPicker.text).toContain("không theo dõi tồn kho");
+    expect(manualPicker.buttons.flat().map((button) => button.callbackData)).not.toEqual(
+      expect.arrayContaining([expect.stringMatching(/^admin:inventory:(?:import|template):/)]),
     );
   });
 

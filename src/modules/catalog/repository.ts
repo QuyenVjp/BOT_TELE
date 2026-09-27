@@ -433,7 +433,7 @@ export interface StorefrontProductSummary {
   slug: string;
   short_description_vi: string | null;
   min_price_vnd: string;
-  total_available: number;
+  total_available: number | null;
   preorder_enabled: boolean;
   primary_variant_id: string;
   primary_variant_sku: string;
@@ -471,10 +471,7 @@ export async function listStorefrontProducts(
           when v.fulfillment_type = 'SUPPLIER_API' then (
             case when ${SUPPLIER_READY_SQL} then 1 else 0 end
           )
-          when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then (
-            select count(*)::int from variant_service_fulfillment sf
-            where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
-          )
+          when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then null
           else 0
         end as available_count
       from product_variant v
@@ -496,7 +493,7 @@ export async function listStorefrontProducts(
         p.short_description_vi,
         p.sort_order,
         min(vd.price_vnd)::text as min_price_vnd,
-        coalesce(sum(vd.available_count), 0)::int as total_available,
+        sum(vd.available_count)::int as total_available,
         coalesce(bool_or(vd.preorder_enabled), false) as preorder_enabled,
         (array_agg(vd.variant_id order by vd.sort_order asc, vd.variant_id asc))[1] as primary_variant_id,
         (array_agg(vd.sku order by vd.sort_order asc, vd.variant_id asc))[1] as primary_variant_sku,
@@ -547,17 +544,14 @@ export async function listTestCatalogProducts(
             (select count(*)::int from supplier_sku ss join supplier s on s.id = ss.supplier_id
              where ss.variant_id = v.id and ss.id = v.supplier_sku_id
                and ss.is_active and s.status = 'ACTIVE')
-          when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then
-            (select count(*)::int from variant_service_fulfillment sf
-             where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active)
-          else 0
+          when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then null
         end as available_count
       from product_variant v
       where v.is_active and v.price_vnd > 0
     ), product_summary as (
       select p.id, p.name_vi, p.slug, p.short_description_vi, p.sort_order,
         min(vd.price_vnd)::text as min_price_vnd,
-        coalesce(sum(vd.available_count), 0)::int as total_available,
+        sum(vd.available_count)::int as total_available,
         coalesce(bool_or(vd.preorder_enabled), false) as preorder_enabled,
         (array_agg(vd.variant_id order by vd.sort_order asc, vd.variant_id asc))[1] as primary_variant_id,
         (array_agg(vd.sku order by vd.sort_order asc, vd.variant_id asc))[1] as primary_variant_sku,

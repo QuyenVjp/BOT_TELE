@@ -722,6 +722,7 @@ export interface TelegramDomainDispatcherDeps {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
+      offset?: number;
     }): Promise<PresentedMessage>;
     manualTask?(input: {
       telegramUserId: string;
@@ -2474,6 +2475,18 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Nhắn khách không khả dụng.");
+        } else if (route.startsWith("manual:page:")) {
+          const rawOffset = route.slice("manual:page:".length);
+          const offset = /^(0|[1-9][0-9]{0,4})$/.test(rawOffset) ? Number(rawOffset) : -1;
+          message =
+            offset >= 0 && offset <= 10_000 && admin.manualTasks
+              ? await admin.manualTasks({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  offset,
+                  correlationId,
+                })
+              : safeError("Trang hàng chờ không hợp lệ.");
         } else if (route === "manual") {
           message = admin.manualTasks
             ? await admin.manualTasks({

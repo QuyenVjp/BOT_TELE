@@ -6,6 +6,7 @@ import {
   presentVariantDetail,
 } from "../../src/bot/presenters/catalog.js";
 import type { CatalogVariantRow, ProductDetailView } from "../../src/modules/catalog/repository.js";
+import { DESCRIPTION_TEMPLATES } from "../../src/modules/catalog/description-templates.js";
 
 function variant(
   stockPolicy: CatalogVariantRow["stock_policy"],
@@ -154,6 +155,23 @@ describe("catalog presenter stock-policy guard", () => {
     expect(none.text).toContain("Thời hạn: —");
   });
 
+  it("describes manual fulfillment as owner-operated, not inventory, and asks for no checkout details", () => {
+    const message = presentVariantDetail(
+      {
+        ...variant("LOCAL_ONLY", "MANUAL_FULFILLMENT", true, 0),
+        low_stock_threshold: 5,
+      },
+      "buy:signed-callback",
+    );
+
+    expect(message.text).toContain("xử lý thủ công");
+    expect(message.text).not.toContain("Còn hàng");
+    expect(message.text).not.toContain("Sắp hết hàng");
+    expect(DESCRIPTION_TEMPLATES.MANUAL_FULFILLMENT.usageInstructions).toContain("Telegram");
+    expect(DESCRIPTION_TEMPLATES.MANUAL_FULFILLMENT.usageInstructions).not.toMatch(
+      /mật khẩu|OTP|cookie/iu,
+    );
+  });
   it("follows configured variant low_stock_threshold and defaults to 3", () => {
     const customLow = presentVariantDetail({
       ...variant("LOCAL_ONLY", "QUANTITY_STOCK", true, 4),
@@ -220,10 +238,14 @@ describe("catalog product detail copy", () => {
       expect(message.text).toContain(heading);
     }
     expect(message.text).toContain("💰 Giá từ: ");
-    expect(message.text).toContain("🟡 Tình trạng: Sắp hết hàng");
-    expect(message.text).toContain("⚡ Giao hàng: Nhân viên xử lý");
-    expect(message.text).not.toContain("Tạm hết hàng");
+    expect(message.text).toContain("xử lý thủ công");
+    expect(message.text).not.toContain("Còn hàng");
+    expect(message.text).not.toContain("Sắp hết hàng");
+    expect(message.text).toMatch(/⚡ Giao hàng: .*Telegram/u);
     expect(message.text).not.toContain("MANUAL_FULFILLMENT");
+    expect(message.text).not.toMatch(
+      /⏱ Dự kiến:|vài giây|ngay sau khi thanh toán|\b\d+\s*(giây|phút|giờ)/iu,
+    );
 
     expect(
       message.buttons.flat().find((button) => button.callbackData === "buy:signed-callback")?.text,
@@ -236,6 +258,31 @@ describe("catalog product detail copy", () => {
       { text: "⬅️ Claude", callbackData: "cat:view:cat-1" },
       { text: "🏠 Trang chủ", callbackData: "shop:home" },
     ]);
+  });
+
+  it("does not apply the automatic ETA fallback to a product containing manual fulfillment", () => {
+    const manual = variant("LOCAL_ONLY", "MANUAL_FULFILLMENT", true, 2);
+    const automatic = variant("LOCAL_ONLY", "STOCK_ACCOUNT", true, 2);
+    const message = presentProductDetail(detailView([manual, automatic]), {});
+
+    expect(message.text).not.toMatch(/⏱ Dự kiến:.*(vài giây|ngay sau khi thanh toán)/iu);
+  });
+
+  it("does not infer product stock from ready non-stock variants", () => {
+    const manual = variant("LOCAL_ONLY", "MANUAL_FULFILLMENT", true, 0);
+    const unlimited = variant("LOCAL_ONLY", "UNLIMITED_SERVICE", true, 0);
+    const nonStockOnly = presentProductDetail(detailView([manual, unlimited]), {});
+    expect(nonStockOnly.text).toContain("🟢 Có thể đặt");
+    expect(nonStockOnly.text).not.toContain("Còn hàng");
+    expect(nonStockOnly.text).not.toContain("Sắp hết hàng");
+
+    const manualOrderable = variant("LOCAL_ONLY", "MANUAL_FULFILLMENT", true, 0);
+    const stockSoldOut = variant("LOCAL_ONLY", "QUANTITY_STOCK", false, 0);
+    const mixed = presentProductDetail(detailView([manualOrderable, stockSoldOut]), {});
+    expect(mixed.text).toContain("🟢 Có thể đặt");
+    expect(mixed.text).not.toContain("Còn hàng");
+    expect(mixed.text).not.toContain("Sắp hết hàng");
+    expect(mixed.text).not.toContain("Hết hàng");
   });
 
   it("keeps restock and, when enabled, a deposit hold on an out-of-stock variant", () => {

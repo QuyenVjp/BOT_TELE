@@ -5,9 +5,10 @@ import {
   listVariantInventoryHistory,
 } from "../../src/modules/catalog/quantity-stock.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
+import { withTransaction } from "../../src/infrastructure/db/transaction.js";
 import { fulfillPaidOrder } from "../../src/modules/digital-goods/fulfillment.js";
 import {
-  completeManualFulfillmentTask,
+  completeManualFulfillmentTaskInTransaction,
   listManualFulfillmentTasks,
 } from "../../src/modules/digital-goods/manual-fulfillment.js";
 import {
@@ -72,6 +73,23 @@ async function seedQuantityOrder(input: { quantity?: number; threshold?: number 
       100000, 'P1M', 'CREDENTIAL', 'QUANTITY_STOCK', 'PAID', now())
   `.execute(ctx.db);
   return { orderId, variantId, customerId };
+}
+async function completeTask(taskId: string, correlationId: string) {
+  const versions = await sql<{ order_version: number; task_version: number }>`
+    select o.version as order_version, m.version as task_version
+    from manual_fulfillment_task m join "order" o on o.id = m.order_id
+    where m.id = ${taskId}
+  `.execute(ctx.db);
+  const row = versions.rows[0];
+  if (!row) throw new Error("quantity task missing");
+  return withTransaction(ctx.db, (trx) =>
+    completeManualFulfillmentTaskInTransaction(trx, {
+      taskId,
+      actorId: "42",
+      correlationId,
+      expectedVersion: `${row.order_version}:${row.task_version}`,
+    }),
+  );
 }
 
 describe("quantity-stock fulfillment", () => {
@@ -146,18 +164,8 @@ describe("quantity-stock fulfillment", () => {
     });
 
     const [task] = await listManualFulfillmentTasks(ctx.db, { status: "OPEN" });
-    const complete = await completeManualFulfillmentTask(ctx.db, {
-      taskId: task!.id,
-      actor: { numericUserId: 42, chatType: "private", observedUsername: "owner" },
-      config: { adminTelegramUserId: 42, expectedUsername: "owner" },
-      correlationId: "qty-complete",
-    });
-    const replay = await completeManualFulfillmentTask(ctx.db, {
-      taskId: task!.id,
-      actor: { numericUserId: 42, chatType: "private", observedUsername: "owner" },
-      config: { adminTelegramUserId: 42, expectedUsername: "owner" },
-      correlationId: "qty-complete",
-    });
+    const complete = await completeTask(task!.id, "qty-complete");
+    const replay = await completeTask(task!.id, "qty-complete");
 
     expect(complete).toMatchObject({ ok: true, alreadyCompleted: false });
     expect(replay).toMatchObject({ ok: true, alreadyCompleted: true });
@@ -244,14 +252,9 @@ describe("quantity-stock fulfillment", () => {
     await releaseTypedStockForOrder(ctx.db, f.orderId);
     const [task] = await listManualFulfillmentTasks(ctx.db, { status: "OPEN" });
 
-    const complete = await completeManualFulfillmentTask(ctx.db, {
-      taskId: task!.id,
-      actor: { numericUserId: 42, chatType: "private", observedUsername: "owner" },
-      config: { adminTelegramUserId: 42, expectedUsername: "owner" },
-      correlationId: "qty-complete-released",
-    });
+    const complete = await completeTask(task!.id, "qty-complete-released");
 
-    expect(complete).toEqual({ ok: false, code: "ORDER_NOT_PROCESSING" });
+    expect(complete).toMatchObject({ ok: false, code: "ORDER_NOT_PROCESSING" });
     const state = await sql<{ task_status: string; order_status: string; delivered: number }>`
       select m.status as task_status, o.status as order_status,
         (select count(*)::int from quantity_stock_ledger where order_id = ${f.orderId} and entry_type = 'DELIVER') as delivered

@@ -42,6 +42,14 @@ import { presentReviewModerated, presentReviewModeration } from "./bot/presenter
 import { forecastInventory } from "./modules/operations/forecast.js";
 import { getFunnelCounts } from "./modules/operations/funnel.js";
 
+import {
+  presentAdminManualTaskDetail,
+  presentAdminManualTasks,
+} from "./bot/presenters/manual-fulfillment.js";
+import {
+  getAdminManualFulfillmentTask,
+  listAdminManualFulfillmentTasks,
+} from "./modules/digital-goods/manual-fulfillment.js";
 import { pathToFileURL } from "node:url";
 import { getAdminOverview, vietnamDayStart } from "./modules/admin/overview.js";
 import {
@@ -185,9 +193,11 @@ import {
   previewStockAnnouncementBroadcast,
   processNotificationDeliveryClaim,
   setNotificationPreferences,
+  NotificationPreSubmitError,
   type BroadcastAudience,
   type BroadcastRefusal,
   type NotificationResponder,
+  type NotificationSendInput,
 } from "./modules/notification/service.js";
 import type { AdminCustomerFilter } from "./modules/admin/customer-operations.js";
 import {
@@ -786,21 +796,61 @@ export function createWorkerScheduler(input: WorkerSchedulerInput): WorkerSchedu
   };
 }
 
+const PRE_SUBMIT_NETWORK_CODES: Record<string, true> = {
+  ENOTFOUND: true,
+  EAI_AGAIN: true,
+  ECONNREFUSED: true,
+  EHOSTUNREACH: true,
+  ENETUNREACH: true,
+};
+
+function isPreSubmitTransportFailure(error: unknown): boolean {
+  let current = error;
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (typeof current !== "object" || current === null) return false;
+    if (
+      "code" in current &&
+      typeof current.code === "string" &&
+      PRE_SUBMIT_NETWORK_CODES[current.code] === true
+    ) {
+      return true;
+    }
+    current = "cause" in current ? current.cause : "error" in current ? current.error : undefined;
+  }
+  return false;
+}
+
 export function createSealedNotificationResponder(input: {
   responder: NotificationResponder;
   codec: CallbackTokenCodec;
   resolveOrderId(orderNumber: string): Promise<string | null>;
 }): NotificationResponder {
+  const prepare = async (messageInput: NotificationSendInput) => {
+    let message: NotificationSendInput["message"];
+    try {
+      message = await sealPresentedMessageCallbacks(messageInput.message, {
+        codec: input.codec,
+        telegramUserId: messageInput.telegramUserId,
+        resolveOrderId: input.resolveOrderId,
+      });
+    } catch (error) {
+      throw new NotificationPreSubmitError(error);
+    }
+
+    const request = { ...messageInput, message };
+    return async () => {
+      try {
+        return await input.responder.send(request);
+      } catch (error) {
+        if (isPreSubmitTransportFailure(error)) throw new NotificationPreSubmitError(error);
+        throw error;
+      }
+    };
+  };
+
   return {
-    send: async (messageInput) =>
-      input.responder.send({
-        ...messageInput,
-        message: await sealPresentedMessageCallbacks(messageInput.message, {
-          codec: input.codec,
-          telegramUserId: messageInput.telegramUserId,
-          resolveOrderId: input.resolveOrderId,
-        }),
-      }),
+    prepare,
+    send: async (messageInput) => (await prepare(messageInput))(),
   };
 }
 
@@ -812,12 +862,18 @@ export interface NotificationDeliveryLaneInput {
   batchSize?: number;
   workers?: number;
   sleep?: (ms: number) => Promise<void>;
+  adminAlertMode?: "IMMEDIATE" | "OFF";
+  onSendUncertain?: (delivery: { id: string; campaignId: string }) => void;
 }
 
 export async function runNotificationDeliveryLane(
   input: NotificationDeliveryLaneInput,
 ): Promise<void> {
-  const deliveries = await claimNotificationDeliveries(input.db, input.batchSize ?? 100);
+  const deliveries = await claimNotificationDeliveries(
+    input.db,
+    input.batchSize ?? 100,
+    input.adminAlertMode,
+  );
   let next = 0;
   const sleep = input.sleep ?? delayNotification;
   const sendNext = async (): Promise<void> => {
@@ -830,7 +886,7 @@ export async function runNotificationDeliveryLane(
         await sleep(pause);
         pause = await notificationPauseRemaining(input.db);
       }
-      await processNotificationDeliveryClaim(input.db, delivery, input.responder, {
+      const outcome = await processNotificationDeliveryClaim(input.db, delivery, input.responder, {
         maxAttempts: input.maxAttempts,
         retryAfterSeconds: (error) =>
           error instanceof Error &&
@@ -840,6 +896,8 @@ export async function runNotificationDeliveryLane(
             : null,
         onRateLimit: (seconds) => pauseNotificationRate(input.db, seconds),
       });
+      if (outcome === "SEND_UNCERTAIN")
+        input.onSendUncertain?.({ id: delivery.id, campaignId: delivery.campaignId });
     }
   };
   await Promise.all(Array.from({ length: input.workers ?? 4 }, sendNext));
@@ -1529,8 +1587,6 @@ async function bootstrap(): Promise<void> {
     stageFileArtifactDocument,
     startFileArtifactImportSession,
   } = await import("./modules/digital-goods/file-artifact-import-session.js");
-  const { getManualTaskById, listManualFulfillmentTasks } =
-    await import("./modules/digital-goods/manual-fulfillment.js");
   const {
     createDurableProductDraftWorkflow,
     createProductDraftRepository,
@@ -1688,8 +1744,6 @@ async function bootstrap(): Promise<void> {
     presentPurchaseThankYou,
   } = await import("./bot/presenters/customer.js");
   const { presentDeliveryReveal } = await import("./bot/presenters/delivery.js");
-  const { presentAdminManualTaskDetail, presentAdminManualTasks } =
-    await import("./bot/presenters/manual-fulfillment.js");
 
   const dbHandle = createDb({
     connectionString: config.DATABASE_URL,
@@ -3469,7 +3523,7 @@ async function bootstrap(): Promise<void> {
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
         return presentAdminManualTasks(
-          await listManualFulfillmentTasks(dbHandle.db, { status: "OPEN" }),
+          await listAdminManualFulfillmentTasks(dbHandle.db, { offset: input.offset ?? 0 }),
         );
       },
       async manualTask(input) {
@@ -3486,22 +3540,28 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const task = await getManualTaskById(dbHandle.db, input.taskId);
+        const task = await getAdminManualFulfillmentTask(dbHandle.db, input.taskId);
         if (!task)
           return {
             text: "Không tìm thấy tác vụ thủ công.",
             buttons: [[{ text: "🛠 Xử lý thủ công", callbackData: "admin:manual" }]],
           };
+        const contactStateId = await createAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          kind: "ORDER_MESSAGE_PROMPT",
+          payload: { orderId: task.orderId },
+        });
         const confirmationStateId =
           task.status === "OPEN"
             ? await createAdminCallbackState(dbHandle.db, {
                 adminTelegramUserId: input.telegramUserId,
                 kind: "MANUAL_TASK_COMPLETE",
-                payload: { taskId: task.id },
+                payload: { taskId: task.taskId, expectedVersion: task.expectedVersion },
               })
             : undefined;
         return presentAdminManualTaskDetail({
           task,
+          contactStateId,
           ...(confirmationStateId ? { confirmationStateId } : {}),
         });
       },
@@ -3516,7 +3576,13 @@ async function bootstrap(): Promise<void> {
           state?.kind === "MANUAL_TASK_COMPLETE" && typeof state.payload.taskId === "string"
             ? state.payload.taskId
             : null;
-        if (!taskId)
+        const expectedVersion =
+          state?.kind === "MANUAL_TASK_COMPLETE" &&
+          typeof state.payload.expectedVersion === "string" &&
+          /^\d+:\d+$/.test(state.payload.expectedVersion)
+            ? state.payload.expectedVersion
+            : null;
+        if (!taskId || !expectedVersion)
           return {
             text: "Phiên xác nhận tác vụ đã hết hạn.",
             buttons: [[{ text: "🛠 Xử lý thủ công", callbackData: "admin:manual" }]],
@@ -3525,6 +3591,7 @@ async function bootstrap(): Promise<void> {
           command: "manual_fulfillment.complete",
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           targetId: taskId,
+          expectedVersion,
           reason: "Manual fulfillment completion requested from Telegram admin UI",
           correlationId: input.correlationId,
         });
@@ -3677,6 +3744,7 @@ async function bootstrap(): Promise<void> {
             select v.id as variant_id,
               v.low_stock_threshold,
               case
+                when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null
                 when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
                 else count(da.id)::int
               end as available
@@ -3749,12 +3817,35 @@ async function bootstrap(): Promise<void> {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID)
           return presentAdminDenied("NOT_ROOT_ADMIN");
-        const [outbox, prefs] = await Promise.all([
+        const [outbox, prefs, uncertain] = await Promise.all([
           getAdminHealthFacts(dbHandle.db),
           sql<{ recipients: number; opt_outs: number }>`
             select count(*)::int as recipients,
                    count(*) filter (where marketing_opt_in = false)::int as opt_outs
             from customer_notification_preference
+          `.execute(dbHandle.db),
+          sql<{
+            count: number;
+            provider_outcomes: number;
+            sent_persistence_failures: number;
+            followup_identity_failures: number;
+            stale_acknowledgements: number;
+            unclassified: number;
+          }>`
+            select
+              count(*)::int as count,
+              count(*) filter (where last_error = 'provider_outcome_unknown')::int as provider_outcomes,
+              count(*) filter (where last_error = 'sent_persistence_failed')::int as sent_persistence_failures,
+              count(*) filter (where last_error = 'followup_message_identity_missing')::int as followup_identity_failures,
+              count(*) filter (where last_error = 'sent_acknowledgement_stale')::int as stale_acknowledgements,
+              count(*) filter (
+                where last_error is null or last_error not in (
+                  'provider_outcome_unknown', 'sent_persistence_failed',
+                  'followup_message_identity_missing', 'sent_acknowledgement_stale'
+                )
+              )::int as unclassified
+            from notification_delivery
+            where status = 'SEND_UNCERTAIN'
           `.execute(dbHandle.db),
         ]);
         return presentAdminNotifications({
@@ -3770,6 +3861,12 @@ async function bootstrap(): Promise<void> {
           marketingRecipients: prefs.rows[0]?.recipients ?? 0,
           marketingOptOuts: prefs.rows[0]?.opt_outs ?? 0,
           outboxBacklog: outbox.queues.outboxBacklog,
+          uncertainDeliveries: uncertain.rows[0]?.count ?? 0,
+          uncertainProviderOutcomes: uncertain.rows[0]?.provider_outcomes ?? 0,
+          uncertainSentPersistenceFailures: uncertain.rows[0]?.sent_persistence_failures ?? 0,
+          uncertainFollowupIdentityFailures: uncertain.rows[0]?.followup_identity_failures ?? 0,
+          uncertainStaleAcknowledgements: uncertain.rows[0]?.stale_acknowledgements ?? 0,
+          uncertainUnclassified: uncertain.rows[0]?.unclassified ?? 0,
         });
       },
       async audit(input) {
@@ -5965,6 +6062,7 @@ async function bootstrap(): Promise<void> {
           with variant_stock as (
             select v.id, v.product_id, v.low_stock_threshold, v.is_active as active,
               case
+                when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null
                 when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce((select q.available_quantity from variant_quantity_stock q where q.variant_id = v.id), 0)::int
                 when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
                 when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.id = v.supplier_sku_id and ss.is_active), 0)::int
@@ -5972,7 +6070,8 @@ async function bootstrap(): Promise<void> {
               end as available
             from product_variant v
           ), product_stock as (
-            select p.id, p.name_vi as name, p.is_active as active, p.sort_order, count(vs.id)::int as variant_count,
+            select p.id, p.name_vi as name, p.is_active as active, p.sort_order,
+              count(vs.id) filter (where vs.available is not null)::int as variant_count,
               count(vs.id) filter (where vs.available > 0)::int as in_stock,
               count(vs.id) filter (where vs.low_stock_threshold is not null and vs.low_stock_threshold > 0 and vs.available > 0 and vs.available <= vs.low_stock_threshold)::int as low_stock,
               count(vs.id) filter (where vs.available <= 0)::int as out_stock
@@ -6057,24 +6156,25 @@ async function bootstrap(): Promise<void> {
             | "MANUAL_FULFILLMENT"
             | "QUANTITY_STOCK"
             | "UNLIMITED_SERVICE";
-          available: number;
-          reserved: number;
-          delivered: number;
-          error: number;
-          low_stock_threshold: number | null;
+          available: number | null;
+          reserved: number | null;
+          delivered: number | null;
+          error: number | null;
           stock_version: number | null;
           active: boolean;
+          low_stock_threshold: number | null;
         }>`
           select v.id, v.name_vi as name, v.sku, v.fulfillment_type, v.is_active as active,
             case
+              when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null
               when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
               when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
-                when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.id = v.supplier_sku_id and ss.is_active), 0)::int
+              when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.id = v.supplier_sku_id and ss.is_active), 0)::int
               else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
             end as available,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int as reserved,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'DELIVERED'), 0)::int as delivered,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('FAILED','SUPPLIER_NEEDS_REVIEW','COMPROMISED','REVOKED')), 0)::int as error,
+            case when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int end as reserved,
+            case when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'DELIVERED'), 0)::int end as delivered,
+            case when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('FAILED','SUPPLIER_NEEDS_REVIEW','COMPROMISED','REVOKED')), 0)::int end as error,
             v.low_stock_threshold,
             case when v.fulfillment_type = 'QUANTITY_STOCK' then q.version::int else null end as stock_version
           from product_variant v
@@ -6135,24 +6235,25 @@ async function bootstrap(): Promise<void> {
             | "QUANTITY_STOCK"
             | "UNLIMITED_SERVICE";
           inventory_fields: unknown;
-          available: number;
-          reserved: number;
-          delivered: number;
-          error: number;
+          available: number | null;
+          reserved: number | null;
+          delivered: number | null;
+          error: number | null;
           stock_version: number | null;
           low_stock_threshold: number | null;
           active: boolean;
         }>`
           select v.product_id, v.id, v.name_vi as name, v.sku, v.fulfillment_type, v.inventory_fields, v.is_active as active,
             case
+              when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null
               when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
               when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
-                when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.id = v.supplier_sku_id and ss.is_active), 0)::int
+              when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.id = v.supplier_sku_id and ss.is_active), 0)::int
               else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
             end as available,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int as reserved,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'DELIVERED'), 0)::int as delivered,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('FAILED','SUPPLIER_NEEDS_REVIEW','COMPROMISED','REVOKED')), 0)::int as error,
+            case when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int end as reserved,
+            case when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'DELIVERED'), 0)::int end as delivered,
+            case when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('FAILED','SUPPLIER_NEEDS_REVIEW','COMPROMISED','REVOKED')), 0)::int end as error,
             case when v.fulfillment_type = 'QUANTITY_STOCK' then q.version::int else null end as stock_version,
             v.low_stock_threshold
           from product_variant v
@@ -6184,6 +6285,7 @@ async function bootstrap(): Promise<void> {
           fileImportSupported: variant.fulfillment_type === "DIGITAL_FILE",
           supplierSupported: variant.fulfillment_type === "SUPPLIER_API",
           announceSupported:
+            variant.available !== null &&
             variant.available > 0 &&
             (variant.fulfillment_type === "STOCK_ACCOUNT" ||
               variant.fulfillment_type === "STOCK_CODE" ||
@@ -7247,10 +7349,12 @@ async function bootstrap(): Promise<void> {
           name_vi: string;
           sku: string;
           fulfillment_type: FulfillmentType;
-          available: number;
+          available: number | null;
         }>`
           select v.id, v.name_vi, v.sku, v.fulfillment_type,
-            coalesce((select count(*)::int from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int as available
+            case when v.fulfillment_type in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE') then null
+              else coalesce((select count(*)::int from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
+            end as available
           from product_variant v
           where v.product_id = ${productId} and v.is_active = true
           order by v.sort_order asc
@@ -9538,6 +9642,12 @@ async function bootstrap(): Promise<void> {
       }),
       ratePerSecond: notificationRate,
       maxAttempts: config.OUTBOX_MAX_ATTEMPTS,
+      adminAlertMode: config.ADMIN_PAYMENT_ALERT_MODE,
+      onSendUncertain: (delivery) =>
+        logger.warn(
+          { notificationDeliveryId: delivery.id, notificationCampaignId: delivery.campaignId },
+          "notification outcome uncertain; automatic resend disabled",
+        ),
     });
     if (config.DELIVERY_SESSION_HMAC_KEY) {
       await processDeliveryNotificationBatch({
@@ -9616,26 +9726,28 @@ async function bootstrap(): Promise<void> {
           event.eventType === "StockDelta" ||
           event.eventType === "WarrantyClaimOpened" ||
           event.eventType === "TicketOpened" ||
+          event.eventType === "OrderCreated" ||
           event.eventType === "PaymentSettled" ||
           event.eventType === "PaymentNeedsReview" ||
           event.eventType === "DigitalAssetDelivered" ||
+          event.eventType === "ManualFulfillmentTaskCreated" ||
           event.eventType === "ManualFulfillmentTaskCompleted" ||
           event.eventType === "FulfillmentCompleted";
         const completionEvent =
           event.eventType === "DigitalAssetDelivered" ||
+          event.eventType === "ManualFulfillmentTaskCreated" ||
           event.eventType === "ManualFulfillmentTaskCompleted" ||
           event.eventType === "FulfillmentCompleted";
-        if (completionEvent) {
-          const fulfillmentResult = await handler(event);
-          if (fulfillmentResult.kind !== "PUBLISHED") return fulfillmentResult;
-        }
+        const fulfillmentResult = completionEvent ? await handler(event) : null;
         if (notificationEvent) {
-          return handleNotificationOutboxEvent(dbHandle.db, event, {
+          const notificationResult = await handleNotificationOutboxEvent(dbHandle.db, event, {
             rootTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
             adminAlertMode: config.ADMIN_PAYMENT_ALERT_MODE,
           });
+          if (fulfillmentResult && fulfillmentResult.kind !== "PUBLISHED") return fulfillmentResult;
+          return notificationResult;
         }
-        return handler(event);
+        return fulfillmentResult ?? handler(event);
       },
       ownerId,
     });

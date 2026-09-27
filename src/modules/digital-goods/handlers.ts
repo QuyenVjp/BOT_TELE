@@ -248,13 +248,15 @@ export function createFulfillmentOutboxHandler(
       const correlationId =
         typeof p.correlationId === "string" ? p.correlationId : `outbox-${event.id}`;
       if (!customerId) return { kind: "RETRY", errorCode: "MANUAL_TASK_CUSTOMER_MISSING" };
-      await queueManualFulfillmentNotification(deps.db, {
+      const notified = await queueManualFulfillmentNotification(deps.db, {
         customerId,
         taskId,
         state: "WAITING",
         correlationId,
       });
-      return { kind: "PUBLISHED" };
+      return notified
+        ? { kind: "PUBLISHED" }
+        : { kind: "RETRY", errorCode: "MANUAL_TASK_NOTIFICATION_TARGET_MISSING" };
     }
 
     if (event.eventType === "ManualFulfillmentTaskCompleted") {
@@ -264,13 +266,15 @@ export function createFulfillmentOutboxHandler(
       const correlationId =
         typeof p.correlationId === "string" ? p.correlationId : `outbox-${event.id}`;
       if (!customerId) return { kind: "RETRY", errorCode: "MANUAL_TASK_CUSTOMER_MISSING" };
-      await queueManualFulfillmentNotification(deps.db, {
+      const notified = await queueManualFulfillmentNotification(deps.db, {
         customerId,
         taskId,
         state: "COMPLETED",
         correlationId,
       });
-      return { kind: "PUBLISHED" };
+      return notified
+        ? { kind: "PUBLISHED" }
+        : { kind: "RETRY", errorCode: "MANUAL_TASK_NOTIFICATION_TARGET_MISSING" };
     }
 
     if (event.eventType === "DigitalAssetDelivered") {

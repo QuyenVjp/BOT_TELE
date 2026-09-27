@@ -13,10 +13,12 @@ import type { IdentityTelemetry } from "./telemetry.js";
  *
  * Every owner verb that changes money, permissions, supplier routing or the
  * broadcast audience passes through `authorizeSensitiveAdminAction` BEFORE it
- * mutates anything. The layer composes the two existing gates — the numeric-id
- * root identity (`root-admin.ts`) and the RFC 6238 step-up factor
- * (`step-up.ts`) — and appends audit evidence for the success and for every
- * refusal.
+ * mutates anything. The layer composes root identity (`root-admin.ts`) with the
+ * policy-selected TOTP factor (`step-up.ts`), then appends audit evidence for
+ * success and every refusal.
+ * `manual_fulfillment.complete` is the deliberate no-TOTP exception: its separate
+ * durable confirmation path still requires root/private identity, current task/order
+ * versions and exact verified inbound settlement.
  *
  * Why a table instead of a flag per call site: the policy is one declarative
  * map from an action key to the step-up category it requires, so "which verbs
@@ -66,10 +68,12 @@ export type SensitiveActionKey =
   | "warranty.refund.adjust"
   | "warranty.replacement.approve";
 
-/** Which step-up category (if any) an action requires. `null` = no step-up. */
+/** Which step-up category (if any) an action requires. `null` = no TOTP step-up. */
 export const SENSITIVE_ACTION_POLICY: Record<SensitiveActionKey, StepUpActionCategory | null> = {
   "wallet.refund": "REFUND",
-  "manual_fulfillment.complete": "REFUND",
+  // Deliberate exception: durable owner confirmation still enforces root/private identity,
+  // current task/order versions, and exact verified settlement; completion does not use TOTP.
+  "manual_fulfillment.complete": null,
   "support.replacement.approve": "REFUND",
   "inventory.ready.release": "STOCK_ADJUSTMENT",
   "fulfillment.reconcile": "DELIVERY_REISSUE",

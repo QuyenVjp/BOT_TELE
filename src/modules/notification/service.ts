@@ -45,14 +45,27 @@ export interface BroadcastStatus {
   sent: number;
   suppressed: number;
   dead: number;
+  uncertain: number;
 }
+export interface NotificationSendInput {
+  chatId: string;
+  telegramUserId: string;
+  messageId: string | null;
+  message: { text: string; buttons: Array<Array<{ text: string; callbackData: string }>> };
+}
+export type PreparedNotificationSend = () => Promise<unknown>;
+
+/** Marks only outcomes proven to have happened before provider submission. */
+export class NotificationPreSubmitError extends Error {
+  override name = "NotificationPreSubmitError";
+  constructor(readonly originalError?: unknown) {
+    super("Notification request was proven not to have reached Telegram");
+  }
+}
+
 export interface NotificationResponder {
-  send(input: {
-    chatId: string;
-    telegramUserId: string;
-    messageId: string | null;
-    message: { text: string; buttons: Array<Array<{ text: string; callbackData: string }>> };
-  }): Promise<unknown>;
+  send(input: NotificationSendInput): Promise<unknown>;
+  prepare?(input: NotificationSendInput): Promise<PreparedNotificationSend>;
 }
 
 type NotificationPreferenceRow = {
@@ -697,6 +710,7 @@ export async function getBroadcastStatus(
     sent: number;
     suppressed: number;
     dead: number;
+    uncertain: number;
   }>`select
       c.id as campaign_id, c.status, c.audience,
       count(d.id)::int as total,
@@ -704,7 +718,8 @@ export async function getBroadcastStatus(
       count(d.id) filter (where d.status='RETRY')::int as retry,
       count(d.id) filter (where d.status='SENT')::int as sent,
       count(d.id) filter (where d.status='SUPPRESSED')::int as suppressed,
-      count(d.id) filter (where d.status='DEAD')::int as dead
+      count(d.id) filter (where d.status='DEAD')::int as dead,
+      count(d.id) filter (where d.status='SEND_UNCERTAIN')::int as uncertain
     from notification_campaign c
     left join notification_delivery d on d.campaign_id=c.id
     where c.id=${campaignId}
@@ -721,12 +736,14 @@ export async function getBroadcastStatus(
         sent: row.sent,
         suppressed: row.suppressed,
         dead: row.dead,
+        uncertain: row.uncertain,
       }
     : null;
 }
 export async function claimNotificationDeliveries(
   exec: Executor,
   limit: number,
+  adminAlertMode: "IMMEDIATE" | "OFF" = "IMMEDIATE",
 ): Promise<NotificationDeliveryClaim[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new RangeError("limit must be 1..100");
@@ -734,6 +751,7 @@ export async function claimNotificationDeliveries(
     select d.id from notification_delivery d join notification_campaign c on c.id=d.campaign_id
     where d.status in ('PENDING','RETRY') and d.next_attempt_at<=now() and c.status='QUEUED'
       and (d.claim_expires_at is null or d.claim_expires_at<=now())
+      and (${adminAlertMode} <> 'OFF' or c.id not like 'admin-payment-%')
     order by case when c.class='CRITICAL_SERVICE' then 0 else 1 end,d.next_attempt_at,d.id
     for update of d skip locked limit ${limit}
   ) update notification_delivery d set status='RETRY',attempts=d.attempts+1,
@@ -753,19 +771,52 @@ export async function claimNotificationDeliveries(
 
 export async function markNotificationSent(
   exec: Executor,
-  id: string,
-  generation: number,
+  delivery: Pick<
+    NotificationDeliveryClaim,
+    "id" | "campaignId" | "generation" | "content" | "buttons"
+  >,
   messageId: string | null = null,
-): Promise<boolean> {
-  const r = await sql<{
-    id: string;
-  }>`update notification_delivery set status='SENT',sent_at=now(),last_error=null,
-      message_id=coalesce(${messageId}, message_id),
-      claimed_by=null,claim_expires_at=null
-      where id=${id} and status='RETRY' and claim_generation=${generation} returning id`.execute(
-    exec,
-  );
-  return r.rows.length === 1;
+): Promise<"SENT" | "RETRY" | "SEND_UNCERTAIN" | "STALE"> {
+  const completed = await sql<{ status: string }>`
+    with current_campaign as materialized (
+      select content, buttons, status
+      from notification_campaign
+      where id = ${delivery.campaignId}
+      for update
+    ),
+    changed_campaign as materialized (
+      select status = 'QUEUED' and (
+        content is distinct from ${delivery.content}
+        or buttons is distinct from ${JSON.stringify(delivery.buttons)}::jsonb
+      ) as needs_followup
+      from current_campaign
+    )
+    update notification_delivery d
+    set status = case
+          when c.needs_followup and coalesce(${messageId}, d.message_id) is null then 'SEND_UNCERTAIN'
+          when c.needs_followup then 'RETRY'
+          else 'SENT'
+        end,
+        sent_at = case when c.needs_followup then d.sent_at else now() end,
+        message_id = coalesce(${messageId}, d.message_id),
+        next_attempt_at = case
+          when c.needs_followup and coalesce(${messageId}, d.message_id) is not null then now()
+          else d.next_attempt_at
+        end,
+        last_error = case
+          when c.needs_followup and coalesce(${messageId}, d.message_id) is null
+            then 'followup_message_identity_missing'
+          else null
+        end,
+        claimed_by = null, claim_expires_at = null
+    from changed_campaign c
+    where d.id = ${delivery.id} and d.campaign_id = ${delivery.campaignId}
+      and d.status = 'SEND_UNCERTAIN' and d.claim_generation = ${delivery.generation}
+    returning d.status
+  `.execute(exec);
+  const status = completed.rows[0]?.status;
+  if (status === "RETRY" || status === "SENT" || status === "SEND_UNCERTAIN") return status;
+  return "STALE";
 }
 
 export async function markNotificationSuppressed(
@@ -774,12 +825,15 @@ export async function markNotificationSuppressed(
   generation: number,
   reason: string,
 ): Promise<boolean> {
-  const r = await sql<{
-    id: string;
-  }>`update notification_delivery set status='SUPPRESSED',last_error=${reason.slice(0, 200)},claimed_by=null,claim_expires_at=null where id=${id} and status='RETRY' and claim_generation=${generation} returning id`.execute(
-    exec,
-  );
-  return r.rows.length === 1;
+  const result = await sql<{ id: string }>`
+    update notification_delivery
+    set status = 'SUPPRESSED', last_error = ${reason.slice(0, 200)},
+      claimed_by = null, claim_expires_at = null
+    where id = ${id} and status in ('RETRY', 'SEND_UNCERTAIN')
+      and claim_generation = ${generation}
+    returning id
+  `.execute(exec);
+  return result.rows.length === 1;
 }
 
 export async function markNotificationFailure(
@@ -791,14 +845,37 @@ export async function markNotificationFailure(
   retryAfterSeconds = 30,
 ): Promise<boolean> {
   const delay = Number.isFinite(retryAfterSeconds)
-    ? Math.max(1, Math.min(86400, Math.ceil(retryAfterSeconds)))
+    ? Math.max(1, Math.min(86_400, Math.ceil(retryAfterSeconds)))
     : 30;
-  const r = await sql<{
-    id: string;
-  }>`update notification_delivery set status=case when attempts>=${maxAttempts} then 'DEAD' else 'RETRY' end,next_attempt_at=case when attempts>=${maxAttempts} then next_attempt_at else now()+${delay}*interval '1 second' end,last_error=${error.slice(0, 200)},claimed_by=null,claim_expires_at=null where id=${id} and status='RETRY' and claim_generation=${generation} returning id`.execute(
-    exec,
-  );
-  return r.rows.length === 1;
+  const result = await sql<{ id: string }>`
+    update notification_delivery
+    set status = case when attempts >= ${maxAttempts} then 'DEAD' else 'RETRY' end,
+      next_attempt_at = case
+        when attempts >= ${maxAttempts} then next_attempt_at
+        else now() + ${delay} * interval '1 second'
+      end,
+      last_error = ${error.slice(0, 200)},
+      claimed_by = null,
+      claim_expires_at = null
+    where id = ${id} and status = 'SEND_UNCERTAIN'
+      and claim_generation = ${generation}
+    returning id
+  `.execute(exec);
+  return result.rows.length === 1;
+}
+async function markNotificationUncertain(
+  exec: Executor,
+  delivery: NotificationDeliveryClaim,
+  reason: string,
+): Promise<boolean> {
+  const result = await sql<{ id: string }>`
+    update notification_delivery
+    set last_error = ${reason}
+    where id = ${delivery.id} and campaign_id = ${delivery.campaignId}
+      and status = 'SEND_UNCERTAIN' and claim_generation = ${delivery.generation}
+    returning id
+  `.execute(exec);
+  return result.rows.length === 1;
 }
 
 function sentMessageId(value: unknown): string | null {
@@ -807,69 +884,125 @@ function sentMessageId(value: unknown): string | null {
   return typeof messageId === "string" && messageId.trim() ? messageId : null;
 }
 
+function telegramErrorCode(error: unknown): number | null {
+  return error &&
+    typeof error === "object" &&
+    "error_code" in error &&
+    typeof error.error_code === "number"
+    ? error.error_code
+    : null;
+}
+
+function telegramErrorDescription(error: unknown): string | null {
+  return error &&
+    typeof error === "object" &&
+    "description" in error &&
+    typeof error.description === "string"
+    ? error.description
+    : null;
+}
+
+function telegramRetryAfterSeconds(error: unknown): number | null {
+  if (!error || typeof error !== "object") return null;
+  if ("retryAfterSeconds" in error && typeof error.retryAfterSeconds === "number")
+    return error.retryAfterSeconds;
+  if (
+    "parameters" in error &&
+    error.parameters &&
+    typeof error.parameters === "object" &&
+    "retry_after" in error.parameters &&
+    typeof error.parameters.retry_after === "number"
+  )
+    return error.parameters.retry_after;
+  return null;
+}
+
+function boundedRetryAfterSeconds(value: number | null | undefined): number {
+  return Number.isFinite(value) ? Math.max(1, Math.min(86_400, Math.ceil(value!))) : 30;
+}
+
+async function fenceNotificationSend(
+  exec: Executor,
+  delivery: NotificationDeliveryClaim,
+): Promise<boolean> {
+  const fenced = await sql<{ id: string }>`
+    update notification_delivery d
+    set status = 'SEND_UNCERTAIN', last_error = null, claimed_by = null, claim_expires_at = null
+    from notification_campaign c
+    where d.id = ${delivery.id} and d.campaign_id = ${delivery.campaignId}
+      and d.status = 'RETRY' and d.claim_generation = ${delivery.generation}
+      and d.claim_expires_at > now()
+      and c.id = d.campaign_id and c.status = 'QUEUED'
+    returning d.id
+  `.execute(exec);
+  return fenced.rows.length === 1;
+}
+
 export async function processNotificationDeliveryClaim(
   exec: Executor,
   delivery: NotificationDeliveryClaim,
   responder: NotificationResponder,
   input?: {
     maxAttempts?: number;
-
     retryAfterSeconds?: (error: unknown) => number | null;
     onRateLimit?: (seconds: number) => Promise<void>;
   },
-): Promise<"SENT" | "SUPPRESSED" | "RETRY" | "STALE"> {
-  try {
-    const active = await sql<{
-      id: string;
-    }>`select d.id from notification_delivery d join notification_campaign c on c.id=d.campaign_id where d.id=${delivery.id} and d.status='RETRY' and d.claim_generation=${delivery.generation} and d.claim_expires_at>now() and c.status='QUEUED'`.execute(
+): Promise<"SENT" | "SUPPRESSED" | "RETRY" | "SEND_UNCERTAIN" | "STALE"> {
+  const active = await sql<{ id: string }>`
+    select d.id
+    from notification_delivery d
+    join notification_campaign c on c.id = d.campaign_id
+    where d.id = ${delivery.id} and d.campaign_id = ${delivery.campaignId}
+      and d.status = 'RETRY' and d.claim_generation = ${delivery.generation}
+      and d.claim_expires_at > now() and c.status = 'QUEUED'
+  `.execute(exec);
+  if (!active.rows.length) return "STALE";
+
+  const pref = await getNotificationPreferences(exec, delivery.customerId);
+  const restockConsent =
+    delivery.class === "SHOP_UPDATE" &&
+    (await hasActiveRestockSubscriptionForDelivery(exec, delivery));
+  if (
+    (delivery.class === "SHOP_UPDATE" && !pref.shopUpdates && !restockConsent) ||
+    (delivery.class === "PURCHASE_ACTIVITY" && !pref.purchaseActivity)
+  ) {
+    return (await markNotificationSuppressed(
       exec,
-    );
-    if (!active.rows.length) return "STALE";
-    const pref = await getNotificationPreferences(exec, delivery.customerId);
-    const restockConsent =
-      delivery.class === "SHOP_UPDATE" &&
-      (await hasActiveRestockSubscriptionForDelivery(exec, delivery));
-    if (
-      (delivery.class === "SHOP_UPDATE" && !pref.shopUpdates && !restockConsent) ||
-      (delivery.class === "PURCHASE_ACTIVITY" && !pref.purchaseActivity)
-    ) {
-      return (await markNotificationSuppressed(
-        exec,
-        delivery.id,
-        delivery.generation,
-        "preference_opt_out",
-      ))
-        ? "SUPPRESSED"
-        : "STALE";
-    }
-    const sent = await responder.send({
-      telegramUserId: delivery.telegramUserId ?? delivery.chatId,
-      chatId: delivery.chatId,
-      messageId: delivery.messageId,
-      message: {
-        text: delivery.content,
-        buttons:
-          delivery.buttons.length > 0
-            ? delivery.buttons
-            : delivery.productVariantId
-              ? [[{ text: "Xem sản phẩm", callbackData: `var:view:${delivery.productVariantId}` }]]
-              : [],
-      },
-    });
-    return (await markNotificationSent(exec, delivery.id, delivery.generation, sentMessageId(sent)))
-      ? "SENT"
+      delivery.id,
+      delivery.generation,
+      "preference_opt_out",
+    ))
+      ? "SUPPRESSED"
       : "STALE";
+  }
+
+  const message: NotificationSendInput = {
+    telegramUserId: delivery.telegramUserId ?? delivery.chatId,
+    chatId: delivery.chatId,
+    messageId: delivery.messageId,
+    message: {
+      text: delivery.content,
+      buttons:
+        delivery.buttons.length > 0
+          ? delivery.buttons
+          : delivery.productVariantId
+            ? [[{ text: "Xem sản phẩm", callbackData: `var:view:${delivery.productVariantId}` }]]
+            : [],
+    },
+  };
+  const submit = responder.prepare
+    ? await responder.prepare(message)
+    : () => responder.send(message);
+  if (!(await fenceNotificationSend(exec, delivery))) return "STALE";
+
+  let sent: unknown;
+  try {
+    sent = await submit();
   } catch (error) {
-    const retryAfter = input?.retryAfterSeconds?.(error) ?? 30;
-    if (retryAfter > 0 && input?.retryAfterSeconds?.(error)) await input.onRateLimit?.(retryAfter);
+    const errorCode = telegramErrorCode(error);
     if (
-      typeof error === "object" &&
-      error !== null &&
-      "error_code" in error &&
-      (error.error_code === 403 ||
-        (error.error_code === 400 &&
-          "description" in error &&
-          /chat not found/i.test(String(error.description))))
+      errorCode === 403 ||
+      (errorCode === 400 && /chat not found/i.test(telegramErrorDescription(error) ?? ""))
     ) {
       const changed = await markNotificationSuppressed(
         exec,
@@ -878,21 +1011,52 @@ export async function processNotificationDeliveryClaim(
         "chat_unreachable",
       );
       if (changed)
-        await sql`update customer_profile_snapshot set reachable=false where customer_id=${delivery.customerId} and chat_id=${delivery.chatId}`.execute(
-          exec,
-        );
+        await sql`
+          update customer_profile_snapshot set reachable = false
+          where customer_id = ${delivery.customerId} and chat_id = ${delivery.chatId}
+        `.execute(exec);
       return changed ? "SUPPRESSED" : "STALE";
     }
-    return (await markNotificationFailure(
-      exec,
-      delivery.id,
-      delivery.generation,
-      error instanceof Error ? error.name : "TELEGRAM_ERROR",
-      input?.maxAttempts,
-      retryAfter,
-    ))
-      ? "RETRY"
-      : "STALE";
+    if (errorCode === 429) {
+      const retryAfter = boundedRetryAfterSeconds(
+        input?.retryAfterSeconds?.(error) ?? telegramRetryAfterSeconds(error),
+      );
+      const changed = await markNotificationFailure(
+        exec,
+        delivery.id,
+        delivery.generation,
+        "telegram_rate_limited",
+        input?.maxAttempts,
+        retryAfter,
+      );
+      if (changed) await input?.onRateLimit?.(retryAfter);
+      return changed ? "RETRY" : "STALE";
+    }
+    if (error instanceof NotificationPreSubmitError) {
+      return (await markNotificationFailure(
+        exec,
+        delivery.id,
+        delivery.generation,
+        "pre_submit_failure",
+        input?.maxAttempts,
+      ))
+        ? "RETRY"
+        : "STALE";
+    }
+    await markNotificationUncertain(exec, delivery, "provider_outcome_unknown");
+    return "SEND_UNCERTAIN";
+  }
+
+  try {
+    const persisted = await markNotificationSent(exec, delivery, sentMessageId(sent));
+    if (persisted === "STALE") {
+      await markNotificationUncertain(exec, delivery, "sent_acknowledgement_stale");
+      return "SEND_UNCERTAIN";
+    }
+    return persisted;
+  } catch {
+    await markNotificationUncertain(exec, delivery, "sent_persistence_failed");
+    return "SEND_UNCERTAIN";
   }
 }
 
@@ -1090,11 +1254,22 @@ export async function queueManualFulfillmentNotification(
     correlationId: string;
   },
 ): Promise<boolean> {
-  const content =
-    input.state === "WAITING"
-      ? "Đơn hàng của bạn đang chờ nhân viên xử lý thủ công. Shop sẽ thông báo khi hoàn tất."
-      : "Đơn hàng xử lý thủ công của bạn đã hoàn tất. Cảm ơn bạn đã chờ.";
   return withTransaction(db, async (trx) => {
+    const task = await sql<{ order_number: string; fulfillment_type: string }>`
+      select o.order_number, m.fulfillment_type
+      from manual_fulfillment_task m
+      join "order" o on o.id = m.order_id
+      where m.id = ${input.taskId} and m.customer_id = ${input.customerId}
+      limit 1
+    `.execute(trx);
+    const row = task.rows[0];
+    if (!row) return false;
+    const content =
+      input.state === "WAITING"
+        ? row.fulfillment_type === "MANUAL_FULFILLMENT"
+          ? `Shop đã xác nhận thanh toán đơn ${row.order_number}. Shop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.`
+          : "Đơn hàng của bạn đang chờ nhân viên xử lý thủ công. Shop sẽ thông báo khi hoàn tất."
+        : "Đơn hàng xử lý thủ công của bạn đã hoàn tất. Cảm ơn bạn đã chờ.";
     const target = await sql<{ chat_id: string }>`
       select coalesce(cps.chat_id, ci.channel_user_id) as chat_id
       from customer c
@@ -1400,6 +1575,146 @@ function safeAdminText(value: string | null | undefined, fallback: string): stri
   return cleaned ? cleaned.slice(0, 120) : fallback;
 }
 
+async function buildManualOrderAdminAlert(
+  exec: Executor,
+  orderId: string,
+): Promise<AdminAlert | null> {
+  const result = await sql<{
+    order_id: string;
+    order_number: string;
+    display_name: string | null;
+    order_status: string;
+    product_name: string;
+    variant_name: string;
+    amount_vnd: string;
+    payment_source: string | null;
+    task_status: string | null;
+  }>`
+    select
+      o.id as order_id,
+      o.order_number,
+      cps.display_name,
+      o.status as order_status,
+      coalesce(nullif(o.product_name_vi, ''), p.name_vi) as product_name,
+      coalesce(nullif(o.variant_name_vi, ''), v.name_vi) as variant_name,
+      o.price_vnd::text as amount_vnd,
+      case
+        when exists (
+          select 1
+          from payment_intent pi
+          join payment_allocation pa on pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
+          join bank_transaction bt on bt.id = pa.bank_transaction_id
+            and lower(bt.provider) = 'sepay'
+            and bt.direction = 'IN'
+            and bt.signature_status = 'VERIFIED'
+            and bt.merchant_account_id = pi.merchant_account_id
+          where pi.order_id = o.id
+            and pi.status = 'SUCCEEDED'
+            and pi.amount_vnd = o.price_vnd
+            and bt.amount_vnd = pi.amount_vnd
+            and pa.allocated_amount_vnd = bt.amount_vnd
+        ) then 'SEPAY'
+        when exists (
+          select 1
+          from wallet_ledger wl
+          join wallet_account wa on wa.id = wl.wallet_account_id
+            and wa.customer_id = o.customer_id
+          join ledger_transaction lt on lt.wallet_account_id = wa.id
+            and lt.idempotency_key = 'wallet_ledger:' || wl.id
+            and lt.transaction_type = 'PURCHASE'
+            and lt.status = 'POSTED'
+          where wl.entry_type = 'DEBIT'
+            and wl.amount_vnd = o.price_vnd
+            and left(wl.idempotency_key, length('purchase:' || o.id || ':')) =
+              'purchase:' || o.id || ':'
+            and (select count(*) from ledger_posting lp where lp.transaction_id = lt.id) = 2
+            and exists (
+              select 1
+              from ledger_posting lp
+              join ledger_account la on la.id = lp.account_id
+              where lp.transaction_id = lt.id
+                and lp.side = 'DEBIT'
+                and lp.amount_minor = wl.amount_vnd
+                and la.wallet_account_id = wa.id
+                and la.account_type = 'LIABILITY'
+            )
+            and exists (
+              select 1
+              from ledger_posting lp
+              join ledger_account la on la.id = lp.account_id
+              where lp.transaction_id = lt.id
+                and lp.side = 'CREDIT'
+                and lp.amount_minor = wl.amount_vnd
+                and la.code = 'SHOP:REVENUE'
+                and la.account_type = 'REVENUE'
+            )
+        ) then 'WALLET'
+        else null
+      end as payment_source,
+      (select m.status from manual_fulfillment_task m where m.order_id = o.id limit 1) as task_status
+    from "order" o
+    join product_variant v on v.id = o.variant_id
+    join product p on p.id = v.product_id
+    left join customer_profile_snapshot cps on cps.customer_id = o.customer_id
+    where o.id = ${orderId}
+      and o.fulfillment_type = 'MANUAL_FULFILLMENT'
+      and not p.is_test
+      and p.name_vi not ilike '%canary%'
+      and not exists (
+        select 1 from test_customer_allowlist a
+        join channel_identity ci
+          on ci.channel = 'TELEGRAM'
+         and ci.channel_user_id = a.telegram_user_id
+         and ci.customer_id = o.customer_id
+      )
+    limit 1
+  `.execute(exec);
+  const row = result.rows[0];
+  if (!row) return null;
+  const paid =
+    row.payment_source !== null && ["PAID", "PROCESSING", "COMPLETED"].includes(row.order_status);
+  const paymentLabel = paid
+    ? row.payment_source === "WALLET"
+      ? "✅ Ví đã ghi sổ"
+      : "✅ SePay đã xác minh"
+    : "⏳ Chưa xác nhận";
+  let workState = "—";
+  if (row.task_status === "COMPLETED" || row.order_status === "COMPLETED") {
+    workState = "✅ Đã hoàn tất";
+  } else if (row.task_status === "OPEN") {
+    workState = "🛠 Chờ xử lý thủ công";
+  } else if (paid) {
+    workState = "⏳ Chờ tạo tác vụ xử lý";
+  }
+  return {
+    campaignId: `admin-payment-settled:${row.order_id}`,
+    content: [
+      "🛍 ĐƠN DỊCH VỤ THỦ CÔNG",
+      "",
+      `Đơn: ${safeAdminText(row.order_number, "không rõ")}`,
+      `Khách: ${safeAdminText(row.display_name, "Khách không có tên")}`,
+      `Sản phẩm: ${safeAdminText(row.product_name, "không rõ")}`,
+      `Gói: ${safeAdminText(row.variant_name, "không rõ")}`,
+      `Số tiền: ${BigInt(row.amount_vnd).toLocaleString("vi-VN")} ₫`,
+      `Thanh toán: ${paymentLabel}`,
+      `Xử lý: ${workState}`,
+    ].join("\n"),
+    buttons: [
+      [{ text: "🛠 Hàng chờ thủ công", callbackData: "admin:manual" }],
+      [{ text: "📋 Đơn hàng", callbackData: "admin:orders" }],
+    ],
+  };
+}
+
+async function isManualFulfillmentOrder(exec: Executor, orderId: string): Promise<boolean> {
+  const result = await sql<{ id: string }>`
+    select id from "order"
+    where id = ${orderId} and fulfillment_type = 'MANUAL_FULFILLMENT'
+    limit 1
+  `.execute(exec);
+  return result.rows.length === 1;
+}
+
 function eventPayloadString(event: OutboxEvent, key: string): string | null {
   const value = event.payloadRedacted[key];
   return typeof value === "string" && value.trim() ? value : null;
@@ -1580,7 +1895,37 @@ async function refreshRootAdminAlert(trx: Executor, alert: AdminAlert): Promise<
         next_attempt_at = now(), last_error = null, claimed_by = null,
         claim_expires_at = null, claim_generation = claim_generation + 1
     where campaign_id = ${alert.campaignId} and status in ('SENT','PENDING','RETRY')
+      and not (status = 'RETRY' and claim_expires_at > now())
   `.execute(trx);
+}
+
+async function queueOrRefreshRootAdminAlert(
+  trx: Executor,
+  alert: AdminAlert,
+  rootTelegramUserId: number | undefined,
+  mode: "IMMEDIATE" | "OFF" = "IMMEDIATE",
+): Promise<boolean> {
+  if (mode === "OFF") return true;
+  const existing = await sql<{
+    content: string;
+    buttons: unknown;
+    status: string;
+  }>`
+    select content, buttons, status
+    from notification_campaign
+    where id = ${alert.campaignId}
+    for update
+  `.execute(trx);
+  const row = existing.rows[0];
+  if (!row) return queueRootAdminAlert(trx, alert, rootTelegramUserId, mode);
+  if (row.status === "CANCELLED") return true;
+  if (
+    row.content === alert.content &&
+    JSON.stringify(safeButtons(row.buttons)) === JSON.stringify(alert.buttons)
+  )
+    return true;
+  await refreshRootAdminAlert(trx, alert);
+  return true;
 }
 
 async function fulfillmentUpdateAlert(
@@ -1620,15 +1965,28 @@ export async function handleNotificationOutboxEvent(
   const warrantyAdmin = warrantyAdminAlert(event);
   const ticketAdmin = ticketOpenedAdminAlert(event);
   const warrantyCustomer = warrantyCustomerNotice(event);
+  const manualOrderId = eventPayloadString(event, "orderId");
+  const manualOrderEvent = [
+    "OrderCreated",
+    "PaymentSettled",
+    "ManualFulfillmentTaskCreated",
+    "ManualFulfillmentTaskCompleted",
+  ].includes(event.eventType);
+  if (manualOrderEvent && !manualOrderId)
+    return { kind: "TERMINAL_REVIEW", errorCode: "MANUAL_ORDER_ALERT_PAYLOAD_INVALID" };
+  const manualOwnerAlert = Boolean(
+    manualOrderEvent && manualOrderId && (await isManualFulfillmentOrder(db, manualOrderId)),
+  );
   const paymentSettled =
-    event.eventType === "PaymentSettled"
-      ? await buildPaymentSettledAdminAlert(db, eventPayloadString(event, "orderId") ?? "")
+    event.eventType === "PaymentSettled" && !manualOwnerAlert
+      ? await buildPaymentSettledAdminAlert(db, manualOrderId!)
       : null;
   const paymentReview = paymentReviewAdminAlert(event);
-  const fulfillmentUpdate = await fulfillmentUpdateAlert(db, event);
+  const fulfillmentUpdate = manualOwnerAlert ? null : await fulfillmentUpdateAlert(db, event);
   if (walletEvent && !wallet)
     return { kind: "TERMINAL_REVIEW", errorCode: "WALLET_NOTIFICATION_PAYLOAD_INVALID" };
   if (
+    !manualOwnerAlert &&
     !stock &&
     !lowStock &&
     !wallet &&
@@ -1646,7 +2004,26 @@ export async function handleNotificationOutboxEvent(
   let missingLowStockTarget = false;
   let missingShopCancelTarget = false;
   let missingPaymentTarget = false;
+  let missingManualOwnerTarget = false;
   await withTransaction(db, async (trx) => {
+    if (manualOwnerAlert && manualOrderId) {
+      const locked = await sql<{ id: string }>`
+        select id from "order" where id = ${manualOrderId} for update
+      `.execute(trx);
+      if (locked.rows[0]) {
+        const alert = await buildManualOrderAdminAlert(trx, manualOrderId);
+        if (
+          alert &&
+          !(await queueOrRefreshRootAdminAlert(
+            trx,
+            alert,
+            options.rootTelegramUserId,
+            options.adminAlertMode,
+          ))
+        )
+          missingManualOwnerTarget = true;
+      }
+    }
     if (stock) {
       const snapshot = await restockCampaignSnapshot(trx, stock);
       if (!snapshot) return;
@@ -1705,7 +2082,8 @@ export async function handleNotificationOutboxEvent(
       ))
     )
       missingPaymentTarget = true;
-    if (fulfillmentUpdate) await refreshRootAdminAlert(trx, fulfillmentUpdate);
+    if (fulfillmentUpdate && options.adminAlertMode !== "OFF")
+      await refreshRootAdminAlert(trx, fulfillmentUpdate);
   });
   if (missingWarrantyTarget)
     return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
@@ -1717,5 +2095,7 @@ export async function handleNotificationOutboxEvent(
     return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
   if (missingPaymentTarget)
     return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
+  if (missingManualOwnerTarget)
+    return { kind: "RETRY", errorCode: "MANUAL_OWNER_ALERT_TARGET_MISSING" };
   return { kind: "PUBLISHED" };
 }

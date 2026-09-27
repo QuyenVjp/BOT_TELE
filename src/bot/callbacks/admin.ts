@@ -1,7 +1,9 @@
+import { sql } from "kysely";
 import { createHash } from "node:crypto";
 import type { Db, Trx } from "../../infrastructure/db/transaction.js";
 import { appendAuditEvent } from "../../modules/identity/audit.js";
 import {
+  isDurableAdminCommandRef,
   isGenericDurableAdminCommandRef,
   type AdminConfirmationService,
   type AtomicExecuteResult,
@@ -19,11 +21,15 @@ import {
   type SensitiveActionKey,
   type SensitiveAuthorizationRefusal,
 } from "../../modules/identity/sensitive-action.js";
+import { loadSensitiveAuthorizationBinding } from "../../modules/identity/authorization-binding.js";
 import { SENSITIVE_REFUSAL_TEXT } from "../presenters/admin.js";
 import { guardRootAction } from "../middleware/root-admin.js";
 import { refundWalletCredit } from "../../modules/wallet/refund.js";
 import { disableGroupPublicationInTransaction } from "../../modules/marketing/group-commerce-settings.js";
-import { completeManualFulfillmentTaskInTransaction } from "../../modules/digital-goods/manual-fulfillment.js";
+import {
+  completeManualFulfillmentTaskInTransaction,
+  getManualTaskById,
+} from "../../modules/digital-goods/manual-fulfillment.js";
 import {
   keepPaidDeliveryUncertainInTransaction,
   reconcilePaidDeliveryDeliveredInTransaction,
@@ -35,6 +41,7 @@ import {
   markSupplierSkuManuallyVerified,
   selectVariantSupplierMapping,
 } from "../../modules/supplier/admin.js";
+import { findOrderByIdForUpdate } from "../../modules/commerce/repository.js";
 import {
   dispositionDiscrepancyInTransaction,
   isDiscrepancyResolutionCode,
@@ -274,10 +281,11 @@ function fingerprintFor(
   resolutionCode?: string,
   expectedVersion?: number | string,
   input?: string,
+  paymentEvidenceHash?: string,
 ): string {
   const inputHash =
     input === undefined ? "" : createHash("sha256").update(input, "utf8").digest("hex");
-  return `${command}:${targetId}:${resolutionCode ?? ""}:${expectedVersion ?? ""}:${inputHash}`;
+  return `${command}:${targetId}:${resolutionCode ?? ""}:${expectedVersion ?? ""}:${inputHash}${paymentEvidenceHash === undefined ? "" : `:${paymentEvidenceHash}`}`;
 }
 
 function targetTypeFor(
@@ -573,10 +581,16 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         return true;
       }
       case "manual_fulfillment.complete": {
+        if (
+          typeof action.expectedVersion !== "string" ||
+          !/^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$/.test(action.expectedVersion)
+        )
+          return false;
         const completed = await completeManualFulfillmentTaskInTransaction(exec, {
           taskId: action.targetId,
           actorId: action.actorId,
           correlationId,
+          expectedVersion: action.expectedVersion,
         });
         return durableResultOrThrow(action, completed);
       }
@@ -794,6 +808,10 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           typeof input.expectedVersion !== "number" ||
           !Number.isInteger(input.expectedVersion) ||
           input.expectedVersion <= 0);
+      const manualCompletionInputInvalid =
+        input.command === "manual_fulfillment.complete" &&
+        (typeof input.expectedVersion !== "string" ||
+          !/^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$/.test(input.expectedVersion));
       const reconciliationInputInvalid =
         input.command === "fulfillment.reconcile" &&
         (typeof input.expectedVersion !== "number" ||
@@ -816,17 +834,18 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           (input.input === undefined || !isSafeResaleEvidenceInput(input.input))) ||
         revokeInputInvalid ||
         groupPublicationInputInvalid ||
-        reconciliationInputInvalid
+        reconciliationInputInvalid ||
+        manualCompletionInputInvalid
       ) {
-        return {
-          ok: false,
-          code: "INVALID_REASON",
-          message: revokeInputInvalid
-            ? "Thiếu bằng chứng hoặc phiên bản biến thể cần thu hồi."
-            : reconciliationInputInvalid
-              ? "Thiếu phiên bản đơn hàng cần rà soát."
-              : "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
-        };
+        let message = "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.";
+        if (manualCompletionInputInvalid) {
+          message = "Phiên tác vụ không hợp lệ. Vui lòng mở lại hàng chờ.";
+        } else if (revokeInputInvalid) {
+          message = "Thiếu bằng chứng hoặc phiên bản biến thể cần thu hồi.";
+        } else if (reconciliationInputInvalid) {
+          message = "Thiếu phiên bản đơn hàng cần rà soát.";
+        }
+        return { ok: false, code: "INVALID_REASON", message };
       }
 
       const actionKey: SensitiveActionKey | null = isGenericDurableAdminCommandRef(input.command)
@@ -834,6 +853,15 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         : isSensitiveActionKey(input.command)
           ? input.command
           : null;
+      const sensitiveResourceType = targetTypeFor(input.command);
+      const sensitiveResourceIdValue = sensitiveResourceId(input);
+      const sensitiveData = sensitiveRequestedData({
+        command: input.command,
+        targetId: input.targetId,
+        value: input.input,
+        resolutionCode: input.resolutionCode,
+        expectedVersion: input.expectedVersion,
+      });
       if (actionKey !== null) {
         // Before ANY mutation, and before a confirmation is even issued. A durable
         // command only PREVIEWS the grant (consumeGrant: false) so confirm() can
@@ -842,17 +870,11 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         const authorization = await authorizeSensitiveAdminAction(sensitiveDeps, {
           actor: input.actor,
           actionKey,
-          resourceType: targetTypeFor(input.command),
-          resourceId: sensitiveResourceId(input),
+          resourceType: sensitiveResourceType,
+          resourceId: sensitiveResourceIdValue,
           correlationId: input.correlationId,
-          requestedData: sensitiveRequestedData({
-            command: input.command,
-            targetId: input.targetId,
-            value: input.input,
-            resolutionCode: input.resolutionCode,
-            expectedVersion: input.expectedVersion,
-          }),
-          consumeGrant: !isGenericDurableAdminCommandRef(input.command),
+          requestedData: sensitiveData,
+          consumeGrant: !isDurableAdminCommandRef(input.command),
         });
         if (!authorization.ok) {
           return {
@@ -863,19 +885,34 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         }
       }
 
-      if (isGenericDurableAdminCommandRef(input.command)) {
+      if (isDurableAdminCommandRef(input.command)) {
+        const paymentEvidenceHash =
+          input.command === "manual_fulfillment.complete"
+            ? (
+                await loadSensitiveAuthorizationBinding(sensitiveDeps.db, {
+                  actionKey: input.command,
+                  resourceType: sensitiveResourceType,
+                  resourceId: sensitiveResourceIdValue,
+                  requestedData: sensitiveData,
+                })
+              ).payloadHash
+            : undefined;
         const fingerprint = fingerprintFor(
           input.command,
           input.targetId,
           input.resolutionCode,
           input.expectedVersion,
           input.input,
+          paymentEvidenceHash,
         );
         const payloadRedacted: Record<string, unknown> = {
           targetId: input.targetId,
           reason: input.reason.trim(),
           actorId: String(input.actor.numericUserId),
         };
+        if (paymentEvidenceHash !== undefined) {
+          payloadRedacted.paymentEvidenceHash = paymentEvidenceHash;
+        }
         if (input.resolutionCode !== undefined) {
           payloadRedacted.resolutionCode = input.resolutionCode;
         }
@@ -932,17 +969,68 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           challenge: input.challenge,
           execute: async (trx, durableAction) => {
             const action = pendingActionFrom(durableAction);
+            const storedPaymentEvidenceHash = durableAction.payloadRedacted.paymentEvidenceHash;
+            const paymentEvidenceHash =
+              action.command === "manual_fulfillment.complete" &&
+              typeof storedPaymentEvidenceHash === "string" &&
+              /^[a-f0-9]{64}$/.test(storedPaymentEvidenceHash)
+                ? storedPaymentEvidenceHash
+                : undefined;
             if (
               action.actorId !== String(input.actor.numericUserId) ||
+              (action.command === "manual_fulfillment.complete" &&
+                paymentEvidenceHash === undefined) ||
               fingerprintFor(
                 action.command,
                 action.targetId,
                 action.resolutionCode,
                 action.expectedVersion,
                 action.input,
+                paymentEvidenceHash,
               ) !== durableAction.actionFingerprint
             ) {
               throw new InvalidDurableAdminActionError("durable admin action binding is invalid");
+            }
+            const requestedData = sensitiveRequestedData({
+              command: action.command,
+              targetId: action.targetId,
+              value: action.input,
+              resolutionCode: action.resolutionCode,
+              expectedVersion: action.expectedVersion,
+            });
+            if (action.command === "manual_fulfillment.complete") {
+              const task = await getManualTaskById(trx, action.targetId);
+              const order = task ? await findOrderByIdForUpdate(trx, task.orderId) : null;
+              if (!task || !order) {
+                throw new DurableAdminActionRefusedError(
+                  action.command,
+                  "Tác vụ không còn hợp lệ. Vui lòng mở lại hàng chờ.",
+                );
+              }
+              const lockedTask = await sql<{ id: string }>`
+                select id
+                from manual_fulfillment_task
+                where id = ${action.targetId} and order_id = ${order.id}
+                for update
+              `.execute(trx);
+              if (!lockedTask.rows[0]) {
+                throw new DurableAdminActionRefusedError(
+                  action.command,
+                  "Tác vụ không còn hợp lệ. Vui lòng mở lại hàng chờ.",
+                );
+              }
+              const currentBinding = await loadSensitiveAuthorizationBinding(trx, {
+                actionKey: action.command,
+                resourceType: targetTypeFor(action.command),
+                resourceId: action.targetId,
+                requestedData,
+              });
+              if (currentBinding.payloadHash !== paymentEvidenceHash) {
+                throw new DurableAdminActionRefusedError(
+                  action.command,
+                  "Bằng chứng thanh toán đã thay đổi. Vui lòng tạo xác nhận mới.",
+                );
+              }
             }
             // The grant is spent inside the atomic confirmation, immediately
             // before the mutation, so a refused step-up can never reach
@@ -960,13 +1048,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
               resourceType: targetTypeFor(action.command),
               resourceId: action.targetId,
               correlationId: durableAction.correlationId,
-              requestedData: sensitiveRequestedData({
-                command: action.command,
-                targetId: action.targetId,
-                value: action.input,
-                resolutionCode: action.resolutionCode,
-                expectedVersion: action.expectedVersion,
-              }),
+              requestedData,
               consumeGrant: true,
             });
             if (!authorization.ok) {
