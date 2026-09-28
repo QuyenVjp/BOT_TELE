@@ -103,6 +103,7 @@ interface SupplierOrderRow {
   response_fingerprint: string | null;
   last_error_code: string | null;
   needs_review_at: Date | string | null;
+  attempt_count: number;
 }
 
 function toPurchaseRecordStatus(status: string): SupplierPurchaseRecordStatus {
@@ -139,6 +140,7 @@ function toPurchaseRecord(row: SupplierOrderRow): SupplierPurchaseRecord {
     status,
     externalOrderId: status === "UNKNOWN" ? null : row.external_order_id,
     costVndSnapshot: Number(row.cost_vnd_snapshot),
+    attemptCount: row.attempt_count,
     version: row.version,
     responseFingerprint: row.response_fingerprint,
     blockCode: row.last_error_code,
@@ -153,7 +155,7 @@ async function findSupplierOrderByIdempotency(
   const result = await sql<SupplierOrderRow>`
     select id, supplier_id, supplier_sku_id, order_id, idempotency_key,
            request_fingerprint, status, external_order_id, query_key, cost_vnd_snapshot,
-           version, response_fingerprint, last_error_code, needs_review_at
+           attempt_count, version, response_fingerprint, last_error_code, needs_review_at
     from supplier_order
     where supplier_id = ${supplierId} and idempotency_key = ${idempotencyKey}
     limit 1
@@ -165,7 +167,7 @@ async function findSupplierOrderById(exec: Executor, id: string): Promise<Suppli
   const result = await sql<SupplierOrderRow>`
     select id, supplier_id, supplier_sku_id, order_id, idempotency_key,
            request_fingerprint, status, external_order_id, query_key, cost_vnd_snapshot,
-           version, response_fingerprint, last_error_code, needs_review_at
+           attempt_count, version, response_fingerprint, last_error_code, needs_review_at
     from supplier_order where id = ${id} limit 1
   `.execute(exec);
   return result.rows[0] ?? null;
@@ -300,7 +302,8 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
         set status = 'REJECTED', last_error_code = ${code}, next_reconcile_at = null,
             version = version + 1
         where id = ${id}
-          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+          and status in ('AUTHORIZED','SUBMITTED')
+          and attempt_count = 0
       `.execute(db);
     },
   };
@@ -469,6 +472,17 @@ export async function provisionFromSupplier(
     ? provisionResultFromExisting(existingRow, await findAssetBySupplierOrder(db, existingRow.id))
     : null;
   if (known) return known;
+  if (
+    order.status === "COMPLETED" &&
+    existingRecord?.status === "SUBMITTED" &&
+    existingRecord.attemptCount === 0
+  ) {
+    return {
+      ok: false,
+      code: "ORDER_TERMINAL",
+      message: "Đơn nhà cung cấp không ở trạng thái có thể cấp phát.",
+    };
+  }
 
   const canReuseCompletedReplay = order.status === "COMPLETED" && existingRecord !== null;
   if (order.status !== "PAID" && order.status !== "PROCESSING" && !canReuseCompletedReplay) {
@@ -479,7 +493,7 @@ export async function provisionFromSupplier(
     if (
       existingRecord.status === "UNKNOWN" ||
       existingRecord.status === "PENDING" ||
-      existingRecord.status === "SUBMITTED"
+      (existingRecord.status === "SUBMITTED" && existingRecord.attemptCount !== 0)
     ) {
       const recovered = await recoverUnknownSupplierOrder(db, {
         supplierOrderId: existingRecord.id,
@@ -519,7 +533,10 @@ export async function provisionFromSupplier(
         queryKey: existingRecord.queryKey ?? idempotencyKey,
       };
     }
-    if (existingRecord.status !== "AUTHORIZED") {
+    if (
+      existingRecord.status !== "AUTHORIZED" &&
+      !(existingRecord.status === "SUBMITTED" && existingRecord.attemptCount === 0)
+    ) {
       return {
         ok: false,
         code: "ORDER_TERMINAL",

@@ -25,6 +25,7 @@ export interface SupplierPurchaseRecord {
   costVndSnapshot: number;
   version: number;
   responseFingerprint?: string | null;
+  attemptCount?: number;
   blockCode?: string | null;
 }
 
@@ -193,13 +194,14 @@ export async function executeSupplierPurchase(
     if (
       existing.status === "UNKNOWN" ||
       existing.status === "PENDING" ||
-      existing.status === "SUBMITTED"
+      (existing.status === "SUBMITTED" && existing.attemptCount !== 0)
     ) {
       return recoverExisting(existing);
     }
-    // AUTHORIZED is the only existing state that may proceed to create without
-    // inserting a second intent. Every other preserved state is fail-closed.
-    if (existing.status !== "AUTHORIZED") {
+    if (
+      existing.status !== "AUTHORIZED" &&
+      !(existing.status === "SUBMITTED" && existing.attemptCount === 0)
+    ) {
       return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_ELIGIBLE", record: existing };
     }
   }
@@ -235,11 +237,13 @@ export async function executeSupplierPurchase(
       if (
         record.status === "UNKNOWN" ||
         record.status === "PENDING" ||
-        record.status === "SUBMITTED"
+        (record.status === "SUBMITTED" && record.attemptCount !== 0)
       ) {
         return recoverExisting(record);
       }
-      return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_ELIGIBLE", record };
+      if (record.status !== "SUBMITTED" || record.attemptCount !== 0) {
+        return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_ELIGIBLE", record };
+      }
     }
   }
 
@@ -252,7 +256,15 @@ export async function executeSupplierPurchase(
   if (!beforeCreate.ok) {
     await input.store.markBlocked(record.id, beforeCreate.code);
     const blocked = await input.store.findById(record.id);
-    return { kind: "BLOCKED", code: beforeCreate.code, record: blocked ?? record };
+    if (!blocked) return { kind: "BLOCKED", code: beforeCreate.code, record: null };
+    if (blocked.status === "FULFILLED") return { kind: "REPLAY", record: blocked };
+    if (blocked.status === "REJECTED") {
+      return { kind: "BLOCKED", code: beforeCreate.code, record: blocked };
+    }
+    if (["AUTHORIZED", "SUBMITTED", "PENDING", "UNKNOWN"].includes(blocked.status)) {
+      return unknownResult(blocked, blocked.queryKey ?? input.idempotencyKey);
+    }
+    return { kind: "BLOCKED", code: beforeCreate.code, record: blocked };
   }
 
   const externalSku = beforeCreate.externalSku ?? input.externalSku;

@@ -42,13 +42,18 @@ retried. Missing generic/provider purchase authorization is false, and
 `ORDER_CREATE` plus paid/settled prerequisites are required before any upstream
 POST.
 
-Recovery for `SUBMITTED`, `PENDING`, and `UNKNOWN` remains query-only. A
-`PENDING` provider result stays `PENDING`; a legacy `UNKNOWN` row's
+Commerce intents persist `SUBMITTED` with `attempt_count=0` before provider I/O;
+a single compare-and-set increments the count before the first `POST`. A stale
+pre-submit failure may reject only an intent with `attempt_count=0`.
+`SUBMITTED` with `attempt_count>0`, `PENDING`, and `UNKNOWN` remain query-only
+and never POST again.
+A `PENDING` provider result stays `PENDING`; a legacy `UNKNOWN` row's
 `external_order_id` is a lookup key even after it is copied to `query_key`, and
 is never exposed as a confirmed provider order ID. Other persisted statuses are
 preserved; cancellation/refund, reconciled, created, and unrecognized statuses
 fail closed for owner review and are never coerced to `SUBMITTED`, queried, or
-re-created. Only `AUTHORIZED` may claim a new `POST`.
+re-created. In the owner-canary aggregate, only `AUTHORIZED` may claim a new
+`POST`; its transition to `SUBMITTED` is the durable create claim.
 
 Required checkpoints before enabling real purchase:
 

@@ -246,6 +246,117 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     expect(assets.rows[0]?.count).toBe(0);
   });
 
+  it("claims a pre-POST SUBMITTED intent instead of querying a nonexistent order", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const supplierOrderId = newId();
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, attempt_count, cost_vnd_snapshot, sale_price_vnd_snapshot,
+         margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId},
+         ${`${f.orderId}:${f.supplierSkuId}`}, 'fp-before-post',
+         'SUBMITTED', 0, 150000, 199000, 49000, now())
+    `.execute(ctx.db);
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    let createCalls = 0;
+    let queryCalls = 0;
+    const port: SupplierPort = {
+      ...sandbox,
+      async createOrder(input) {
+        createCalls += 1;
+        return sandbox.createOrder(input);
+      },
+      async queryOrder(input) {
+        queryCalls += 1;
+        return sandbox.queryOrder(input);
+      },
+    };
+
+    const result = await provisionFromSupplier(ctx.db, {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL",
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-before-post",
+      port,
+      vault: createInMemoryVault(),
+      purchaseEnabled: true,
+    });
+
+    expect(result).toMatchObject({ ok: true, kind: "FULFILLED", supplierOrderId });
+    expect({ createCalls, queryCalls }).toEqual({ createCalls: 1, queryCalls: 0 });
+    const persisted = await sql<{ status: string; attempt_count: number }>`
+      select status, attempt_count from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(persisted.rows[0]).toMatchObject({ status: "FULFILLED", attempt_count: 1 });
+    const assets = await sql<{ count: number }>`
+      select count(*)::int as count from digital_asset where supplier_order_id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(assets.rows[0]?.count).toBe(1);
+  });
+  it("does not create a SUBMITTED intent after its order is completed", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    await sql`update "order" set status = 'COMPLETED' where id = ${f.orderId}`.execute(ctx.db);
+    const supplierOrderId = newId();
+    const idempotencyKey = `${f.orderId}:${f.supplierSkuId}`;
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, attempt_count, cost_vnd_snapshot, sale_price_vnd_snapshot,
+         margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId},
+         ${idempotencyKey}, 'fp-completed-unattempted',
+         'SUBMITTED', 0, 150000, 199000, 49000, now())
+    `.execute(ctx.db);
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    let createCalls = 0;
+    let queryCalls = 0;
+    const port: SupplierPort = {
+      ...sandbox,
+      async createOrder(input) {
+        createCalls += 1;
+        return sandbox.createOrder(input);
+      },
+      async queryOrder(input) {
+        queryCalls += 1;
+        return sandbox.queryOrder(input);
+      },
+    };
+
+    const result = await provisionFromSupplier(ctx.db, {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL",
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-completed-unattempted",
+      port,
+      vault: createInMemoryVault(),
+      purchaseEnabled: true,
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "ORDER_TERMINAL" });
+    expect({ createCalls, queryCalls }).toEqual({ createCalls: 0, queryCalls: 0 });
+    const persisted = await sql<{ status: string; attempt_count: number }>`
+      select status, attempt_count from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(persisted.rows[0]).toMatchObject({ status: "SUBMITTED", attempt_count: 0 });
+  });
+
   it("does not call the upstream when the provider lacks ORDER_CREATE", async () => {
     const f = await seedPaidOrderWithSupplierSku();
     const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
@@ -844,10 +955,11 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     await sql`
       insert into supplier_order
         (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
-         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at)
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at,
+         attempt_count)
       values
         (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId}, ${idempotencyKey}, 'fp-submitted',
-         'SUBMITTED', 150000, 199000, 49000, now())
+         'SUBMITTED', 150000, 199000, 49000, now(), 1)
     `.execute(ctx.db);
     let queries = 0;
     const port: SupplierPort = {

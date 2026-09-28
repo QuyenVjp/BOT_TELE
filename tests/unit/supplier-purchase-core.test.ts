@@ -71,6 +71,7 @@ function makeStore(): SupplierPurchaseRecordStore & {
         requestFingerprint: input.requestFingerprint,
         status: "SUBMITTED",
         externalOrderId: null,
+        attemptCount: 0,
         costVndSnapshot: input.costCeilingVnd,
         version: 1,
       };
@@ -84,10 +85,21 @@ function makeStore(): SupplierPurchaseRecordStore & {
       });
     },
     async markAttempt(id) {
-      if (claimed.has(id)) return false;
-      claimed.add(id);
       const record = rows.get(id);
-      await patch(id, { status: "SUBMITTED", queryKey: record?.idempotencyKey ?? null });
+      if (
+        claimed.has(id) ||
+        !record ||
+        (record.status !== "AUTHORIZED" && record.status !== "SUBMITTED") ||
+        record.attemptCount !== 0
+      ) {
+        return false;
+      }
+      claimed.add(id);
+      await patch(id, {
+        status: "SUBMITTED",
+        attemptCount: 1,
+        queryKey: record.idempotencyKey,
+      });
       return true;
     },
     async markTransportFailure(id) {
@@ -103,7 +115,10 @@ function makeStore(): SupplierPurchaseRecordStore & {
       await patch(id, { status: "PENDING", externalOrderId, queryKey: null });
     },
     async markFulfilled(id, externalOrderId) {
-      await patch(id, { status: "FULFILLED", externalOrderId });
+      const current = rows.get(id);
+      if (current && ["AUTHORIZED", "SUBMITTED", "PENDING", "UNKNOWN"].includes(current.status)) {
+        await patch(id, { status: "FULFILLED", externalOrderId });
+      }
     },
     async markRejected(id) {
       const current = rows.get(id);
@@ -116,7 +131,14 @@ function makeStore(): SupplierPurchaseRecordStore & {
       await patch(_id, {});
     },
     async markBlocked(id, code) {
-      await patch(id, { status: "REJECTED", blockCode: code });
+      const current = rows.get(id);
+      if (
+        current &&
+        ["AUTHORIZED", "SUBMITTED"].includes(current.status) &&
+        current.attemptCount === 0
+      ) {
+        await patch(id, { status: "REJECTED", blockCode: code });
+      }
     },
   };
 }
@@ -241,6 +263,153 @@ describe("durable supplier purchase core", () => {
     expect({ creates, queries, ingested }).toEqual({ creates: 1, queries: 1, ingested: 0 });
   });
 
+  it("claims an unattempted SUBMITTED intent instead of querying it", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    let creates = 0;
+    let queries = 0;
+    const port = makePort({
+      createOrder: async () => {
+        creates += 1;
+        return { kind: "ACCEPTED", externalOrderId: "ext-first-post", status: "PENDING" };
+      },
+      queryOrder: async () => {
+        queries += 1;
+        return { status: "REJECTED", externalOrderId: "never-created" };
+      },
+    });
+
+    const result = await executeSupplierPurchase(input(store, { port }));
+
+    expect(result).toMatchObject({ kind: "ACCEPTED", externalOrderId: "ext-first-post" });
+    expect(store.rows.get(seeded.record.id)).toMatchObject({
+      status: "PENDING",
+      attemptCount: 1,
+      externalOrderId: "ext-first-post",
+    });
+    expect({ creates, queries }).toEqual({ creates: 1, queries: 0 });
+  });
+
+  it("lets one concurrent caller claim an unattempted SUBMITTED intent", async () => {
+    const store = makeStore();
+    let creates = 0;
+    let queries = 0;
+    let preflightStarted!: () => void;
+    let releasePreflight!: () => void;
+    const started = new Promise<void>((resolve) => {
+      preflightStarted = resolve;
+    });
+    const preflightGate = new Promise<void>((resolve) => {
+      releasePreflight = resolve;
+    });
+    const port = makePort({
+      createOrder: async () => {
+        creates += 1;
+        return { kind: "ACCEPTED", externalOrderId: "ext-concurrent", status: "PENDING" };
+      },
+      queryOrder: async () => {
+        queries += 1;
+        return { status: "REJECTED", externalOrderId: "never-created" };
+      },
+    });
+    const beforeCreate = async (pause: boolean) => {
+      if (pause) {
+        preflightStarted();
+        await preflightGate;
+      }
+      return { ok: true as const, costCeilingVnd: 23000 };
+    };
+
+    const first = executeSupplierPurchase(
+      input(store, { port, beforeCreate: () => beforeCreate(true) }),
+    );
+    await started;
+    const winner = await executeSupplierPurchase(
+      input(store, { port, beforeCreate: () => beforeCreate(false) }),
+    );
+    releasePreflight();
+    const loser = await first;
+
+    expect(winner).toMatchObject({ kind: "ACCEPTED", externalOrderId: "ext-concurrent" });
+    expect(loser).toMatchObject({ kind: "UNKNOWN", queryKey: "ext-concurrent" });
+    expect([...store.rows.values()]).toHaveLength(1);
+    expect([...store.rows.values()][0]).toMatchObject({
+      status: "PENDING",
+      attemptCount: 1,
+      externalOrderId: "ext-concurrent",
+    });
+    expect({ creates, queries }).toEqual({ creates: 1, queries: 0 });
+  });
+  it("does not block a submitted intent after another caller claims it", async () => {
+    const store = makeStore();
+    let preflightStarted!: () => void;
+    let releasePreflight!: () => void;
+    let createStarted!: () => void;
+    let releaseCreate!: () => void;
+    const preflight = new Promise<void>((resolve) => {
+      preflightStarted = resolve;
+    });
+    const preflightGate = new Promise<void>((resolve) => {
+      releasePreflight = resolve;
+    });
+    const create = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    let creates = 0;
+    let queries = 0;
+    const port = makePort({
+      createOrder: async () => {
+        creates += 1;
+        createStarted();
+        await createGate;
+        return { kind: "FULFILLED", externalOrderId: "ext-race", assetEnvelope: envelope };
+      },
+      queryOrder: async () => {
+        queries += 1;
+        return { status: "REJECTED", externalOrderId: "never-created" };
+      },
+    });
+    const stale = executeSupplierPurchase(
+      input(store, {
+        port,
+        beforeCreate: async () => {
+          preflightStarted();
+          await preflightGate;
+          return { ok: false as const, code: "SUPPLIER_UNAVAILABLE" };
+        },
+      }),
+    );
+    await preflight;
+    const active = executeSupplierPurchase(
+      input(store, { port, beforeCreate: async () => ({ ok: true, costCeilingVnd: 23000 }) }),
+    );
+    await create;
+    releasePreflight();
+    const staleResult = await stale;
+    expect(staleResult).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
+    expect([...store.rows.values()][0]).toMatchObject({ status: "SUBMITTED", attemptCount: 1 });
+    releaseCreate();
+    const activeResult = await active;
+
+    expect(activeResult).toMatchObject({ kind: "FULFILLED", externalOrderId: "ext-race" });
+    expect([...store.rows.values()][0]).toMatchObject({
+      status: "FULFILLED",
+      attemptCount: 1,
+      externalOrderId: "ext-race",
+    });
+    expect({ creates, queries }).toEqual({ creates: 1, queries: 0 });
+  });
+
   it("recovers a SUBMITTED record by stable query key even with spending disabled", async () => {
     const store = makeStore();
     const seeded = await store.insertIntent({
@@ -251,6 +420,7 @@ describe("durable supplier purchase core", () => {
       requestFingerprint: "fingerprint",
       costCeilingVnd: 23000,
     });
+    seeded.record.attemptCount = 1;
     let creates = 0;
     let queries = 0;
     const port = makePort({
@@ -274,6 +444,7 @@ describe("durable supplier purchase core", () => {
     expect(result).toMatchObject({ kind: "UNKNOWN", queryKey: "ext-submitted-1" });
     expect(store.rows.get(seeded.record.id)).toMatchObject({
       status: "PENDING",
+      attemptCount: 1,
       externalOrderId: "ext-submitted-1",
     });
     expect({ creates, queries }).toEqual({ creates: 0, queries: 1 });

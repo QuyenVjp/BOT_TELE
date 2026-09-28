@@ -191,7 +191,7 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 - Inventory correction must not masquerade as a customer-facing announcement unless explicitly toggled and derived from a real stock delta.
 - Marketing `all` is `SHOP_UPDATE` and requires `shop_updates` consent at preview, recipient creation and send time. Only genuine service-critical campaigns retain opt-out-independent delivery; marketing navigation cannot select that class.
 - Owner-triggered stock announcements from an inventory variant view are optional `SHOP_UPDATE` marketing broadcasts. The preview content is rebuilt from product/variant/stock/price tables, then confirmed through the existing broadcast campaign flow; product restock subscriptions never imply shop-update consent.
-- A supplier purchase has one persisted dispatch winner. Re-entering a pending/submitted/unknown attempt never issues another purchase; recovery queries the original provider identity without holding a database transaction across network I/O.
+- A commerce supplier order persists `SUBMITTED` before dispatch with `attempt_count=0`; one compare-and-set increments it before the first provider `POST`. Only an intent with `attempt_count=0` may be claimed or blocked. `SUBMITTED` with `attempt_count>0`, `PENDING`, and `UNKNOWN` recover by querying the original provider identity and never issue another purchase; no database transaction spans provider I/O.
 
 ## 8. Safety invariants
 

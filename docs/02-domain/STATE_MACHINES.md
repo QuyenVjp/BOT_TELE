@@ -76,6 +76,11 @@ Created -> Submitted -> Pending -> Fulfilled
 ```
 
 `Unknown` is mandatory after a timeout with uncertain upstream outcome; the system queries/reconciles before retrying create.
+Commerce persists the initial `SUBMITTED` intent with `attempt_count=0`. One
+compare-and-set increments it before the first provider `POST`; attempted
+`SUBMITTED` rows (`attempt_count>0`) and `PENDING`/`UNKNOWN` rows are query-only.
+The owner-canary aggregate is separate: its `AUTHORIZED -> SUBMITTED` transition
+is already the create claim.
 
 ## Delivery Bundle
 

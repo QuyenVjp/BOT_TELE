@@ -51,19 +51,26 @@ describe("compiled production migration entrypoint (T173)", () => {
         values ('legacy-identity', 'legacy-customer', 'telegram', '7788990011', 'observed_user')
       `.execute(started.handle.db);
 
-      const result = await runCompiledMigration(started.connectionString);
-      expect(result.code, result.stderr).toBe(0);
+      await runCompiledMigration(started.connectionString);
       const proof = await sql<{
         channel: string;
         observed_username: string | null;
         delivery_session: string | null;
         handoff: string | null;
         compensation: string | null;
+        supplier_canary_run: string | null;
+        applied_094_count: string;
+        applied_095_count: string;
       }>`
         select ci.channel, ci.observed_username,
           to_regclass('public.delivery_session')::text as delivery_session,
           to_regclass('public.delivery_notification_handoff')::text as handoff,
-          to_regclass('public.delivery_capability_compensation')::text as compensation
+          to_regclass('public.delivery_capability_compensation')::text as compensation,
+          to_regclass('public.supplier_canary_run')::text as supplier_canary_run,
+          (select count(*)::text from schema_migrations
+           where filename = '094_supplier_owner_canary.sql') as applied_094_count,
+          (select count(*)::text from schema_migrations
+           where filename = '095_supplier_unknown_query_key_backfill.sql') as applied_095_count
         from channel_identity ci where ci.id = 'legacy-identity'
       `.execute(started.handle.db);
       expect(proof.rows[0]).toMatchObject({
@@ -72,6 +79,9 @@ describe("compiled production migration entrypoint (T173)", () => {
         delivery_session: "delivery_session",
         handoff: "delivery_notification_handoff",
         compensation: "delivery_capability_compensation",
+        supplier_canary_run: "supplier_canary_run",
+        applied_094_count: "1",
+        applied_095_count: "1",
       });
     } finally {
       await rm(baselineDir, { recursive: true, force: true });
@@ -226,9 +236,9 @@ describe("compiled production migration entrypoint (T173)", () => {
         applied_095_count: "0",
       });
 
-      const upgrade = await runMigrations(started.handle.db);
-      expect(upgrade.applied).not.toContain("094_supplier_owner_canary.sql");
-      expect(upgrade.applied).toContain("095_supplier_unknown_query_key_backfill.sql");
+      const upgrade = await runCompiledMigration(started.connectionString);
+      expect(upgrade.code, upgrade.stderr).toBe(0);
+      expect(upgrade.stdout).toMatch(/migrate: applied=1/);
       const proof = await sql<{
         canary_table: string | null;
         query_key_column: string | null;
@@ -278,10 +288,9 @@ describe("compiled production migration entrypoint (T173)", () => {
       expect(proof.rows[0]?.canary_status_constraint).toContain("SUBMITTED");
       expect(proof.rows[0]?.canary_status_constraint).toContain("UNKNOWN");
 
-      const reentry = await runMigrations(started.handle.db);
-      expect(reentry.alreadyApplied).toContain("095_supplier_unknown_query_key_backfill.sql");
-      expect(reentry.applied).not.toContain("094_supplier_owner_canary.sql");
-      expect(reentry.applied).not.toContain("095_supplier_unknown_query_key_backfill.sql");
+      const reentry = await runCompiledMigration(started.connectionString);
+      expect(reentry.code, reentry.stderr).toBe(0);
+      expect(reentry.stdout).toMatch(/migrate: applied=0/);
 
       let creates = 0;
       const queries: QueryOrderInput[] = [];
