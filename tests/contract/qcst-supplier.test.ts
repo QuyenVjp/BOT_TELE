@@ -256,6 +256,59 @@ describe("QCST supplier adapter", () => {
     });
   });
 
+  it.each([
+    ["client order", { client_order_id: "supplier-order:other" }],
+    ["product", { product_id: "product-other" }],
+  ] as const)("keeps a create response with the wrong %s identity UNKNOWN", async (_field, mismatch) => {
+    const submittedKey = "supplier-order:identity-check";
+    const server = await startServer((request, response) => {
+      sendJson(
+        response,
+        { success: true, data: { ...ORDER, ...mismatch } },
+        request.method === "POST" ? 201 : 200,
+      );
+    });
+    const { port } = await createPort(server.baseUrl);
+
+    await expect(
+      port.createOrder({
+        idempotencyKey: submittedKey,
+        supplierSku: PRODUCT.id,
+        costCeilingVnd: PRODUCT.price,
+        orderId: "ord-identity-check",
+      }),
+    ).resolves.toMatchObject({
+      kind: "UNKNOWN",
+      queryKey: submittedKey,
+    });
+  });
+
+  it.each([
+    ["client order", { client_order_id: "supplier-order:other" }, { queryKey: ORDER.client_order_id }],
+    ["product", { product_id: "product-other" }, { queryKey: ORDER.client_order_id }],
+    ["external order", { id: "qcst-order-other" }, { externalOrderId: ORDER.id }],
+  ] as const)("fails closed when a query response has the wrong %s identity", async (_field, mismatch, identity) => {
+    const server = await startServer((_request, response) => {
+      const order = { ...ORDER, ...mismatch };
+      sendJson(
+        response,
+        "externalOrderId" in identity
+          ? { success: true, data: order }
+          : { success: true, data: { items: [order], has_more: false, next_cursor: null } },
+      );
+    });
+    const { port } = await createPort(server.baseUrl);
+
+    await expect(
+      port.queryOrder({ ...identity, expectedSku: PRODUCT.id }),
+    ).rejects.toMatchObject({
+      supplierCode: "IDENTITY_MISMATCH",
+      message: "QCST order identity mismatch",
+    });
+  });
+
+
+
   it("uses the documented QCST cancel endpoint without inventing a refund API", async () => {
     let seen: { method: string; path: string; idempotencyKey: string | undefined } | undefined;
     const server = await startServer((request, response) => {
@@ -290,7 +343,7 @@ describe("QCST supplier adapter", () => {
     const submittedKey = "supplier-order:submitted";
     const deliveredShape = {
       ...ORDER,
-      client_order_id: "supplier-order:response",
+      client_order_id: submittedKey,
       delivery_available: true,
       delivery: { credential: "opaque" },
     };
@@ -321,7 +374,9 @@ describe("QCST supplier adapter", () => {
       queryKey: submittedKey,
       reason: "delivery_schema_unsupported",
     });
-    await expect(port.queryOrder({ queryKey: submittedKey })).rejects.toMatchObject({
+    await expect(
+      port.queryOrder({ queryKey: submittedKey, expectedSku: PRODUCT.id }),
+    ).rejects.toMatchObject({
       supplierCode: "DELIVERY_UNSUPPORTED",
     });
     expect(queriedClientOrderId).toBe(submittedKey);

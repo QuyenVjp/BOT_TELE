@@ -81,7 +81,7 @@ export interface SupplierPurchaseFulfillmentInput {
 
 export type SupplierPurchaseFulfillmentHandler = (
   input: SupplierPurchaseFulfillmentInput,
-) => Promise<void>;
+) => Promise<boolean | void>;
 
 export interface SupplierPurchaseInput {
   supplierId: string;
@@ -158,6 +158,7 @@ export async function executeSupplierPurchase(
       store: input.store,
       recordId: record.id,
       queryKey: input.idempotencyKey,
+      expectedSku: input.externalSku,
       port: input.port,
       ...(input.onFulfilled ? { onFulfilled: input.onFulfilled } : {}),
     });
@@ -270,13 +271,18 @@ export async function executeSupplierPurchase(
 
   await input.store.markResponse(record.id, responseFingerprint(result));
   switch (result.kind) {
-    case "FULFILLED":
-      if (input.onFulfilled) {
-        await input.onFulfilled({
+    case "FULFILLED": {
+      const accepted =
+        input.onFulfilled === undefined ||
+        (await input.onFulfilled({
           record,
           externalOrderId: result.externalOrderId,
           assetEnvelope: result.assetEnvelope,
-        });
+        })) !== false;
+      if (!accepted) {
+        const current = await input.store.findById(record.id);
+        if (current?.status === "REJECTED") return { kind: "REJECTED", record: current };
+        return { kind: "REPLAY", record: current ?? record };
       }
       await input.store.markFulfilled(record.id, result.externalOrderId);
       return {
@@ -285,6 +291,7 @@ export async function executeSupplierPurchase(
         externalOrderId: result.externalOrderId,
         assetEnvelope: result.assetEnvelope,
       };
+    }
     case "UNKNOWN":
       await input.store.markUnknown(record.id, {
         queryKey: result.queryKey,
@@ -308,6 +315,7 @@ export async function recoverSupplierPurchase(input: {
   store: SupplierPurchaseRecordStore;
   recordId: string;
   queryKey: string;
+  expectedSku: string;
   port: SupplierPort | SupplierProvider;
   onFulfilled?: SupplierPurchaseFulfillmentHandler;
 }): Promise<SupplierPurchaseResult> {
@@ -326,30 +334,43 @@ export async function recoverSupplierPurchase(input: {
 
   let observed: QueryOrderResult;
   try {
-    const queryKey = record.externalOrderId ? null : (record.queryKey ?? input.queryKey);
+    const queryKey = record.queryKey ?? input.queryKey;
     observed = await input.port.queryOrder({
-      ...(record.externalOrderId && queryKey === null
-        ? { externalOrderId: record.externalOrderId }
-        : {}),
-      ...(queryKey !== null ? { queryKey } : {}),
+      expectedSku: input.expectedSku,
+      ...(record.externalOrderId ? { externalOrderId: record.externalOrderId } : {}),
+      queryKey,
     });
   } catch (error) {
-    if (error instanceof SupplierPortError && error.supplierCode === "DELIVERY_UNSUPPORTED") {
-      await input.store.markNeedsReview(record.id, "DELIVERY_UNSUPPORTED");
-      return { kind: "BLOCKED", code: "DELIVERY_UNSUPPORTED", record };
+    if (
+      error instanceof SupplierPortError &&
+      (error.supplierCode === "DELIVERY_UNSUPPORTED" ||
+        error.supplierCode === "IDENTITY_MISMATCH")
+    ) {
+      await input.store.markNeedsReview(record.id, error.supplierCode);
+      const current = await input.store.findById(record.id);
+      return {
+        kind: "BLOCKED",
+        code: error.supplierCode,
+        record: current ?? record,
+      };
     }
     throw error;
   }
 
   await input.store.markResponse(record.id, responseFingerprint(observed));
   switch (observed.status) {
-    case "FULFILLED":
-      if (input.onFulfilled) {
-        await input.onFulfilled({
+    case "FULFILLED": {
+      const accepted =
+        input.onFulfilled === undefined ||
+        (await input.onFulfilled({
           record,
           externalOrderId: observed.externalOrderId,
           assetEnvelope: observed.assetEnvelope,
-        });
+        })) !== false;
+      if (!accepted) {
+        const current = await input.store.findById(record.id);
+        if (current?.status === "REJECTED") return { kind: "REJECTED", record: current };
+        return { kind: "REPLAY", record: current ?? record };
       }
       await input.store.markFulfilled(record.id, observed.externalOrderId);
       return {
@@ -358,6 +379,7 @@ export async function recoverSupplierPurchase(input: {
         externalOrderId: observed.externalOrderId,
         assetEnvelope: observed.assetEnvelope,
       };
+    }
     case "REJECTED":
     case "CANCELLED":
     case "REFUNDED":

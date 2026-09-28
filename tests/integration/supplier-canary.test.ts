@@ -2,7 +2,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
+import type { Vault } from "../../src/infrastructure/vault/port.js";
 import { createAdminConfirmation } from "../../src/modules/identity/admin-confirmation.js";
+import { createStepUpService } from "../../src/modules/identity/step-up.js";
+import { loadSensitiveAuthorizationBinding } from "../../src/modules/identity/authorization-binding.js";
 import { createSupplierCanaryService } from "../../src/modules/supplier/canary.js";
 import { createSupplierProviderRegistry } from "../../src/modules/supplier/registry.js";
 import { provisionFromSupplier } from "../../src/modules/supplier/service.js";
@@ -17,6 +20,9 @@ import type {
   SupplierProvider,
 } from "../../src/modules/supplier/port.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import { createTotpCode } from "../helpers/totp.js";
+
+const STEP_UP_OPTIONS = { ttlSeconds: 120, lockoutMinutes: 10, maxAttempts: 5 };
 
 let ctx: PgTestContext;
 const ROOT_ID = 7788990011;
@@ -53,7 +59,8 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await sql`
-    truncate table supplier_canary_run, admin_confirmation, audit_event, supplier_catalog_product,
+    truncate table admin_step_up_attempt, admin_step_up_grant, admin_step_up_secret,
+      supplier_canary_run, admin_confirmation, audit_event, supplier_catalog_product,
       supplier_sku,
       supplier, channel_identity, product_variant, product, category, customer cascade
   `.execute(ctx.db);
@@ -167,6 +174,10 @@ function makeService(
     SUPPLIER_CANARY_ENABLED: true,
   },
   registerProvider = true,
+  stepUp: {
+    enabled?: boolean;
+    vault?: Vault;
+  } = {},
 ) {
   const provider = makeProvider(fixture, state);
   const confirmation = createAdminConfirmation(ctx.db);
@@ -181,15 +192,78 @@ function makeService(
     sensitiveDeps: {
       db: ctx.db,
       rootConfig,
-      vault: createInMemoryVault(),
-      stepUpEnabled: false,
-      stepUpOptions: { ttlSeconds: 120, lockoutMinutes: 10, maxAttempts: 5 },
+      vault: stepUp.vault ?? createInMemoryVault(),
+      stepUpEnabled: stepUp.enabled ?? false,
+      stepUpOptions: STEP_UP_OPTIONS,
     },
     canaryEnabled: flags.SUPPLIER_CANARY_ENABLED,
     canaryPurchaseEnabled: (providerKey) =>
       supplierCanaryPurchaseEnabled(flags, providerKey === fixture.supplierId),
     maxCostVnd: 100000,
   });
+}
+
+async function loadCanaryAuthorizationPayload(runId: string) {
+  const result = await sql<{
+    supplier_id: string;
+    supplier_sku_id: string;
+    variant_id: string;
+    provider_key: string;
+    external_sku: string;
+    region: string | null;
+    approved_cost_vnd: string;
+    currency: string;
+    version: string;
+  }>`
+    select supplier_id, supplier_sku_id, variant_id, provider_key, external_sku, region,
+           approved_cost_vnd::text, currency, version::text
+    from supplier_canary_run
+    where id = ${runId}
+    limit 1
+  `.execute(ctx.db);
+  const row = result.rows[0];
+  if (!row) throw new Error(`missing canary run ${runId}`);
+  return {
+    runId,
+    supplierId: row.supplier_id,
+    supplierSkuId: row.supplier_sku_id,
+    variantId: row.variant_id,
+    providerKey: row.provider_key,
+    externalSku: row.external_sku,
+    region: row.region,
+    costVnd: row.approved_cost_vnd,
+    currency: row.currency,
+    version: row.version,
+  };
+}
+
+async function grantCanaryRun(runId: string, vault: Vault): Promise<void> {
+  const adminTelegramUserId = String(ROOT_ID);
+  const stepUp = createStepUpService(ctx.db, vault, STEP_UP_OPTIONS);
+  await stepUp.enroll({
+    adminTelegramUserId,
+    issuer: "TIER20 SHOP",
+    accountLabel: adminTelegramUserId,
+  });
+  const requestedData = await loadCanaryAuthorizationPayload(runId);
+  const binding = await loadSensitiveAuthorizationBinding(ctx.db, {
+    actionKey: "supplier.canary.purchase",
+    resourceType: "SupplierCanaryRun",
+    resourceId: runId,
+    requestedData,
+  });
+  const code = await createTotpCode(vault, adminTelegramUserId, ctx.db);
+  const verified = await stepUp.verify({
+    adminTelegramUserId,
+    category: "SUPPLIER_CONFIG",
+    code,
+    actionKey: "supplier.canary.purchase",
+    resourceType: "SupplierCanaryRun",
+    resourceId: runId,
+    resourceVersion: binding.resourceVersion,
+    payloadHash: binding.payloadHash,
+  });
+  if (!verified.ok) throw new Error(`canary grant failed: ${verified.code}`);
 }
 
 async function seedPaidCommerceOrder(fixture: Fixture): Promise<string> {
@@ -267,6 +341,128 @@ async function commerceCounts() {
 }
 
 describe("owner supplier canary", () => {
+  it("refuses canary preparation when step-up is enabled without a grant", async () => {
+    const fixture = await seed();
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const vault = createInMemoryVault();
+    const service = makeService(fixture, state, undefined, true, { enabled: true, vault });
+
+    const preview = await service.prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "step-up-prepare-denied",
+    });
+
+    expect(preview).toMatchObject({ ok: false, code: "AUTHORIZATION_REQUIRED" });
+    expect(state.creates).toBe(0);
+    const run = await sql<{ status: string }>`
+      select status from supplier_canary_run order by created_at desc limit 1
+    `.execute(ctx.db);
+    expect(run.rows[0]?.status).toBe("BLOCKED");
+  });
+
+  it("refuses canary confirmation without a grant before supplier create", async () => {
+    const fixture = await seed();
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const preview = await makeService(fixture, state).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "step-up-confirm-preview",
+    });
+    if (!preview.ok) throw new Error(preview.code);
+
+    const vault = createInMemoryVault();
+    const stepUp = createStepUpService(ctx.db, vault, STEP_UP_OPTIONS);
+    await stepUp.enroll({
+      adminTelegramUserId: String(ROOT_ID),
+      issuer: "TIER20 SHOP",
+      accountLabel: String(ROOT_ID),
+    });
+    const service = makeService(fixture, state, undefined, true, { enabled: true, vault });
+    const confirmed = await service.confirmIfCanary({
+      confirmationId: preview.confirmationId,
+      challenge: preview.challenge,
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      correlationId: "step-up-confirm-denied",
+    });
+
+    expect(confirmed).toMatchObject({ ok: false, code: "AUTHORIZATION_REQUIRED" });
+    expect(state.creates).toBe(0);
+  });
+
+  it("allows an exact TOTP-bound canary confirmation and creates only once", async () => {
+    const fixture = await seed();
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const preview = await makeService(fixture, state).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "step-up-valid-preview",
+    });
+    if (!preview.ok) throw new Error(preview.code);
+
+    const vault = createInMemoryVault();
+    await grantCanaryRun(preview.runId, vault);
+    const service = makeService(fixture, state, undefined, true, { enabled: true, vault });
+    const input = {
+      confirmationId: preview.confirmationId,
+      challenge: preview.challenge,
+      actor: { numericUserId: ROOT_ID, chatType: "private" as const },
+    };
+    const first = await service.confirmIfCanary({
+      ...input,
+      correlationId: "step-up-valid-confirm",
+    });
+    const replay = await service.confirmIfCanary({
+      ...input,
+      correlationId: "step-up-valid-replay",
+    });
+
+    expect(first).toMatchObject({
+      ok: true,
+      runId: preview.runId,
+      execution: { ok: true, status: "PENDING" },
+    });
+    expect(replay).toMatchObject({
+      ok: true,
+      runId: preview.runId,
+      execution: { ok: true, status: "PENDING" },
+    });
+    expect(state.creates).toBe(1);
+  });
+
+  it("refuses a canary grant with a stale run version before supplier create", async () => {
+    const fixture = await seed();
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const preview = await makeService(fixture, state).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "step-up-stale-preview",
+    });
+    if (!preview.ok) throw new Error(preview.code);
+
+    const vault = createInMemoryVault();
+    await grantCanaryRun(preview.runId, vault);
+    await sql`
+      update supplier_canary_run
+      set version = version + 1
+      where id = ${preview.runId} and status = 'PREVIEWED'
+    `.execute(ctx.db);
+    const service = makeService(fixture, state, undefined, true, { enabled: true, vault });
+    const stale = await service.confirmIfCanary({
+      confirmationId: preview.confirmationId,
+      challenge: preview.challenge,
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      correlationId: "step-up-stale-confirm",
+    });
+
+    expect(stale).toMatchObject({ ok: false, code: "AUTHORIZATION_REQUIRED" });
+    expect(state.creates).toBe(0);
+    const run = await sql<{ status: string; version: number }>`
+      select status, version from supplier_canary_run where id = ${preview.runId}
+    `.execute(ctx.db);
+    expect(run.rows[0]).toEqual({ status: "PREVIEWED", version: 2 });
+  });
+
   it("recovers SUBMITTED query-only even after every purchase gate is off", async () => {
     const fixture = await seed();
     const state: ProviderState = {
@@ -287,7 +483,9 @@ describe("owner supplier canary", () => {
       "provider query temporarily unavailable",
     );
     expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 0, queries: 1 });
-    expect(state.queryInputs).toEqual([{ queryKey: `supplier-canary:${runId}` }]);
+    expect(state.queryInputs).toEqual([
+      { queryKey: `supplier-canary:${runId}`, expectedSku: "CANARY-SKU" },
+    ]);
     const row = await sql<{ status: string; query_key: string | null }>`
       select status, query_key from supplier_canary_run where id = ${runId}
     `.execute(ctx.db);
@@ -337,8 +535,12 @@ describe("owner supplier canary", () => {
       externalOrderId: acceptedOrderId,
     });
     expect(state.queryInputs).toEqual([
-      { queryKey: `supplier-canary:${runId}` },
-      { externalOrderId: acceptedOrderId },
+      { queryKey: `supplier-canary:${runId}`, expectedSku: "CANARY-SKU" },
+      {
+        queryKey: `supplier-canary:${runId}`,
+        externalOrderId: acceptedOrderId,
+        expectedSku: "CANARY-SKU",
+      },
     ]);
     expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 0, queries: 2 });
     const row = await sql<{

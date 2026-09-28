@@ -429,6 +429,101 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     `.execute(ctx.db);
     expect(Number(assets.rows[0]?.count)).toBe(1);
   });
+  it("does not ingest a stale fulfilled recovery after rejection wins", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const vault = createInMemoryVault();
+    const supplierOrderId = newId();
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId}, 'idem-recover-race',
+         'fp-recover-race', 'UNKNOWN', 150000, 199000, 49000, now() - interval '10 minutes')
+    `.execute(ctx.db);
+
+    let createCalls = 0;
+    let queryCalls = 0;
+    let queryStarted!: () => void;
+    let releaseFulfilled!: () => void;
+    const firstQueryStarted = new Promise<void>((resolve) => {
+      queryStarted = resolve;
+    });
+    const delayedFulfilled = new Promise<void>((resolve) => {
+      releaseFulfilled = resolve;
+    });
+    const port: SupplierPort = {
+      getAvailability: () =>
+        Promise.resolve({ status: "UNKNOWN", observedAt: "2026-01-01T00:00:00.000Z" }),
+      createOrder: () => {
+        createCalls += 1;
+        throw new Error("create must not be called during recovery");
+      },
+      queryOrder: async () => {
+        queryCalls += 1;
+        if (queryCalls === 1) {
+          queryStarted();
+          await delayedFulfilled;
+          return {
+            status: "FULFILLED",
+            externalOrderId: "ext-recover-race-fulfilled",
+            assetEnvelope: {
+              deliveryType: "CREDENTIAL",
+              expectedSku: f.externalSku,
+              region: "VN",
+              durationCode: "P1M",
+              expiresAt: null,
+              supplierAssetId: "asset-recover-race",
+              fingerprint: "fp-asset-recover-race",
+              vaultRef: "vault:asset-recover-race",
+            },
+          };
+        }
+        return {
+          status: "REJECTED",
+          externalOrderId: "ext-recover-race-rejected",
+        };
+      },
+      cancelOrder: () => Promise.resolve({ status: "UNSUPPORTED" }),
+      requestRefund: () => Promise.resolve({ status: "UNSUPPORTED" }),
+      reconcile: () => Promise.resolve({ observations: [], nextCursor: null }),
+    };
+    const input = {
+      supplierOrderId,
+      queryKey: "qk-recover-race",
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL" as const,
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-recover-race",
+      port,
+      vault,
+    };
+
+    const fulfilledRecovery = recoverUnknownSupplierOrder(ctx.db, input);
+    await firstQueryStarted;
+    const rejectedResult = await recoverUnknownSupplierOrder(ctx.db, input);
+
+    expect(rejectedResult).toEqual({ ok: true, kind: "REJECTED" });
+    const rejectedRow = await sql<{ status: string }>`
+      select status from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(rejectedRow.rows[0]?.status).toBe("REJECTED");
+
+    releaseFulfilled();
+    const fulfilledResult = await fulfilledRecovery;
+
+    expect(fulfilledResult).toEqual({ ok: true, kind: "REJECTED" });
+    const finalRow = await sql<{ status: string }>`
+      select status from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(finalRow.rows[0]?.status).toBe("REJECTED");
+    const assets = await sql<{ count: string }>`
+      select count(*)::text as count from digital_asset where supplier_order_id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(Number(assets.rows[0]?.count)).toBe(0);
+    expect(createCalls).toBe(0);
+  });
 
   it("create is idempotent on the same idempotency key (one supplier_order)", async () => {
     const f = await seedPaidOrderWithSupplierSku();
@@ -517,7 +612,9 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     const second = await provisionFromSupplier(ctx.db, input);
     expect(second.ok).toBe(true);
     if (!second.ok) return;
-    expect(queryInputs).toEqual([{ queryKey: "qk-idem-timeout-1" }]);
+    expect(queryInputs).toEqual([
+      { queryKey: "qk-idem-timeout-1", expectedSku: f.externalSku },
+    ]);
     expect({ createSku, recoveredSku }).toEqual({
       createSku: f.externalSku,
       recoveredSku: f.externalSku,
@@ -607,11 +704,12 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       createOrder: () => {
         throw new Error("create must not be called while recovering SUBMITTED");
       },
-      queryOrder: ({ queryKey, externalOrderId }) => {
+      queryOrder: ({ queryKey, externalOrderId, expectedSku }) => {
         queries += 1;
-        expect({ queryKey, externalOrderId }).toEqual({
+        expect({ queryKey, externalOrderId, expectedSku }).toEqual({
           queryKey: idempotencyKey,
           externalOrderId: undefined,
+          expectedSku: f.externalSku,
         });
         return Promise.resolve({ status: "PENDING", externalOrderId: "ext-submitted-1" });
       },
@@ -673,10 +771,11 @@ describe("supplier provision service (FR-015/FR-016)", () => {
           status: "PENDING",
         });
       },
-      queryOrder: ({ queryKey, externalOrderId }) => {
-        expect({ queryKey, externalOrderId }).toEqual({
+      queryOrder: ({ queryKey, externalOrderId, expectedSku }) => {
+        expect({ queryKey, externalOrderId, expectedSku }).toEqual({
           queryKey: legacyKey,
           externalOrderId: undefined,
+          expectedSku: f.externalSku,
         });
         return Promise.resolve({ status: "PENDING", externalOrderId: providerExternalOrderId });
       },

@@ -340,6 +340,19 @@ function hasUnsupportedDelivery(order: QcstOrder): boolean {
   return order.delivery_available || (order.delivery !== undefined && order.delivery !== null);
 }
 
+const IDENTITY_MISMATCH_CODE = "IDENTITY_MISMATCH";
+const IDENTITY_MISMATCH_MESSAGE = "QCST order identity mismatch";
+
+function assertQueryIdentity(order: QcstOrder, input: QueryOrderInput): void {
+  if (
+    order.product_id !== input.expectedSku ||
+    (input.queryKey !== undefined && order.client_order_id !== input.queryKey) ||
+    (input.externalOrderId !== undefined && order.id !== input.externalOrderId)
+  ) {
+    throw new SupplierPortError(IDENTITY_MISMATCH_CODE, IDENTITY_MISMATCH_MESSAGE);
+  }
+}
+
 function mapOrderToQuery(order: QcstOrder): QueryOrderResult {
   const externalOrderId = order.id;
   const status = order.status.trim().toUpperCase();
@@ -545,6 +558,16 @@ export function createQcstSupplierPort(
           idempotencyKey: input.idempotencyKey,
           parse: (value) => OrderResponseSchema.parse(value),
         });
+        if (
+          response.data.client_order_id !== input.idempotencyKey ||
+          response.data.product_id !== input.supplierSku
+        ) {
+          return {
+            kind: "UNKNOWN",
+            queryKey: input.idempotencyKey,
+            reason: "identity_mismatch",
+          };
+        }
         return mapOrderToCreate(response.data, input.idempotencyKey);
       } catch (error) {
         if (isTransportError(error)) {
@@ -555,6 +578,7 @@ export function createQcstSupplierPort(
     },
     async queryOrder(input) {
       const order = await getOrder(input);
+      assertQueryIdentity(order, input);
       if (hasUnsupportedDelivery(order)) {
         throw new SupplierPortError("DELIVERY_UNSUPPORTED", "QCST delivery schema is unsupported");
       }

@@ -205,7 +205,7 @@ function makeProvider(input: {
   balanceVnd?: number;
   createResult?: { kind: "ACCEPTED"; externalOrderId: string; status: "PENDING" };
   createError?: Error;
-  queryResult?: (query: QueryOrderInput, call: number) => QueryOrderResult;
+  queryResult?: (query: QueryOrderInput, call: number) => QueryOrderResult | Promise<QueryOrderResult>;
   queryError?: Error;
 }) {
   const queryInputs: QueryOrderInput[] = [];
@@ -441,7 +441,9 @@ describe("worker-dispatched supplier canary recovery", () => {
 
     expect(recovered.supplierCanary).toMatchObject({ claimed: 1, succeeded: 1, failed: 0 });
     expect(provider.createCalls).toBe(1);
-    expect(provider.queryInputs).toEqual([{ queryKey: run.idempotencyKey }]);
+    expect(provider.queryInputs).toEqual([
+      { queryKey: run.idempotencyKey, expectedSku: "RECOVERY-SKU" },
+    ]);
     expect(await canaryRun(run.runId)).toMatchObject({
       status: "PENDING",
       external_order_id: expect.any(String),
@@ -577,7 +579,75 @@ describe("worker-dispatched supplier canary recovery", () => {
       status: "PENDING",
       external_order_id: externalOrderId,
     });
-    expect(provider.queryInputs).toEqual([{ queryKey: run.idempotencyKey }]);
+    expect(provider.queryInputs).toEqual([
+      { queryKey: run.idempotencyKey, expectedSku: "RECOVERY-SKU" },
+    ]);
+    expect(provider.createCalls).toBe(0);
+  });
+
+  it("returns durable FULFILLED when a stale PENDING observation finishes after it wins", async () => {
+    const run = await seedCanaryRun("UNKNOWN");
+    const winnerExternalOrderId = `fulfilled-${run.runId}`;
+    const staleExternalOrderId = `stale-${run.runId}`;
+    const firstQueryStarted = Promise.withResolvers<void>();
+    const staleQueryStarted = Promise.withResolvers<void>();
+    const releaseStaleQuery = Promise.withResolvers<void>();
+    const provider = makeProvider({
+      providerKey: run.supplierId,
+      queryResult: async (_query, call) => {
+        if (call === 1) {
+          firstQueryStarted.resolve();
+          await staleQueryStarted.promise;
+          return {
+            status: "FULFILLED",
+            externalOrderId: winnerExternalOrderId,
+            assetEnvelope: {
+              deliveryType: "CREDENTIAL",
+              expectedSku: "RECOVERY-SKU",
+              region: "VN",
+              durationCode: "P1M",
+              expiresAt: null,
+              supplierAssetId: `asset-${run.runId}`,
+              fingerprint: `fingerprint-${run.runId}`,
+              vaultRef: `vault:asset-${run.runId}`,
+            },
+          };
+        }
+        staleQueryStarted.resolve();
+        await releaseStaleQuery.promise;
+        return { status: "PENDING", externalOrderId: staleExternalOrderId };
+      },
+    });
+    const service = makeRecoveryService(createSupplierProviderRegistry([provider.provider]));
+
+    const winnerAttempt = service.executePending(run.runId);
+    await firstQueryStarted.promise;
+    const staleAttempt = service.executePending(run.runId);
+    await staleQueryStarted.promise;
+
+    await expect(winnerAttempt).resolves.toMatchObject({
+      ok: true,
+      runId: run.runId,
+      status: "FULFILLED",
+      externalOrderId: winnerExternalOrderId,
+    });
+    releaseStaleQuery.resolve();
+    await expect(staleAttempt).resolves.toMatchObject({
+      ok: true,
+      runId: run.runId,
+      status: "FULFILLED",
+      externalOrderId: winnerExternalOrderId,
+    });
+
+    expect(await canaryRun(run.runId)).toMatchObject({
+      status: "FULFILLED",
+      external_order_id: winnerExternalOrderId,
+      next_reconcile_at: null,
+    });
+    expect(provider.queryInputs).toEqual([
+      { queryKey: run.idempotencyKey, expectedSku: "RECOVERY-SKU" },
+      { queryKey: run.idempotencyKey, expectedSku: "RECOVERY-SKU" },
+    ]);
     expect(provider.createCalls).toBe(0);
   });
 
@@ -619,9 +689,13 @@ describe("worker-dispatched supplier canary recovery", () => {
         });
         expect(providers.flatMap((provider) => provider.queryInputs)).toEqual(
           expect.arrayContaining([
-            { queryKey: submitted.idempotencyKey },
-            { externalOrderId: pending.externalOrderId },
-            { queryKey: unknown.idempotencyKey },
+            { queryKey: submitted.idempotencyKey, expectedSku: "RECOVERY-SKU" },
+            {
+              queryKey: pending.idempotencyKey,
+              externalOrderId: pending.externalOrderId,
+              expectedSku: "RECOVERY-SKU",
+            },
+            { queryKey: unknown.idempotencyKey, expectedSku: "RECOVERY-SKU" },
           ]),
         );
         expect(providers.every((provider) => provider.createCalls === 0)).toBe(true);
@@ -811,6 +885,33 @@ describe("worker-dispatched supplier canary recovery", () => {
     expect(row.last_queried_at).toBeInstanceOf(Date);
     expect(row.needs_review_at).toBeInstanceOf(Date);
     expect(provider.queryInputs).toHaveLength(1);
+    expect(provider.createCalls).toBe(0);
+    expect(await deliveryCounts()).toEqual({ orders: "0", assets: "0", bundles: "0" });
+  });
+
+  it("blocks an identity-mismatched recovery without retrying or ingesting", async () => {
+    const run = await seedCanaryRun("UNKNOWN");
+    const provider = makeProvider({
+      providerKey: run.supplierId,
+      queryError: new SupplierPortError("IDENTITY_MISMATCH", "QCST order identity mismatch"),
+    });
+
+    const result = await dispatchRecovery(createSupplierProviderRegistry([provider.provider]));
+    const row = await canaryRun(run.runId);
+
+    expect(result).toMatchObject({
+      supplierCanary: { claimed: 1, succeeded: 0, failed: 1 },
+    });
+    expect(row).toMatchObject({
+      status: "BLOCKED",
+      last_error_code: "IDENTITY_MISMATCH",
+      retry_after_seconds: null,
+      next_reconcile_at: null,
+    });
+    expect(row.needs_review_at).toBeInstanceOf(Date);
+    expect(provider.queryInputs).toEqual([
+      { queryKey: run.idempotencyKey, expectedSku: "RECOVERY-SKU" },
+    ]);
     expect(provider.createCalls).toBe(0);
     expect(await deliveryCounts()).toEqual({ orders: "0", assets: "0", bundles: "0" });
   });

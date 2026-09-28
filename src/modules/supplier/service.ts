@@ -237,6 +237,7 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
             },
             version = version + 1
         where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
       `.execute(db);
     },
     async markResponse(id, fingerprint) {
@@ -244,6 +245,7 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
         update supplier_order
         set response_fingerprint = ${fingerprint}, version = version + 1
         where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
       `.execute(db);
     },
     async markUnknown(id, input) {
@@ -254,6 +256,7 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
             last_queried_at = now(), uncertain_at = now(), last_error_code = ${input.reason},
             version = version + 1
         where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
       `.execute(db);
     },
     async markPending(id, externalOrderId) {
@@ -262,13 +265,16 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
         set status = 'PENDING', external_order_id = ${externalOrderId}, query_key = null,
             last_queried_at = now(), last_error_code = null, version = version + 1
         where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
       `.execute(db);
     },
     async markFulfilled(id, externalOrderId) {
       await sql`
         update supplier_order
-        set status = 'FULFILLED', external_order_id = ${externalOrderId}, query_key = null, version = version + 1
+        set status = 'FULFILLED', external_order_id = ${externalOrderId}, query_key = null,
+            version = version + 1
         where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
       `.execute(db);
     },
     async markRejected(id) {
@@ -276,6 +282,7 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
         update supplier_order
         set status = 'REJECTED', version = version + 1
         where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
       `.execute(db);
     },
     async markNeedsReview(id, code) {
@@ -284,6 +291,7 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
         set last_error_code = ${code}, needs_review_at = coalesce(needs_review_at, now()),
             next_reconcile_at = null, version = version + 1
         where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
       `.execute(db);
     },
     async markBlocked(id, code) {
@@ -292,6 +300,7 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
         set status = 'REJECTED', last_error_code = ${code}, next_reconcile_at = null,
             version = version + 1
         where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
       `.execute(db);
     },
   };
@@ -341,9 +350,8 @@ function recoverResultFromAsset(asset: { id: string; status: string }): RecoverR
 
 /**
  * Ingest a validated supplier asset as a SUPPLIER/READY asset bound to the
- * order. On a validation mismatch the asset is quarantined (SUPPLIER_NEEDS_REVIEW)
- * instead of delivered. The shared purchase core marks the supplier order
- * FULFILLED after this transaction commits.
+ * order. The supplier row is locked and claimed in the same transaction so a
+ * stale fulfilled observation cannot ingest after a terminal outcome wins.
  */
 async function ingestFulfilledAsset(
   db: Db,
@@ -351,13 +359,14 @@ async function ingestFulfilledAsset(
     supplierOrderId: string;
     orderId: string;
     variantId: string;
+    externalOrderId: string;
     envelope: AssetEnvelope;
     expectedSku: string;
     deliveryType: string;
     durationCode: string;
     region: string | null;
   },
-): Promise<{ assetId: string; quarantined: boolean }> {
+): Promise<boolean> {
   const decision = validateAssetEnvelope(params.envelope, {
     expectedSku: params.expectedSku,
     deliveryType: params.deliveryType,
@@ -366,14 +375,26 @@ async function ingestFulfilledAsset(
   });
 
   return withTransaction(db, async (trx) => {
-    const locked = await sql<{ id: string }>`
-      select id from supplier_order where id = ${params.supplierOrderId} for update
+    const locked = await sql<{ id: string; status: string }>`
+      select id, status from supplier_order where id = ${params.supplierOrderId} for update
     `.execute(trx);
-    if (!locked.rows[0]) throw new Error("Supplier order disappeared during fulfilled ingest");
+    const row = locked.rows[0];
+    if (!row) throw new Error("Supplier order disappeared during fulfilled ingest");
 
     const existing = await findAssetBySupplierOrder(trx, params.supplierOrderId);
+    if (row.status === "FULFILLED") return existing !== null;
+    if (!["AUTHORIZED", "CREATED", "SUBMITTED", "PENDING", "UNKNOWN"].includes(row.status)) {
+      return false;
+    }
     if (existing) {
-      return { assetId: existing.id, quarantined: existing.status === "SUPPLIER_NEEDS_REVIEW" };
+      await sql`
+        update supplier_order
+        set status = 'FULFILLED', external_order_id = ${params.externalOrderId}, query_key = null,
+            version = version + 1
+        where id = ${params.supplierOrderId}
+          and status in ('AUTHORIZED','CREATED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(trx);
+      return true;
     }
 
     const assetId = newId();
@@ -395,15 +416,23 @@ async function ingestFulfilledAsset(
          ${JSON.stringify(summary)}::jsonb)
     `.execute(trx);
 
+    await sql`
+      update supplier_order
+      set status = 'FULFILLED', external_order_id = ${params.externalOrderId}, query_key = null,
+          version = version + 1
+      where id = ${params.supplierOrderId}
+        and status in ('AUTHORIZED','CREATED','SUBMITTED','PENDING','UNKNOWN')
+    `.execute(trx);
     if (quarantined) {
       await sql`
         update supplier_order
         set needs_review_at = coalesce(needs_review_at, now())
         where id = ${params.supplierOrderId}
+          and status = 'FULFILLED'
       `.execute(trx);
     }
 
-    return { assetId, quarantined };
+    return true;
   });
 }
 
@@ -555,18 +584,18 @@ export async function provisionFromSupplier(
         region: latest.region,
       };
     },
-    onFulfilled: async ({ record, assetEnvelope }) => {
-      await ingestFulfilledAsset(db, {
+    onFulfilled: async ({ record, externalOrderId, assetEnvelope }) =>
+      ingestFulfilledAsset(db, {
         supplierOrderId: record.id,
         orderId: input.orderId,
         variantId: order.variantId,
+        externalOrderId,
         envelope: assetEnvelope,
         expectedSku,
         deliveryType: input.deliveryType,
         durationCode: input.durationCode,
         region,
-      });
-    },
+      }),
   });
 
   if (result.kind === "BLOCKED") {
@@ -629,19 +658,20 @@ export async function recoverUnknownSupplierOrder(
     store: createSupplierOrderStore(db, Number(so.cost_vnd_snapshot)),
     recordId: so.id,
     queryKey: input.queryKey,
+    expectedSku: input.expectedSku,
     port: input.port,
-    onFulfilled: async ({ record, assetEnvelope }) => {
-      await ingestFulfilledAsset(db, {
+    onFulfilled: async ({ record, externalOrderId, assetEnvelope }) =>
+      ingestFulfilledAsset(db, {
         supplierOrderId: record.id,
         orderId: so.order_id,
         variantId: order.variantId,
+        externalOrderId,
         envelope: assetEnvelope,
         expectedSku: input.expectedSku,
         deliveryType: input.deliveryType,
         durationCode: input.durationCode,
         region: input.region,
-      });
-    },
+      }),
   });
   if (result.kind === "BLOCKED") {
     return {

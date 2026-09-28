@@ -34,8 +34,12 @@ function makePort(overrides: Partial<SupplierPort> = {}): SupplierPort {
   };
 }
 
-function makeStore(): SupplierPurchaseRecordStore & { rows: Map<string, SupplierPurchaseRecord> } {
+function makeStore(): SupplierPurchaseRecordStore & {
+  rows: Map<string, SupplierPurchaseRecord>;
+  reviewCodes: string[];
+} {
   const rows = new Map<string, SupplierPurchaseRecord>();
+  const reviewCodes: string[] = [];
   const byKey = new Map<string, string>();
   let next = 0;
   const claimed = new Set<string>();
@@ -46,6 +50,7 @@ function makeStore(): SupplierPurchaseRecordStore & { rows: Map<string, Supplier
   };
   return {
     rows,
+    reviewCodes,
     async findByIdempotency(input) {
       const id = byKey.get(`${input.supplierId}:${input.idempotencyKey}`);
       return id ? (rows.get(id) ?? null) : null;
@@ -103,8 +108,9 @@ function makeStore(): SupplierPurchaseRecordStore & { rows: Map<string, Supplier
     async markRejected(id) {
       await patch(id, { status: "REJECTED" });
     },
-    async markNeedsReview(id) {
-      await patch(id, {});
+    async markNeedsReview(_id, code) {
+      reviewCodes.push(code);
+      await patch(_id, {});
     },
     async markBlocked(id, code) {
       await patch(id, { status: "REJECTED", blockCode: code });
@@ -187,10 +193,49 @@ describe("durable supplier purchase core", () => {
       store,
       recordId: row.id,
       queryKey: "canary-1",
+      expectedSku: "SKU-1",
       port,
     });
     expect(recovered).toMatchObject({ kind: "FULFILLED", externalOrderId: "ext-1" });
     expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
+  });
+
+  it("parks a mismatched provider identity for review without retrying or ingesting", async () => {
+    const store = makeStore();
+    let creates = 0;
+    let queries = 0;
+    let ingested = 0;
+    const port = makePort({
+      createOrder: async () => {
+        creates += 1;
+        throw new SupplierPortError("TRANSPORT_TIMEOUT", "timeout");
+      },
+      queryOrder: async ({ expectedSku }) => {
+        queries += 1;
+        expect(expectedSku).toBe("SKU-1");
+        throw new SupplierPortError("IDENTITY_MISMATCH", "QCST order identity mismatch");
+      },
+    });
+
+    const first = await executeSupplierPurchase(input(store, { port }));
+    const row = [...store.rows.values()][0]!;
+    expect(first).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
+
+    const recovered = await recoverSupplierPurchase({
+      store,
+      recordId: row.id,
+      queryKey: "canary-1",
+      expectedSku: "SKU-1",
+      port,
+      onFulfilled: async () => {
+        ingested += 1;
+      },
+    });
+
+    expect(recovered).toMatchObject({ kind: "BLOCKED", code: "IDENTITY_MISMATCH" });
+    expect(store.reviewCodes).toEqual(["IDENTITY_MISMATCH"]);
+    expect(store.rows.get(row.id)).toMatchObject({ status: "UNKNOWN" });
+    expect({ creates, queries, ingested }).toEqual({ creates: 1, queries: 1, ingested: 0 });
   });
 
   it("recovers a SUBMITTED record by stable query key even with spending disabled", async () => {
@@ -210,11 +255,12 @@ describe("durable supplier purchase core", () => {
         creates += 1;
         return { kind: "REJECTED", code: "unexpected", retryable: false };
       },
-      queryOrder: async ({ queryKey, externalOrderId }) => {
+      queryOrder: async ({ queryKey, externalOrderId, expectedSku }) => {
         queries += 1;
-        expect({ queryKey, externalOrderId }).toEqual({
+        expect({ queryKey, externalOrderId, expectedSku }).toEqual({
           queryKey: "canary-1",
           externalOrderId: undefined,
+          expectedSku: "SKU-1",
         });
         return { status: "PENDING", externalOrderId: "ext-submitted-1" };
       },
