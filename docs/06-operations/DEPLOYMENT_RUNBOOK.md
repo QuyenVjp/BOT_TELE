@@ -124,21 +124,28 @@ The next forward-only source migrations after the protected production head are:
 3. `094_supplier_owner_canary.sql`
 4. `095_supplier_unknown_query_key_backfill.sql`
 
-Apply them in filename order from a clean release artifact; no older migration
-file may be edited or replaced. Migration `095` backfills pre-canary `UNKNOWN`
-supplier-order rows after `094` has already been recorded: it copies the legacy
-lookup key into `query_key` while retaining `external_order_id` for rollback
-compatibility. The mapper treats it as a query key only while status is
-`UNKNOWN`; provider IDs on other states remain unchanged. It remains branch-only
-until separately approved; do not apply it to production as part of this PR.
-
-The release sequence is linear: automated CI and security gates → protected PR merge →
-build the exact clean SHA with an empty compiled migration directory → keep the store
-`CLOSED` and risky flags off → apply only the ordered migrations → restart the existing
-API/worker supervisors → verify `/health`, `/ready`, and `npm run preflight:production`
-→ run direct live Telegram/browser smoke → enable one feature flag at a time with
-rollback evidence. Migration application must not wait on a first-sale or workbook
-write; those are separate acceptance gates.
+This list records source order only; it is not an instruction to apply the
+migrations as a set. Apply a production migration only after that exact
+migration is separately approved for the exact release artifact and window.
+Migration `095` backfills pre-canary `UNKNOWN` supplier-order rows after `094`
+has already been recorded: it copies the legacy lookup key into `query_key`
+while retaining `external_order_id` for rollback compatibility. The mapper
+treats it as a query key only while status is `UNKNOWN`; provider IDs on other
+states remain unchanged.
+Source history and a PR merge are not deployment approval. No production
+migration is authorized by this task. Do not run production migrations from
+any artifact containing unapproved `094_supplier_owner_canary.sql` or
+`095_supplier_unknown_query_key_backfill.sql`; those migrations remain
+branch-only until separately approved through the production change process.
+The release sequence is linear only after that independent approval:
+automated CI and security gates → protected PR merge → build the exact clean
+SHA with an empty compiled migration directory → keep the store `CLOSED` and
+risky flags off → apply only the separately approved ordered migrations →
+restart the existing API/worker supervisors → verify `/health`, `/ready`, and
+`npm run preflight:production` → run direct live Telegram/browser smoke →
+enable one feature flag at a time with rollback evidence. Migration application
+must not wait on a first-sale or workbook write; those are separate acceptance
+gates. A merge alone does not authorize any of these production actions.
 
 Production defaults for this growth train are fail-closed:
 `SOCIAL_PROOF_ENABLED=false`, `VERIFIED_REVIEWS_ENABLED=false`,
@@ -168,6 +175,10 @@ SUPPLIER_CANARY_ENABLED=true
 QCST_PURCHASE_ENABLED=true
 VOKHONG_PURCHASE_ENABLED=false
 SUPPLIER_AUTO_FAILOVER_ENABLED=false
+QCST_CATALOG_SYNC=true
+QCST_ADMIN_PRODUCT_BROWSER=true
+QCST_OWNER_SELECTION=true
+QCST_LOCAL_PRICE_CONTROL=true
 ```
 
 Only the owner canary lane may create a QCST order; historical PAID commerce
@@ -186,7 +197,9 @@ Keep `QCST_DELIVERY_SCHEMA_ACCEPTED=NO`. If QCST returns
 `DELIVERY_UNSUPPORTED` / `NEEDS_REVIEW`; do not decode, persist, or send raw
 delivery data. Migrations `094_supplier_owner_canary.sql` and
 `095_supplier_unknown_query_key_backfill.sql` are branch-only until separately
-approved and must not be applied to production as part of this PR.
+approved and must not be applied to production from an artifact containing
+either unapproved migration. This runbook does not authorize a production
+migration, flag change, or live canary; the store remains `CLOSED`.
 
 ## Historical migrations 072–076 — post-merge production procedure
 

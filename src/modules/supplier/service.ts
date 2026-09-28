@@ -9,6 +9,7 @@ import {
   executeSupplierPurchase,
   recoverSupplierPurchase,
   type SupplierPurchaseRecord,
+  type SupplierPurchaseRecordStatus,
   type SupplierPurchaseRecordStore,
 } from "./purchase-core.js";
 import {
@@ -62,7 +63,11 @@ export type ProvisionResult =
   | { ok: true; kind: "UNKNOWN"; supplierOrderId: string; queryKey: string }
   | { ok: true; kind: "REJECTED"; supplierOrderId: string }
   | { ok: true; kind: "NEEDS_REVIEW"; supplierOrderId: string; assetId: string }
-  | { ok: false; code: "NOT_FOUND" | "NOT_PAID" | "UNSUPPORTED"; message: string };
+  | {
+      ok: false;
+      code: "NOT_FOUND" | "NOT_PAID" | "UNSUPPORTED" | "ORDER_TERMINAL";
+      message: string;
+    };
 
 export interface RecoverInput {
   supplierOrderId: string;
@@ -100,15 +105,28 @@ interface SupplierOrderRow {
   needs_review_at: Date | string | null;
 }
 
+function toPurchaseRecordStatus(status: string): SupplierPurchaseRecordStatus {
+  switch (status) {
+    case "AUTHORIZED":
+    case "CREATED":
+    case "SUBMITTED":
+    case "PENDING":
+    case "FULFILLED":
+    case "REJECTED":
+    case "UNKNOWN":
+    case "RECONCILED":
+    case "CANCEL_PENDING":
+    case "CANCELLED":
+    case "REFUND_PENDING":
+    case "REFUNDED":
+      return status;
+    default:
+      return "UNRECOGNIZED";
+  }
+}
+
 function toPurchaseRecord(row: SupplierOrderRow): SupplierPurchaseRecord {
-  const status: SupplierPurchaseRecord["status"] =
-    row.status === "FULFILLED" ||
-    row.status === "REJECTED" ||
-    row.status === "PENDING" ||
-    row.status === "UNKNOWN" ||
-    row.status === "AUTHORIZED"
-      ? row.status
-      : "SUBMITTED";
+  const status = toPurchaseRecordStatus(row.status);
   const legacyQueryKey = status === "UNKNOWN" ? row.external_order_id : null;
   return {
     id: row.id,
@@ -300,6 +318,18 @@ function provisionResultFromExisting(
   }
   if (existing.status === "REJECTED")
     return { ok: true, kind: "REJECTED", supplierOrderId: existing.id };
+  if (
+    existing.status !== "AUTHORIZED" &&
+    existing.status !== "SUBMITTED" &&
+    existing.status !== "PENDING" &&
+    existing.status !== "UNKNOWN"
+  ) {
+    return {
+      ok: false,
+      code: "ORDER_TERMINAL",
+      message: "Đơn nhà cung cấp không ở trạng thái có thể cấp phát.",
+    };
+  }
   return null;
 }
 
@@ -453,12 +483,13 @@ export async function provisionFromSupplier(
         queryKey: existingRecord.queryKey ?? idempotencyKey,
       };
     }
-    return {
-      ok: true,
-      kind: "UNKNOWN",
-      supplierOrderId: existingRecord.id,
-      queryKey: existingRecord.queryKey ?? idempotencyKey,
-    };
+    if (existingRecord.status !== "AUTHORIZED") {
+      return {
+        ok: false,
+        code: "ORDER_TERMINAL",
+        message: "Đơn nhà cung cấp không ở trạng thái có thể cấp phát.",
+      };
+    }
   }
   if (input.purchaseEnabled !== true) {
     return {

@@ -352,7 +352,7 @@ function mapOrderToQuery(order: QcstOrder): QueryOrderResult {
   return { status: "PENDING", externalOrderId };
 }
 
-function mapOrderToCreate(order: QcstOrder): CreateOrderResult {
+function mapOrderToCreate(order: QcstOrder, queryKey: string): CreateOrderResult {
   const status = order.status.trim().toUpperCase();
   if (["FAILED", "REJECTED", "CANCELLED", "REFUNDED", "REFUND_FAILED"].includes(status)) {
     return {
@@ -364,7 +364,7 @@ function mapOrderToCreate(order: QcstOrder): CreateOrderResult {
   if (hasUnsupportedDelivery(order)) {
     return {
       kind: "UNKNOWN",
-      queryKey: order.client_order_id,
+      queryKey,
       reason: "delivery_schema_unsupported",
     };
   }
@@ -545,7 +545,7 @@ export function createQcstSupplierPort(
           idempotencyKey: input.idempotencyKey,
           parse: (value) => OrderResponseSchema.parse(value),
         });
-        return mapOrderToCreate(response.data);
+        return mapOrderToCreate(response.data, input.idempotencyKey);
       } catch (error) {
         if (isTransportError(error)) {
           return { kind: "UNKNOWN", queryKey: input.idempotencyKey, reason: "transport_timeout" };

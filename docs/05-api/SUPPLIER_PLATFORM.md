@@ -42,11 +42,13 @@ retried. Missing generic/provider purchase authorization is false, and
 `ORDER_CREATE` plus paid/settled prerequisites are required before any upstream
 POST.
 
-Recovery stays query-only: a `PENDING` provider result is stored as `PENDING`
-and only queried again. For a legacy `UNKNOWN` row, `external_order_id` remains
-a lookup key even after it is copied to `query_key`; it is never exposed as a
-confirmed provider order ID. Other states retain their actual provider ID.
-This compatibility mapping never authorizes another `POST`.
+Recovery for `SUBMITTED`, `PENDING`, and `UNKNOWN` remains query-only. A
+`PENDING` provider result stays `PENDING`; a legacy `UNKNOWN` row's
+`external_order_id` is a lookup key even after it is copied to `query_key`, and
+is never exposed as a confirmed provider order ID. Other persisted statuses are
+preserved; cancellation/refund, reconciled, created, and unrecognized statuses
+fail closed for owner review and are never coerced to `SUBMITTED`, queried, or
+re-created. Only `AUTHORIZED` may claim a new `POST`.
 
 Required checkpoints before enabling real purchase:
 

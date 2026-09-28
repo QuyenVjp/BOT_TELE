@@ -328,7 +328,7 @@ export function createAdminConfirmation(
 
       const now = clock();
       const expiresAt = new Date(toIso(row.expires_at));
-      if (now.getTime() > expiresAt.getTime()) {
+      if (now.getTime() >= expiresAt.getTime()) {
         await sql`
           update admin_confirmation set status = 'EXPIRED'
           where id = ${row.id} and status in ('CREATED', 'CONFIRMED')
@@ -380,7 +380,7 @@ export function createAdminConfirmation(
 
       const now = clock();
       const expiresAt = new Date(toIso(row.expires_at));
-      if (now.getTime() > expiresAt.getTime()) {
+      if (now.getTime() >= expiresAt.getTime()) {
         await sql`
           update admin_confirmation set status = 'EXPIRED'
           where id = ${row.id} and status = 'CONFIRMED'
@@ -436,7 +436,7 @@ export function createAdminConfirmation(
 
           const now = clock();
           const expiresAt = new Date(toIso(row.expires_at));
-          if (now.getTime() > expiresAt.getTime()) {
+          if (now.getTime() >= expiresAt.getTime()) {
             await sql`
               update admin_confirmation set status = 'EXPIRED'
               where id = ${row.id} and status in ('CREATED', 'CONFIRMED')

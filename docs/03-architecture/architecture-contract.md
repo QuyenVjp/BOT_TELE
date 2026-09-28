@@ -682,26 +682,35 @@ customer delivery bundle.
 
 The canary lifecycle is `PREVIEWED -> AUTHORIZED -> SUBMITTED -> PENDING`,
 `FULFILLED`, `UNKNOWN`, `REJECTED`, or `BLOCKED`. `PREVIEWED` is read-only.
-The explicit durable `/confirm` transitions the run to `AUTHORIZED`; only
-`AUTHORIZED` may claim and issue the first provider create. `SUBMITTED` means
-the provider may already have received the request. `SUBMITTED`, `PENDING`,
-and `UNKNOWN` recover only by querying with the stable idempotency/client order
-key or a known external order ID. A replay or process restart from those states
-MUST NOT create again. Query-only recovery remains available after spend gates
-are disabled.
+The durable `/confirm` transitions the run to `AUTHORIZED`. Recovery may resume
+that state only when the linked admin confirmation is durably `CONSUMED`, its
+`supplier.canary.purchase` action fingerprint binds the run ID and request
+fingerprint, and its payload binds the owner actor. Before any new create, the
+service rechecks current master/canary/provider gates, approved and current
+cost, mapping/support/availability, automatic fulfillment with no customer
+input, and VND balance. Proof or gate failures durably block the run so a later
+flag change cannot revive it. The shared executor's `AUTHORIZED -> SUBMITTED`
+compare-and-set is the sole create claim and occurs before provider I/O.
+`SUBMITTED` means the provider may already have received the request.
+`SUBMITTED`, `PENDING`, and `UNKNOWN` recover only by querying with the stable
+idempotency/client order key or a known external order ID. A replay or process
+restart from those states MUST NOT create again. Query-only recovery remains
+available after spend gates are disabled.
 
-A provider-observed `PENDING` response remains `PENDING` in the durable row
-and owner-facing execution result; `UNKNOWN` is reserved for unresolved or
-ambiguous outcomes.
-Query-only recovery requires the provider registration, its `ORDER_READ`
-capability, and the existing Vault-backed credential to remain available until
-the row is terminal; purchase gates may be disabled during recovery.
-The worker dispatches this recovery through `runRecoveryJobsOnce` in the
-existing 60-second recovery lane; it does not add a timer or depend on owner
-identity or purchase gates. Batches claim due rows with `FOR UPDATE SKIP LOCKED`,
-defer each row before querying, and keep transient failures nonterminal with a
-bounded retry delay. `SUBMITTED` receives a 60-second grace period before its
-first query; `PENDING` and `UNKNOWN` use the durable `next_reconcile_at` schedule.
+A provider-observed `PENDING` response remains `PENDING` in the durable row and
+owner-facing execution result; `UNKNOWN` is reserved for unresolved or
+ambiguous outcomes. Query-only recovery requires the provider registration, its
+`ORDER_READ` capability, and the existing Vault-backed credential to remain
+available until the row is terminal; purchase gates may be disabled during
+recovery. `runRecoveryJobsOnce` dispatches this work through the existing
+60-second recovery lane. Query-only ambiguous recovery never depends on owner
+identity or purchase gates; `AUTHORIZED` resume is dispatched only when the
+live canary service is available and it revalidates the consumed confirmation
+and current create gates. Batches claim due rows with `FOR UPDATE SKIP LOCKED`,
+defer each row before network I/O, and keep transient failures nonterminal with
+a bounded retry delay. `SUBMITTED` receives a 60-second grace period before its
+first query; `PENDING` and `UNKNOWN` use the durable `next_reconcile_at`
+schedule.
 
 Final confirmation re-reads the authoritative provider, primary mapping,
 catalog support/availability, automatic fulfillment with no customer input,
@@ -749,10 +758,11 @@ resale evidence exists.
 ### Canary invariant and rollout ledger
 
 - `invariants_preserved`: no fake commerce payment; provider-neutral adapter;
-  Vault-only secrets; durable idempotency; query-only `SUBMITTED`/`PENDING`/
-  `UNKNOWN` recovery; strict delivery schema; root/private authorization;
-  isolated commerce and canary spend lanes; local price and resale-evidence
-  authority; fail-closed customer routing.
+  Vault-only secrets; durable idempotency; exact consumed-confirmation binding;
+  gated `AUTHORIZED` resume before the single create CAS; query-only
+  `SUBMITTED`/`PENDING`/`UNKNOWN` recovery; strict delivery schema; root/private
+  authorization; isolated commerce/canary spend lanes; local price and
+  resale-evidence authority; fail-closed customer routing.
 - `intentional_breaks`: none to customer payment, SePay, store mode, or
   fulfillment semantics; the canary adds only an owner commissioning aggregate
   and a reuse seam around existing supplier purchase I/O.
@@ -760,6 +770,8 @@ resale evidence exists.
   concurrent owner actions, ambiguous delivery, and adapter capability drift.
   Re-read-at-submit gates, unique durable claims, version/payload binding,
   provider balance reads, strict schemas, and query-only recovery bound them.
+  A crash after the durable `AUTHORIZED -> SUBMITTED` claim but before the
+  provider call remains intentionally query-only and may require manual review.
 - `kill_switches`: `SUPPLIER_CANARY_ENABLED=false`,
   `SUPPLIER_COMMERCE_PURCHASE_ENABLED=false`,
   `SUPPLIER_PURCHASE_ENABLED=false`, and provider purchase gates false.

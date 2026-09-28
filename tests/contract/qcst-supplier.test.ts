@@ -286,13 +286,21 @@ describe("QCST supplier adapter", () => {
     });
   });
 
-  it("fails closed when QCST advertises an untyped delivery", async () => {
+  it("uses the submitted idempotency key for unknown delivery reconciliation", async () => {
+    const submittedKey = "supplier-order:submitted";
     const deliveredShape = {
       ...ORDER,
+      client_order_id: "supplier-order:response",
       delivery_available: true,
       delivery: { credential: "opaque" },
     };
+    let queriedClientOrderId: string | null = null;
     const server = await startServer((request, response) => {
+      if (request.method === "GET") {
+        queriedClientOrderId = new URL(request.url ?? "", "http://127.0.0.1").searchParams.get(
+          "client_order_id",
+        );
+      }
       const body =
         request.method === "GET"
           ? { success: true, data: { items: [deliveredShape], has_more: false, next_cursor: null } }
@@ -303,19 +311,20 @@ describe("QCST supplier adapter", () => {
 
     await expect(
       port.createOrder({
-        idempotencyKey: ORDER.client_order_id,
+        idempotencyKey: submittedKey,
         supplierSku: PRODUCT.id,
         costCeilingVnd: PRODUCT.price,
         orderId: "ord-1",
       }),
     ).resolves.toEqual({
       kind: "UNKNOWN",
-      queryKey: deliveredShape.client_order_id,
+      queryKey: submittedKey,
       reason: "delivery_schema_unsupported",
     });
-    await expect(
-      port.queryOrder({ queryKey: deliveredShape.client_order_id }),
-    ).rejects.toMatchObject({ supplierCode: "DELIVERY_UNSUPPORTED" });
+    await expect(port.queryOrder({ queryKey: submittedKey })).rejects.toMatchObject({
+      supplierCode: "DELIVERY_UNSUPPORTED",
+    });
+    expect(queriedClientOrderId).toBe(submittedKey);
   });
 
   it("does not echo QCST error bodies and preserves rate-limit classification", async () => {

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { SupplierOrderStatus } from "./domain.js";
 import {
   hasSupplierCapability,
   SupplierPortError,
@@ -9,8 +10,7 @@ import {
   type SupplierProvider,
 } from "./port.js";
 
-export type SupplierPurchaseRecordStatus =
-  "AUTHORIZED" | "SUBMITTED" | "PENDING" | "FULFILLED" | "REJECTED" | "UNKNOWN";
+export type SupplierPurchaseRecordStatus = SupplierOrderStatus | "AUTHORIZED" | "UNRECOGNIZED";
 
 export interface SupplierPurchaseRecord {
   id: string;
@@ -172,13 +172,10 @@ export async function executeSupplierPurchase(
     ) {
       return recoverExisting(existing);
     }
-    // AUTHORIZED is the canary post-confirmation state. It is the only existing
-    // state that may proceed to create without inserting a second intent.
+    // AUTHORIZED is the only existing state that may proceed to create without
+    // inserting a second intent. Every other preserved state is fail-closed.
     if (existing.status !== "AUTHORIZED") {
-      return unknownResult(
-        existing,
-        existing.queryKey ?? existing.externalOrderId ?? input.idempotencyKey,
-      );
+      return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_ELIGIBLE", record: existing };
     }
   }
   if (input.purchaseEnabled !== true) {
@@ -214,10 +211,7 @@ export async function executeSupplierPurchase(
       ) {
         return recoverExisting(record);
       }
-      return unknownResult(
-        record,
-        record.queryKey ?? record.externalOrderId ?? input.idempotencyKey,
-      );
+      return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_ELIGIBLE", record };
     }
   }
 
@@ -321,6 +315,9 @@ export async function recoverSupplierPurchase(input: {
   if (!record) return { kind: "BLOCKED", code: "NOT_FOUND", record: null };
   if (record.status === "FULFILLED" || record.status === "REJECTED") {
     return { kind: "REPLAY", record };
+  }
+  if (record.status !== "UNKNOWN" && record.status !== "PENDING" && record.status !== "SUBMITTED") {
+    return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_QUERYABLE", record };
   }
   if (!hasReadCapability(input.port)) {
     await input.store.markNeedsReview(record.id, "ORDER_READ_UNSUPPORTED");

@@ -171,6 +171,22 @@ async function loadCanary(exec: Executor, id: string): Promise<CanaryRow | null>
   `.execute(exec);
   return result.rows[0] ?? null;
 }
+async function hasConsumedCanaryConfirmation(exec: Executor, row: CanaryRow): Promise<boolean> {
+  if (!row.confirmation_id) return false;
+  const result = await sql<{ id: string }>`
+    select confirmation.id
+    from admin_confirmation confirmation
+    where confirmation.id = ${row.confirmation_id}
+      and confirmation.status = 'CONSUMED'
+      and confirmation.consumed_at is not null
+      and confirmation.allowlisted_command_ref = ${CANARY_ACTION}
+      and confirmation.action_fingerprint = ${`${CANARY_ACTION}:${row.id}:${row.request_fingerprint}`}
+      and confirmation.payload_redacted->>'runId' = ${row.id}
+      and confirmation.payload_redacted->>'actorId' = ${row.created_by}
+    limit 1
+  `.execute(exec);
+  return result.rows.length === 1;
+}
 async function hasAutomaticDelivery(exec: Executor, supplierSkuId: string): Promise<boolean> {
   const result = await sql<{
     fulfillment_mode: string | null;
@@ -499,6 +515,7 @@ export async function recoverSupplierCanariesBatch(
     now?: Date;
     retryDelaySeconds?: number;
     registry: SupplierProviderRegistry;
+    resumeAuthorizedCanary?: (runId: string) => Promise<SupplierCanaryExecutionResult>;
   },
 ): Promise<RecoveryTelemetry> {
   validateRecoveryBatchSize(options.batchSize);
@@ -519,7 +536,26 @@ export async function recoverSupplierCanariesBatch(
         select canary.id
         from supplier_canary_run canary
         where canary.needs_review_at is null
-          and canary.status in ('SUBMITTED','PENDING','UNKNOWN')
+          and (
+            canary.status in ('SUBMITTED','PENDING','UNKNOWN')
+            or (
+              ${options.resumeAuthorizedCanary !== undefined}
+              and canary.status = 'AUTHORIZED'
+              and canary.confirmation_id is not null
+              and exists (
+                select 1
+                from admin_confirmation confirmation
+                where confirmation.id = canary.confirmation_id
+                  and confirmation.status = 'CONSUMED'
+                  and confirmation.consumed_at is not null
+                  and confirmation.allowlisted_command_ref = ${CANARY_ACTION}
+                  and confirmation.action_fingerprint =
+                    ${CANARY_ACTION} || ':' || canary.id || ':' || canary.request_fingerprint
+                  and confirmation.payload_redacted->>'runId' = canary.id
+                  and confirmation.payload_redacted->>'actorId' = canary.created_by
+              )
+            )
+          )
           and (
             canary.status <> 'SUBMITTED'
             or canary.submitted_at <= ${submittedGraceCutoff}
@@ -561,13 +597,20 @@ export async function recoverSupplierCanariesBatch(
     }
     let attempt: CanaryRecoveryAttempt;
     try {
-      attempt = await recoverCanaryRun(db, options.registry, row);
+      if (row.status === "AUTHORIZED" && options.resumeAuthorizedCanary) {
+        attempt = {
+          execution: await options.resumeAuthorizedCanary(row.id),
+          queried: false,
+        };
+      } else {
+        attempt = await recoverCanaryRun(db, options.registry, row);
+      }
     } catch {
       failed += 1;
       await scheduleCanaryRecovery(db, {
         runId: candidate.id,
         retryDelaySeconds,
-        queried: true,
+        queried: row.status !== "AUTHORIZED",
         errorCode: "SUPPLIER_QUERY_FAILED",
       });
       continue;
@@ -778,6 +821,10 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       return (await recoverCanaryRun(options.db, options.registry, row)).execution;
     }
     if (row.status !== "AUTHORIZED") return { runId, ...safeFailure("CANARY_NOT_AUTHORIZED") };
+    if (!(await hasConsumedCanaryConfirmation(options.db, row))) {
+      await markCanaryBlocked(options.db, runId, "CONFIRMATION_FAILED");
+      return { runId, ...safeFailure("CONFIRMATION_FAILED") };
+    }
     if (!options.canaryEnabled || !options.canaryPurchaseEnabled(row.provider_key)) {
       await markCanaryBlocked(options.db, runId, "PURCHASE_GATE_DISABLED");
       return { runId, ...safeFailure("PURCHASE_GATE_DISABLED") };

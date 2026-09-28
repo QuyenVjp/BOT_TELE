@@ -134,6 +134,7 @@ import type {
 } from "./modules/supplier/port.js";
 import type { SupplierProviderRegistry } from "./modules/supplier/registry.js";
 import type { RecoveryTelemetry } from "./modules/recovery-result.js";
+import type { LatencyMetrics } from "./infrastructure/observability/tracing.js";
 import {
   configureSupplierCatalogProduct,
   ensureSupplierProvider,
@@ -164,7 +165,7 @@ import { reconcileForPaymentCheck } from "./modules/payments/check-now.js";
 import { setTimeout as delayNotification } from "node:timers/promises";
 import { recoverSupplierOrdersBatch } from "./modules/supplier/recovery.js";
 import { recoverSupplierCanariesBatch } from "./modules/supplier/canary.js";
-import type { LatencyMetrics } from "./infrastructure/observability/tracing.js";
+import type { SupplierCanaryExecutionResult } from "./modules/supplier/canary.js";
 import { subscribeRestock, unsubscribeRestock } from "./modules/catalog/restock.js";
 import {
   reserveNotificationSlot,
@@ -270,6 +271,7 @@ export async function runRecoveryJobsOnce(input: {
   sePayPort: SePayReconciliationPort | null;
   supplierPort: SupplierPort | null;
   supplierRegistry?: SupplierProviderRegistry | null;
+  resumeAuthorizedCanary?: (runId: string) => Promise<SupplierCanaryExecutionResult>;
   vault: Vault;
   inboxRetention?: Partial<TelegramInboxRetention>;
 }): Promise<RecoveryCycleResult> {
@@ -330,6 +332,9 @@ export async function runRecoveryJobsOnce(input: {
         batchSize: input.batchSize,
         now,
         registry: input.supplierRegistry,
+        ...(input.resumeAuthorizedCanary
+          ? { resumeAuthorizedCanary: input.resumeAuthorizedCanary }
+          : {}),
       })
     : null;
   return {
@@ -9721,6 +9726,7 @@ async function bootstrap(): Promise<void> {
       sePayPort: sePayRecoveryPort,
       supplierPort: supplier,
       supplierRegistry,
+      ...(supplierCanary ? { resumeAuthorizedCanary: supplierCanary.executePending } : {}),
       vault,
       inboxRetention: {
         processedRetentionDays: config.TELEGRAM_INBOX_PROCESSED_RETENTION_DAYS,
