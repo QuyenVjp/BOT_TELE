@@ -986,8 +986,20 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
         },
       });
       if (!executed.ok) return { ok: false, code: executed.code, message: executed.message };
-      const execution = await executePending(payload.runId);
-      return { ok: true, runId: payload.runId, execution };
+      // Consumed confirmations bypass the callback, so bind replayed work before resuming it.
+      const confirmedPayload = parseCanaryAction(executed.action.payloadRedacted);
+      if (
+        executed.action.commandRef !== CANARY_ACTION ||
+        !confirmedPayload ||
+        confirmedPayload.runId !== payload.runId
+      ) {
+        return safeFailure("CONFIRMATION_FAILED");
+      }
+      if (confirmedPayload.actorId !== String(input.actor.numericUserId)) {
+        return safeFailure("AUTHORIZATION_REQUIRED");
+      }
+      const execution = await executePending(confirmedPayload.runId);
+      return { ok: true, runId: confirmedPayload.runId, execution };
     } catch (error) {
       if (error instanceof SensitiveAuthorizationRefusedError) {
         return safeFailure("AUTHORIZATION_REQUIRED");

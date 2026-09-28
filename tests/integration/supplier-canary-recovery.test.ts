@@ -53,6 +53,8 @@ type SeededRecoveryRun = {
   externalOrderId: string | null;
   confirmationId?: string;
   actionFingerprint?: string;
+  challenge?: string;
+  rootChannelIdentityId?: string;
 };
 
 async function seedCanaryRun(
@@ -118,7 +120,10 @@ async function seedCanaryRun(
 
   return { runId, supplierId, supplierSkuId, variantId, idempotencyKey, externalOrderId };
 }
-async function seedAuthorizedCanaryRun(withValidConfirmation = true): Promise<SeededRecoveryRun> {
+async function seedAuthorizedCanaryRun(
+  withValidConfirmation = true,
+  rootChannelIdentityId = newId(),
+): Promise<SeededRecoveryRun> {
   const run = await seedCanaryRun("AUTHORIZED");
   await sql`
     update supplier_canary_run
@@ -147,7 +152,6 @@ async function seedAuthorizedCanaryRun(withValidConfirmation = true): Promise<Se
   if (!withValidConfirmation) return run;
 
   const customerId = newId();
-  const rootChannelIdentityId = newId();
   await sql`
     insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')
   `.execute(ctx.db);
@@ -186,7 +190,13 @@ async function seedAuthorizedCanaryRun(withValidConfirmation = true): Promise<Se
     set confirmation_id = ${issued.confirmationId}
     where id = ${run.runId}
   `.execute(ctx.db);
-  return { ...run, confirmationId: issued.confirmationId, actionFingerprint };
+  return {
+    ...run,
+    confirmationId: issued.confirmationId,
+    actionFingerprint,
+    challenge: issued.challenge,
+    rootChannelIdentityId,
+  };
 }
 
 function makeProvider(input: {
@@ -194,6 +204,7 @@ function makeProvider(input: {
   capabilities?: readonly SupplierCapability[];
   balanceVnd?: number;
   createResult?: { kind: "ACCEPTED"; externalOrderId: string; status: "PENDING" };
+  createError?: Error;
   queryResult?: (query: QueryOrderInput, call: number) => QueryOrderResult;
   queryError?: Error;
 }) {
@@ -207,6 +218,7 @@ function makeProvider(input: {
     getBalance: async () => ({ available: input.balanceVnd ?? 100_000, currency: "VND" }),
     createOrder: async () => {
       createCalls += 1;
+      if (input.createError) throw input.createError;
       if (input.createResult) return input.createResult;
       throw new Error("recovery must never create an order");
     },
@@ -256,6 +268,7 @@ function makeRecoveryService(
   options: {
     canaryEnabled?: boolean;
     canaryPurchaseEnabled?: (providerKey: string) => boolean;
+    rootChannelIdentityId?: string;
   } = {},
 ) {
   const rootConfig = { adminTelegramUserId: 1, expectedUsername: "test-owner" };
@@ -263,7 +276,7 @@ function makeRecoveryService(
     db: ctx.db,
     registry,
     confirmation: createAdminConfirmation(ctx.db),
-    rootChannelIdentityId: "recovery-test-root-channel",
+    rootChannelIdentityId: options.rootChannelIdentityId ?? "recovery-test-root-channel",
     rootConfig,
     sensitiveDeps: {
       db: ctx.db,
@@ -281,6 +294,7 @@ function makeRecoveryService(
 async function canaryRun(runId: string) {
   const result = await sql<{
     status: string;
+    query_key: string | null;
     external_order_id: string | null;
     last_error_code: string | null;
     retry_after_seconds: number | null;
@@ -288,7 +302,7 @@ async function canaryRun(runId: string) {
     next_reconcile_at: Date | null;
     needs_review_at: Date | null;
   }>`
-    select status, external_order_id, last_error_code, retry_after_seconds,
+    select status, query_key, external_order_id, last_error_code, retry_after_seconds,
            last_queried_at, next_reconcile_at, needs_review_at
     from supplier_canary_run where id = ${runId}
   `.execute(ctx.db);
@@ -359,6 +373,79 @@ describe("worker-dispatched supplier canary recovery", () => {
       backlog: 1,
     });
     expect(provider.createCalls).toBe(1);
+    expect(await deliveryCounts()).toEqual({ orders: "0", assets: "0", bundles: "0" });
+  });
+
+  it("rejects a consumed canary confirmation replay from a different private actor", async () => {
+    const rootChannelIdentityId = newId();
+    const run = await seedAuthorizedCanaryRun(true, rootChannelIdentityId);
+    if (!run.confirmationId || !run.challenge) throw new Error("missing confirmation fixture");
+    const provider = makeProvider({
+      providerKey: run.supplierId,
+      capabilities: ["ORDER_CREATE", "ORDER_READ", "BALANCE_READ", "CATALOG_LIST"],
+      createResult: {
+        kind: "ACCEPTED",
+        externalOrderId: `qcst-created-${run.runId}`,
+        status: "PENDING",
+      },
+    });
+    const service = makeRecoveryService(createSupplierProviderRegistry([provider.provider]), {
+      canaryEnabled: true,
+      canaryPurchaseEnabled: () => true,
+      rootChannelIdentityId,
+    });
+
+    const result = await service.confirmIfCanary({
+      confirmationId: run.confirmationId,
+      challenge: run.challenge,
+      actor: { numericUserId: 2, chatType: "private" },
+      correlationId: "unauthorized-canary-replay",
+    });
+
+    expect(provider.createCalls).toBe(0);
+    expect(result).toMatchObject({ ok: false, code: "AUTHORIZATION_REQUIRED" });
+    expect(await canaryRun(run.runId)).toMatchObject({ status: "AUTHORIZED" });
+  });
+
+  it("recovers an uncertain canary create by query without a second create", async () => {
+    const run = await seedAuthorizedCanaryRun();
+    const provider = makeProvider({
+      providerKey: run.supplierId,
+      capabilities: ["ORDER_CREATE", "ORDER_READ", "BALANCE_READ", "CATALOG_LIST"],
+      createError: new SupplierPortError("TRANSPORT_TIMEOUT", "temporary supplier create timeout"),
+    });
+    const registry = createSupplierProviderRegistry([provider.provider]);
+    const service = makeRecoveryService(registry, {
+      canaryEnabled: true,
+      canaryPurchaseEnabled: () => true,
+    });
+
+    const submitted = await service.executePending(run.runId);
+    expect(submitted).toMatchObject({ ok: true, runId: run.runId, status: "UNKNOWN" });
+    expect(provider.createCalls).toBe(1);
+    expect(provider.queryInputs).toEqual([]);
+    const uncertain = await canaryRun(run.runId);
+    expect(uncertain).toMatchObject({
+      status: "UNKNOWN",
+      query_key: run.idempotencyKey,
+      retry_after_seconds: 60,
+    });
+    expect(uncertain.next_reconcile_at).toBeInstanceOf(Date);
+    await sql`
+      update supplier_canary_run
+      set next_reconcile_at = now() - interval '1 second'
+      where id = ${run.runId} and status = 'UNKNOWN'
+    `.execute(ctx.db);
+
+    const recovered = await dispatchRecovery(registry, new Date(), 20, service.executePending);
+
+    expect(recovered.supplierCanary).toMatchObject({ claimed: 1, succeeded: 1, failed: 0 });
+    expect(provider.createCalls).toBe(1);
+    expect(provider.queryInputs).toEqual([{ queryKey: run.idempotencyKey }]);
+    expect(await canaryRun(run.runId)).toMatchObject({
+      status: "PENDING",
+      external_order_id: expect.any(String),
+    });
     expect(await deliveryCounts()).toEqual({ orders: "0", assets: "0", bundles: "0" });
   });
 
@@ -768,6 +855,19 @@ describe("worker-dispatched supplier canary recovery", () => {
         next_reconcile_at: null,
       });
       expect(provider.queryInputs).toHaveLength(1);
+      const replay = await dispatchRecovery(createSupplierProviderRegistry([provider.provider]));
+      expect(replay.supplierCanary).toMatchObject({
+        claimed: 0,
+        succeeded: 0,
+        failed: 0,
+        backlog: 0,
+      });
+      expect(provider.queryInputs).toHaveLength(1);
+      expect(await canaryRun(run.runId)).toMatchObject({
+        status: expected,
+        next_reconcile_at: null,
+      });
+
       expect(provider.createCalls).toBe(0);
       expect(await deliveryCounts()).toEqual({ orders: "0", assets: "0", bundles: "0" });
     },
