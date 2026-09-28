@@ -22,7 +22,11 @@
 
 ### Unknown recovery
 
-1. For each `UNKNOWN` supplier order: use the stored `query_key` when present; on a legacy row where it is `NULL`, pass `external_order_id` as `queryKey`, never as `externalOrderId`.
+1. For each `UNKNOWN` supplier order, query by `query_key`; on an unmigrated legacy
+   row where it is `NULL`, treat `external_order_id` as `queryKey`, never
+   `externalOrderId`. Migration `095` backfills `query_key` without clearing the
+   legacy field for rollback; while status is `UNKNOWN`, it remains a lookup key,
+   not a provider order ID.
 2. For a `PENDING` supplier order: query by its persisted provider external order ID; a `PENDING` observation stays query-only and must never trigger another create.
 3. On `FULFILLED`: validate the asset envelope (SKU / delivery type / duration / region / expiry),
    ingest as a vault-backed asset, mark ready, continue fulfillment.

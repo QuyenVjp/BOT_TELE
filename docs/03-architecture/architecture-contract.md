@@ -604,8 +604,8 @@ code consume the provider-neutral contracts and capability checks; they do not
 branch on `QCST` or `VOKHONG`. Unsupported financial actions return
 `UNSUPPORTED` or remain `NEEDS_REVIEW`; they are never emulated.
 
-Migration `094` is the next unused forward source ordinal after scanning the
-complete tree through `093`. It keeps `supplier`, `supplier_sku`, and
+Migration `094` was selected as the next unused forward source ordinal after
+scanning the complete tree through `093`. It keeps `supplier`, `supplier_sku`,
 `supplier_order` provider-neutral, namespaces external product/order identity
 by provider and optional external variant, and stores only safe catalog
 snapshots, local mapping state, supplier-cost observations, and durable
@@ -614,6 +614,13 @@ purchase fingerprints. One local variant may have multiple supplier mappings;
 mappings may retain local metadata but are not routable fallback candidates until
 an owner explicitly changes primary policy. Automatic cross-provider failover is
 permanently off for this rollout.
+
+Migration `095` backfills pre-canary `UNKNOWN` supplier-order rows by copying
+their legacy lookup key from `external_order_id` into `query_key` when it is
+missing. It runs after `094`, so it also covers databases that already recorded
+the schema migration. It retains the old field for rollback compatibility; the
+mapper treats it as a query key for `UNKNOWN`, never a provider order ID.
+Provider external IDs on other states remain unchanged.
 
 Upstream existence never publishes a product. Every provider sync creates or
 updates `DISCOVERED`/unselected disabled rows. The owner explicitly chooses the
@@ -682,6 +689,10 @@ and `UNKNOWN` recover only by querying with the stable idempotency/client order
 key or a known external order ID. A replay or process restart from those states
 MUST NOT create again. Query-only recovery remains available after spend gates
 are disabled.
+
+A provider-observed `PENDING` response remains `PENDING` in the durable row
+and owner-facing execution result; `UNKNOWN` is reserved for unresolved or
+ambiguous outcomes.
 Query-only recovery requires the provider registration, its `ORDER_READ`
 capability, and the existing Vault-backed credential to remain available until
 the row is terminal; purchase gates may be disabled during recovery.

@@ -43,10 +43,10 @@ retried. Missing generic/provider purchase authorization is false, and
 POST.
 
 Recovery stays query-only: a `PENDING` provider result is stored as `PENDING`
-and only queried again. `query_key` is preferred; for legacy `UNKNOWN` rows
-without it, `external_order_id` is treated as the provider lookup key, not a
-confirmed provider order ID. This compatibility mapping never authorizes another
-`POST`.
+and only queried again. For a legacy `UNKNOWN` row, `external_order_id` remains
+a lookup key even after it is copied to `query_key`; it is never exposed as a
+confirmed provider order ID. Other states retain their actual provider ID.
+This compatibility mapping never authorizes another `POST`.
 
 Required checkpoints before enabling real purchase:
 

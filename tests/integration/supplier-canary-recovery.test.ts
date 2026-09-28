@@ -2,6 +2,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vites
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
+import { createAdminConfirmation } from "../../src/modules/identity/admin-confirmation.js";
+import { createSupplierCanaryService } from "../../src/modules/supplier/canary.js";
 import {
   createWorkerScheduler,
   runRecoveryJobsOnce,
@@ -159,6 +161,27 @@ async function dispatchRecovery(
   });
 }
 
+function makeRecoveryService(registry: SupplierProviderRegistry) {
+  const rootConfig = { adminTelegramUserId: 1, expectedUsername: "test-owner" };
+  return createSupplierCanaryService({
+    db: ctx.db,
+    registry,
+    confirmation: createAdminConfirmation(ctx.db),
+    rootChannelIdentityId: "recovery-test-root-channel",
+    rootConfig,
+    sensitiveDeps: {
+      db: ctx.db,
+      rootConfig,
+      vault: createInMemoryVault(),
+      stepUpEnabled: false,
+      stepUpOptions: { ttlSeconds: 120, lockoutMinutes: 10, maxAttempts: 5 },
+    },
+    canaryEnabled: false,
+    canaryPurchaseEnabled: () => false,
+    maxCostVnd: 100_000,
+  });
+}
+
 async function canaryRun(runId: string) {
   const result = await sql<{
     status: string;
@@ -187,6 +210,31 @@ async function deliveryCounts() {
 }
 
 describe("worker-dispatched supplier canary recovery", () => {
+  it("preserves provider PENDING in the durable row and owner-facing recovery result", async () => {
+    const run = await seedCanaryRun("SUBMITTED");
+    const externalOrderId = `pending-${run.runId}`;
+    const provider = makeProvider({
+      providerKey: run.supplierId,
+      queryResult: () => ({ status: "PENDING", externalOrderId }),
+    });
+    const service = makeRecoveryService(createSupplierProviderRegistry([provider.provider]));
+
+    const result = await service.executePending(run.runId);
+
+    expect(result).toMatchObject({
+      ok: true,
+      runId: run.runId,
+      status: "PENDING",
+      externalOrderId,
+    });
+    expect(await canaryRun(run.runId)).toMatchObject({
+      status: "PENDING",
+      external_order_id: externalOrderId,
+    });
+    expect(provider.queryInputs).toEqual([{ queryKey: run.idempotencyKey }]);
+    expect(provider.createCalls).toBe(0);
+  });
+
   it.each([false, true])(
     "queries SUBMITTED/PENDING/UNKNOWN without POST when purchase gates are %s",
     async (gatesEnabled) => {

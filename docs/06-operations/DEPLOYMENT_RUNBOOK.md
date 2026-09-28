@@ -84,11 +84,11 @@ npm run migrate:production
 
 ## Current production migration head
 
-The source tree currently contains **92** SQL files under `src/infrastructure/db/migrations/`.
+The source tree currently contains **94** SQL files under `src/infrastructure/db/migrations/`.
 The latest source migration is:
 
-- **filename:** `093_supplier_catalog_platform.sql`
-- **count:** `92`
+- **filename:** `095_supplier_unknown_query_key_backfill.sql`
+- **count:** `94`
 
 The latest protected production record places production at
 `091_growth_migration_repair.sql` (**96** migrations). The prior `090_payment_reminders.sql`
@@ -121,9 +121,16 @@ The next forward-only source migrations after the protected production head are:
 
 1. `092_group_publication_admin_command.sql`
 2. `093_supplier_catalog_platform.sql`
+3. `094_supplier_owner_canary.sql`
+4. `095_supplier_unknown_query_key_backfill.sql`
 
-Both are additive and must be applied in filename order from a clean release
-artifact; no older migration file may be edited or replaced.
+Apply them in filename order from a clean release artifact; no older migration
+file may be edited or replaced. Migration `095` backfills pre-canary `UNKNOWN`
+supplier-order rows after `094` has already been recorded: it copies the legacy
+lookup key into `query_key` while retaining `external_order_id` for rollback
+compatibility. The mapper treats it as a query key only while status is
+`UNKNOWN`; provider IDs on other states remain unchanged. It remains branch-only
+until separately approved; do not apply it to production as part of this PR.
 
 The release sequence is linear: automated CI and security gates → protected PR merge →
 build the exact clean SHA with an empty compiled migration directory → keep the store
@@ -177,8 +184,9 @@ blocks query-only recovery.
 Keep `QCST_DELIVERY_SCHEMA_ACCEPTED=NO`. If QCST returns
 `delivery_available=true` or a non-null `delivery`, fail closed as
 `DELIVERY_UNSUPPORTED` / `NEEDS_REVIEW`; do not decode, persist, or send raw
-delivery data. Migration `094_supplier_owner_canary.sql` is branch-only until
-separately approved and must not be applied to production as part of this PR.
+delivery data. Migrations `094_supplier_owner_canary.sql` and
+`095_supplier_unknown_query_key_backfill.sql` are branch-only until separately
+approved and must not be applied to production as part of this PR.
 
 ## Historical migrations 072–076 — post-merge production procedure
 
