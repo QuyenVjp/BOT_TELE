@@ -1687,7 +1687,7 @@ async function buildManualOrderAdminAlert(
     workState = "⏳ Chờ tạo tác vụ xử lý";
   }
   return {
-    campaignId: `admin-payment-settled:${row.order_id}`,
+    campaignId: `admin-manual-order:${row.order_id}`,
     content: [
       "🛍 ĐƠN DỊCH VỤ THỦ CÔNG",
       "",
@@ -2012,15 +2012,7 @@ export async function handleNotificationOutboxEvent(
       `.execute(trx);
       if (locked.rows[0]) {
         const alert = await buildManualOrderAdminAlert(trx, manualOrderId);
-        if (
-          alert &&
-          !(await queueOrRefreshRootAdminAlert(
-            trx,
-            alert,
-            options.rootTelegramUserId,
-            options.adminAlertMode,
-          ))
-        )
+        if (alert && !(await queueOrRefreshRootAdminAlert(trx, alert, options.rootTelegramUserId)))
           missingManualOwnerTarget = true;
       }
     }

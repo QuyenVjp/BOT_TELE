@@ -442,6 +442,377 @@ describe("compiled production migration entrypoint (T173)", () => {
       await started.stop();
     }
   }, 180_000);
+  it("upgrades pre-095 notification deliveries without loss and records migration once", async () => {
+    if (!hasDocker) return;
+    const started = await startPostgres();
+    const pre095Dir = await createPreMigrationDir("095_notification_send_uncertain.sql");
+    try {
+      await sql`drop schema public cascade`.execute(started.handle.db);
+      await sql`create schema public`.execute(started.handle.db);
+      const baseline = await runMigrations(started.handle.db, pre095Dir);
+      expect(baseline.applied).toContain("094_supplier_owner_canary.sql");
+
+      await sql`
+        insert into customer (id) values
+          ('pre095-pending-customer'), ('pre095-sent-customer'),
+          ('pre095-retry-customer'), ('pre095-suppressed-customer'),
+          ('pre095-dead-customer'), ('pre095-uncertain-customer')
+      `.execute(started.handle.db);
+      await sql`
+        insert into notification_campaign
+          (id, class, content, status, idempotency_key, created_by)
+        values
+          ('pre095-campaign', 'CRITICAL_SERVICE', 'preserve me', 'QUEUED',
+           'pre095-campaign', 'test')
+      `.execute(started.handle.db);
+      await sql`
+        insert into notification_delivery (id, campaign_id, customer_id, chat_id, status)
+        values
+          ('pre095-pending', 'pre095-campaign', 'pre095-pending-customer', '10001', 'PENDING'),
+          ('pre095-sent', 'pre095-campaign', 'pre095-sent-customer', '10002', 'SENT'),
+          ('pre095-retry', 'pre095-campaign', 'pre095-retry-customer', '10003', 'RETRY'),
+          ('pre095-suppressed', 'pre095-campaign', 'pre095-suppressed-customer', '10004', 'SUPPRESSED'),
+          ('pre095-dead', 'pre095-campaign', 'pre095-dead-customer', '10005', 'DEAD')
+      `.execute(started.handle.db);
+      await sql`
+        update notification_delivery
+        set attempts = 1, message_id = 'telegram-pre095-sent',
+            sent_at = '2020-01-02T03:04:05.000Z'
+        where id = 'pre095-sent'
+      `.execute(started.handle.db);
+      await sql`
+        update notification_delivery
+        set attempts = 3, next_attempt_at = '2099-01-02T03:04:05.000Z',
+            last_error = 'temporary-pre095-failure'
+        where id = 'pre095-retry'
+      `.execute(started.handle.db);
+      await sql`
+        insert into category (id, name_vi, slug)
+        values ('pre095-category', 'Pre-095', 'pre095-category')
+      `.execute(started.handle.db);
+      await sql`
+        insert into product (id, category_id, name_vi, slug)
+        values ('pre095-product', 'pre095-category', 'Pre-095 product', 'pre095-product')
+      `.execute(started.handle.db);
+      await sql`
+        insert into product_variant
+          (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy)
+        values
+          ('pre095-manual-variant', 'pre095-product', 'PRE095-MANUAL', 'Manual', 1000, '1M', 'MANUAL_REVIEW', 'PAUSED'),
+          ('pre095-stock-variant', 'pre095-product', 'PRE095-STOCK', 'Stock', 1000, '1M', 'CREDENTIAL', 'LOCAL_ONLY')
+      `.execute(started.handle.db);
+      await sql`
+        insert into "order"
+          (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
+           price_vnd, duration_code, delivery_type, status, paid_at)
+        values
+          ('pre095-manual-sent-order', 'PRE095-MANUAL-SENT', 'pre095-sent-customer', 'pre095-manual-variant',
+           'Manual', 'Plan', 1000, '1M', 'MANUAL_REVIEW', 'PAID', '2020-01-02T03:04:05.000Z'),
+          ('pre095-manual-retry-order', 'PRE095-MANUAL-RETRY', 'pre095-sent-customer', 'pre095-manual-variant',
+           'Manual', 'Plan', 1000, '1M', 'MANUAL_REVIEW', 'PAID', '2020-01-02T03:04:05.000Z'),
+          ('pre095-normal-order', 'PRE095-NORMAL', 'pre095-pending-customer', 'pre095-stock-variant',
+           'Stock', 'Plan', 1000, '1M', 'CREDENTIAL', 'PAID', '2020-01-02T03:04:05.000Z')
+      `.execute(started.handle.db);
+      await sql`
+        insert into notification_campaign
+          (id, class, content, status, idempotency_key, created_by)
+        values
+          ('admin-payment-settled:pre095-manual-sent-order', 'CRITICAL_SERVICE', 'legacy manual sent', 'COMPLETED',
+           'admin-payment-settled:pre095-manual-sent-order', 'test'),
+          ('admin-payment-settled:pre095-manual-retry-order', 'CRITICAL_SERVICE', 'legacy manual retry', 'QUEUED',
+           'admin-payment-settled:pre095-manual-retry-order', 'test'),
+          ('admin-payment-settled:pre095-normal-order', 'CRITICAL_SERVICE', 'ordinary payment alert', 'COMPLETED',
+           'admin-payment-settled:pre095-normal-order', 'test')
+      `.execute(started.handle.db);
+      await sql`
+        insert into notification_delivery (id, campaign_id, customer_id, chat_id, status)
+        values
+          ('pre095-manual-sent-delivery', 'admin-payment-settled:pre095-manual-sent-order', 'pre095-sent-customer', '10007', 'SENT'),
+          ('pre095-manual-retry-delivery', 'admin-payment-settled:pre095-manual-retry-order', 'pre095-sent-customer', '10008', 'RETRY'),
+          ('pre095-normal-delivery', 'admin-payment-settled:pre095-normal-order', 'pre095-pending-customer', '10009', 'SENT')
+      `.execute(started.handle.db);
+      await sql`
+        update notification_delivery
+        set attempts = 2, message_id = 'telegram-pre095-manual-sent',
+            sent_at = '2020-01-02T03:04:05.000Z'
+        where id = 'pre095-manual-sent-delivery'
+      `.execute(started.handle.db);
+      await sql`
+        update notification_delivery
+        set attempts = 3, next_attempt_at = '2099-01-02T03:04:05.000Z',
+            last_error = 'temporary-pre095-manual-failure'
+        where id = 'pre095-manual-retry-delivery'
+      `.execute(started.handle.db);
+      await sql`
+        insert into notification_campaign_audience (campaign_id, stage, customer_id, chat_id)
+        values ('admin-payment-settled:pre095-manual-sent-order', 'PREVIEW', 'pre095-sent-customer', '10007')
+      `.execute(started.handle.db);
+
+      const fulfillmentTypes = await sql<{ id: string; fulfillment_type: string }>`
+        select id, fulfillment_type from "order"
+        where id in ('pre095-manual-sent-order', 'pre095-manual-retry-order', 'pre095-normal-order')
+        order by id
+      `.execute(started.handle.db);
+      expect(fulfillmentTypes.rows).toEqual([
+        { id: "pre095-manual-retry-order", fulfillment_type: "MANUAL_FULFILLMENT" },
+        { id: "pre095-manual-sent-order", fulfillment_type: "MANUAL_FULFILLMENT" },
+        { id: "pre095-normal-order", fulfillment_type: "STOCK_ACCOUNT" },
+      ]);
+
+      const campaignBefore = await sql<{
+        id: string;
+        class: string;
+        content: string;
+        status: string;
+        idempotency_key: string;
+        created_by: string;
+        created_at: Date;
+      }>`
+        select id, class, content, status, idempotency_key, created_by, created_at
+        from notification_campaign
+        where id like 'admin-payment-settled:pre095-%'
+        order by id
+      `.execute(started.handle.db);
+      const manualDeliveriesBefore = await sql<{
+        id: string;
+        campaign_id: string;
+        customer_id: string;
+        chat_id: string;
+        status: string;
+        attempts: number;
+        next_attempt_at: Date;
+        last_error: string | null;
+        sent_at: Date | null;
+        message_id: string | null;
+      }>`
+        select id, campaign_id, customer_id, chat_id, status, attempts,
+          next_attempt_at, last_error, sent_at, message_id
+        from notification_delivery
+        where id in ('pre095-manual-sent-delivery', 'pre095-manual-retry-delivery', 'pre095-normal-delivery')
+        order by id
+      `.execute(started.handle.db);
+      const audienceBefore = await sql<{
+        campaign_id: string;
+        stage: string;
+        customer_id: string;
+        chat_id: string;
+      }>`
+        select campaign_id, stage, customer_id, chat_id
+        from notification_campaign_audience
+        where campaign_id = 'admin-payment-settled:pre095-manual-sent-order'
+      `.execute(started.handle.db);
+      const rekeyManualCampaign = (id: string): string =>
+        id.startsWith("admin-payment-settled:pre095-manual-")
+          ? id.replace("admin-payment-settled:", "admin-manual-order:")
+          : id;
+
+      expect(campaignBefore.rows).toHaveLength(3);
+      expect(manualDeliveriesBefore.rows).toHaveLength(3);
+      expect(audienceBefore.rows).toHaveLength(1);
+
+      const manualCampaignIds = new Set([
+        "admin-payment-settled:pre095-manual-sent-order",
+        "admin-payment-settled:pre095-manual-retry-order",
+      ]);
+      const expectedCampaigns = campaignBefore.rows
+        .map((campaign) => ({
+          ...campaign,
+          id: rekeyManualCampaign(campaign.id),
+          idempotency_key: manualCampaignIds.has(campaign.id)
+            ? rekeyManualCampaign(campaign.id)
+            : campaign.idempotency_key,
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id));
+      const expectedManualDeliveries = manualDeliveriesBefore.rows
+        .map((delivery) => ({
+          ...delivery,
+          campaign_id: rekeyManualCampaign(delivery.campaign_id),
+        }))
+        .sort((left, right) => left.id.localeCompare(right.id));
+      const expectedAudience = audienceBefore.rows.map((audience) => ({
+        ...audience,
+        campaign_id: rekeyManualCampaign(audience.campaign_id),
+      }));
+      await sql`
+        insert into notification_campaign
+          (id, class, content, status, idempotency_key, created_by)
+        values
+          ('admin-manual-order:pre095-manual-retry-order', 'CRITICAL_SERVICE', 'conflicting target', 'QUEUED',
+           'admin-manual-order:pre095-manual-retry-order', 'test')
+      `.execute(started.handle.db);
+
+      await expect(runMigrations(started.handle.db)).rejects.toThrow(
+        /manual alert campaign identity collision/,
+      );
+      const campaignsAfterCollision = await sql<{ count: string }>`
+        select count(*)::text as count from notification_campaign
+        where id in (
+          'admin-payment-settled:pre095-manual-sent-order',
+          'admin-payment-settled:pre095-manual-retry-order'
+        )
+      `.execute(started.handle.db);
+      expect(campaignsAfterCollision.rows[0]?.count).toBe("2");
+      const deliveriesAfterCollision = await sql<{
+        id: string;
+        campaign_id: string;
+        customer_id: string;
+        chat_id: string;
+        status: string;
+        attempts: number;
+        next_attempt_at: Date;
+        last_error: string | null;
+        sent_at: Date | null;
+        message_id: string | null;
+      }>`
+        select id, campaign_id, customer_id, chat_id, status, attempts,
+          next_attempt_at, last_error, sent_at, message_id
+        from notification_delivery
+        where id in ('pre095-manual-sent-delivery', 'pre095-manual-retry-delivery', 'pre095-normal-delivery')
+        order by id
+      `.execute(started.handle.db);
+      expect(deliveriesAfterCollision.rows).toEqual(manualDeliveriesBefore.rows);
+      await sql`
+        delete from notification_campaign
+        where id = 'admin-manual-order:pre095-manual-retry-order'
+      `.execute(started.handle.db);
+
+      const legacyRows = [
+        { id: "pre095-dead", status: "DEAD" },
+        { id: "pre095-pending", status: "PENDING" },
+        { id: "pre095-retry", status: "RETRY" },
+        { id: "pre095-sent", status: "SENT" },
+        { id: "pre095-suppressed", status: "SUPPRESSED" },
+      ];
+      const before = await sql<{
+        id: string;
+        status: string;
+        attempts: number;
+        next_attempt_at: Date;
+        last_error: string | null;
+        sent_at: Date | null;
+        message_id: string | null;
+      }>`
+        select id, status, attempts, next_attempt_at, last_error, sent_at, message_id
+        from notification_delivery
+        where campaign_id = 'pre095-campaign' order by id
+      `.execute(started.handle.db);
+      expect(before.rows.map(({ id, status }) => ({ id, status }))).toEqual(legacyRows);
+      expect(before.rows.find(({ id }) => id === "pre095-sent")).toMatchObject({
+        attempts: 1,
+        sent_at: expect.any(Date),
+        message_id: "telegram-pre095-sent",
+      });
+      expect(before.rows.find(({ id }) => id === "pre095-retry")).toMatchObject({
+        attempts: 3,
+        next_attempt_at: expect.any(Date),
+        last_error: "temporary-pre095-failure",
+      });
+      const upgrade = await runMigrations(started.handle.db);
+      expect(upgrade.applied).toContain("095_notification_send_uncertain.sql");
+      const after = await sql<{
+        id: string;
+        status: string;
+        attempts: number;
+        next_attempt_at: Date;
+        last_error: string | null;
+        sent_at: Date | null;
+        message_id: string | null;
+      }>`
+        select id, status, attempts, next_attempt_at, last_error, sent_at, message_id
+        from notification_delivery
+        where campaign_id = 'pre095-campaign' order by id
+      `.execute(started.handle.db);
+      expect(after.rows).toEqual(before.rows);
+
+      const afterManualCampaigns = await sql<{
+        id: string;
+        class: string;
+        content: string;
+        status: string;
+        idempotency_key: string;
+        created_by: string;
+        created_at: Date;
+      }>`
+        select id, class, content, status, idempotency_key, created_by, created_at
+        from notification_campaign
+        where id in (
+          'admin-manual-order:pre095-manual-sent-order',
+          'admin-manual-order:pre095-manual-retry-order',
+          'admin-payment-settled:pre095-normal-order'
+        )
+        order by id
+      `.execute(started.handle.db);
+      expect(afterManualCampaigns.rows).toEqual(expectedCampaigns);
+
+      const afterManualDeliveries = await sql<{
+        id: string;
+        campaign_id: string;
+        customer_id: string;
+        chat_id: string;
+        status: string;
+        attempts: number;
+        next_attempt_at: Date;
+        last_error: string | null;
+        sent_at: Date | null;
+        message_id: string | null;
+      }>`
+        select id, campaign_id, customer_id, chat_id, status, attempts,
+          next_attempt_at, last_error, sent_at, message_id
+        from notification_delivery
+        where id in ('pre095-manual-sent-delivery', 'pre095-manual-retry-delivery', 'pre095-normal-delivery')
+        order by id
+      `.execute(started.handle.db);
+      expect(afterManualDeliveries.rows).toEqual(expectedManualDeliveries);
+
+      const afterAudience = await sql<{
+        campaign_id: string;
+        stage: string;
+        customer_id: string;
+        chat_id: string;
+      }>`
+        select campaign_id, stage, customer_id, chat_id
+        from notification_campaign_audience
+        where campaign_id = 'admin-manual-order:pre095-manual-sent-order'
+      `.execute(started.handle.db);
+      expect(afterAudience.rows).toEqual(expectedAudience);
+
+      const remainingLegacyManual = await sql<{ count: string }>`
+        select count(*)::text as count from notification_campaign
+        where id in (
+          'admin-payment-settled:pre095-manual-sent-order',
+          'admin-payment-settled:pre095-manual-retry-order'
+        )
+      `.execute(started.handle.db);
+      expect(remainingLegacyManual.rows[0]?.count).toBe("0");
+
+      await sql`
+        insert into notification_delivery (id, campaign_id, customer_id, chat_id, status)
+        values
+          ('pre095-uncertain', 'pre095-campaign', 'pre095-uncertain-customer',
+           '10006', 'SEND_UNCERTAIN')
+      `.execute(started.handle.db);
+      await expect(
+        sql`update notification_delivery set status = 'INVALID'
+            where id = 'pre095-pending'`.execute(started.handle.db),
+      ).rejects.toThrow();
+      const unchanged = await sql<{ status: string }>`
+        select status from notification_delivery where id = 'pre095-pending'
+      `.execute(started.handle.db);
+      expect(unchanged.rows).toEqual([{ status: "PENDING" }]);
+
+      const replay = await runMigrations(started.handle.db);
+      expect(replay.applied).not.toContain("095_notification_send_uncertain.sql");
+      expect(replay.alreadyApplied).toContain("095_notification_send_uncertain.sql");
+      const receipt = await sql<{ count: string }>`
+        select count(*)::text as count from schema_migrations
+        where filename = '095_notification_send_uncertain.sql'
+      `.execute(started.handle.db);
+      expect(receipt.rows[0]?.count).toBe("1");
+    } finally {
+      await rm(pre095Dir, { recursive: true, force: true });
+      await started.stop();
+    }
+  }, 180_000);
 });
 
 async function createBaselineMigrationDir(): Promise<string> {
@@ -568,12 +939,11 @@ async function runCompiledMigration(
     child.on("close", (code) => resolvePromise({ code, stdout, stderr }));
   });
 }
-async function createPreCanaryMigrationDir(): Promise<string> {
-  const dir = await mkdtemp(resolve(tmpdir(), "telegram-shop-pre-canary-migrations-"));
+async function createPreMigrationDir(cutoff: string): Promise<string> {
+  const dir = await mkdtemp(resolve(tmpdir(), "telegram-shop-pre-migrations-"));
   const source = resolve(repoRoot, "src", "infrastructure", "db", "migrations");
-  const files = await listMigrationFiles(source);
-  for (const file of files) {
-    if (file.localeCompare("094_supplier_owner_canary.sql") >= 0) break;
+  for (const file of await listMigrationFiles(source)) {
+    if (file.localeCompare(cutoff) >= 0) break;
     await cp(resolve(source, file), resolve(dir, file));
   }
   return dir;

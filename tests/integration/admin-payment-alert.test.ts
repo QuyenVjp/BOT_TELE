@@ -257,8 +257,9 @@ describe("admin payment alert", () => {
     await settleManualOrder(orderId, amount);
     await handleNotificationOutboxEvent(ctx.db, event("PaymentSettled", orderId), {
       rootTelegramUserId: ROOT_TELEGRAM_ID,
+      adminAlertMode: "OFF",
     });
-    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1, "OFF");
     expect(claim).toBeDefined();
     const alertOutcome = await processNotificationDeliveryClaim(ctx.db, claim!, {
       send: async () => {
@@ -271,6 +272,15 @@ describe("admin payment alert", () => {
     const fulfill = fulfillmentOutboxHandler();
     const first = await fulfill(paidOrderEvent(orderId, "manual-alert-uncertain"));
     const replay = await fulfill(paidOrderEvent(orderId, "manual-alert-uncertain-replay"));
+    await handleNotificationOutboxEvent(ctx.db, event("ManualFulfillmentTaskCreated", orderId), {
+      rootTelegramUserId: ROOT_TELEGRAM_ID,
+      adminAlertMode: "OFF",
+    });
+    await handleNotificationOutboxEvent(ctx.db, event("OrderCreated", orderId), {
+      rootTelegramUserId: ROOT_TELEGRAM_ID,
+      adminAlertMode: "OFF",
+    });
+    expect(await claimNotificationDeliveries(ctx.db, 1, "OFF")).toEqual([]);
     const queue = await listAdminManualFulfillmentTasks(ctx.db);
     const state = await sql<{
       tasks: number;
@@ -305,9 +315,22 @@ describe("admin payment alert", () => {
       expect(
         await handleNotificationOutboxEvent(ctx.db, event("PaymentSettled", orderId), {
           rootTelegramUserId: ROOT_TELEGRAM_ID,
+          adminAlertMode: "OFF",
         }),
       ).toMatchObject({ kind: "PUBLISHED" });
     }
+    expect(
+      await handleNotificationOutboxEvent(ctx.db, event("OrderCreated", orderId), {
+        rootTelegramUserId: ROOT_TELEGRAM_ID,
+        adminAlertMode: "OFF",
+      }),
+    ).toMatchObject({ kind: "PUBLISHED" });
+    const currentAlert = await sql<{ content: string }>`
+      select content from notification_campaign
+      where id = ${`admin-manual-order:${orderId}`}
+    `.execute(ctx.db);
+    expect(currentAlert.rows[0]?.content).toContain("SePay đã xác minh");
+    expect(currentAlert.rows[0]?.content).not.toContain("Chưa xác nhận");
     const fulfill = fulfillmentOutboxHandler();
     expect(await fulfill(paidOrderEvent(orderId, "manual-duplicate-settlement"))).toEqual({
       kind: "PUBLISHED",
@@ -323,16 +346,14 @@ describe("admin payment alert", () => {
       select c.id as campaign_id, count(d.id)::int as deliveries
       from notification_campaign c
       left join notification_delivery d on d.campaign_id = c.id
-      where c.id = ${`admin-payment-settled:${orderId}`}
+      where c.id = ${`admin-manual-order:${orderId}`}
       group by c.id
     `.execute(ctx.db);
     const queue = await listAdminManualFulfillmentTasks(ctx.db);
 
     expect(taskCount.rows[0]?.count).toBe(1);
     expect(queue.tasks.map((task) => task.orderId)).toEqual([orderId]);
-    expect(alerts.rows).toEqual([
-      { campaign_id: `admin-payment-settled:${orderId}`, deliveries: 1 },
-    ]);
+    expect(alerts.rows).toEqual([{ campaign_id: `admin-manual-order:${orderId}`, deliveries: 1 }]);
   });
   it("does not refresh a sent admin payment alert on fulfillment completion when mode is OFF", async () => {
     const { orderId } = await seedFixture();
@@ -418,10 +439,11 @@ describe("admin payment alert", () => {
     const taskCreated = event("ManualFulfillmentTaskCreated", orderId);
     await handleNotificationOutboxEvent(ctx.db, taskCreated, {
       rootTelegramUserId: ROOT_TELEGRAM_ID,
+      adminAlertMode: "OFF",
     });
     const unmatched = await sql<{ content: string }>`
       select content from notification_campaign
-      where id = ${`admin-payment-settled:${orderId}`}
+      where id = ${`admin-manual-order:${orderId}`}
     `.execute(ctx.db);
     expect(unmatched.rows[0]?.content).toContain("⏳ Chưa xác nhận");
 
@@ -434,10 +456,11 @@ describe("admin payment alert", () => {
     });
     await handleNotificationOutboxEvent(ctx.db, event("ManualFulfillmentTaskCreated", orderId), {
       rootTelegramUserId: ROOT_TELEGRAM_ID,
+      adminAlertMode: "OFF",
     });
     const matched = await sql<{ content: string }>`
       select content from notification_campaign
-      where id = ${`admin-payment-settled:${orderId}`}
+      where id = ${`admin-manual-order:${orderId}`}
     `.execute(ctx.db);
     expect(matched.rows[0]?.content).toContain("Thanh toán: ✅ Ví đã ghi sổ");
     expect(matched.rows[0]?.content).not.toContain("SePay đã xác minh");
@@ -489,7 +512,7 @@ describe("admin payment alert", () => {
     });
     const campaign = await sql<{ content: string }>`
       select content from notification_campaign
-      where id = ${`admin-payment-settled:${orderId}`}
+      where id = ${`admin-manual-order:${orderId}`}
     `.execute(ctx.db);
     expect(campaign.rows[0]?.content).toContain("Thanh toán: ⏳ Chưa xác nhận");
     expect(campaign.rows[0]?.content).not.toContain("Ví đã ghi sổ");
@@ -510,7 +533,7 @@ describe("admin payment alert", () => {
     });
     const campaign = await sql<{ content: string }>`
       select content from notification_campaign
-      where id = ${`admin-payment-settled:${orderId}`}
+      where id = ${`admin-manual-order:${orderId}`}
     `.execute(ctx.db);
     expect(campaign.rows[0]?.content).toContain("Thanh toán: ⏳ Chưa xác nhận");
     expect(campaign.rows[0]?.content).not.toContain("SePay đã xác minh");
@@ -523,17 +546,19 @@ describe("admin payment alert", () => {
     expect(
       await handleNotificationOutboxEvent(ctx.db, created, {
         rootTelegramUserId: ROOT_TELEGRAM_ID,
+        adminAlertMode: "OFF",
       }),
     ).toMatchObject({ kind: "PUBLISHED" });
     expect(
       await handleNotificationOutboxEvent(ctx.db, created, {
         rootTelegramUserId: ROOT_TELEGRAM_ID,
+        adminAlertMode: "OFF",
       }),
     ).toMatchObject({ kind: "PUBLISHED" });
 
     const unpaid = await sql<{ content: string }>`
       select content from notification_campaign
-      where id = ${`admin-payment-settled:${orderId}`}
+      where id = ${`admin-manual-order:${orderId}`}
     `.execute(ctx.db);
     expect(unpaid.rows[0]?.content).toContain("Chưa xác nhận");
     expect(unpaid.rows[0]?.content).toContain("ORD-ALERT-1");
@@ -542,13 +567,13 @@ describe("admin payment alert", () => {
 
     const recipients = await sql<{ customer_id: string; chat_id: string }>`
       select customer_id, chat_id from notification_delivery
-      where campaign_id = ${`admin-payment-settled:${orderId}`}
+      where campaign_id = ${`admin-manual-order:${orderId}`}
     `.execute(ctx.db);
     expect(recipients.rows).toEqual([
       { customer_id: rootCustomerId, chat_id: String(ROOT_TELEGRAM_ID) },
     ]);
 
-    const [initialClaim] = await claimNotificationDeliveries(ctx.db, 1);
+    const [initialClaim] = await claimNotificationDeliveries(ctx.db, 1, "OFF");
     let notifyFirstSendStarted!: () => void;
     let releaseFirstSend!: (response: unknown) => void;
     const firstSendStarted = new Promise<void>((resolve) => {
@@ -575,12 +600,14 @@ describe("admin payment alert", () => {
     expect(
       await handleNotificationOutboxEvent(ctx.db, event("PaymentSettled", orderId), {
         rootTelegramUserId: ROOT_TELEGRAM_ID,
+        adminAlertMode: "OFF",
       }),
     ).toMatchObject({ kind: "PUBLISHED" });
     // A replayed creation event must read canonical paid state, not restore unpaid copy.
     expect(
       await handleNotificationOutboxEvent(ctx.db, created, {
         rootTelegramUserId: ROOT_TELEGRAM_ID,
+        adminAlertMode: "OFF",
       }),
     ).toMatchObject({ kind: "PUBLISHED" });
 
@@ -588,7 +615,7 @@ describe("admin payment alert", () => {
       select c.content, count(d.id)::text as count
       from notification_campaign c
       join notification_delivery d on d.campaign_id = c.id
-      where c.id = ${`admin-payment-settled:${orderId}`}
+      where c.id = ${`admin-manual-order:${orderId}`}
       group by c.content
     `.execute(ctx.db);
     expect(paid.rows[0]?.content).toContain("SePay đã xác minh");
@@ -610,7 +637,7 @@ describe("admin payment alert", () => {
       select c.content, d.status, d.message_id, count(*) over ()::text as count
       from notification_campaign c
       join notification_delivery d on d.campaign_id = c.id
-      where c.id = ${`admin-payment-settled:${orderId}`}
+      where c.id = ${`admin-manual-order:${orderId}`}
     `.execute(ctx.db);
     expect(afterStaleSend.rows).toHaveLength(1);
     expect(afterStaleSend.rows[0]?.content).toContain("SePay đã xác minh");
@@ -619,11 +646,11 @@ describe("admin payment alert", () => {
     expect(afterStaleSend.rows[0]?.message_id).toBe("owner-manual-alert-1");
     const campaigns = await sql`
       select id from notification_campaign
-      where id = ${`admin-payment-settled:${orderId}`}
+      where id = ${`admin-manual-order:${orderId}`}
     `.execute(ctx.db);
     expect(campaigns.rows).toHaveLength(1);
 
-    const [updateClaim] = await claimNotificationDeliveries(ctx.db, 1);
+    const [updateClaim] = await claimNotificationDeliveries(ctx.db, 1, "OFF");
     let editedMessageId: string | null = null;
     let editedContent = "";
     expect(
@@ -645,9 +672,10 @@ describe("admin payment alert", () => {
     const amount = await prepareManualOrder(orderId);
     await handleNotificationOutboxEvent(ctx.db, event("OrderCreated", orderId), {
       rootTelegramUserId: ROOT_TELEGRAM_ID,
+      adminAlertMode: "OFF",
     });
 
-    const [initialClaim] = await claimNotificationDeliveries(ctx.db, 1);
+    const [initialClaim] = await claimNotificationDeliveries(ctx.db, 1, "OFF");
     let notifySendStarted!: () => void;
     let releaseSend!: (response: unknown) => void;
     const sendStarted = new Promise<void>((resolve) => {
@@ -667,6 +695,7 @@ describe("admin payment alert", () => {
     await settleManualOrder(orderId, amount);
     await handleNotificationOutboxEvent(ctx.db, event("PaymentSettled", orderId), {
       rootTelegramUserId: ROOT_TELEGRAM_ID,
+      adminAlertMode: "OFF",
     });
 
     const uncertain = await sql<{
@@ -686,7 +715,7 @@ describe("admin payment alert", () => {
       claim_expires_at: null,
       message_id: null,
     });
-    expect(await claimNotificationDeliveries(ctx.db, 1)).toEqual([]);
+    expect(await claimNotificationDeliveries(ctx.db, 1, "OFF")).toEqual([]);
 
     releaseSend({
       chatId: String(ROOT_TELEGRAM_ID),
@@ -711,7 +740,7 @@ describe("admin payment alert", () => {
       message_id: "owner-manual-late-ack",
     });
 
-    const [refreshedClaim] = await claimNotificationDeliveries(ctx.db, 1);
+    const [refreshedClaim] = await claimNotificationDeliveries(ctx.db, 1, "OFF");
     expect(refreshedClaim!.generation).toBeGreaterThan(initialClaim!.generation);
     let editedMessageId: string | null = null;
     let editedContent = "";
@@ -734,9 +763,10 @@ describe("admin payment alert", () => {
     `.execute(ctx.db);
     await handleNotificationOutboxEvent(ctx.db, event("ManualFulfillmentTaskCompleted", orderId), {
       rootTelegramUserId: ROOT_TELEGRAM_ID,
+      adminAlertMode: "OFF",
     });
 
-    const [completionClaim] = await claimNotificationDeliveries(ctx.db, 1);
+    const [completionClaim] = await claimNotificationDeliveries(ctx.db, 1, "OFF");
     let completionMessageId: string | null = null;
     let completionContent = "";
     expect(
@@ -750,39 +780,65 @@ describe("admin payment alert", () => {
     ).toBe("SENT");
     expect(completionMessageId).toBe("owner-manual-late-ack");
     expect(completionContent).toContain("✅ Đã hoàn tất");
-    expect(await claimNotificationDeliveries(ctx.db, 1)).toEqual([]);
+    expect(await claimNotificationDeliveries(ctx.db, 1, "OFF")).toEqual([]);
   });
 
-  it("does not create or refresh manual alerts when admin alert mode is OFF", async () => {
-    const { orderId } = await seedFixture();
+  it("A/B. keeps manual owner notifications available when payment alerts are OFF", async () => {
+    const { orderId, rootCustomerId } = await seedFixture();
     const amount = await prepareManualOrder(orderId);
-    const created = event("OrderCreated", orderId);
+    const campaignId = `admin-manual-order:${orderId}`;
     expect(
-      await handleNotificationOutboxEvent(ctx.db, created, {
+      await handleNotificationOutboxEvent(ctx.db, event("OrderCreated", orderId), {
         rootTelegramUserId: ROOT_TELEGRAM_ID,
         adminAlertMode: "OFF",
       }),
     ).toMatchObject({ kind: "PUBLISHED" });
-    const suppressed = await sql`
-      select id from notification_campaign where id = ${`admin-payment-settled:${orderId}`}
-    `.execute(ctx.db);
-    expect(suppressed.rows).toHaveLength(0);
-    const noDelivery = await sql`
-      select id from notification_delivery
-      where campaign_id = ${`admin-payment-settled:${orderId}`}
-    `.execute(ctx.db);
-    expect(noDelivery.rows).toHaveLength(0);
 
-    expect(
-      await handleNotificationOutboxEvent(ctx.db, created, {
-        rootTelegramUserId: ROOT_TELEGRAM_ID,
-      }),
-    ).toMatchObject({ kind: "PUBLISHED" });
-    const original = await sql<{ content: string }>`
-      select content from notification_campaign
-      where id = ${`admin-payment-settled:${orderId}`}
+    const state = await sql<{
+      order_status: string;
+      paid_at: Date | null;
+      payment_intents: number;
+      content: string;
+      customer_id: string;
+      chat_id: string;
+      delivery_count: number;
+    }>`
+      select o.status as order_status, o.paid_at,
+        (select count(*)::int from payment_intent where order_id = o.id) as payment_intents,
+        c.content, d.customer_id, d.chat_id,
+        (select count(*)::int from notification_delivery where campaign_id = c.id) as delivery_count
+      from "order" o
+      join notification_campaign c on c.id = ${campaignId}
+      join notification_delivery d on d.campaign_id = c.id
+      where o.id = ${orderId}
     `.execute(ctx.db);
-    expect(original.rows[0]?.content).toContain("Chưa xác nhận");
+    expect(state.rows).toHaveLength(1);
+    expect(state.rows[0]).toMatchObject({
+      order_status: "PENDING_PAYMENT",
+      paid_at: null,
+      payment_intents: 0,
+      customer_id: rootCustomerId,
+      chat_id: String(ROOT_TELEGRAM_ID),
+      delivery_count: 1,
+    });
+    expect(state.rows[0]?.content).toContain("Chưa xác nhận");
+
+    const [unpaidClaim] = await claimNotificationDeliveries(ctx.db, 1, "OFF");
+    expect(unpaidClaim).toMatchObject({
+      campaignId,
+      content: expect.stringContaining("Chưa xác nhận"),
+    });
+    let firstMessageId: string | null = null;
+    expect(
+      await processNotificationDeliveryClaim(ctx.db, unpaidClaim!, {
+        send: async (input) => {
+          firstMessageId = input.messageId;
+          expect(input.message.text).toContain("Chưa xác nhận");
+          return { chatId: input.chatId, messageId: "owner-manual-off-1" };
+        },
+      }),
+    ).toBe("SENT");
+    expect(firstMessageId).toBeNull();
 
     await settleManualOrder(orderId, amount);
     expect(
@@ -791,15 +847,48 @@ describe("admin payment alert", () => {
         adminAlertMode: "OFF",
       }),
     ).toMatchObject({ kind: "PUBLISHED" });
-    const unchanged = await sql<{ content: string; count: string; status: string }>`
-      select c.content, count(d.id)::text as count, d.status
+
+    const paid = await sql<{
+      content: string;
+      status: string;
+      message_id: string;
+      delivery_count: number;
+    }>`
+      select c.content, d.status, d.message_id,
+        (select count(*)::int from notification_delivery where campaign_id = c.id) as delivery_count
       from notification_campaign c
       join notification_delivery d on d.campaign_id = c.id
-      where c.id = ${`admin-payment-settled:${orderId}`}
-      group by c.content, d.status
+      where c.id = ${campaignId}
     `.execute(ctx.db);
-    expect(unchanged.rows[0]?.content).toBe(original.rows[0]?.content);
-    expect(unchanged.rows[0]?.count).toBe("1");
-    expect(unchanged.rows[0]?.status).toBe("PENDING");
+    expect(paid.rows).toHaveLength(1);
+    expect(paid.rows[0]).toMatchObject({
+      status: "RETRY",
+      message_id: "owner-manual-off-1",
+      delivery_count: 1,
+    });
+    expect(paid.rows[0]?.content).toContain("SePay đã xác minh");
+    expect(paid.rows[0]?.content).toContain("⏳ Chờ tạo tác vụ xử lý");
+    expect(paid.rows[0]?.content).not.toContain("Chưa xác nhận");
+    const paymentCampaigns = await sql`
+      select id from notification_campaign where id like 'admin-payment-%'
+    `.execute(ctx.db);
+    expect(paymentCampaigns.rows).toEqual([]);
+
+    const [paidClaim] = await claimNotificationDeliveries(ctx.db, 1, "OFF");
+    expect(paidClaim?.campaignId).toBe(campaignId);
+    let editedMessageId: string | null = null;
+    let editedContent = "";
+    expect(
+      await processNotificationDeliveryClaim(ctx.db, paidClaim!, {
+        send: async (input) => {
+          editedMessageId = input.messageId;
+          editedContent = input.message.text;
+          return { chatId: input.chatId, messageId: "owner-manual-off-1" };
+        },
+      }),
+    ).toBe("SENT");
+    expect(editedMessageId).toBe("owner-manual-off-1");
+    expect(editedContent).toContain("SePay đã xác minh");
+    expect(editedContent).not.toContain("Chưa xác nhận");
   });
 });
