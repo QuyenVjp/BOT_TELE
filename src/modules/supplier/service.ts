@@ -109,16 +109,18 @@ function toPurchaseRecord(row: SupplierOrderRow): SupplierPurchaseRecord {
     row.status === "AUTHORIZED"
       ? row.status
       : "SUBMITTED";
+  const legacyQueryKey =
+    status === "UNKNOWN" && row.query_key === null ? row.external_order_id : null;
   return {
     id: row.id,
     requestReference: row.order_id,
     supplierId: row.supplier_id,
     supplierSkuId: row.supplier_sku_id,
-    queryKey: row.query_key,
+    queryKey: row.query_key ?? legacyQueryKey,
     idempotencyKey: row.idempotency_key,
     requestFingerprint: row.request_fingerprint,
     status,
-    externalOrderId: row.external_order_id,
+    externalOrderId: legacyQueryKey === null ? row.external_order_id : null,
     costVndSnapshot: Number(row.cost_vnd_snapshot),
     version: row.version,
     responseFingerprint: row.response_fingerprint,

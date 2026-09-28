@@ -591,6 +591,79 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     });
     expect(queries).toBe(1);
   });
+  it("recovers a legacy UNKNOWN record using its persisted provider lookup key", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const vault = createInMemoryVault();
+    const idempotencyKey = "idem-legacy-unknown-1";
+    const legacyKey = `qk-${idempotencyKey}`;
+    const supplierOrderId = newId();
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         external_order_id, query_key, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
+         margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId}, ${idempotencyKey}, 'fp-legacy-unknown',
+         ${legacyKey}, null, 'UNKNOWN', 150000, 199000, 49000, now())
+    `.execute(ctx.db);
+    let creates = 0;
+    const providerExternalOrderId = "ext-legacy-pending-1";
+    const port: SupplierPort = {
+      getAvailability: () =>
+        Promise.resolve({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
+      createOrder: () => {
+        creates += 1;
+        return Promise.resolve({
+          kind: "ACCEPTED",
+          externalOrderId: "ext-unexpected-create",
+          status: "PENDING",
+        });
+      },
+      queryOrder: ({ queryKey, externalOrderId }) => {
+        expect({ queryKey, externalOrderId }).toEqual({
+          queryKey: legacyKey,
+          externalOrderId: undefined,
+        });
+        return Promise.resolve({ status: "PENDING", externalOrderId: providerExternalOrderId });
+      },
+      cancelOrder: () => Promise.resolve({ status: "UNSUPPORTED" }),
+      requestRefund: () => Promise.resolve({ status: "UNSUPPORTED" }),
+      reconcile: () => Promise.resolve({ observations: [], nextCursor: null }),
+    };
+
+    const result = await provisionFromSupplier(ctx.db, {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL",
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-legacy-unknown",
+      port,
+      vault,
+      purchaseEnabled: false,
+      idempotencyKey,
+    });
+    expect(result).toEqual({
+      ok: true,
+      kind: "UNKNOWN",
+      supplierOrderId,
+      queryKey: legacyKey,
+    });
+    expect(creates).toBe(0);
+
+    const row = await sql<{ status: string; external_order_id: string | null }>`
+      select status, external_order_id from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toEqual({
+      status: "PENDING",
+      external_order_id: providerExternalOrderId,
+    });
+  });
 
   it("a rejected supplier response does not create an asset", async () => {
     const f = await seedPaidOrderWithSupplierSku();

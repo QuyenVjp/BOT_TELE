@@ -327,13 +327,13 @@ describe("owner supplier canary", () => {
     const first = await restartedService.executePending(runId);
     expect(first).toMatchObject({
       ok: true,
-      status: "UNKNOWN",
+      status: "PENDING",
       externalOrderId: acceptedOrderId,
     });
     const replay = await restartedService.executePending(runId);
     expect(replay).toMatchObject({
       ok: true,
-      status: "UNKNOWN",
+      status: "PENDING",
       externalOrderId: acceptedOrderId,
     });
     expect(state.queryInputs).toEqual([
@@ -549,7 +549,7 @@ describe("owner supplier canary", () => {
       actor,
       correlationId: "replay-again",
     });
-    expect(replay).toMatchObject({ ok: true, execution: { ok: true, status: "UNKNOWN" } });
+    expect(replay).toMatchObject({ ok: true, execution: { ok: true, status: "PENDING" } });
     expect(state.creates).toBe(1);
     expect(state.queries).toBe(1);
   });

@@ -22,12 +22,13 @@
 
 ### Unknown recovery
 
-1. For each `UNKNOWN` supplier order: call `queryOrder` with the stored external id / idempotency key.
-2. On `FULFILLED`: validate the asset envelope (SKU / delivery type / duration / region / expiry),
+1. For each `UNKNOWN` supplier order: use the stored `query_key` when present; on a legacy row where it is `NULL`, pass `external_order_id` as `queryKey`, never as `externalOrderId`.
+2. For a `PENDING` supplier order: query by its persisted provider external order ID; a `PENDING` observation stays query-only and must never trigger another create.
+3. On `FULFILLED`: validate the asset envelope (SKU / delivery type / duration / region / expiry),
    ingest as a vault-backed asset, mark ready, continue fulfillment.
-3. On `REJECTED` / terminal failure: transition the supplier order and open a replacement or
+4. On `REJECTED` / terminal failure: transition the supplier order and open a replacement or
    refund-request case; never invent a secret.
-4. On still-unknown: leave in `UNKNOWN` and re-schedule; do not re-create.
+5. On still-unknown: leave in `UNKNOWN` and re-schedule; do not re-create.
 
 ### Invalid asset
 

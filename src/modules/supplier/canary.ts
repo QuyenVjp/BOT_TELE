@@ -437,7 +437,7 @@ async function recoverCanaryRun(
       execution: {
         ok: true,
         runId,
-        status: "UNKNOWN",
+        status: current?.status === "PENDING" ? "PENDING" : "UNKNOWN",
         ...(current?.external_order_id ? { externalOrderId: current.external_order_id } : {}),
       },
       queried: true,
