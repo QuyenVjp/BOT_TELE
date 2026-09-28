@@ -106,7 +106,10 @@ function makeStore(): SupplierPurchaseRecordStore & {
       await patch(id, { status: "FULFILLED", externalOrderId });
     },
     async markRejected(id) {
-      await patch(id, { status: "REJECTED" });
+      const current = rows.get(id);
+      if (current && current.status !== "FULFILLED" && current.status !== "REJECTED") {
+        await patch(id, { status: "REJECTED" });
+      }
     },
     async markNeedsReview(_id, code) {
       reviewCodes.push(code);
@@ -318,6 +321,57 @@ describe("durable supplier purchase core", () => {
     const resumed = await executeSupplierPurchase(input(store, { purchaseEnabled: false, port }));
     expect(resumed).toMatchObject({ kind: "UNKNOWN", queryKey: "ext-crash-1" });
     expect({ creates, queries }).toEqual({ creates: 0, queries: 1 });
+  });
+
+  it("blocks a concurrent idempotency-key claim for another supplier SKU", async () => {
+    const store = makeStore();
+    let creates = 0;
+    let queries = 0;
+    const port = makePort({
+      createOrder: async () => {
+        creates += 1;
+        return { kind: "ACCEPTED", externalOrderId: "ext-claim-1", status: "PENDING" };
+      },
+      queryOrder: async () => {
+        queries += 1;
+        return { status: "PENDING", externalOrderId: "ext-claim-1" };
+      },
+    });
+
+    const [purchase, conflict] = await Promise.all([
+      executeSupplierPurchase(input(store, { port })),
+      executeSupplierPurchase(input(store, { supplierSkuId: "sku-2", port })),
+    ]);
+
+    expect(purchase.kind).toBe("ACCEPTED");
+    expect(conflict).toMatchObject({
+      kind: "BLOCKED",
+      code: "SUPPLIER_ORDER_NOT_ELIGIBLE",
+    });
+    expect({ creates, queries }).toEqual({ creates: 1, queries: 0 });
+  });
+
+  it("returns the durable fulfillment when a create rejection loses the race", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    seeded.record.status = "AUTHORIZED";
+    const port = makePort({
+      createOrder: async () => {
+        seeded.record.status = "FULFILLED";
+        return { kind: "REJECTED", code: "OUT_OF_STOCK", retryable: false };
+      },
+    });
+
+    const result = await executeSupplierPurchase(input(store, { port }));
+
+    expect(result).toMatchObject({ kind: "REPLAY", record: { status: "FULFILLED" } });
   });
 
   it("claims an authorized canary exactly once under concurrent execution", async () => {

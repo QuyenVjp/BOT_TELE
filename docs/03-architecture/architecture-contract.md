@@ -604,16 +604,18 @@ code consume the provider-neutral contracts and capability checks; they do not
 branch on `QCST` or `VOKHONG`. Unsupported financial actions return
 `UNSUPPORTED` or remain `NEEDS_REVIEW`; they are never emulated.
 
-Migration `094` was selected as the next unused forward source ordinal after
-scanning the complete tree through `093`. It keeps `supplier`, `supplier_sku`,
-`supplier_order` provider-neutral, namespaces external product/order identity
-by provider and optional external variant, and stores only safe catalog
-snapshots, local mapping state, supplier-cost observations, and durable
-purchase fingerprints. One local variant may have multiple supplier mappings;
-`product_variant.supplier_sku_id` is the explicit primary source. Non-primary
-mappings may retain local metadata but are not routable fallback candidates until
-an owner explicitly changes primary policy. Automatic cross-provider failover is
-permanently off for this rollout.
+Migration `093` established the provider-neutral supplier/catalog schema and
+durable recovery metadata, including provider-scoped external product/variant
+identity and safe catalog snapshots. One local variant may have multiple
+supplier mappings; `product_variant.supplier_sku_id` is the explicit primary
+source. Non-primary mappings may retain local metadata but are not routable
+fallback candidates until an owner explicitly changes primary policy. Automatic
+cross-provider failover is permanently off for this rollout.
+
+Migration `094` adds `supplier_order.query_key`, allowlists the owner canary
+action, and creates the durable `supplier_canary_run` aggregate with its request
+fingerprint and recovery state.
+
 
 Migration `095` backfills pre-canary `UNKNOWN` supplier-order rows by copying
 their legacy lookup key from `external_order_id` into `query_key` when it is
@@ -688,9 +690,11 @@ that state only when the linked admin confirmation is durably `CONSUMED`, its
 fingerprint, and its payload binds the owner actor. Before any new create, the
 service rechecks current master/canary/provider gates, approved and current
 cost, mapping/support/availability, automatic fulfillment with no customer
-input, and VND balance. Proof or gate failures durably block the run so a later
-flag change cannot revive it. The shared executor's `AUTHORIZED -> SUBMITTED`
-compare-and-set is the sole create claim and occurs before provider I/O.
+input, and VND balance. Proof or gate failures block only the exact `AUTHORIZED`
+version they evaluated; stale preflight and pre-submit failures MUST NOT
+overwrite a newer `SUBMITTED`, `PENDING`, or `UNKNOWN` run. The shared
+executor's `AUTHORIZED -> SUBMITTED` compare-and-set is the sole create claim
+and occurs before provider I/O.
 `SUBMITTED` means the provider may already have received the request.
 `SUBMITTED`, `PENDING`, and `UNKNOWN` recover only by querying with the stable
 idempotency/client order key or a known external order ID. Each recovered
@@ -738,7 +742,9 @@ new external create.
 The durable executor owns the exactly-once boundary: one stable provider
 idempotency key, one persisted intent before external I/O, a unique
 `(supplier_id, idempotency_key)` claim, and query-only recovery for existing
-`SUBMITTED`, `PENDING`, or `UNKNOWN` runs. A transport timeout is `UNKNOWN`;
+`SUBMITTED`, `PENDING`, or `UNKNOWN` runs. Claims and replays are bound to the
+persisted supplier SKU and request reference; a key reused for another intent
+is blocked before replay, query, or create. A transport timeout is `UNKNOWN`;
 recovery is query-only. Repeated confirmation, worker restart, Telegram retry,
 and concurrent confirmation all converge on the existing durable run and
 cannot issue a second create request.
@@ -747,11 +753,11 @@ The owner surface is private Telegram only. It displays safe product/provider,
 SKU, current cost, maximum approved cost, balance sufficiency, gate results,
 stable run identity, and status. It never renders provider delivery payloads,
 Vault references, raw keys, credentials, or secrets. A fulfilled upstream
-response is accepted only through the existing strict `AssetEnvelope` boundary;
-the official QCST API currently documents `delivery` only as an opaque/empty
-object with no stable field schema. Therefore QCST delivery acceptance remains
-`QCST_DELIVERY_SCHEMA_ACCEPTED=NO`, no heuristic decoder is allowed, and a
-canary cannot publish or deliver the returned payload to customers.
+response is accepted only through the existing strict `AssetEnvelope` boundary.
+The current QCST adapter rejects a response that claims delivery or supplies a
+non-null `delivery`; no delivery schema has been accepted in code. No heuristic
+decoder is allowed, and a canary cannot publish or deliver the returned payload
+to customers.
 
 Canary success is commissioning evidence only. It MUST NOT set
 `resale_evidence_id`, change local price/publication, enable a product, open the

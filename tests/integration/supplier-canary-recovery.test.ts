@@ -205,7 +205,10 @@ function makeProvider(input: {
   balanceVnd?: number;
   createResult?: { kind: "ACCEPTED"; externalOrderId: string; status: "PENDING" };
   createError?: Error;
-  queryResult?: (query: QueryOrderInput, call: number) => QueryOrderResult | Promise<QueryOrderResult>;
+  queryResult?: (
+    query: QueryOrderInput,
+    call: number,
+  ) => QueryOrderResult | Promise<QueryOrderResult>;
   queryError?: Error;
 }) {
   const queryInputs: QueryOrderInput[] = [];

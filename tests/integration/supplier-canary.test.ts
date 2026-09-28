@@ -39,6 +39,7 @@ interface ProviderState {
   creates: number;
   queries: number;
   balance: number;
+  readBalance?: () => Promise<{ available: number; currency: string }>;
   queryInputs?: QueryOrderInput[];
   queryResult?: QueryOrderResult;
   queryError?: Error;
@@ -143,7 +144,8 @@ function makeProvider(fixture: Fixture, state: ProviderState): SupplierProvider 
       "BALANCE_READ",
       "NATIVE_IDEMPOTENCY",
     ]),
-    getBalance: async () => ({ available: state.balance, currency: "VND" }),
+    getBalance: async () =>
+      state.readBalance ? state.readBalance() : { available: state.balance, currency: "VND" },
     getAvailability: async () => ({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
     createOrder: async () => {
       state.creates += 1;
@@ -428,6 +430,128 @@ describe("owner supplier canary", () => {
       execution: { ok: true, status: "PENDING" },
     });
     expect(state.creates).toBe(1);
+  });
+
+  it("does not block a submitted canary after a stale balance preflight failure", async () => {
+    const fixture = await seed();
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const preview = await makeService(fixture, state).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "stale-preflight-preview",
+    });
+    if (!preview.ok) throw new Error(preview.code);
+
+    const vault = createInMemoryVault();
+    await grantCanaryRun(preview.runId, vault);
+    const service = makeService(fixture, state, undefined, true, { enabled: true, vault });
+    let balanceCalls = 0;
+    let preflightStarted!: () => void;
+    let releasePreflight!: () => void;
+    const firstPreflightStarted = new Promise<void>((resolve) => {
+      preflightStarted = resolve;
+    });
+    const delayedPreflight = new Promise<void>((resolve) => {
+      releasePreflight = resolve;
+    });
+    state.readBalance = async () => {
+      balanceCalls += 1;
+      if (balanceCalls === 1) {
+        preflightStarted();
+        await delayedPreflight;
+        return { available: 0, currency: "VND" };
+      }
+      return { available: state.balance, currency: "VND" };
+    };
+
+    const confirmation = service.confirmIfCanary({
+      confirmationId: preview.confirmationId,
+      challenge: preview.challenge,
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      correlationId: "stale-preflight-confirm",
+    });
+    await firstPreflightStarted;
+    const concurrent = await service.executePending(preview.runId);
+    expect(concurrent).toMatchObject({ ok: true, status: "PENDING" });
+
+    releasePreflight();
+    expect(await confirmation).toMatchObject({
+      ok: true,
+      execution: { ok: true, status: "PENDING" },
+    });
+    expect(state.creates).toBe(1);
+    const run = await sql<{
+      status: string;
+      retry_after_seconds: number | null;
+      next_reconcile_at: string | null;
+    }>`
+      select status, retry_after_seconds, next_reconcile_at
+      from supplier_canary_run where id = ${preview.runId}
+    `.execute(ctx.db);
+    expect(run.rows[0]?.status).toBe("PENDING");
+    expect(run.rows[0]?.retry_after_seconds).toBeGreaterThan(0);
+    expect(run.rows[0]?.next_reconcile_at).not.toBeNull();
+  });
+
+  it("does not block a submitted canary after a stale before-create failure", async () => {
+    const fixture = await seed();
+    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const preview = await makeService(fixture, state).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "stale-before-create-preview",
+    });
+    if (!preview.ok) throw new Error(preview.code);
+
+    const vault = createInMemoryVault();
+    await grantCanaryRun(preview.runId, vault);
+    const service = makeService(fixture, state, undefined, true, { enabled: true, vault });
+    let balanceCalls = 0;
+    let beforeCreateStarted!: () => void;
+    let releaseBeforeCreate!: () => void;
+    const beforeCreateWaiting = new Promise<void>((resolve) => {
+      beforeCreateStarted = resolve;
+    });
+    const delayedBeforeCreate = new Promise<void>((resolve) => {
+      releaseBeforeCreate = resolve;
+    });
+    state.readBalance = async () => {
+      balanceCalls += 1;
+      if (balanceCalls === 2) {
+        beforeCreateStarted();
+        await delayedBeforeCreate;
+        return { available: 0, currency: "VND" };
+      }
+      return { available: state.balance, currency: "VND" };
+    };
+
+    const confirmation = service.confirmIfCanary({
+      confirmationId: preview.confirmationId,
+      challenge: preview.challenge,
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      correlationId: "stale-before-create-confirm",
+    });
+    await beforeCreateWaiting;
+    const concurrent = await service.executePending(preview.runId);
+    expect(concurrent).toMatchObject({ ok: true, status: "PENDING" });
+
+    releaseBeforeCreate();
+    expect(await confirmation).toMatchObject({
+      ok: true,
+      execution: { ok: true, status: "PENDING" },
+    });
+    expect(state.creates).toBe(1);
+    const run = await sql<{
+      status: string;
+      retry_after_seconds: number | null;
+      next_reconcile_at: string | null;
+    }>`
+      select status, retry_after_seconds, next_reconcile_at
+      from supplier_canary_run where id = ${preview.runId}
+    `.execute(ctx.db);
+    expect(run.rows[0]?.status).toBe("PENDING");
+    expect(run.rows[0]?.retry_after_seconds).toBeGreaterThan(0);
+    expect(run.rows[0]?.next_reconcile_at).not.toBeNull();
   });
 
   it("refuses a canary grant with a stale run version before supplier create", async () => {

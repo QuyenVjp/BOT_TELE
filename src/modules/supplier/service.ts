@@ -457,6 +457,13 @@ export async function provisionFromSupplier(
   if (existingRecord && existingRecord.requestReference !== input.orderId) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
+  if (existingRecord && existingRecord.supplierSkuId !== input.supplierSkuId) {
+    return {
+      ok: false,
+      code: "ORDER_TERMINAL",
+      message: "Đơn nhà cung cấp không ở trạng thái có thể cấp phát.",
+    };
+  }
   const existingRow = existingRecord ? await findSupplierOrderById(db, existingRecord.id) : null;
   const known = existingRow
     ? provisionResultFromExisting(existingRow, await findAssetBySupplierOrder(db, existingRow.id))

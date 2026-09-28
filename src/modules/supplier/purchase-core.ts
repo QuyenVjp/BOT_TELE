@@ -146,6 +146,27 @@ function unknownResult(record: SupplierPurchaseRecord, queryKey: string): Suppli
   return { kind: "UNKNOWN", record, queryKey };
 }
 
+function matchesPurchaseIntent(
+  record: SupplierPurchaseRecord,
+  input: SupplierPurchaseInput,
+): boolean {
+  return (
+    record.supplierSkuId === input.supplierSkuId &&
+    record.requestReference === input.requestReference
+  );
+}
+
+async function markRejectedAndReload(
+  store: SupplierPurchaseRecordStore,
+  record: SupplierPurchaseRecord,
+): Promise<SupplierPurchaseResult> {
+  await store.markRejected(record.id);
+  const current = (await store.findById(record.id)) ?? record;
+  return current.status === "FULFILLED"
+    ? { kind: "REPLAY", record: current }
+    : { kind: "REJECTED", record: current };
+}
+
 export async function executeSupplierPurchase(
   input: SupplierPurchaseInput,
 ): Promise<SupplierPurchaseResult> {
@@ -163,6 +184,9 @@ export async function executeSupplierPurchase(
       ...(input.onFulfilled ? { onFulfilled: input.onFulfilled } : {}),
     });
   if (existing) {
+    if (!matchesPurchaseIntent(existing, input)) {
+      return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_ELIGIBLE", record: existing };
+    }
     if (existing.status === "FULFILLED" || existing.status === "REJECTED") {
       return { kind: "REPLAY", record: existing };
     }
@@ -202,6 +226,9 @@ export async function executeSupplierPurchase(
     record = claimed.record;
     inserted = claimed.inserted;
     if (!inserted) {
+      if (!matchesPurchaseIntent(record, input)) {
+        return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_ELIGIBLE", record };
+      }
       if (record.status === "FULFILLED" || record.status === "REJECTED") {
         return { kind: "REPLAY", record };
       }
@@ -299,8 +326,7 @@ export async function executeSupplierPurchase(
       });
       return unknownResult((await input.store.findById(record.id)) ?? record, result.queryKey);
     case "REJECTED":
-      await input.store.markRejected(record.id);
-      return { kind: "REJECTED", record: (await input.store.findById(record.id)) ?? record };
+      return markRejectedAndReload(input.store, record);
     case "ACCEPTED":
       await input.store.markPending(record.id, result.externalOrderId);
       return {
@@ -343,8 +369,7 @@ export async function recoverSupplierPurchase(input: {
   } catch (error) {
     if (
       error instanceof SupplierPortError &&
-      (error.supplierCode === "DELIVERY_UNSUPPORTED" ||
-        error.supplierCode === "IDENTITY_MISMATCH")
+      (error.supplierCode === "DELIVERY_UNSUPPORTED" || error.supplierCode === "IDENTITY_MISMATCH")
     ) {
       await input.store.markNeedsReview(record.id, error.supplierCode);
       const current = await input.store.findById(record.id);
@@ -383,8 +408,7 @@ export async function recoverSupplierPurchase(input: {
     case "REJECTED":
     case "CANCELLED":
     case "REFUNDED":
-      await input.store.markRejected(record.id);
-      return { kind: "REJECTED", record: (await input.store.findById(record.id)) ?? record };
+      return markRejectedAndReload(input.store, record);
     case "PENDING":
       await input.store.markPending(record.id, observed.externalOrderId);
       return unknownResult(

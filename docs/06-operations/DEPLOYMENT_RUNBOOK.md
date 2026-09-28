@@ -192,14 +192,15 @@ and its existing Vault-backed `ORDER_READ` path available until no canary run
 remains `SUBMITTED`, `PENDING`, or `UNKNOWN`; disabling provider registration
 blocks query-only recovery.
 
-Keep `QCST_DELIVERY_SCHEMA_ACCEPTED=NO`. If QCST returns
-`delivery_available=true` or a non-null `delivery`, fail closed as
-`DELIVERY_UNSUPPORTED` / `NEEDS_REVIEW`; do not decode, persist, or send raw
-delivery data. Migrations `094_supplier_owner_canary.sql` and
-`095_supplier_unknown_query_key_backfill.sql` are branch-only until separately
-approved and must not be applied to production from an artifact containing
-either unapproved migration. This runbook does not authorize a production
-migration, flag change, or live canary; the store remains `CLOSED`.
+QCST delivery remains unconditionally fail-closed in the current adapter; no
+runtime acceptance flag exists. If QCST returns `delivery_available=true` or a
+non-null `delivery`, fail closed as `DELIVERY_UNSUPPORTED` / `NEEDS_REVIEW`; do
+not decode, persist, or send raw delivery data. Migrations
+`094_supplier_owner_canary.sql` and `095_supplier_unknown_query_key_backfill.sql`
+are branch-only until separately approved and must not be applied to production
+from an artifact containing either unapproved migration. This runbook does not
+authorize a production migration, flag change, or live canary; the store remains
+`CLOSED`.
 
 ## Historical migrations 072–076 — post-merge production procedure
 

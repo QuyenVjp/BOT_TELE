@@ -206,17 +206,38 @@ async function hasAutomaticDelivery(exec: Executor, supplierSkuId: string): Prom
   );
 }
 
-async function markCanaryBlocked(db: Db, id: string, code: string): Promise<void> {
-  await sql`
+async function markCanaryBlocked(
+  db: Db,
+  id: string,
+  code: string,
+  expectedStatus: "PREVIEWED" | "AUTHORIZED",
+  expectedVersion: number,
+): Promise<boolean> {
+  const result = await sql<{ id: string }>`
     update supplier_canary_run
     set status = 'BLOCKED', last_error_code = ${code}, retry_after_seconds = null,
         next_reconcile_at = null, updated_at = now(), version = version + 1
-    where id = ${id}
-      and status in ('PREVIEWED','AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+    where id = ${id} and status = ${expectedStatus} and version = ${expectedVersion}
+    returning id
   `.execute(db);
+  return result.rows.length === 1;
 }
 
-function canaryStore(db: Db): SupplierPurchaseRecordStore {
+async function blockAuthorizedCanary(
+  db: Db,
+  id: string,
+  version: number,
+  code: string,
+): Promise<SupplierCanaryExecutionResult> {
+  const blocked = await markCanaryBlocked(db, id, code, "AUTHORIZED", version);
+  const current = await loadCanary(db, id);
+  if (!blocked && current?.status === "AUTHORIZED") {
+    return { runId: id, ...safeFailure(code) };
+  }
+  return executionFromCanaryRow(current, id);
+}
+
+function canaryStore(db: Db, authorizedVersion: number): SupplierPurchaseRecordStore {
   const load = (id: string) => loadCanary(db, id);
   const toRecord = (row: CanaryRow): SupplierPurchaseRecord => ({
     id: row.id,
@@ -381,7 +402,7 @@ function canaryStore(db: Db): SupplierPurchaseRecordStore {
       `.execute(db);
     },
     async markBlocked(id, code) {
-      await markCanaryBlocked(db, id, code);
+      await markCanaryBlocked(db, id, code, "AUTHORIZED", authorizedVersion);
     },
   };
 }
@@ -454,15 +475,12 @@ async function recoverCanaryRun(
     return { execution: { runId, ...safeFailure("PROVIDER_UNAVAILABLE") }, queried: false };
   }
   const recovered = await recoverSupplierPurchase({
-    store: canaryStore(db),
+    store: canaryStore(db, row.version),
     recordId: row.id,
     queryKey: row.query_key ?? row.idempotency_key,
     expectedSku: row.external_sku,
     port: provider,
   });
-  if (recovered.kind === "BLOCKED") {
-    await markCanaryBlocked(db, runId, recovered.code);
-  }
 
   const queried =
     recovered.kind !== "REPLAY" &&
@@ -748,7 +766,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       consumeGrant: false,
     });
     if (!authorization.ok) {
-      await markCanaryBlocked(options.db, runId, authorization.code);
+      await markCanaryBlocked(options.db, runId, authorization.code, "PREVIEWED", 1);
       return safeFailure("AUTHORIZATION_REQUIRED");
     }
 
@@ -772,7 +790,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       },
     });
     if (!issued.ok) {
-      await markCanaryBlocked(options.db, runId, "CONFIRMATION_FAILED");
+      await markCanaryBlocked(options.db, runId, "CONFIRMATION_FAILED", "PREVIEWED", 1);
       return safeFailure("CONFIRMATION_FAILED");
     }
     const linked = await sql`
@@ -781,7 +799,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       where id = ${runId} and status = 'PREVIEWED'
     `.execute(options.db);
     if (Number(linked.numAffectedRows ?? 0) !== 1) {
-      await markCanaryBlocked(options.db, runId, "CONFIRMATION_FAILED");
+      await markCanaryBlocked(options.db, runId, "CONFIRMATION_FAILED", "PREVIEWED", 1);
       return safeFailure("CONFIRMATION_FAILED");
     }
     return {
@@ -814,27 +832,22 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
     }
     if (row.status !== "AUTHORIZED") return { runId, ...safeFailure("CANARY_NOT_AUTHORIZED") };
     if (!(await hasConsumedCanaryConfirmation(options.db, row))) {
-      await markCanaryBlocked(options.db, runId, "CONFIRMATION_FAILED");
-      return { runId, ...safeFailure("CONFIRMATION_FAILED") };
+      return blockAuthorizedCanary(options.db, runId, row.version, "CONFIRMATION_FAILED");
     }
     if (!options.canaryEnabled || !options.canaryPurchaseEnabled(row.provider_key)) {
-      await markCanaryBlocked(options.db, runId, "PURCHASE_GATE_DISABLED");
-      return { runId, ...safeFailure("PURCHASE_GATE_DISABLED") };
+      return blockAuthorizedCanary(options.db, runId, row.version, "PURCHASE_GATE_DISABLED");
     }
     const provider = options.registry.get(row.provider_key);
     if (!provider) {
-      await markCanaryBlocked(options.db, runId, "PROVIDER_UNAVAILABLE");
-      return { runId, ...safeFailure("PROVIDER_UNAVAILABLE") };
+      return blockAuthorizedCanary(options.db, runId, row.version, "PROVIDER_UNAVAILABLE");
     }
     const approvedCost = numberValue(row.approved_cost_vnd);
     if (approvedCost === null || approvedCost > options.maxCostVnd) {
-      await markCanaryBlocked(options.db, runId, "COST_TOO_HIGH");
-      return { runId, ...safeFailure("COST_TOO_HIGH") };
+      return blockAuthorizedCanary(options.db, runId, row.version, "COST_TOO_HIGH");
     }
     const safety = await canarySafety(provider, row, approvedCost);
     if (!safety.ok) {
-      await markCanaryBlocked(options.db, runId, safety.code);
-      return { runId, ...safeFailure(safety.code) };
+      return blockAuthorizedCanary(options.db, runId, row.version, safety.code);
     }
 
     const result = await executeSupplierPurchase({
@@ -847,7 +860,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       correlationId: `canary:${runId}`,
       region: row.region,
       port: provider,
-      store: canaryStore(options.db),
+      store: canaryStore(options.db, row.version),
       purchaseEnabled: true,
       beforeCreate: async () => {
         const latest = await checkSupplierPurchaseReadiness(options.db, {
@@ -886,7 +899,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       },
     });
     if (result.kind === "BLOCKED") {
-      await markCanaryBlocked(options.db, runId, result.code);
+      return blockAuthorizedCanary(options.db, runId, row.version, result.code);
     }
     // The canary never stores or presents the provider fulfillment payload.
     return executionFromCanaryRow(await loadCanary(options.db, runId), runId);

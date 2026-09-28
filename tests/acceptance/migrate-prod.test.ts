@@ -7,7 +7,7 @@ import { resolve } from "node:path";
 import { sql } from "kysely";
 import { listMigrationFiles, runMigrations } from "../../src/infrastructure/db/migrate.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
-import type { SupplierPort } from "../../src/modules/supplier/port.js";
+import type { QueryOrderInput, SupplierPort } from "../../src/modules/supplier/port.js";
 import { recoverUnknownSupplierOrder } from "../../src/modules/supplier/service.js";
 import { dockerAvailable, startPostgres } from "../helpers/pg-container.js";
 
@@ -284,7 +284,7 @@ describe("compiled production migration entrypoint (T173)", () => {
       expect(reentry.applied).not.toContain("095_supplier_unknown_query_key_backfill.sql");
 
       let creates = 0;
-      const queries: Array<{ externalOrderId?: string; queryKey?: string }> = [];
+      const queries: QueryOrderInput[] = [];
       const port: SupplierPort = {
         getAvailability: async () => ({
           status: "AVAILABLE",
@@ -314,7 +314,7 @@ describe("compiled production migration entrypoint (T173)", () => {
         vault: createInMemoryVault(),
       });
       expect(recovered).toEqual({ ok: true, kind: "PENDING" });
-      expect(queries).toEqual([{ queryKey: "legacy-query-key" }]);
+      expect(queries).toEqual([{ queryKey: "legacy-query-key", expectedSku: "PRE-CANARY-SKU" }]);
       expect(creates).toBe(0);
 
       const preservedProviderId = await sql<{ external_order_id: string | null }>`
