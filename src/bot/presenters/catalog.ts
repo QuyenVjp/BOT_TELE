@@ -243,14 +243,16 @@ export function presentProductDetail(
 ): PresentedMessage {
   const prices = detail.variants.map((v) => BigInt(v.price_vnd)).filter((p) => p > 0n);
   const minPrice = prices.length ? prices.reduce((a, b) => (a < b ? a : b)) : null;
-  const hasManualFulfillment = detail.variants.some(
-    (variant) => variant.fulfillment_type === "MANUAL_FULFILLMENT",
+  const hasNonImmediateFulfillment = detail.variants.some(
+    (variant) =>
+      variant.fulfillment_type === "MANUAL_FULFILLMENT" ||
+      variant.fulfillment_type === "UNLIMITED_SERVICE",
   );
   const deliveryModes = [
     ...new Set(detail.variants.map((v) => DELIVERY_MODE_COPY[v.fulfillment_type] ?? "Tự động")),
   ];
   const deliveryEta =
-    detail.delivery_eta_vi || (!hasManualFulfillment ? "vài giây sau khi thanh toán" : null);
+    detail.delivery_eta_vi || (!hasNonImmediateFulfillment ? "vài giây sau khi thanh toán" : null);
 
   const lines = [
     `📦 ${detail.name_vi}`,

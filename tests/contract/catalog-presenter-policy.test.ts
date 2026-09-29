@@ -284,6 +284,14 @@ describe("catalog product detail copy", () => {
     expect(message.text).not.toMatch(/⏱ Dự kiến:.*(vài giây|ngay sau khi thanh toán)/iu);
   });
 
+  it("does not apply the automatic ETA fallback to unlimited-service-only products", () => {
+    const unlimited = variant("LOCAL_ONLY", "UNLIMITED_SERVICE", true, 2);
+    const message = presentProductDetail(detailView([unlimited]), {});
+
+    expect(message.text).toContain("⚡ Giao hàng: Kích hoạt sau khi thanh toán");
+    expect(message.text).not.toMatch(/⏱ Dự kiến:.*(vài giây|ngay sau khi thanh toán)/iu);
+  });
+
   it("does not infer product stock from ready non-stock variants", () => {
     const manual = variant("LOCAL_ONLY", "MANUAL_FULFILLMENT", true, 0);
     const unlimited = variant("LOCAL_ONLY", "UNLIMITED_SERVICE", true, 0);
