@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { sql } from "kysely";
 import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
@@ -7,10 +6,15 @@ import { newId } from "../../shared/ids/index.js";
 import { findOrderById } from "../commerce/repository.js";
 import { validateAssetEnvelope } from "../digital-goods/asset-validation.js";
 import {
+  executeSupplierPurchase,
+  recoverSupplierPurchase,
+  type SupplierPurchaseRecord,
+  type SupplierPurchaseRecordStatus,
+  type SupplierPurchaseRecordStore,
+} from "./purchase-core.js";
+import {
   hasSupplierCapability,
-  SupplierPortError,
   type AssetEnvelope,
-  type CreateOrderResult,
   type SupplierPort,
   type SupplierProvider,
 } from "./port.js";
@@ -59,7 +63,11 @@ export type ProvisionResult =
   | { ok: true; kind: "UNKNOWN"; supplierOrderId: string; queryKey: string }
   | { ok: true; kind: "REJECTED"; supplierOrderId: string }
   | { ok: true; kind: "NEEDS_REVIEW"; supplierOrderId: string; assetId: string }
-  | { ok: false; code: "NOT_FOUND" | "NOT_PAID" | "UNSUPPORTED"; message: string };
+  | {
+      ok: false;
+      code: "NOT_FOUND" | "NOT_PAID" | "UNSUPPORTED" | "ORDER_TERMINAL";
+      message: string;
+    };
 
 export interface RecoverInput {
   supplierOrderId: string;
@@ -83,23 +91,63 @@ export type RecoverResult =
 interface SupplierOrderRow {
   id: string;
   order_id: string;
+  supplier_id: string;
+  supplier_sku_id: string;
+  idempotency_key: string;
+  request_fingerprint: string;
   status: string;
   external_order_id: string | null;
+  query_key: string | null;
+  cost_vnd_snapshot: number | string;
+  submitted_at: Date | string | null;
   version: number;
+  response_fingerprint: string | null;
+  last_error_code: string | null;
+  needs_review_at: Date | string | null;
+  attempt_count: number;
 }
 
-function requestFingerprint(input: ProvisionInput, idempotencyKey: string): string {
-  return createHash("sha256")
-    .update(`${input.supplierId}|${input.supplierSkuId}|${input.orderId}|${idempotencyKey}`, "utf8")
-    .digest("hex");
+function toPurchaseRecordStatus(status: string): SupplierPurchaseRecordStatus {
+  switch (status) {
+    case "AUTHORIZED":
+    case "CREATED":
+    case "SUBMITTED":
+    case "PENDING":
+    case "FULFILLED":
+    case "REJECTED":
+    case "UNKNOWN":
+    case "RECONCILED":
+    case "CANCEL_PENDING":
+    case "CANCELLED":
+    case "REFUND_PENDING":
+    case "REFUNDED":
+      return status;
+    default:
+      return "UNRECOGNIZED";
+  }
 }
 
-function retryAfterFromError(error: unknown): number | null {
-  if (!(error instanceof SupplierPortError)) return null;
-  const value = (error as SupplierPortError & { retryAfterSeconds?: unknown }).retryAfterSeconds;
-  return typeof value === "number" && Number.isInteger(value) && value >= 0
-    ? Math.min(value, 86_400)
-    : null;
+function toPurchaseRecord(row: SupplierOrderRow): SupplierPurchaseRecord {
+  const status = toPurchaseRecordStatus(row.status);
+  const legacyQueryKey = status === "UNKNOWN" ? row.external_order_id : null;
+  return {
+    id: row.id,
+    requestReference: row.order_id,
+    supplierId: row.supplier_id,
+    supplierSkuId: row.supplier_sku_id,
+    queryKey: row.query_key ?? legacyQueryKey,
+    submittedAt: row.submitted_at,
+    needsReviewAt: row.needs_review_at,
+    idempotencyKey: row.idempotency_key,
+    requestFingerprint: row.request_fingerprint,
+    status,
+    externalOrderId: status === "UNKNOWN" ? null : row.external_order_id,
+    costVndSnapshot: Number(row.cost_vnd_snapshot),
+    attemptCount: row.attempt_count,
+    version: row.version,
+    responseFingerprint: row.response_fingerprint,
+    blockCode: row.last_error_code,
+  };
 }
 
 async function findSupplierOrderByIdempotency(
@@ -108,7 +156,9 @@ async function findSupplierOrderByIdempotency(
   idempotencyKey: string,
 ): Promise<SupplierOrderRow | null> {
   const result = await sql<SupplierOrderRow>`
-    select id, order_id, status, external_order_id, version
+    select id, supplier_id, supplier_sku_id, order_id, idempotency_key,
+           request_fingerprint, status, external_order_id, query_key, cost_vnd_snapshot,
+           submitted_at, attempt_count, version, response_fingerprint, last_error_code, needs_review_at
     from supplier_order
     where supplier_id = ${supplierId} and idempotency_key = ${idempotencyKey}
     limit 1
@@ -118,10 +168,142 @@ async function findSupplierOrderByIdempotency(
 
 async function findSupplierOrderById(exec: Executor, id: string): Promise<SupplierOrderRow | null> {
   const result = await sql<SupplierOrderRow>`
-    select id, order_id, status, external_order_id, version
+    select id, supplier_id, supplier_sku_id, order_id, idempotency_key,
+           request_fingerprint, status, external_order_id, query_key, cost_vnd_snapshot,
+           submitted_at, attempt_count, version, response_fingerprint, last_error_code, needs_review_at
     from supplier_order where id = ${id} limit 1
   `.execute(exec);
   return result.rows[0] ?? null;
+}
+
+function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchaseRecordStore {
+  const load = async (id: string): Promise<SupplierOrderRow | null> =>
+    findSupplierOrderById(db, id);
+  return {
+    async findByIdempotency(input) {
+      const row = await findSupplierOrderByIdempotency(db, input.supplierId, input.idempotencyKey);
+      return row ? toPurchaseRecord(row) : null;
+    },
+    async findById(id) {
+      const row = await load(id);
+      return row ? toPurchaseRecord(row) : null;
+    },
+    async insertIntent(input) {
+      const id = newId();
+      const inserted = await sql<{ id: string }>`
+        insert into supplier_order
+          (id, supplier_id, supplier_sku_id, order_id, idempotency_key, provider_client_order_id,
+           request_fingerprint, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
+           margin_vnd_snapshot, submitted_at, last_attempt_at, attempt_count)
+        values
+          (${id}, ${input.supplierId}, ${input.supplierSkuId}, ${input.requestReference},
+           ${input.idempotencyKey}, ${input.idempotencyKey}, ${input.requestFingerprint}, 'SUBMITTED',
+           ${input.costCeilingVnd}, ${salePriceVnd}, ${salePriceVnd - input.costCeilingVnd},
+           null, null, 0)
+        on conflict (supplier_id, idempotency_key) do nothing
+        returning id
+      `.execute(db);
+      const row = await (inserted.rows[0]
+        ? load(id)
+        : findSupplierOrderByIdempotency(db, input.supplierId, input.idempotencyKey));
+      if (!row) throw new Error("supplier idempotency winner was not visible after conflict wait");
+      return { inserted: inserted.rows.length === 1, record: toPurchaseRecord(row) };
+    },
+    async markAttempt(id, input) {
+      const result = await sql<{ id: string }>`
+        update supplier_order
+        set status = 'SUBMITTED', query_key = coalesce(query_key, idempotency_key),
+            cost_vnd_snapshot = ${input.costCeilingVnd},
+            margin_vnd_snapshot = sale_price_vnd_snapshot - ${input.costCeilingVnd},
+            submitted_at = now(), attempt_count = attempt_count + 1, last_attempt_at = now(),
+            last_error_code = null, retry_after_seconds = null, next_reconcile_at = null,
+            version = version + 1
+        where id = ${id} and needs_review_at is null
+          and status in ('SUBMITTED','AUTHORIZED') and attempt_count = 0
+        returning id
+      `.execute(db);
+      return result.rows.length === 1;
+    },
+    async markTransportFailure(id, input) {
+      await sql`
+        update supplier_order
+        set last_error_code = ${input.code},
+            retry_after_seconds = ${input.retryAfterSeconds ?? null},
+            next_reconcile_at = ${
+              input.retryAfterSeconds === null || input.retryAfterSeconds === undefined
+                ? null
+                : new Date(Date.now() + input.retryAfterSeconds * 1_000).toISOString()
+            },
+            version = version + 1
+        where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(db);
+    },
+    async markResponse(id, fingerprint) {
+      await sql`
+        update supplier_order
+        set response_fingerprint = ${fingerprint}, version = version + 1
+        where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(db);
+    },
+    async markUnknown(id, input) {
+      await sql`
+        update supplier_order
+        set status = 'UNKNOWN',
+            query_key = ${input.queryKey},
+            last_queried_at = now(), uncertain_at = now(), last_error_code = ${input.reason},
+            version = version + 1
+        where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(db);
+    },
+    async markPending(id, externalOrderId) {
+      await sql`
+        update supplier_order
+        set status = 'PENDING', external_order_id = ${externalOrderId}, query_key = null,
+            last_queried_at = now(), last_error_code = null, version = version + 1
+        where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(db);
+    },
+    async markFulfilled(id, externalOrderId) {
+      await sql`
+        update supplier_order
+        set status = 'FULFILLED', external_order_id = ${externalOrderId}, query_key = null,
+            version = version + 1
+        where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(db);
+    },
+    async markRejected(id) {
+      await sql`
+        update supplier_order
+        set status = 'REJECTED', version = version + 1
+        where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(db);
+    },
+    async markNeedsReview(id, code) {
+      await sql`
+        update supplier_order
+        set last_error_code = ${code}, needs_review_at = coalesce(needs_review_at, now()),
+            next_reconcile_at = null, version = version + 1
+        where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(db);
+    },
+    async markBlocked(id, code) {
+      await sql`
+        update supplier_order
+        set status = 'REJECTED', last_error_code = ${code}, next_reconcile_at = null,
+            version = version + 1
+        where id = ${id}
+          and status in ('AUTHORIZED','SUBMITTED')
+          and attempt_count = 0
+      `.execute(db);
+    },
+  };
 }
 
 async function findAssetBySupplierOrder(
@@ -145,6 +327,18 @@ function provisionResultFromExisting(
   }
   if (existing.status === "REJECTED")
     return { ok: true, kind: "REJECTED", supplierOrderId: existing.id };
+  if (
+    existing.status !== "AUTHORIZED" &&
+    existing.status !== "SUBMITTED" &&
+    existing.status !== "PENDING" &&
+    existing.status !== "UNKNOWN"
+  ) {
+    return {
+      ok: false,
+      code: "ORDER_TERMINAL",
+      message: "Đơn nhà cung cấp không ở trạng thái có thể cấp phát.",
+    };
+  }
   return null;
 }
 
@@ -156,9 +350,8 @@ function recoverResultFromAsset(asset: { id: string; status: string }): RecoverR
 
 /**
  * Ingest a validated supplier asset as a SUPPLIER/READY asset bound to the
- * order, then move the supplier order to FULFILLED — atomically. On a
- * validation mismatch the asset is quarantined (SUPPLIER_NEEDS_REVIEW) and left
- * unreserved so it can never be delivered.
+ * order. The supplier row is locked and claimed in the same transaction so a
+ * stale fulfilled observation cannot ingest after a terminal or quarantined outcome wins.
  */
 async function ingestFulfilledAsset(
   db: Db,
@@ -173,7 +366,7 @@ async function ingestFulfilledAsset(
     durationCode: string;
     region: string | null;
   },
-): Promise<{ assetId: string; quarantined: boolean }> {
+): Promise<boolean> {
   const decision = validateAssetEnvelope(params.envelope, {
     expectedSku: params.expectedSku,
     deliveryType: params.deliveryType,
@@ -182,14 +375,31 @@ async function ingestFulfilledAsset(
   });
 
   return withTransaction(db, async (trx) => {
-    const locked = await sql<{ id: string }>`
-      select id from supplier_order where id = ${params.supplierOrderId} for update
+    const locked = await sql<{
+      status: string;
+      needs_review_at: Date | string | null;
+    }>`
+      select status, needs_review_at
+      from supplier_order where id = ${params.supplierOrderId} for update
     `.execute(trx);
-    if (!locked.rows[0]) throw new Error("Supplier order disappeared during fulfilled ingest");
+    const row = locked.rows[0];
+    if (!row) throw new Error("Supplier order disappeared during fulfilled ingest");
+    if (row.needs_review_at !== null) return false;
 
     const existing = await findAssetBySupplierOrder(trx, params.supplierOrderId);
+    if (row.status === "FULFILLED") return existing !== null;
+    if (!["AUTHORIZED", "CREATED", "SUBMITTED", "PENDING", "UNKNOWN"].includes(row.status)) {
+      return false;
+    }
     if (existing) {
-      return { assetId: existing.id, quarantined: existing.status === "SUPPLIER_NEEDS_REVIEW" };
+      await sql`
+        update supplier_order
+        set status = 'FULFILLED', external_order_id = ${params.externalOrderId}, query_key = null,
+            version = version + 1
+        where id = ${params.supplierOrderId}
+          and status in ('AUTHORIZED','CREATED','SUBMITTED','PENDING','UNKNOWN')
+      `.execute(trx);
+      return true;
     }
 
     const assetId = newId();
@@ -211,18 +421,23 @@ async function ingestFulfilledAsset(
          ${JSON.stringify(summary)}::jsonb)
     `.execute(trx);
 
-    // Supplier order is FULFILLED regardless (the upstream purchase happened);
-    // the asset quarantine is what blocks delivery.
     await sql`
       update supplier_order
-      set status = 'FULFILLED',
-          external_order_id = ${params.externalOrderId},
-          needs_review_at = ${quarantined ? new Date().toISOString() : null},
+      set status = 'FULFILLED', external_order_id = ${params.externalOrderId}, query_key = null,
           version = version + 1
       where id = ${params.supplierOrderId}
+        and status in ('AUTHORIZED','CREATED','SUBMITTED','PENDING','UNKNOWN')
     `.execute(trx);
+    if (quarantined) {
+      await sql`
+        update supplier_order
+        set needs_review_at = coalesce(needs_review_at, now())
+        where id = ${params.supplierOrderId}
+          and status = 'FULFILLED'
+      `.execute(trx);
+    }
 
-    return { assetId, quarantined };
+    return true;
   });
 }
 
@@ -234,48 +449,69 @@ export async function provisionFromSupplier(
   if (!order) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
-  if (input.purchaseEnabled !== true) {
-    return {
-      ok: false,
-      code: "UNSUPPORTED",
-      message: "Mua từ nhà cung cấp đang bị khóa.",
-    };
-  }
-  if ("capabilities" in input.port && !hasSupplierCapability(input.port, "ORDER_CREATE")) {
-    return {
-      ok: false,
-      code: "UNSUPPORTED",
-      message: "Nhà cung cấp chưa công bố capability đặt hàng.",
-    };
-  }
-
   if (order.status !== "PAID" && order.status !== "PROCESSING" && order.status !== "COMPLETED") {
     return { ok: false, code: "NOT_PAID", message: "Đơn hàng chưa được thanh toán." };
   }
 
   const idempotencyKey = input.idempotencyKey ?? `${input.orderId}:${input.supplierSkuId}`;
-  const existing = await findSupplierOrderByIdempotency(db, input.supplierId, idempotencyKey);
-  if (existing && existing.order_id !== input.orderId) {
+  const store = createSupplierOrderStore(db, input.salePriceVnd);
+  const existingRecord = await store.findByIdempotency({
+    supplierId: input.supplierId,
+    idempotencyKey,
+  });
+  if (existingRecord && existingRecord.requestReference !== input.orderId) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
-  if (existing) {
-    const known = provisionResultFromExisting(
-      existing,
-      await findAssetBySupplierOrder(db, existing.id),
-    );
-    if (known) return known;
+  if (existingRecord && existingRecord.supplierSkuId !== input.supplierSkuId) {
+    return {
+      ok: false,
+      code: "ORDER_TERMINAL",
+      message: "Đơn nhà cung cấp không ở trạng thái có thể cấp phát.",
+    };
+  }
+  const existingRow = existingRecord ? await findSupplierOrderById(db, existingRecord.id) : null;
+  const known = existingRow
+    ? provisionResultFromExisting(existingRow, await findAssetBySupplierOrder(db, existingRow.id))
+    : null;
+  if (known) return known;
+  if (
+    existingRow &&
+    existingRow.needs_review_at !== null &&
+    existingRow.status !== "FULFILLED" &&
+    existingRow.status !== "REJECTED"
+  ) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: recoveryBlockedMessage("SUPPLIER_ORDER_NOT_QUERYABLE"),
+    };
+  }
+  if (
+    order.status === "COMPLETED" &&
+    existingRecord?.status === "SUBMITTED" &&
+    existingRecord.attemptCount === 0
+  ) {
+    return {
+      ok: false,
+      code: "ORDER_TERMINAL",
+      message: "Đơn nhà cung cấp không ở trạng thái có thể cấp phát.",
+    };
   }
 
-  const canReuseCompletedReplay = order.status === "COMPLETED" && existing !== null;
+  const canReuseCompletedReplay = order.status === "COMPLETED" && existingRecord !== null;
   if (order.status !== "PAID" && order.status !== "PROCESSING" && !canReuseCompletedReplay) {
     return { ok: false, code: "NOT_PAID", message: "Đơn hàng chưa được thanh toán." };
   }
 
-  if (existing) {
-    if (existing.status === "UNKNOWN" || existing.status === "PENDING") {
+  if (existingRecord) {
+    if (
+      existingRecord.status === "UNKNOWN" ||
+      existingRecord.status === "PENDING" ||
+      (existingRecord.status === "SUBMITTED" && existingRecord.attemptCount !== 0)
+    ) {
       const recovered = await recoverUnknownSupplierOrder(db, {
-        supplierOrderId: existing.id,
-        queryKey: existing.external_order_id ?? idempotencyKey,
+        supplierOrderId: existingRecord.id,
+        queryKey: existingRecord.queryKey ?? idempotencyKey,
         expectedSku: input.expectedSku,
         deliveryType: input.deliveryType,
         durationCode: input.durationCode,
@@ -289,7 +525,7 @@ export async function provisionFromSupplier(
         return {
           ok: true,
           kind: "FULFILLED",
-          supplierOrderId: existing.id,
+          supplierOrderId: existingRecord.id,
           assetId: recovered.assetId,
         };
       }
@@ -297,25 +533,43 @@ export async function provisionFromSupplier(
         return {
           ok: true,
           kind: "NEEDS_REVIEW",
-          supplierOrderId: existing.id,
+          supplierOrderId: existingRecord.id,
           assetId: recovered.assetId,
         };
       }
-      if (recovered.kind === "REJECTED")
-        return { ok: true, kind: "REJECTED", supplierOrderId: existing.id };
+      if (recovered.kind === "REJECTED") {
+        return { ok: true, kind: "REJECTED", supplierOrderId: existingRecord.id };
+      }
       return {
         ok: true,
         kind: "UNKNOWN",
-        supplierOrderId: existing.id,
-        queryKey: existing.external_order_id ?? idempotencyKey,
+        supplierOrderId: existingRecord.id,
+        queryKey: existingRecord.queryKey ?? idempotencyKey,
       };
     }
-
+    if (
+      existingRecord.status !== "AUTHORIZED" &&
+      !(existingRecord.status === "SUBMITTED" && existingRecord.attemptCount === 0)
+    ) {
+      return {
+        ok: false,
+        code: "ORDER_TERMINAL",
+        message: "Đơn nhà cung cấp không ở trạng thái có thể cấp phát.",
+      };
+    }
+  }
+  if (input.purchaseEnabled !== true) {
     return {
-      ok: true,
-      kind: "UNKNOWN",
-      supplierOrderId: existing.id,
-      queryKey: existing.external_order_id ?? idempotencyKey,
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Mua từ nhà cung cấp đang bị khóa.",
+    };
+  }
+  if ("capabilities" in input.port && !hasSupplierCapability(input.port, "ORDER_CREATE")) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Nhà cung cấp chưa công bố capability đặt hàng.",
     };
   }
 
@@ -333,185 +587,108 @@ export async function provisionFromSupplier(
       message: "Mapping nhà cung cấp hiện không đủ điều kiện mua.",
     };
   }
-  let purchaseInput: ProvisionInput = {
-    ...input,
-    externalSku: readiness.externalSku,
-    expectedSku: input.expectedSku,
-    costCeilingVnd: readiness.costVnd,
-    region: readiness.region,
-  };
 
-  // Insert the durable winner before external I/O. ON CONFLICT waits for a concurrent
-  // winner, then the loser returns that in-flight state without creating or querying.
-  const supplierOrderId = newId();
-  const costSnapshot = purchaseInput.costCeilingVnd;
-  const margin = purchaseInput.salePriceVnd - costSnapshot;
-  const inserted = await sql<{ id: string }>`
-    insert into supplier_order
-      (id, supplier_id, supplier_sku_id, order_id, idempotency_key, provider_client_order_id,
-       request_fingerprint, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
-       margin_vnd_snapshot, submitted_at, last_attempt_at, attempt_count)
-    values
-      (${supplierOrderId}, ${purchaseInput.supplierId}, ${purchaseInput.supplierSkuId}, ${purchaseInput.orderId},
-       ${idempotencyKey}, ${idempotencyKey}, ${requestFingerprint(purchaseInput, idempotencyKey)}, 'SUBMITTED',
-       ${costSnapshot}, ${purchaseInput.salePriceVnd}, ${margin}, now(), now(), 0)
-    on conflict (supplier_id, idempotency_key) do nothing
-    returning id
-  `.execute(db);
-
-  if (!inserted.rows[0]) {
-    const winner = await findSupplierOrderByIdempotency(db, input.supplierId, idempotencyKey);
-    if (!winner) throw new Error("supplier idempotency winner was not visible after conflict wait");
-    const known = provisionResultFromExisting(
-      winner,
-      await findAssetBySupplierOrder(db, winner.id),
-    );
-    return (
-      known ?? {
-        ok: true,
-        kind: "UNKNOWN",
-        supplierOrderId: winner.id,
-        queryKey: winner.external_order_id ?? idempotencyKey,
-      }
-    );
-  }
-  const latestReadiness = await checkSupplierPurchaseReadiness(db, {
-    variantId: order.variantId,
+  let expectedSku =
+    input.expectedSku === input.externalSku ? readiness.externalSku : input.expectedSku;
+  let region = readiness.region;
+  const result = await executeSupplierPurchase({
     supplierId: input.supplierId,
     supplierSkuId: input.supplierSkuId,
-    provider: input.port,
+    requestReference: input.orderId,
+    externalSku: readiness.externalSku,
+    costCeilingVnd: readiness.costVnd,
+    idempotencyKey,
+    correlationId: input.correlationId,
+    region,
+    port: input.port,
+    store,
     purchaseEnabled: input.purchaseEnabled,
+    beforeCreate: async () => {
+      const latest = await checkSupplierPurchaseReadiness(db, {
+        variantId: order.variantId,
+        supplierId: input.supplierId,
+        supplierSkuId: input.supplierSkuId,
+        provider: input.port,
+        purchaseEnabled: input.purchaseEnabled,
+      });
+      if (!latest.ok) return { ok: false, code: latest.reason };
+      expectedSku =
+        input.expectedSku === input.externalSku ? latest.externalSku : input.expectedSku;
+      region = latest.region;
+      return {
+        ok: true,
+        externalSku: latest.externalSku,
+        costCeilingVnd: latest.costVnd,
+        region: latest.region,
+      };
+    },
+    onFulfilled: async ({ record, externalOrderId, assetEnvelope }) =>
+      ingestFulfilledAsset(db, {
+        supplierOrderId: record.id,
+        orderId: input.orderId,
+        variantId: order.variantId,
+        externalOrderId,
+        envelope: assetEnvelope,
+        expectedSku,
+        deliveryType: input.deliveryType,
+        durationCode: input.durationCode,
+        region,
+      }),
   });
-  if (!latestReadiness.ok) {
-    await sql`
-      update supplier_order
-      set status = 'REJECTED',
-          last_error_code = ${latestReadiness.reason},
-          next_reconcile_at = null,
-          version = version + 1
-      where id = ${supplierOrderId}
-    `.execute(db);
+
+  if (result.kind === "BLOCKED") {
     return {
       ok: false,
       code: "UNSUPPORTED",
       message: "Mapping nhà cung cấp hiện không đủ điều kiện mua.",
     };
   }
-  purchaseInput = {
-    ...purchaseInput,
-    externalSku: latestReadiness.externalSku,
-    expectedSku:
-      input.expectedSku === input.externalSku
-        ? latestReadiness.externalSku
-        : purchaseInput.expectedSku,
-    costCeilingVnd: latestReadiness.costVnd,
-    region: latestReadiness.region,
-  };
-  await sql`
-    update supplier_order
-    set cost_vnd_snapshot = ${purchaseInput.costCeilingVnd},
-        margin_vnd_snapshot = ${purchaseInput.salePriceVnd - purchaseInput.costCeilingVnd},
-        version = version + 1
-    where id = ${supplierOrderId}
-  `.execute(db);
-
-  await sql`
-    update supplier_order
-    set attempt_count = attempt_count + 1, last_attempt_at = now(),
-        last_error_code = null, retry_after_seconds = null, next_reconcile_at = null,
-        version = version + 1
-    where id = ${supplierOrderId}
-  `.execute(db);
-
-  let result: CreateOrderResult;
-  try {
-    result = await purchaseInput.port.createOrder({
-      idempotencyKey,
-      supplierSku: purchaseInput.externalSku,
-      costCeilingVnd: purchaseInput.costCeilingVnd,
-      orderId: purchaseInput.orderId,
-      ...(purchaseInput.region !== null ? { region: purchaseInput.region } : {}),
-    });
-  } catch (error) {
-    const retryAfterSeconds = retryAfterFromError(error);
-    const nextReconcileAt =
-      retryAfterSeconds === null
-        ? null
-        : new Date(Date.now() + retryAfterSeconds * 1_000).toISOString();
-    await sql`
-      update supplier_order
-      set last_error_code = ${error instanceof SupplierPortError ? error.supplierCode : "PORT_ERROR"},
-          retry_after_seconds = ${retryAfterSeconds},
-          next_reconcile_at = ${nextReconcileAt},
-          version = version + 1
-      where id = ${supplierOrderId}
-    `.execute(db);
-    throw error;
+  if (result.kind === "UNKNOWN") {
+    return {
+      ok: true,
+      kind: "UNKNOWN",
+      supplierOrderId: result.record.id,
+      queryKey: result.queryKey,
+    };
+  }
+  if (result.kind === "ACCEPTED") {
+    return {
+      ok: true,
+      kind: "UNKNOWN",
+      supplierOrderId: result.record.id,
+      queryKey: idempotencyKey,
+    };
+  }
+  if (result.kind === "REJECTED" || result.kind === "REPLAY") {
+    const row = await findSupplierOrderById(db, result.record.id);
+    const asset = await findAssetBySupplierOrder(db, result.record.id);
+    const replay = row ? provisionResultFromExisting(row, asset) : null;
+    return replay ?? { ok: true, kind: "REJECTED", supplierOrderId: result.record.id };
   }
 
-  const responseFingerprint = createHash("sha256")
-    .update(JSON.stringify(result), "utf8")
-    .digest("hex");
-  await sql`
-    update supplier_order
-    set response_fingerprint = ${responseFingerprint}, version = version + 1
-    where id = ${supplierOrderId}
-  `.execute(db);
+  const asset = await findAssetBySupplierOrder(db, result.record.id);
+  if (!asset) throw new Error("fulfilled supplier purchase has no ingested asset");
+  return asset.status === "SUPPLIER_NEEDS_REVIEW"
+    ? { ok: true, kind: "NEEDS_REVIEW", supplierOrderId: result.record.id, assetId: asset.id }
+    : { ok: true, kind: "FULFILLED", supplierOrderId: result.record.id, assetId: asset.id };
+}
 
-  switch (result.kind) {
-    case "FULFILLED": {
-      const { assetId, quarantined } = await ingestFulfilledAsset(db, {
-        supplierOrderId,
-        orderId: purchaseInput.orderId,
-        variantId: order.variantId,
-        externalOrderId: result.externalOrderId,
-        envelope: result.assetEnvelope,
-        expectedSku: purchaseInput.expectedSku,
-        deliveryType: purchaseInput.deliveryType,
-        durationCode: purchaseInput.durationCode,
-        region: purchaseInput.region,
-      });
-      if (quarantined) {
-        return { ok: true, kind: "NEEDS_REVIEW", supplierOrderId, assetId };
-      }
-      return { ok: true, kind: "FULFILLED", supplierOrderId, assetId };
-    }
-    case "UNKNOWN": {
-      await sql`
-        update supplier_order
-        set status = 'UNKNOWN', external_order_id = coalesce(external_order_id, ${result.queryKey}),
-            last_queried_at = now(), uncertain_at = now(), last_error_code = ${result.reason},
-            version = version + 1
-        where id = ${supplierOrderId}
-      `.execute(db);
-      return { ok: true, kind: "UNKNOWN", supplierOrderId, queryKey: result.queryKey };
-    }
-    case "REJECTED": {
-      await sql`
-        update supplier_order set status = 'REJECTED', version = version + 1
-        where id = ${supplierOrderId}
-      `.execute(db);
-      return { ok: true, kind: "REJECTED", supplierOrderId };
-    }
-    case "ACCEPTED":
-    default: {
-      // ACCEPTED (pending upstream) — keep SUBMITTED/PENDING; recovered by query.
-      await sql`
-        update supplier_order
-        set status = 'PENDING', external_order_id = ${result.kind === "ACCEPTED" ? result.externalOrderId : null},
-            last_error_code = null, version = version + 1
-        where id = ${supplierOrderId}
-      `.execute(db);
-      return { ok: true, kind: "UNKNOWN", supplierOrderId, queryKey: idempotencyKey };
-    }
+function recoveryBlockedMessage(code: string): string {
+  if (code === "DELIVERY_UNSUPPORTED") {
+    return "Nhà cung cấp trả về payload giao hàng chưa được hỗ trợ.";
   }
+  if (code === "SUPPLIER_ORDER_NOT_QUERYABLE" || code === "IDENTITY_MISMATCH") {
+    return "Không thể đối soát an toàn đơn nhà cung cấp; cần kiểm tra thủ công.";
+  }
+  return "Nhà cung cấp chưa công bố capability truy vấn đơn hàng.";
 }
 
 /**
- * Recover an UNKNOWN (or pending) supplier order by querying the provider.
+ * Recover an UNKNOWN, SUBMITTED, or pending supplier order by querying the provider.
  * Never re-creates upstream — query is the only path forward. A fulfilled
  * result is validated and ingested exactly like the create path.
  */
+
 export async function recoverUnknownSupplierOrder(
   db: Db,
   input: RecoverInput,
@@ -520,82 +697,52 @@ export async function recoverUnknownSupplierOrder(
   if (!so) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn nhà cung cấp." };
   }
-  if ("capabilities" in input.port && !hasSupplierCapability(input.port, "ORDER_READ")) {
-    await sql`
-      update supplier_order
-      set last_error_code = 'UNSUPPORTED', needs_review_at = coalesce(needs_review_at, now()),
-          next_reconcile_at = null, version = version + 1
-      where id = ${so.id} and needs_review_at is null
-    `.execute(db);
+  if (so.needs_review_at !== null && so.status !== "FULFILLED" && so.status !== "REJECTED") {
     return {
       ok: false,
       code: "UNSUPPORTED",
-      message: "Nhà cung cấp chưa công bố capability truy vấn đơn hàng.",
+      message: recoveryBlockedMessage("SUPPLIER_ORDER_NOT_QUERYABLE"),
     };
   }
-  // Already recovered.
-  if (so.status === "FULFILLED") {
-    const asset = await findAssetBySupplierOrder(db, so.id);
-    if (asset) return recoverResultFromAsset(asset);
-  }
-
   const order = await findOrderById(db, so.order_id);
   if (!order) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
   }
 
-  let observed: Awaited<ReturnType<SupplierPort["queryOrder"]>>;
-  try {
-    observed = await input.port.queryOrder({ queryKey: input.queryKey });
-  } catch (error) {
-    if (error instanceof SupplierPortError && error.supplierCode === "DELIVERY_UNSUPPORTED") {
-      await sql`
-        update supplier_order
-        set last_error_code = 'DELIVERY_UNSUPPORTED', needs_review_at = coalesce(needs_review_at, now()),
-            next_reconcile_at = null, version = version + 1
-        where id = ${so.id} and needs_review_at is null
-      `.execute(db);
-      return {
-        ok: false,
-        code: "UNSUPPORTED",
-        message: "Nhà cung cấp trả về payload giao hàng chưa được hỗ trợ.",
-      };
-    }
-    throw error;
-  }
-
-  switch (observed.status) {
-    case "FULFILLED": {
-      const { assetId, quarantined } = await ingestFulfilledAsset(db, {
-        supplierOrderId: so.id,
+  const result = await recoverSupplierPurchase({
+    store: createSupplierOrderStore(db, Number(so.cost_vnd_snapshot)),
+    recordId: so.id,
+    queryKey: input.queryKey,
+    expectedSku: input.expectedSku,
+    port: input.port,
+    onFulfilled: async ({ record, externalOrderId, assetEnvelope }) =>
+      ingestFulfilledAsset(db, {
+        supplierOrderId: record.id,
         orderId: so.order_id,
         variantId: order.variantId,
-        externalOrderId: observed.externalOrderId,
-        envelope: observed.assetEnvelope,
+        externalOrderId,
+        envelope: assetEnvelope,
         expectedSku: input.expectedSku,
         deliveryType: input.deliveryType,
         durationCode: input.durationCode,
         region: input.region,
-      });
-      if (quarantined) return { ok: true, kind: "NEEDS_REVIEW", assetId };
-      return { ok: true, kind: "FULFILLED", assetId };
-    }
-    case "REJECTED":
-    case "CANCELLED":
-    case "REFUNDED": {
-      await sql`
-        update supplier_order set status = 'REJECTED', last_queried_at = now(), version = version + 1
-        where id = ${so.id}
-      `.execute(db);
-      return { ok: true, kind: "REJECTED" };
-    }
-    case "PENDING":
-    default: {
-      await sql`
-        update supplier_order set last_queried_at = now(), version = version + 1
-        where id = ${so.id}
-      `.execute(db);
-      return { ok: true, kind: "PENDING" };
-    }
+      }),
+  });
+  if (result.kind === "BLOCKED") {
+    return {
+      ok: false,
+      code: result.code === "NOT_FOUND" ? "NOT_FOUND" : "UNSUPPORTED",
+      message: recoveryBlockedMessage(result.code),
+    };
   }
+  if (result.kind === "REJECTED") return { ok: true, kind: "REJECTED" };
+  if (result.kind === "UNKNOWN") return { ok: true, kind: "PENDING" };
+  if (result.kind === "REPLAY") {
+    const asset = await findAssetBySupplierOrder(db, so.id);
+    return asset ? recoverResultFromAsset(asset) : { ok: true, kind: "PENDING" };
+  }
+  if (result.kind !== "FULFILLED") return { ok: true, kind: "PENDING" };
+  const asset = await findAssetBySupplierOrder(db, result.record.id);
+  if (!asset) throw new Error("fulfilled supplier recovery has no ingested asset");
+  return recoverResultFromAsset(asset);
 }

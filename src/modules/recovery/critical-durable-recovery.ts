@@ -162,13 +162,23 @@ async function recoverOutbox(
     );
   }
   if (row.event_type === "OrderPaid") {
-    const ambiguous = await sql<{ id: string }>`
-      select id from supplier_order
-      where order_id=${row.aggregate_id} and status in ('UNKNOWN','PENDING','SUBMITTED')
+    const supplierOrders = await sql<{
+      id: string;
+      status: string;
+      attempt_count: number;
+      needs_review_at: Date | string | null;
+    }>`
+      select id, status, attempt_count, needs_review_at
+      from supplier_order
+      where order_id = ${row.aggregate_id}
       order by submitted_at desc nulls last, id desc
-      limit 1
     `.execute(trx);
-    const supplierOrder = ambiguous.rows[0];
+    const supplierOrder = supplierOrders.rows.find(
+      (candidate) =>
+        candidate.status === "UNKNOWN" ||
+        candidate.status === "PENDING" ||
+        (candidate.status === "SUBMITTED" && candidate.attempt_count > 0),
+    );
     if (supplierOrder) {
       const recovered = await recoverSupplierOrder(trx, {
         ...input,
@@ -178,6 +188,17 @@ async function recoverOutbox(
       if (!recovered.ok) return recovered;
       await audit(trx, input, "DEAD_WITH_AMBIGUOUS_SUPPLIER_ORDER", "SUPPLIER_RECONCILE_QUEUED");
       return { ok: true, family: input.family, id: input.id, recovered: true };
+    }
+    if (
+      supplierOrders.rows.length > 1 ||
+      supplierOrders.rows.some(
+        (candidate) =>
+          candidate.status !== "SUBMITTED" ||
+          candidate.attempt_count !== 0 ||
+          candidate.needs_review_at !== null,
+      )
+    ) {
+      return fail(input, "MANUAL_REVIEW_REQUIRED", "supplier order history is not safe to replay");
     }
   }
 
@@ -341,11 +362,14 @@ async function recoverSupplierOrder(
   input: CriticalRecoveryInput,
 ): Promise<CriticalRecoveryResult> {
   const row = (
-    await sql<{ id: string; status: SupplierOrderStatus; version: number }>`
-      select id,status,version from supplier_order where id=${input.id} for update
+    await sql<{ id: string; status: SupplierOrderStatus; attempt_count: number; version: number }>`
+      select id,status,attempt_count,version from supplier_order where id=${input.id} for update
     `.execute(trx)
   ).rows[0];
   if (!row) return fail(input, "NOT_FOUND", "supplier order not found");
+  if (row.status === "SUBMITTED" && row.attempt_count === 0) {
+    return fail(input, "NOT_TERMINAL", "supplier order has not reached the provider");
+  }
   if (!requiresQueryBeforeRetry(row.status)) {
     return fail(input, "NOT_TERMINAL", "supplier order is not in a reconciliation state");
   }

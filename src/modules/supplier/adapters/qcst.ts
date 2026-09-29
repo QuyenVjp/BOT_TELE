@@ -340,6 +340,19 @@ function hasUnsupportedDelivery(order: QcstOrder): boolean {
   return order.delivery_available || (order.delivery !== undefined && order.delivery !== null);
 }
 
+const IDENTITY_MISMATCH_CODE = "IDENTITY_MISMATCH";
+const IDENTITY_MISMATCH_MESSAGE = "QCST order identity mismatch";
+
+function assertQueryIdentity(order: QcstOrder, input: QueryOrderInput): void {
+  if (
+    order.product_id !== input.expectedSku ||
+    (input.queryKey !== undefined && order.client_order_id !== input.queryKey) ||
+    (input.externalOrderId !== undefined && order.id !== input.externalOrderId)
+  ) {
+    throw new SupplierPortError(IDENTITY_MISMATCH_CODE, IDENTITY_MISMATCH_MESSAGE);
+  }
+}
+
 function mapOrderToQuery(order: QcstOrder): QueryOrderResult {
   const externalOrderId = order.id;
   const status = order.status.trim().toUpperCase();
@@ -352,7 +365,7 @@ function mapOrderToQuery(order: QcstOrder): QueryOrderResult {
   return { status: "PENDING", externalOrderId };
 }
 
-function mapOrderToCreate(order: QcstOrder): CreateOrderResult {
+function mapOrderToCreate(order: QcstOrder, queryKey: string): CreateOrderResult {
   const status = order.status.trim().toUpperCase();
   if (["FAILED", "REJECTED", "CANCELLED", "REFUNDED", "REFUND_FAILED"].includes(status)) {
     return {
@@ -362,7 +375,11 @@ function mapOrderToCreate(order: QcstOrder): CreateOrderResult {
     };
   }
   if (hasUnsupportedDelivery(order)) {
-    return { kind: "UNKNOWN", queryKey: order.id, reason: "delivery_schema_unsupported" };
+    return {
+      kind: "UNKNOWN",
+      queryKey,
+      reason: "delivery_schema_unsupported",
+    };
   }
   return {
     kind: "ACCEPTED",
@@ -482,12 +499,19 @@ export function createQcstSupplierPort(
     }
     const queryKey = input.queryKey?.trim();
     if (!queryKey) throw new SupplierPortError("INVALID_QUERY", "QCST order query is invalid");
-    const query = new URLSearchParams({ client_order_id: queryKey, limit: "1" });
+    const query = new URLSearchParams({ client_order_id: queryKey, limit: "2" });
     const response = await request({
       method: "GET",
       path: `/v1/orders?${query}`,
       parse: (value) => OrderListResponseSchema.parse(value),
     });
+    if (
+      response.data.has_more ||
+      response.data.next_cursor !== null ||
+      response.data.items.length > 1
+    ) {
+      throw new SupplierPortError(IDENTITY_MISMATCH_CODE, IDENTITY_MISMATCH_MESSAGE);
+    }
     const order = response.data.items[0];
     if (!order) throw new SupplierPortError("NOT_FOUND", "QCST order was not found");
     return order;
@@ -541,7 +565,17 @@ export function createQcstSupplierPort(
           idempotencyKey: input.idempotencyKey,
           parse: (value) => OrderResponseSchema.parse(value),
         });
-        return mapOrderToCreate(response.data);
+        if (
+          response.data.client_order_id !== input.idempotencyKey ||
+          response.data.product_id !== input.supplierSku
+        ) {
+          return {
+            kind: "UNKNOWN",
+            queryKey: input.idempotencyKey,
+            reason: "identity_mismatch",
+          };
+        }
+        return mapOrderToCreate(response.data, input.idempotencyKey);
       } catch (error) {
         if (isTransportError(error)) {
           return { kind: "UNKNOWN", queryKey: input.idempotencyKey, reason: "transport_timeout" };
@@ -551,6 +585,7 @@ export function createQcstSupplierPort(
     },
     async queryOrder(input) {
       const order = await getOrder(input);
+      assertQueryIdentity(order, input);
       if (hasUnsupportedDelivery(order)) {
         throw new SupplierPortError("DELIVERY_UNSUPPORTED", "QCST delivery schema is unsupported");
       }

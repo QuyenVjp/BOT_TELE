@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import { spawn } from "node:child_process";
 import { resolve } from "node:path";
 import { sql } from "kysely";
-import { runMigrations } from "../../src/infrastructure/db/migrate.js";
+import { listMigrationFiles, runMigrations } from "../../src/infrastructure/db/migrate.js";
+import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
+import type { QueryOrderInput, SupplierPort } from "../../src/modules/supplier/port.js";
+import { recoverUnknownSupplierOrder } from "../../src/modules/supplier/service.js";
 import { dockerAvailable, startPostgres } from "../helpers/pg-container.js";
 
 const repoRoot = resolve(import.meta.dirname, "..", "..");
@@ -56,11 +59,19 @@ describe("compiled production migration entrypoint (T173)", () => {
         delivery_session: string | null;
         handoff: string | null;
         compensation: string | null;
+        supplier_canary_run: string | null;
+        applied_094_count: string;
+        applied_095_count: string;
       }>`
         select ci.channel, ci.observed_username,
           to_regclass('public.delivery_session')::text as delivery_session,
           to_regclass('public.delivery_notification_handoff')::text as handoff,
-          to_regclass('public.delivery_capability_compensation')::text as compensation
+          to_regclass('public.delivery_capability_compensation')::text as compensation,
+          to_regclass('public.supplier_canary_run')::text as supplier_canary_run,
+          (select count(*)::text from schema_migrations
+           where filename = '094_supplier_owner_canary.sql') as applied_094_count,
+          (select count(*)::text from schema_migrations
+           where filename = '095_supplier_unknown_query_key_backfill.sql') as applied_095_count
         from channel_identity ci where ci.id = 'legacy-identity'
       `.execute(started.handle.db);
       expect(proof.rows[0]).toMatchObject({
@@ -69,6 +80,9 @@ describe("compiled production migration entrypoint (T173)", () => {
         delivery_session: "delivery_session",
         handoff: "delivery_notification_handoff",
         compensation: "delivery_capability_compensation",
+        supplier_canary_run: "supplier_canary_run",
+        applied_094_count: "1",
+        applied_095_count: "1",
       });
     } finally {
       await rm(baselineDir, { recursive: true, force: true });
@@ -172,6 +186,259 @@ describe("compiled production migration entrypoint (T173)", () => {
       expect(preserved.rows[0]?.count).toBe("2");
     } finally {
       await rm(baselineDir, { recursive: true, force: true });
+      await started.stop();
+    }
+  }, 180_000);
+  it("applies the UNKNOWN query-key backfill after 094 is already recorded and scopes keys per supplier", async () => {
+    if (!hasDocker) return;
+    const started = await startPostgres();
+    const baselineDir = await createPreCanaryMigrationDir();
+    const recorded094Dir = await createSingle094MigrationDir();
+    try {
+      await sql`drop schema public cascade`.execute(started.handle.db);
+      await sql`create schema public`.execute(started.handle.db);
+      const baseline = await runMigrations(started.handle.db, baselineDir);
+      expect(baseline.applied.some((file) => file.startsWith("093_"))).toBe(true);
+      expect(baseline.applied).not.toContain("094_supplier_owner_canary.sql");
+      await sql`insert into customer (id) values ('pre-canary-customer')`.execute(
+        started.handle.db,
+      );
+      await seedPreCanarySupplierRecoveryRows(started);
+      await seedCrossSupplierUnknownRow(started);
+
+      const before = await sql<{ canary_table: string | null; query_key_column: string | null }>`
+        select
+          to_regclass('public.supplier_canary_run')::text as canary_table,
+          (select column_name from information_schema.columns
+           where table_schema = 'public' and table_name = 'supplier_order'
+             and column_name = 'query_key' limit 1) as query_key_column
+      `.execute(started.handle.db);
+      expect(before.rows[0]).toEqual({ canary_table: null, query_key_column: null });
+
+      const recorded094 = await runMigrations(started.handle.db, recorded094Dir);
+      expect(recorded094.applied).toEqual(["094_supplier_owner_canary.sql"]);
+      const after094 = await sql<{
+        legacy_query_key: string | null;
+        legacy_external_order_id: string | null;
+        applied_094_count: string;
+        applied_095_count: string;
+      }>`
+        select
+          (select query_key from supplier_order where id = 'pre-canary-unknown') as legacy_query_key,
+          (select external_order_id from supplier_order where id = 'pre-canary-unknown') as legacy_external_order_id,
+          (select count(*)::text from schema_migrations
+           where filename = '094_supplier_owner_canary.sql') as applied_094_count,
+          (select count(*)::text from schema_migrations
+           where filename = '095_supplier_unknown_query_key_backfill.sql') as applied_095_count
+      `.execute(started.handle.db);
+      expect(after094.rows[0]).toEqual({
+        legacy_query_key: null,
+        legacy_external_order_id: "legacy-query-key",
+        applied_094_count: "1",
+        applied_095_count: "0",
+      });
+
+      const upgrade = await runCompiledMigration(started.connectionString);
+      expect(upgrade.code, upgrade.stderr).toBe(0);
+      expect(upgrade.stdout).toMatch(/migrate: applied=1/);
+      const proof = await sql<{
+        canary_table: string | null;
+        query_key_column: string | null;
+        command_constraint: string | null;
+        canary_status_constraint: string | null;
+        preserved_customers: string;
+        legacy_supplier_id: string;
+        second_supplier_id: string;
+        legacy_query_key: string | null;
+        second_supplier_query_key: string | null;
+        legacy_external_order_id: string | null;
+        second_supplier_external_order_id: string | null;
+        provider_external_order_id: string | null;
+        provider_query_key: string | null;
+        query_key_index: string | null;
+        applied_094_count: string;
+        applied_095_count: string;
+      }>`
+        select
+          to_regclass('public.supplier_canary_run')::text as canary_table,
+          (select column_name from information_schema.columns
+           where table_schema = 'public' and table_name = 'supplier_order'
+             and column_name = 'query_key' limit 1) as query_key_column,
+          (select pg_get_constraintdef(oid) from pg_constraint
+           where conrelid = 'admin_confirmation'::regclass
+             and conname = 'admin_confirmation_command_ref_ck') as command_constraint,
+          (select pg_get_constraintdef(oid) from pg_constraint
+           where conrelid = 'supplier_canary_run'::regclass and contype = 'c'
+             and pg_get_constraintdef(oid) like '%PREVIEWED%') as canary_status_constraint,
+          (select count(*)::text from customer where id = 'pre-canary-customer') as preserved_customers,
+          (select supplier_id from supplier_order where id = 'pre-canary-unknown') as legacy_supplier_id,
+          (select supplier_id from supplier_order where id = 'pre-canary-unknown-other') as second_supplier_id,
+          (select query_key from supplier_order where id = 'pre-canary-unknown') as legacy_query_key,
+          (select query_key from supplier_order where id = 'pre-canary-unknown-other')
+            as second_supplier_query_key,
+          (select external_order_id from supplier_order where id = 'pre-canary-unknown')
+            as legacy_external_order_id,
+          (select external_order_id from supplier_order where id = 'pre-canary-unknown-other')
+            as second_supplier_external_order_id,
+          (select external_order_id from supplier_order where id = 'pre-canary-pending')
+            as provider_external_order_id,
+          (select query_key from supplier_order where id = 'pre-canary-pending') as provider_query_key,
+          pg_get_indexdef(to_regclass('public.supplier_order_query_key_uq')::oid) as query_key_index,
+          (select count(*)::text from schema_migrations
+           where filename = '094_supplier_owner_canary.sql') as applied_094_count,
+          (select count(*)::text from schema_migrations
+           where filename = '095_supplier_unknown_query_key_backfill.sql') as applied_095_count
+      `.execute(started.handle.db);
+      expect(proof.rows[0]).toMatchObject({
+        canary_table: "supplier_canary_run",
+        query_key_column: "query_key",
+        preserved_customers: "1",
+        legacy_supplier_id: "pre-canary-supplier",
+        second_supplier_id: "pre-canary-supplier-other",
+        legacy_query_key: "legacy-query-key",
+        second_supplier_query_key: "legacy-query-key",
+        legacy_external_order_id: "legacy-query-key",
+        second_supplier_external_order_id: "legacy-query-key",
+        provider_external_order_id: "provider-order-123",
+        provider_query_key: null,
+        applied_094_count: "1",
+        applied_095_count: "1",
+      });
+      expect(proof.rows[0]?.query_key_index).toContain("(supplier_id, query_key)");
+      expect(proof.rows[0]?.command_constraint).toContain("supplier.canary.purchase");
+      expect(proof.rows[0]?.canary_status_constraint).toContain("SUBMITTED");
+      expect(proof.rows[0]?.canary_status_constraint).toContain("UNKNOWN");
+
+      const reentry = await runCompiledMigration(started.connectionString);
+      expect(reentry.code, reentry.stderr).toBe(0);
+      expect(reentry.stdout).toMatch(/migrate: applied=0/);
+      const receipts = await sql<{
+        applied_094_count: string;
+        applied_095_count: string;
+      }>`
+        select
+          (select count(*)::text from schema_migrations
+           where filename = '094_supplier_owner_canary.sql') as applied_094_count,
+          (select count(*)::text from schema_migrations
+           where filename = '095_supplier_unknown_query_key_backfill.sql') as applied_095_count
+      `.execute(started.handle.db);
+      expect(receipts.rows[0]).toEqual({ applied_094_count: "1", applied_095_count: "1" });
+
+      let creates = 0;
+      const queries: QueryOrderInput[] = [];
+      const port: SupplierPort = {
+        getAvailability: async () => ({
+          status: "AVAILABLE",
+          observedAt: new Date().toISOString(),
+        }),
+        createOrder: async () => {
+          creates += 1;
+          throw new Error("legacy UNKNOWN recovery must not create");
+        },
+        queryOrder: async (input) => {
+          queries.push(input);
+          return { status: "PENDING", externalOrderId: "provider-order-recovered" };
+        },
+        cancelOrder: async () => ({ status: "UNSUPPORTED" }),
+        requestRefund: async () => ({ status: "UNSUPPORTED" }),
+        reconcile: async () => ({ observations: [], nextCursor: null }),
+      };
+      const recovered = await recoverUnknownSupplierOrder(started.handle.db, {
+        supplierOrderId: "pre-canary-unknown",
+        queryKey: "caller-fallback-key",
+        expectedSku: "PRE-CANARY-SKU",
+        deliveryType: "CREDENTIAL",
+        durationCode: "P1M",
+        region: "VN",
+        correlationId: "pre-canary-recovery",
+        port,
+        vault: createInMemoryVault(),
+      });
+      expect(recovered).toEqual({ ok: true, kind: "PENDING" });
+      expect(queries).toEqual([{ queryKey: "legacy-query-key", expectedSku: "PRE-CANARY-SKU" }]);
+      expect(creates).toBe(0);
+
+      const preservedProviderId = await sql<{ external_order_id: string | null }>`
+        select external_order_id from supplier_order where id = 'pre-canary-pending'
+      `.execute(started.handle.db);
+      expect(preservedProviderId.rows[0]?.external_order_id).toBe("provider-order-123");
+    } finally {
+      await rm(baselineDir, { recursive: true, force: true });
+      await rm(recorded094Dir, { recursive: true, force: true });
+      await started.stop();
+    }
+  }, 180_000);
+  it("rolls back the UNKNOWN query-key backfill on a per-supplier collision", async () => {
+    if (!hasDocker) return;
+    const started = await startPostgres();
+    const baselineDir = await createPreCanaryMigrationDir();
+    const recorded094Dir = await createSingle094MigrationDir();
+    try {
+      await sql`drop schema public cascade`.execute(started.handle.db);
+      await sql`create schema public`.execute(started.handle.db);
+      const baseline = await runMigrations(started.handle.db, baselineDir);
+      expect(baseline.applied.some((file) => file.startsWith("093_"))).toBe(true);
+      await sql`insert into customer (id) values ('pre-canary-customer')`.execute(
+        started.handle.db,
+      );
+      await seedPreCanarySupplierRecoveryRows(started);
+
+      const recorded094 = await runMigrations(started.handle.db, recorded094Dir);
+      expect(recorded094.applied).toEqual(["094_supplier_owner_canary.sql"]);
+      await sql`
+        update supplier_order
+        set status = 'UNKNOWN',
+            idempotency_key = 'legacy-query-key',
+            provider_client_order_id = 'legacy-query-key',
+            external_order_id = null,
+            query_key = 'legacy-query-key'
+        where id = 'pre-canary-pending'
+      `.execute(started.handle.db);
+      const result = await runCompiledMigration(started.connectionString);
+      expect(result.code).not.toBe(0);
+      const proof = await sql<{
+        legacy_external_order_id: string | null;
+        legacy_query_key: string | null;
+        current_status: string;
+        current_external_order_id: string | null;
+        current_provider_client_order_id: string | null;
+        current_query_key: string | null;
+        applied_094_count: string;
+        applied_095_count: string;
+        query_key_index: string | null;
+      }>`
+        select
+          (select external_order_id from supplier_order where id = 'pre-canary-unknown')
+            as legacy_external_order_id,
+          (select query_key from supplier_order where id = 'pre-canary-unknown')
+            as legacy_query_key,
+          (select status from supplier_order where id = 'pre-canary-pending') as current_status,
+          (select external_order_id from supplier_order where id = 'pre-canary-pending')
+            as current_external_order_id,
+          (select provider_client_order_id from supplier_order where id = 'pre-canary-pending')
+            as current_provider_client_order_id,
+          (select query_key from supplier_order where id = 'pre-canary-pending')
+            as current_query_key,
+          (select count(*)::text from schema_migrations
+           where filename = '094_supplier_owner_canary.sql') as applied_094_count,
+          (select count(*)::text from schema_migrations
+           where filename = '095_supplier_unknown_query_key_backfill.sql') as applied_095_count,
+          to_regclass('public.supplier_order_query_key_uq')::text as query_key_index
+      `.execute(started.handle.db);
+      expect(proof.rows[0]).toEqual({
+        legacy_external_order_id: "legacy-query-key",
+        legacy_query_key: null,
+        current_status: "UNKNOWN",
+        current_external_order_id: null,
+        current_provider_client_order_id: "legacy-query-key",
+        current_query_key: "legacy-query-key",
+        applied_094_count: "1",
+        applied_095_count: "0",
+        query_key_index: null,
+      });
+    } finally {
+      await rm(baselineDir, { recursive: true, force: true });
+      await rm(recorded094Dir, { recursive: true, force: true });
       await started.stop();
     }
   }, 180_000);
@@ -300,4 +567,97 @@ async function runCompiledMigration(
     });
     child.on("close", (code) => resolvePromise({ code, stdout, stderr }));
   });
+}
+async function createPreCanaryMigrationDir(): Promise<string> {
+  const dir = await mkdtemp(resolve(tmpdir(), "telegram-shop-pre-canary-migrations-"));
+  const source = resolve(repoRoot, "src", "infrastructure", "db", "migrations");
+  const files = await listMigrationFiles(source);
+  for (const file of files) {
+    if (file.localeCompare("094_supplier_owner_canary.sql") >= 0) break;
+    await cp(resolve(source, file), resolve(dir, file));
+  }
+  return dir;
+}
+
+async function createSingle094MigrationDir(): Promise<string> {
+  const dir = await mkdtemp(resolve(tmpdir(), "telegram-shop-094-migration-"));
+  const source = resolve(repoRoot, "src", "infrastructure", "db", "migrations");
+  const filename = "094_supplier_owner_canary.sql";
+  await cp(resolve(source, filename), resolve(dir, filename));
+  return dir;
+}
+
+async function seedPreCanarySupplierRecoveryRows(
+  started: Awaited<ReturnType<typeof startPostgres>>,
+): Promise<void> {
+  await sql`
+    insert into category (id, name_vi, slug, is_active, sort_order)
+    values ('pre-canary-category', 'Category', 'pre-canary-category', true, 1)
+  `.execute(started.handle.db);
+  await sql`
+    insert into product (id, category_id, name_vi, slug, is_active, sort_order)
+    values ('pre-canary-product', 'pre-canary-category', 'Product', 'pre-canary-product', true, 1)
+  `.execute(started.handle.db);
+  await sql`
+    insert into product_variant
+      (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
+       stock_policy, resale_evidence_id)
+    values ('pre-canary-variant', 'pre-canary-product', 'PRE-CANARY-SKU', 'Variant', 199000,
+      'P1M', 'CREDENTIAL', 'SUPPLIER_ONLY', 'RES-PRE-CANARY')
+  `.execute(started.handle.db);
+  await sql`
+    insert into "order"
+      (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
+       price_vnd, duration_code, delivery_type, status, paid_at)
+    values ('pre-canary-order', 'ORD-PRE-CANARY', 'pre-canary-customer', 'pre-canary-variant',
+      'Product', 'Variant', 199000, 'P1M', 'CREDENTIAL', 'PAID', now())
+  `.execute(started.handle.db);
+  await sql`
+    insert into supplier (id, name, adapter_type, credential_vault_ref, status)
+    values ('pre-canary-supplier', 'Supplier', 'sandbox', 'vault:pre-canary', 'ACTIVE')
+  `.execute(started.handle.db);
+  await sql`
+    insert into supplier_sku
+      (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type, is_active)
+    values ('pre-canary-sku', 'pre-canary-supplier', 'pre-canary-variant', 'PRE-CANARY-SKU',
+      120000, 'VN', 'CREDENTIAL', true)
+  `.execute(started.handle.db);
+  await sql`
+    insert into supplier_order
+      (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+       external_order_id, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
+       margin_vnd_snapshot, submitted_at)
+    values
+      ('pre-canary-unknown', 'pre-canary-supplier', 'pre-canary-sku', 'pre-canary-order',
+       'legacy-idempotency', 'legacy-fingerprint', 'legacy-query-key', 'UNKNOWN',
+       120000, 199000, 79000, now()),
+      ('pre-canary-pending', 'pre-canary-supplier', 'pre-canary-sku', 'pre-canary-order',
+       'provider-idempotency', 'provider-fingerprint', 'provider-order-123', 'PENDING',
+       120000, 199000, 79000, now())
+  `.execute(started.handle.db);
+}
+
+async function seedCrossSupplierUnknownRow(
+  started: Awaited<ReturnType<typeof startPostgres>>,
+): Promise<void> {
+  await sql`
+    insert into supplier (id, name, adapter_type, credential_vault_ref, status)
+    values ('pre-canary-supplier-other', 'Other Supplier', 'sandbox',
+      'vault:pre-canary-other', 'ACTIVE')
+  `.execute(started.handle.db);
+  await sql`
+    insert into supplier_sku
+      (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type, is_active)
+    values ('pre-canary-sku-other', 'pre-canary-supplier-other', 'pre-canary-variant',
+      'PRE-CANARY-SKU', 120000, 'VN', 'CREDENTIAL', true)
+  `.execute(started.handle.db);
+  await sql`
+    insert into supplier_order
+      (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+       external_order_id, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
+       margin_vnd_snapshot, submitted_at)
+    values ('pre-canary-unknown-other', 'pre-canary-supplier-other', 'pre-canary-sku-other',
+      'pre-canary-order', 'legacy-idempotency-other', 'legacy-fingerprint-other',
+      'legacy-query-key', 'UNKNOWN', 120000, 199000, 79000, now())
+  `.execute(started.handle.db);
 }

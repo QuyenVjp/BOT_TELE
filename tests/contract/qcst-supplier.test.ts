@@ -256,6 +256,140 @@ describe("QCST supplier adapter", () => {
     });
   });
 
+  it.each([
+    ["client order", { client_order_id: "supplier-order:other" }],
+    ["product", { product_id: "product-other" }],
+  ] as const)(
+    "keeps a create response with the wrong %s identity UNKNOWN",
+    async (_field, mismatch) => {
+      const submittedKey = "supplier-order:identity-check";
+      const server = await startServer((request, response) => {
+        sendJson(
+          response,
+          { success: true, data: { ...ORDER, ...mismatch } },
+          request.method === "POST" ? 201 : 200,
+        );
+      });
+      const { port } = await createPort(server.baseUrl);
+
+      await expect(
+        port.createOrder({
+          idempotencyKey: submittedKey,
+          supplierSku: PRODUCT.id,
+          costCeilingVnd: PRODUCT.price,
+          orderId: "ord-identity-check",
+        }),
+      ).resolves.toMatchObject({
+        kind: "UNKNOWN",
+        queryKey: submittedKey,
+      });
+    },
+  );
+
+  it.each([
+    [
+      "client order",
+      { client_order_id: "supplier-order:other" },
+      { queryKey: ORDER.client_order_id },
+    ],
+    ["product", { product_id: "product-other" }, { queryKey: ORDER.client_order_id }],
+    ["external order", { id: "qcst-order-other" }, { externalOrderId: ORDER.id }],
+  ] as const)(
+    "fails closed when a query response has the wrong %s identity",
+    async (_field, mismatch, identity) => {
+      const server = await startServer((_request, response) => {
+        const order = { ...ORDER, ...mismatch };
+        sendJson(
+          response,
+          "externalOrderId" in identity
+            ? { success: true, data: order }
+            : { success: true, data: { items: [order], has_more: false, next_cursor: null } },
+        );
+      });
+      const { port } = await createPort(server.baseUrl);
+
+      await expect(port.queryOrder({ ...identity, expectedSku: PRODUCT.id })).rejects.toMatchObject(
+        {
+          supplierCode: "IDENTITY_MISMATCH",
+          message: "QCST order identity mismatch",
+        },
+      );
+    },
+  );
+
+  it("fails closed when a client-order query returns duplicate identities despite complete pagination metadata", async () => {
+    let requestedLimit: string | null = null;
+    const server = await startServer((request, response) => {
+      const url = new URL(request.url ?? "", "http://127.0.0.1");
+      requestedLimit = url.searchParams.get("limit");
+      sendJson(response, {
+        success: true,
+        data: {
+          items: [ORDER, { ...ORDER, id: "qcst-order-duplicate" }],
+          has_more: false,
+          next_cursor: null,
+        },
+      });
+    });
+    const { port } = await createPort(server.baseUrl);
+
+    await expect(
+      port.queryOrder({ queryKey: ORDER.client_order_id, expectedSku: PRODUCT.id }),
+    ).rejects.toMatchObject({
+      supplierCode: "IDENTITY_MISMATCH",
+      message: "QCST order identity mismatch",
+    });
+    expect(requestedLimit).toBe("2");
+  });
+
+  it.each([
+    ["client order", { client_order_id: "supplier-order:other" }],
+    ["external order", { id: "qcst-order-other" }],
+  ] as const)(
+    "fails closed when a dual-identity external query returns the wrong %s identity",
+    async (_field, mismatch) => {
+      const server = await startServer((_request, response) => {
+        sendJson(response, { success: true, data: { ...ORDER, ...mismatch } });
+      });
+      const { port } = await createPort(server.baseUrl);
+
+      await expect(
+        port.queryOrder({
+          externalOrderId: ORDER.id,
+          queryKey: ORDER.client_order_id,
+          expectedSku: PRODUCT.id,
+        }),
+      ).rejects.toMatchObject({
+        supplierCode: "IDENTITY_MISMATCH",
+        message: "QCST order identity mismatch",
+      });
+    },
+  );
+
+  it.each([
+    ["has_more without a cursor", true, null],
+    ["has_more with a next cursor", true, "next-page"],
+    ["cursor without has_more", false, "next-page"],
+  ] as const)(
+    "fails closed when a client-order query page is incomplete: %s",
+    async (_state, hasMore, nextCursor) => {
+      const server = await startServer((_request, response) => {
+        sendJson(response, {
+          success: true,
+          data: { items: [ORDER], has_more: hasMore, next_cursor: nextCursor },
+        });
+      });
+      const { port } = await createPort(server.baseUrl);
+
+      await expect(
+        port.queryOrder({ queryKey: ORDER.client_order_id, expectedSku: PRODUCT.id }),
+      ).rejects.toMatchObject({
+        supplierCode: "IDENTITY_MISMATCH",
+        message: "QCST order identity mismatch",
+      });
+    },
+  );
+
   it("uses the documented QCST cancel endpoint without inventing a refund API", async () => {
     let seen: { method: string; path: string; idempotencyKey: string | undefined } | undefined;
     const server = await startServer((request, response) => {
@@ -286,29 +420,47 @@ describe("QCST supplier adapter", () => {
     });
   });
 
-  it("fails closed when QCST advertises an untyped delivery", async () => {
+  it("uses the submitted idempotency key for unknown delivery reconciliation", async () => {
+    const submittedKey = "supplier-order:submitted";
     const deliveredShape = {
       ...ORDER,
+      client_order_id: submittedKey,
       delivery_available: true,
       delivery: { credential: "opaque" },
     };
-    const server = await startServer((_request, response) => {
-      sendJson(response, { success: true, data: deliveredShape }, 201);
+    let queriedClientOrderId: string | null = null;
+    const server = await startServer((request, response) => {
+      if (request.method === "GET") {
+        queriedClientOrderId = new URL(request.url ?? "", "http://127.0.0.1").searchParams.get(
+          "client_order_id",
+        );
+      }
+      const body =
+        request.method === "GET"
+          ? { success: true, data: { items: [deliveredShape], has_more: false, next_cursor: null } }
+          : { success: true, data: deliveredShape };
+      sendJson(response, body, request.method === "GET" ? 200 : 201);
     });
     const { port } = await createPort(server.baseUrl);
 
     await expect(
       port.createOrder({
-        idempotencyKey: ORDER.client_order_id,
+        idempotencyKey: submittedKey,
         supplierSku: PRODUCT.id,
         costCeilingVnd: PRODUCT.price,
         orderId: "ord-1",
       }),
     ).resolves.toEqual({
       kind: "UNKNOWN",
-      queryKey: deliveredShape.id,
+      queryKey: submittedKey,
       reason: "delivery_schema_unsupported",
     });
+    await expect(
+      port.queryOrder({ queryKey: submittedKey, expectedSku: PRODUCT.id }),
+    ).rejects.toMatchObject({
+      supplierCode: "DELIVERY_UNSUPPORTED",
+    });
+    expect(queriedClientOrderId).toBe(submittedKey);
   });
 
   it("does not echo QCST error bodies and preserves rate-limit classification", async () => {

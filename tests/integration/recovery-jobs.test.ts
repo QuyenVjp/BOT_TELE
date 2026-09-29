@@ -952,6 +952,92 @@ describe("bounded recovery jobs (T167/T168)", () => {
     expect(retry).toMatchObject({ claimed: 0, succeeded: 0, failed: 0 });
   });
 
+  it("keeps a PENDING QCST order tied to its client order id", async () => {
+    const seed = await seedCommerce();
+    const order = await seedOrder(seed, { status: "PAID" });
+    const supplierId = newId();
+    const supplierSkuId = newId();
+    const supplierOrderId = newId();
+    const clientOrderId = `client-order-${supplierOrderId}`;
+    const externalOrderId = `external-order-${supplierOrderId}`;
+    await sql`
+      insert into supplier (id, name, adapter_type, credential_vault_ref)
+      values (${supplierId}, 'QCST fixture', 'qcst', 'vault:supplier')
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_sku
+        (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type)
+      values (${supplierSkuId}, ${supplierId}, ${seed.variantId}, 'EXT-SKU', 100000, 'VN', 'CREDENTIAL')
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, provider_client_order_id,
+         request_fingerprint, external_order_id, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
+         margin_vnd_snapshot, submitted_at, last_queried_at, next_reconcile_at, attempt_count)
+      values
+        (${supplierOrderId}, ${supplierId}, ${supplierSkuId}, ${order.orderId}, ${clientOrderId},
+         ${clientOrderId}, 'fp-qcst-pending', ${externalOrderId}, 'PENDING', 100000, 150000, 50000,
+         now() - interval '10 minutes', now() - interval '1 minute',
+         now() - interval '1 minute', 1)
+    `.execute(ctx.db);
+
+    const port: SupplierPort = {
+      getAvailability: () =>
+        Promise.resolve({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
+      createOrder: () => Promise.reject(new Error("create must not be called by recovery")),
+      queryOrder: async (input) => {
+        if (
+          input.expectedSku !== "EXT-SKU" ||
+          input.externalOrderId !== externalOrderId ||
+          input.queryKey !== clientOrderId
+        ) {
+          throw new SupplierPortError("IDENTITY_MISMATCH", "fixture identity mismatch");
+        }
+        return { status: "PENDING", externalOrderId };
+      },
+      cancelOrder: async () => ({ status: "ACCEPTED" }),
+      requestRefund: async () => ({ status: "PENDING" }),
+      reconcile: async () => ({ observations: [], nextCursor: null }),
+    };
+    const now = new Date();
+
+    const result = await recoverSupplierOrdersBatch(ctx.db, {
+      batchSize: 1,
+      now,
+      retryDelaySeconds: 60,
+      resolvePort: () => port,
+      vault: createInMemoryVault(),
+    });
+
+    expect(result).toMatchObject({ claimed: 1, succeeded: 1, failed: 0, backlog: 1 });
+    const row = await sql<{
+      status: string;
+      idempotency_key: string;
+      provider_client_order_id: string | null;
+      external_order_id: string | null;
+      query_key: string | null;
+      last_error_code: string | null;
+      needs_review_at: Date | null;
+      next_reconcile_at: Date | null;
+    }>`
+      select status, idempotency_key, provider_client_order_id, external_order_id, query_key,
+             last_error_code, needs_review_at, next_reconcile_at
+      from supplier_order
+      where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toMatchObject({
+      status: "PENDING",
+      idempotency_key: clientOrderId,
+      provider_client_order_id: clientOrderId,
+      external_order_id: externalOrderId,
+      query_key: null,
+      last_error_code: null,
+      needs_review_at: null,
+      next_reconcile_at: expect.any(Date),
+    });
+    expect(row.rows[0]?.next_reconcile_at?.getTime()).toBeGreaterThan(now.getTime());
+  });
+
   it("claims stale SUBMITTED supplier rows only after the retry threshold", async () => {
     const seed = await seedCommerce();
     const order = await seedOrder(seed, { status: "PAID" });
@@ -966,33 +1052,71 @@ describe("bounded recovery jobs (T167/T168)", () => {
         (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type)
       values (${supplierSkuId}, ${supplierId}, ${seed.variantId}, 'EXT-SKU', 100000, 'VN', 'CREDENTIAL')
     `.execute(ctx.db);
+    const freshAttemptedId = newId();
+    const staleAttemptedId = newId();
+    const oldUnattemptedId = newId();
+
     await sql`
       insert into supplier_order
         (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
          status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
-         submitted_at)
+         submitted_at, attempt_count)
       values
-        (${newId()}, ${supplierId}, ${supplierSkuId}, ${order.orderId}, 'fresh-submitted', 'fp-fresh',
-         'SUBMITTED', 100000, 150000, 50000, now())
+        (${freshAttemptedId}, ${supplierId}, ${supplierSkuId}, ${order.orderId}, 'fresh-submitted', 'fp-fresh',
+         'SUBMITTED', 100000, 150000, 50000, now(), 1)
     `.execute(ctx.db);
     await sql`
       insert into supplier_order
         (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
          status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
-         submitted_at)
+         submitted_at, attempt_count)
       values
-        (${newId()}, ${supplierId}, ${supplierSkuId}, ${order.orderId}, 'stale-submitted', 'fp-stale',
-         'SUBMITTED', 100000, 150000, 50000, now() - interval '10 minutes')
+        (${staleAttemptedId}, ${supplierId}, ${supplierSkuId}, ${order.orderId}, 'stale-submitted', 'fp-stale',
+         'SUBMITTED', 100000, 150000, 50000, now() - interval '10 minutes', 1)
+    `.execute(ctx.db);
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
+         submitted_at, attempt_count)
+      values
+        (${oldUnattemptedId}, ${supplierId}, ${supplierSkuId}, ${order.orderId}, 'stale-unattempted',
+         'fp-stale-unattempted', 'SUBMITTED', 100000, 150000, 50000,
+         now() - interval '10 minutes', 0)
+    `.execute(ctx.db);
+    const recentUnknownId = newId();
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
+         submitted_at, attempt_count)
+      values
+        (${recentUnknownId}, ${supplierId}, ${supplierSkuId}, ${order.orderId},
+         'recent-unknown', 'fp-recent-unknown', 'UNKNOWN', 100000, 150000, 50000, now(), 1)
+    `.execute(ctx.db);
+    const missingTimestampId = newId();
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
+         submitted_at, attempt_count)
+      values
+        (${missingTimestampId}, ${supplierId}, ${supplierSkuId}, ${order.orderId},
+         'missing-submitted-at', 'fp-missing-submitted-at', 'SUBMITTED',
+         100000, 150000, 50000, null, 1)
     `.execute(ctx.db);
 
-    let queryCalls = 0;
+    const queriedKeys: string[] = [];
     const port: SupplierPort = {
       getAvailability: () =>
         Promise.resolve({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
       createOrder: () => Promise.reject(new Error("create must not be called by recovery")),
-      queryOrder: () => {
-        queryCalls += 1;
-        return Promise.resolve({ status: "PENDING", externalOrderId: "external-submitted" });
+      queryOrder: (input) => {
+        queriedKeys.push(input.queryKey ?? "<missing>");
+        if (input.queryKey !== "stale-submitted" || input.externalOrderId !== undefined) {
+          throw new Error("only the stale attempted supplier row may be queried");
+        }
+        return Promise.resolve({ status: "PENDING", externalOrderId: "external-stale-submitted" });
       },
       cancelOrder: async () => ({ status: "ACCEPTED" }),
       requestRefund: async () => ({ status: "PENDING" }),
@@ -1000,15 +1124,85 @@ describe("bounded recovery jobs (T167/T168)", () => {
     };
 
     const result = await recoverSupplierOrdersBatch(ctx.db, {
-      batchSize: 2,
+      batchSize: 3,
       now: new Date(),
       retryDelaySeconds: 60,
       resolvePort: () => port,
       vault: createInMemoryVault(),
     });
 
-    expect(queryCalls).toBe(1);
-    expect(result.claimed).toBe(1);
+    expect(queriedKeys).toEqual(["stale-submitted"]);
+    const supplierRows = await sql<{
+      id: string;
+      status: string;
+      attempt_count: number;
+      idempotency_key: string;
+      external_order_id: string | null;
+      query_key: string | null;
+      last_error_code: string | null;
+      needs_review_at: Date | null;
+      next_reconcile_at: Date | null;
+    }>`
+      select id, status, attempt_count, idempotency_key, external_order_id, query_key,
+             last_error_code, needs_review_at, next_reconcile_at
+      from supplier_order
+      where id in (${freshAttemptedId}, ${staleAttemptedId}, ${oldUnattemptedId})
+    `.execute(ctx.db);
+    expect(supplierRows.rows).toHaveLength(3);
+    const byId = new Map(supplierRows.rows.map((row) => [row.id, row]));
+    expect(byId.get(freshAttemptedId)).toMatchObject({
+      status: "SUBMITTED",
+      attempt_count: 1,
+      idempotency_key: "fresh-submitted",
+      external_order_id: null,
+      query_key: null,
+      last_error_code: null,
+      needs_review_at: null,
+      next_reconcile_at: null,
+    });
+    expect(byId.get(staleAttemptedId)).toMatchObject({
+      status: "PENDING",
+      attempt_count: 1,
+      idempotency_key: "stale-submitted",
+      external_order_id: "external-stale-submitted",
+      query_key: null,
+      last_error_code: null,
+      needs_review_at: null,
+      next_reconcile_at: expect.any(Date),
+    });
+    expect(byId.get(oldUnattemptedId)).toMatchObject({
+      status: "SUBMITTED",
+      attempt_count: 0,
+      idempotency_key: "stale-unattempted",
+      external_order_id: null,
+      query_key: null,
+      last_error_code: null,
+      needs_review_at: null,
+      next_reconcile_at: null,
+    });
+    expect(result.claimed).toBe(3);
+    const recent = await sql<{ status: string; next_reconcile_at: Date | null }>`
+      select status, next_reconcile_at from supplier_order where id = ${recentUnknownId}
+    `.execute(ctx.db);
+    expect(recent.rows[0]).toMatchObject({
+      status: "UNKNOWN",
+      next_reconcile_at: expect.any(Date),
+    });
+    const invalidTimestamp = await sql<{
+      status: string;
+      last_error_code: string | null;
+      needs_review_at: Date | null;
+      next_reconcile_at: Date | null;
+    }>`
+      select status, last_error_code, needs_review_at, next_reconcile_at
+      from supplier_order where id = ${missingTimestampId}
+    `.execute(ctx.db);
+    expect(invalidTimestamp.rows[0]).toMatchObject({
+      status: "SUBMITTED",
+      last_error_code: "SUPPLIER_ORDER_NOT_QUERYABLE",
+      needs_review_at: expect.any(Date),
+      next_reconcile_at: null,
+    });
   });
 
   it("lets concurrent bundle workers split expired rows and never resets CONSUMED", async () => {

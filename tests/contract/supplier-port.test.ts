@@ -183,7 +183,10 @@ describe("sandbox supplier adapter (FR-015/FR-016)", () => {
     if (first.kind !== "UNKNOWN") return;
 
     // Domain rule: do NOT re-create; query first.
-    const queried = await port.queryOrder({ queryKey: first.queryKey });
+    const queried = await port.queryOrder({
+      queryKey: first.queryKey,
+      expectedSku: BASE_CREATE.supplierSku,
+    });
     expect(queried.status).toBe("FULFILLED");
     if (queried.status === "FULFILLED") {
       expect(queried.assetEnvelope.vaultRef.startsWith("vault:")).toBe(true);

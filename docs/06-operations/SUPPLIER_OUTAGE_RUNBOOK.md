@@ -22,12 +22,24 @@
 
 ### Unknown recovery
 
-1. For each `UNKNOWN` supplier order: call `queryOrder` with the stored external id / idempotency key.
-2. On `FULFILLED`: validate the asset envelope (SKU / delivery type / duration / region / expiry),
+1. For each `UNKNOWN` supplier order, query by `query_key`; on an unmigrated legacy
+   row where it is `NULL`, treat `external_order_id` as `queryKey`, never
+   `externalOrderId`. Migration `095` backfills `query_key` without clearing the
+   legacy field for rollback; while status is `UNKNOWN`, it remains a lookup key,
+   not a provider order ID.
+2. For a `PENDING` supplier order: query by its persisted provider external order ID; a `PENDING` observation stays query-only and must never trigger another create.
+3. On `FULFILLED`: validate the asset envelope (SKU / delivery type / duration / region / expiry),
    ingest as a vault-backed asset, mark ready, continue fulfillment.
-3. On `REJECTED` / terminal failure: transition the supplier order and open a replacement or
+4. On `REJECTED` / terminal failure: transition the supplier order and open a replacement or
    refund-request case; never invent a secret.
-4. On still-unknown: leave in `UNKNOWN` and re-schedule; do not re-create.
+5. On still-unknown: leave in `UNKNOWN` and re-schedule; do not re-create.
+
+### Dead-lettered `OrderPaid`
+
+- Ambiguous `UNKNOWN`, `PENDING`, or attempted `SUBMITTED` orders stay out of create/re-arm and are routed to query-only reconciliation; never re-POST them.
+- Without an ambiguous row, re-arm a dead `OrderPaid` only when no supplier-order row exists or
+  exactly one `SUBMITTED` row remains unattempted (`attempt_count=0`, no `needs_review_at`);
+  other terminal, quarantined, or multiple supplier-order histories require manual review.
 
 ### Invalid asset
 

@@ -272,6 +272,52 @@ describe("supplier fulfillment from OrderPaid", () => {
     expect(attempt.createCalls).toBe(1);
     expect(await supplierOrderCount(attempt.fixture.orderId)).toBe(1);
   });
+  it("fails closed when a paid order already has a terminal supplier order", async () => {
+    const fixture = await seedSupplierPaidOrder();
+    const supplierOrderId = newId();
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         external_order_id, status, cost_vnd_snapshot, sale_price_vnd_snapshot,
+         margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${fixture.supplierId}, ${fixture.supplierSkuId}, ${fixture.orderId},
+         ${`${fixture.orderId}:${fixture.supplierSkuId}`}, 'cancelled-fingerprint',
+         'cancelled-external-order', 'CANCELLED', 120000, 199000, 79000, now())
+    `.execute(ctx.db);
+
+    const result = await fulfillPaidOrder(ctx.db, {
+      orderId: fixture.orderId,
+      correlationId: "terminal-supplier-order-regression",
+      deps: {
+        vault: createInMemoryVault(),
+        supplier: createSandboxSupplierAdapter({ mode: "fulfill" }),
+        supplierPurchaseEnabled: () => true,
+        deliveryBaseUrl: "https://shop.example/d",
+        bundleTtlSeconds: 900,
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "NEEDS_REVIEW" });
+    const persisted = await sql<{
+      order_status: string;
+      supplier_status: string;
+      assets: number;
+      bundles: number;
+    }>`
+      select
+        o.status as order_status,
+        so.status as supplier_status,
+        (select count(*)::int from digital_asset where reserved_order_id = ${fixture.orderId}) as assets,
+        (select count(*)::int from delivery_bundle where order_id = ${fixture.orderId}) as bundles
+      from "order" o
+      join supplier_order so on so.id = ${supplierOrderId}
+      where o.id = ${fixture.orderId}
+    `.execute(ctx.db);
+    expect(persisted.rows).toEqual([
+      { order_status: "PAID", supplier_status: "CANCELLED", assets: 0, bundles: 0 },
+    ]);
+  });
 
   it.each([
     [
@@ -487,6 +533,11 @@ describe("supplier fulfillment from OrderPaid", () => {
       ctx.db,
     );
     expect(afterTimeout.rows[0]).toEqual({ published: false, last_error_code: "SUPPLIER_PENDING" });
+    await sql`
+      update supplier_order
+      set submitted_at = now() - interval '61 seconds'
+      where order_id = ${f.orderId} and status = 'UNKNOWN'
+    `.execute(ctx.db);
 
     await sql`update outbox_event set next_attempt_at = now(), claimed_by = null, claim_expires_at = null where id = ${eventId}`.execute(
       ctx.db,

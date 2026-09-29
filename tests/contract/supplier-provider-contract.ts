@@ -15,7 +15,9 @@ export async function expectUnsupportedSupplierOperations(
       orderId: "fixture-order",
     }),
   ).rejects.toMatchObject({ supplierCode: "UNSUPPORTED" });
-  await expect(provider.queryOrder({ externalOrderId: "fixture-order" })).rejects.toMatchObject({
+  await expect(
+    provider.queryOrder({ externalOrderId: "fixture-order", expectedSku: "fixture" }),
+  ).rejects.toMatchObject({
     supplierCode: "UNSUPPORTED",
   });
   await expect(

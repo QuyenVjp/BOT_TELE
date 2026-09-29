@@ -2,9 +2,10 @@ import { createHash } from "node:crypto";
 import type { Db, Trx } from "../../infrastructure/db/transaction.js";
 import { appendAuditEvent } from "../../modules/identity/audit.js";
 import {
-  isDurableAdminCommandRef,
+  isGenericDurableAdminCommandRef,
   type AdminConfirmationService,
   type AtomicExecuteResult,
+  type GenericDurableAdminCommandRef,
   type DurableAdminAction,
 } from "../../modules/identity/admin-confirmation.js";
 import type { IdentityTelemetry } from "../../modules/identity/telemetry.js";
@@ -193,7 +194,7 @@ export type ConfirmActionResult =
     };
 
 interface PendingAction {
-  command: DurableAdminAction["commandRef"];
+  command: GenericDurableAdminCommandRef;
   targetId: string;
   reason: string;
   resolutionCode?: string;
@@ -353,7 +354,7 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
   const input = payload.input;
   const expectedVersion = payload.expectedVersion;
   if (
-    !isDurableAdminCommandRef(action.commandRef) ||
+    !isGenericDurableAdminCommandRef(action.commandRef) ||
     typeof targetId !== "string" ||
     targetId.length === 0 ||
     targetId.length > 128 ||
@@ -828,7 +829,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         };
       }
 
-      const actionKey: SensitiveActionKey | null = isDurableAdminCommandRef(input.command)
+      const actionKey: SensitiveActionKey | null = isGenericDurableAdminCommandRef(input.command)
         ? input.command
         : isSensitiveActionKey(input.command)
           ? input.command
@@ -851,7 +852,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             resolutionCode: input.resolutionCode,
             expectedVersion: input.expectedVersion,
           }),
-          consumeGrant: !isDurableAdminCommandRef(input.command),
+          consumeGrant: !isGenericDurableAdminCommandRef(input.command),
         });
         if (!authorization.ok) {
           return {
@@ -862,7 +863,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         }
       }
 
-      if (isDurableAdminCommandRef(input.command)) {
+      if (isGenericDurableAdminCommandRef(input.command)) {
         const fingerprint = fingerprintFor(
           input.command,
           input.targetId,

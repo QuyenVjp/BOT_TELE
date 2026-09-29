@@ -43,6 +43,7 @@ export const DURABLE_ADMIN_COMMAND_REFS = [
   "catalog.publish",
   "catalog.evidence.register",
   "catalog.evidence.revoke",
+  "supplier.canary.purchase",
 ] as const;
 export type DurableAdminCommandRef = (typeof DURABLE_ADMIN_COMMAND_REFS)[number];
 
@@ -55,6 +56,17 @@ export interface DurableAdminAction {
 
 export function isDurableAdminCommandRef(value: string): value is DurableAdminCommandRef {
   return (DURABLE_ADMIN_COMMAND_REFS as readonly string[]).includes(value);
+}
+
+export type GenericDurableAdminCommandRef = Exclude<
+  DurableAdminCommandRef,
+  "supplier.canary.purchase"
+>;
+
+export function isGenericDurableAdminCommandRef(
+  value: string,
+): value is GenericDurableAdminCommandRef {
+  return isDurableAdminCommandRef(value) && value !== "supplier.canary.purchase";
 }
 
 export interface IssueInput {
@@ -316,7 +328,7 @@ export function createAdminConfirmation(
 
       const now = clock();
       const expiresAt = new Date(toIso(row.expires_at));
-      if (now.getTime() > expiresAt.getTime()) {
+      if (now.getTime() >= expiresAt.getTime()) {
         await sql`
           update admin_confirmation set status = 'EXPIRED'
           where id = ${row.id} and status in ('CREATED', 'CONFIRMED')
@@ -368,7 +380,7 @@ export function createAdminConfirmation(
 
       const now = clock();
       const expiresAt = new Date(toIso(row.expires_at));
-      if (now.getTime() > expiresAt.getTime()) {
+      if (now.getTime() >= expiresAt.getTime()) {
         await sql`
           update admin_confirmation set status = 'EXPIRED'
           where id = ${row.id} and status = 'CONFIRMED'
@@ -424,7 +436,7 @@ export function createAdminConfirmation(
 
           const now = clock();
           const expiresAt = new Date(toIso(row.expires_at));
-          if (now.getTime() > expiresAt.getTime()) {
+          if (now.getTime() >= expiresAt.getTime()) {
             await sql`
               update admin_confirmation set status = 'EXPIRED'
               where id = ${row.id} and status in ('CREATED', 'CONFIRMED')

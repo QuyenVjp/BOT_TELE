@@ -191,7 +191,7 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 - Inventory correction must not masquerade as a customer-facing announcement unless explicitly toggled and derived from a real stock delta.
 - Marketing `all` is `SHOP_UPDATE` and requires `shop_updates` consent at preview, recipient creation and send time. Only genuine service-critical campaigns retain opt-out-independent delivery; marketing navigation cannot select that class.
 - Owner-triggered stock announcements from an inventory variant view are optional `SHOP_UPDATE` marketing broadcasts. The preview content is rebuilt from product/variant/stock/price tables, then confirmed through the existing broadcast campaign flow; product restock subscriptions never imply shop-update consent.
-- A supplier purchase has one persisted dispatch winner. Re-entering a pending/submitted/unknown attempt never issues another purchase; recovery queries the original provider identity without holding a database transaction across network I/O.
+- A commerce supplier order persists `SUBMITTED` before dispatch with `attempt_count=0`; one compare-and-set atomically commits the winning pre-POST cost/margin snapshot while incrementing `attempt_count` before the first provider `POST`. Only an intent with `attempt_count=0` may be claimed or blocked. An ambiguous `UNKNOWN` from that first attempted `POST` shares its 60-second no-query grace; attempted `SUBMITTED`/`UNKNOWN` rows then query the original provider identity and never issue another purchase. `PENDING` stays query-only on its durable schedule; missing/invalid `submitted_at` fails closed to manual review. No database transaction spans provider I/O. The owner-canary `AUTHORIZED -> SUBMITTED` transition is the create claim and atomically persists only its approved cost.
 
 ## 8. Safety invariants
 
@@ -604,16 +604,31 @@ code consume the provider-neutral contracts and capability checks; they do not
 branch on `QCST` or `VOKHONG`. Unsupported financial actions return
 `UNSUPPORTED` or remain `NEEDS_REVIEW`; they are never emulated.
 
-Migration `093` is the next unused forward source ordinal after scanning the
-complete tree through `092`. It keeps `supplier`, `supplier_sku`, and
-`supplier_order` provider-neutral, namespaces external product/order identity
-by provider and optional external variant, and stores only safe catalog
-snapshots, local mapping state, supplier-cost observations, and durable
-purchase fingerprints. One local variant may have multiple supplier mappings;
-`product_variant.supplier_sku_id` is the explicit primary source. Non-primary
-mappings may retain local metadata but are not routable fallback candidates until
-an owner explicitly changes primary policy. Automatic cross-provider failover is
-permanently off for this rollout.
+Migration `093` established the provider-neutral supplier/catalog schema and
+durable recovery metadata, including provider-scoped external product/variant
+identity and safe catalog snapshots. One local variant may have multiple
+supplier mappings; `product_variant.supplier_sku_id` is the explicit primary
+source. Non-primary mappings may retain local metadata but are not routable
+fallback candidates until an owner explicitly changes primary policy. Automatic
+cross-provider failover is permanently off for this rollout.
+
+Migration `094` adds `supplier_order.query_key`, allowlists the owner canary
+action, and creates the durable `supplier_canary_run` aggregate with its request
+fingerprint and recovery state.
+
+
+Migration `095` backfills pre-canary `UNKNOWN` supplier-order rows by copying
+their legacy lookup key from `external_order_id` into `query_key` when it is
+missing. It runs after `094`, so it also covers databases that already recorded
+the schema migration. It retains the old field for rollback compatibility; the
+mapper treats it as a query key for `UNKNOWN`, never a provider order ID.
+Provider external IDs on other states remain unchanged.
+Migration `095` also establishes per-supplier uniqueness for each non-null
+`supplier_order.query_key`. Its backfill and index creation share one
+transaction; a collision aborts the migration without persisting the backfill
+or receipt. Until `095` completes, QCST query-by-client-order fails closed when
+the provider returns multiple matching orders instead of selecting the first.
+
 
 Upstream existence never publishes a product. Every provider sync creates or
 updates `DISCOVERED`/unselected disabled rows. The owner explicitly chooses the
@@ -662,3 +677,128 @@ or screenshots.
   outages. Schema validation, namespaced uniqueness, optimistic binding,
   capability checks, bounded transport, reconciliation, and no automatic
   failover bound these risks.
+
+## 19. Owner QCST canary purchase contract (2026-09)
+
+The owner canary is an explicit commissioning path, not a customer order and
+not a payment simulation. It uses the same provider-neutral durable purchase
+executor as customer `SUPPLIER_API` fulfillment, but it has its own durable
+`supplier_canary_run` aggregate because `supplier_order.order_id` is a required
+foreign key to the commerce `"order"` table. A canary MUST NOT create a fake
+`PAID` order, payment intent, SePay evidence, wallet debit, allocation, or
+customer delivery bundle.
+
+The canary lifecycle is `PREVIEWED -> AUTHORIZED -> SUBMITTED -> PENDING`,
+`FULFILLED`, `UNKNOWN`, `REJECTED`, or `BLOCKED`. `PREVIEWED` is read-only.
+The durable `/confirm` transitions the run to `AUTHORIZED`. Recovery may resume
+that state only when the linked admin confirmation is durably `CONSUMED`, its
+`supplier.canary.purchase` action fingerprint binds the run ID and request
+fingerprint, and its payload binds the owner actor. Before any new create, the
+service rechecks current master/canary/provider gates, approved and current
+cost, mapping/support/availability, automatic fulfillment with no customer
+input, and VND balance. Proof or gate failures block only the exact `AUTHORIZED`
+version they evaluated; stale preflight and pre-submit failures MUST NOT
+overwrite a newer `SUBMITTED`, `PENDING`, or `UNKNOWN` run.
+The shared executor's `AUTHORIZED -> SUBMITTED` compare-and-set is the sole create claim.
+It atomically commits the winning pre-POST cost/margin snapshot
+(`supplier_order`) or approved cost and current VND balance (`supplier_canary_run`)
+before provider I/O. The canary claim also fences the expected run version and
+rechecks the live supplier, primary SKU, cost, region, automatic no-input
+fulfillment, and catalog readiness when catalog-managed. Subsequent canary
+response and status updates are version-fenced so stale queries cannot replace
+a newer provider identity.
+`SUBMITTED` means the provider may already have received the request.
+`SUBMITTED`, `PENDING`, and `UNKNOWN` recover only by querying with the stable
+idempotency/client order key or a known external order ID. Each recovered
+provider order MUST match the expected SKU and every supplied client-order or
+external-order identifier. A mismatched create response remains `UNKNOWN` and
+query-only; a mismatched recovery response fails closed to manual review. A
+replay or process restart from those states MUST NOT create again. Query-only
+recovery remains available after spend gates are disabled.
+
+A provider-observed `PENDING` response remains `PENDING` in the durable row and
+owner-facing execution result; `UNKNOWN` is reserved for unresolved or
+ambiguous outcomes. Query-only recovery requires the provider registration, its
+`ORDER_READ` capability, and the existing Vault-backed credential to remain
+available until the row is terminal; purchase gates may be disabled during
+recovery. `runRecoveryJobsOnce` dispatches this work through the existing
+60-second recovery lane. Query-only ambiguous recovery never depends on owner
+identity or purchase gates; `AUTHORIZED` resume is dispatched only when the
+live canary service is available and it revalidates the consumed confirmation
+and current create gates. Batches claim due rows with `FOR UPDATE SKIP LOCKED`,
+defer each row before network I/O, and keep transient failures nonterminal with
+a bounded retry delay. `SUBMITTED` and its ambiguous `UNKNOWN` outcome receive
+the same 60-second no-query grace from the create claim before their first
+query; `PENDING` follows the durable `next_reconcile_at` schedule. Recovery
+status writes are conditional on an active source state; stale provider
+observations MUST NOT overwrite terminal states.
+
+Final confirmation re-reads the authoritative provider, primary mapping,
+catalog support/availability, automatic fulfillment with no customer input,
+local cost, provider balance, rollout gates, and durable run row. The
+confirmation transaction binds the run and actor before that gate. Commerce
+and canary spend gates are independent: `SUPPLIER_PURCHASE_ENABLED` is the
+master kill switch; `SUPPLIER_COMMERCE_PURCHASE_ENABLED` gates normal paid-order
+fulfillment; `SUPPLIER_CANARY_ENABLED` gates owner canary purchases; and
+`QCST_PURCHASE_ENABLED` is the QCST provider spend gate. Effective commerce
+purchases require master + commerce + provider gates. Effective canary
+purchases require master + canary + provider gates and do not require the
+commerce lane. Production canary enablement requires the master and QCST
+purchase gates, not the commerce gate. Vô Không purchase remains blocked.
+Production hardening rejects simultaneous canary and commerce purchase
+enablement to preserve the one-shot isolation contract.
+A changed unsupported catalog row, unavailable provider, insufficient
+balance, disabled master/canary/provider gate, missing `ORDER_CREATE`,
+non-private/non-root actor, or stale/expired confirmation rejects before a
+new external create.
+
+The durable executor owns the exactly-once boundary: one stable provider
+idempotency key, one persisted intent before external I/O, a unique
+`(supplier_id, idempotency_key)` claim, and query-only recovery for existing
+`SUBMITTED`, `PENDING`, or `UNKNOWN` runs. Claims and replays are bound to the
+persisted supplier SKU and request reference; a key reused for another intent
+is blocked before replay, query, or create. A transport timeout is `UNKNOWN`;
+recovery is query-only. Repeated confirmation, worker restart, Telegram retry,
+and concurrent confirmation all converge on the existing durable run and
+cannot issue a second create request.
+
+The owner surface is private Telegram only. It displays safe product/provider,
+SKU, current cost, maximum approved cost, balance sufficiency, gate results,
+stable run identity, and status. It never renders provider delivery payloads,
+Vault references, raw keys, credentials, or secrets. A fulfilled upstream
+response is accepted only through the existing strict `AssetEnvelope` boundary.
+The current QCST adapter rejects a response that claims delivery or supplies a
+non-null `delivery`; no delivery schema has been accepted in code. No heuristic
+decoder is allowed, and a canary cannot publish or deliver the returned payload
+to customers.
+
+Canary success is commissioning evidence only. It MUST NOT set
+`resale_evidence_id`, change local price/publication, enable a product, open the
+store, alter the existing dead-letter/discrepancy backlog, or expose a customer
+route. Customer publication remains separately blocked until owner-approved
+resale evidence exists.
+
+### Canary invariant and rollout ledger
+
+- `invariants_preserved`: no fake commerce payment; provider-neutral adapter;
+  Vault-only secrets; durable idempotency; exact consumed-confirmation binding;
+  gated `AUTHORIZED` resume before the single create CAS; query-only
+  `SUBMITTED`/`PENDING`/`UNKNOWN` recovery; strict delivery schema; root/private
+  authorization; isolated commerce/canary spend lanes; local price and
+  resale-evidence authority; fail-closed customer routing.
+- `intentional_breaks`: none to customer payment, SePay, store mode, or
+  fulfillment semantics; the canary adds only an owner commissioning aggregate
+  and a reuse seam around existing supplier purchase I/O.
+- `risked_invariants`: provider cost/balance drift, confirmation staleness,
+  concurrent owner actions, ambiguous delivery, and adapter capability drift.
+  Re-read-at-submit gates, unique durable claims, version/payload binding,
+  provider balance reads, strict schemas, and query-only recovery bound them.
+  A crash after the durable `AUTHORIZED -> SUBMITTED` claim but before the
+  provider call remains intentionally query-only and may require manual review.
+- `kill_switches`: `SUPPLIER_CANARY_ENABLED=false`,
+  `SUPPLIER_COMMERCE_PURCHASE_ENABLED=false`,
+  `SUPPLIER_PURCHASE_ENABLED=false`, and provider purchase gates false.
+  Keep `QCST_PROVIDER_ENABLED=true` with `ORDER_READ` and its Vault-backed
+  credential until every ambiguous run is terminal; disabling provider
+  registration prevents query-only recovery. Catalog/curation gates are
+  separate from spend gates and default false outside the commissioning window.

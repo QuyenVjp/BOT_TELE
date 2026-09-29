@@ -231,10 +231,16 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
       purchaseEnabled,
     });
     if (!provision.ok) {
-      return {
-        ...provision,
-        code: provision.code === "UNSUPPORTED" ? "SUPPLIER_UNSUPPORTED" : provision.code,
-      };
+      switch (provision.code) {
+        case "ORDER_TERMINAL":
+          return { ...provision, code: "NEEDS_REVIEW" };
+        case "UNSUPPORTED":
+          return { ...provision, code: "SUPPLIER_UNSUPPORTED" };
+        case "NOT_FOUND":
+          return { ok: false, code: "NOT_FOUND", message: provision.message };
+        case "NOT_PAID":
+          return { ok: false, code: "NOT_PAID", message: provision.message };
+      }
     }
     if (provision.kind === "UNKNOWN") {
       return {

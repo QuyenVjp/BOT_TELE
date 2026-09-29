@@ -8,10 +8,11 @@ Telegram, payment, delivery/outbox, and recovery lanes. VietQR generates payment
 payloads/images only; verified SePay evidence is required before settlement or delivery.
 
 Production requires Node.js >=24, npm 10, PostgreSQL with `DATABASE_URL`, configured Telegram
-bot token/webhook secret, SePay credentials, vault endpoint/credentials, supplier credentials,
-and a non-zero `ADMIN_TELEGRAM_USER_ID`. Production must not use `memory` or `fixture` drivers.
-Docker/OrbStack is needed only for container-backed integration/migration tests; it is not
-needed for local pure-path checks.
+bot token/webhook secret, SePay credentials, Vault endpoint/credentials, and a non-zero
+`ADMIN_TELEGRAM_USER_ID`. Configure supplier credentials only for each provider explicitly
+enabled in production. Production must not use `memory` or `fixture` drivers. Docker/OrbStack is
+needed only for container-backed integration/migration tests; it is not needed for local
+pure-path checks.
 
 ## Local benchmark (no external services)
 
@@ -34,9 +35,10 @@ Docker/OrbStack.
 - [ ] `npm run typecheck`, `lint`, `format:check`, `secret-scan`, `audit` all green.
 - [ ] Unit / contract / property / security / integration / acceptance / performance suites green.
 - [ ] Migrations reviewed; no destructive change without a forward-compatible plan.
-- [ ] Production env has real values for: `ADMIN_TELEGRAM_USER_ID`, SePay secrets, vault endpoint,
-      supplier credentials, Telegram bot token / webhook secret. `loadConfig` fails closed if
-      production still has `memory`/`fixture` drivers or a zero admin id.
+- [ ] Production env has real values for: `ADMIN_TELEGRAM_USER_ID`, SePay secrets, Vault endpoint /
+  credentials, Telegram bot token / webhook secret. Supplier credentials are required only for
+  providers explicitly enabled in production. `loadConfig` fails closed if production still has
+  `memory`/`fixture` drivers or a zero admin id.
 
 ## Health and readiness
 
@@ -84,11 +86,11 @@ npm run migrate:production
 
 ## Current production migration head
 
-The source tree currently contains **92** SQL files under `src/infrastructure/db/migrations/`.
+The source tree currently contains **94** SQL files under `src/infrastructure/db/migrations/`.
 The latest source migration is:
 
-- **filename:** `093_supplier_catalog_platform.sql`
-- **count:** `92`
+- **filename:** `095_supplier_unknown_query_key_backfill.sql`
+- **count:** `94`
 
 The latest protected production record places production at
 `091_growth_migration_repair.sql` (**96** migrations). The prior `090_payment_reminders.sql`
@@ -121,17 +123,36 @@ The next forward-only source migrations after the protected production head are:
 
 1. `092_group_publication_admin_command.sql`
 2. `093_supplier_catalog_platform.sql`
+3. `094_supplier_owner_canary.sql`
+4. `095_supplier_unknown_query_key_backfill.sql`
 
-Both are additive and must be applied in filename order from a clean release
-artifact; no older migration file may be edited or replaced.
+This list records source order only; it is not an instruction to apply the
+migrations as a set. Apply a production migration only after that exact
+migration is separately approved for the exact release artifact and window.
+Migration `095` backfills pre-canary `UNKNOWN` supplier-order rows after `094`
+has already been recorded: it copies the legacy lookup key into `query_key`
+while retaining `external_order_id` for rollback compatibility. The mapper
+treats it as a query key only while status is `UNKNOWN`; provider IDs on other
+states remain unchanged.
+The `095` backfill also creates a per-supplier unique query-key index in the
+same migration transaction. A duplicate key aborts both the backfill and its
+receipt; leave the release blocked rather than guessing which upstream order
+owns the key.
 
-The release sequence is linear: automated CI and security gates → protected PR merge →
-build the exact clean SHA with an empty compiled migration directory → keep the store
-`CLOSED` and risky flags off → apply only the ordered migrations → restart the existing
-API/worker supervisors → verify `/health`, `/ready`, and `npm run preflight:production`
-→ run direct live Telegram/browser smoke → enable one feature flag at a time with
-rollback evidence. Migration application must not wait on a first-sale or workbook
-write; those are separate acceptance gates.
+Source history and a PR merge are not deployment approval. No production
+migration is authorized by this task. Do not run production migrations from
+any artifact containing unapproved `094_supplier_owner_canary.sql` or
+`095_supplier_unknown_query_key_backfill.sql`; those migrations remain
+branch-only until separately approved through the production change process.
+The release sequence is linear only after that independent approval:
+automated CI and security gates → protected PR merge → build the exact clean
+SHA with an empty compiled migration directory → keep the store `CLOSED` and
+risky flags off → apply only the separately approved ordered migrations →
+restart the existing API/worker supervisors → verify `/health`, `/ready`, and
+`npm run preflight:production` → run direct live Telegram/browser smoke →
+enable one feature flag at a time with rollback evidence. Migration application
+must not wait on a first-sale or workbook write; those are separate acceptance
+gates. A merge alone does not authorize any of these production actions.
 
 Production defaults for this growth train are fail-closed:
 `SOCIAL_PROOF_ENABLED=false`, `VERIFIED_REVIEWS_ENABLED=false`,
@@ -143,6 +164,58 @@ Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` in production by owner
 decision. Apps Script commissioning, OIDC audience configuration and workbook
 acceptance are optional future work, not release or store-opening blockers. Do
 not edit older migration files.
+
+## Owner supplier canary commissioning
+
+This is a future, separately owner-approved one-shot procedure, not permission
+to change production flags during PR review. Keep the store `CLOSED`; it blocks
+purchases but not public catalog browsing. Before commissioning, verify that the
+mapped variant is unpublished; withdraw it through the owner catalog workflow if
+needed. The canary must not publish the variant or expose provider delivery to
+customers.
+
+Before enabling any of these flags, verify the persisted store mode is `CLOSED`
+on the root owner's private Telegram `Store control` screen; it reads
+`store_control.id='main'`. If it is not closed, choose `Đóng cửa hàng`, complete
+the durable confirmation, reopen `Store control`, and verify `CLOSED` before
+continuing. `STORE` is not a runtime environment key and cannot close the store.
+
+The isolated canary configuration is:
+
+```text
+SUPPLIER_PURCHASE_ENABLED=true
+SUPPLIER_COMMERCE_PURCHASE_ENABLED=false
+QCST_PROVIDER_ENABLED=true
+SUPPLIER_CANARY_ENABLED=true
+QCST_PURCHASE_ENABLED=true
+VOKHONG_PURCHASE_ENABLED=false
+SUPPLIER_AUTO_FAILOVER_ENABLED=false
+QCST_CATALOG_SYNC=true
+QCST_ADMIN_PRODUCT_BROWSER=true
+QCST_OWNER_SELECTION=true
+QCST_LOCAL_PRICE_CONTROL=true
+```
+
+Only the owner canary lane may create a QCST order; historical PAID commerce
+orders must remain unable to use the supplier path. After one canary completes
+or becomes ambiguous (`SUBMITTED`, `PENDING`, or `UNKNOWN`), immediately set
+`SUPPLIER_CANARY_ENABLED=false`; preferably also set
+`SUPPLIER_PURCHASE_ENABLED=false` and `QCST_PURCHASE_ENABLED=false`. Keep the
+commerce gate false throughout. Recovery of an existing ambiguous purchase is
+query-only and must never issue another create. Keep `QCST_PROVIDER_ENABLED=true`
+and its existing Vault-backed `ORDER_READ` path available until no canary run
+remains `SUBMITTED`, `PENDING`, or `UNKNOWN`; disabling provider registration
+blocks query-only recovery.
+
+QCST delivery remains unconditionally fail-closed in the current adapter; no
+runtime acceptance flag exists. If QCST returns `delivery_available=true` or a
+non-null `delivery`, fail closed as `DELIVERY_UNSUPPORTED` / `NEEDS_REVIEW`; do
+not decode, persist, or send raw delivery data. Migrations
+`094_supplier_owner_canary.sql` and `095_supplier_unknown_query_key_backfill.sql`
+are branch-only until separately approved and must not be applied to production
+from an artifact containing either unapproved migration. This runbook does not
+authorize a production migration, flag change, or live canary; the store remains
+`CLOSED`.
 
 ## Historical migrations 072–076 — post-merge production procedure
 

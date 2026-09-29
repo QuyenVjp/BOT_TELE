@@ -726,6 +726,7 @@ describe("admin operational presenters", () => {
       expect.arrayContaining([
         "admin:sups:01ARZ3NDEKTSV4RRFFQ69G5FAY",
         "admin:supm:01ARZ3NDEKTSV4RRFFQ69G5FAY",
+        "admin:supcan:01ARZ3NDEKTSV4RRFFQ69G5FAY",
         "admin:supc:01ARZ3NDEKTSV4RRFFQ69G5FAX",
       ]),
     );

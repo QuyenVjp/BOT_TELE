@@ -153,6 +153,7 @@ async function deadWebhook(source: "telegram" | "sepay") {
 
 async function supplierOrder(
   status: "UNKNOWN" | "PENDING" | "SUBMITTED" | "FULFILLED" = "UNKNOWN",
+  attemptCount = 0,
 ) {
   const seeded = await seedCommerce("PAID");
   const supplierId = newId();
@@ -168,10 +169,10 @@ async function supplierOrder(
   await sql`
     insert into supplier_order
       (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
-       external_order_id, status, cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot,
-       submitted_at, last_queried_at, next_reconcile_at)
+       external_order_id, status, attempt_count, cost_vnd_snapshot, sale_price_vnd_snapshot,
+       margin_vnd_snapshot, submitted_at, last_queried_at, next_reconcile_at)
     values (${supplierOrderId}, ${supplierId}, ${supplierSkuId}, ${seeded.orderId}, ${"key-" + supplierOrderId}, ${"fp-" + supplierOrderId},
-      ${"external-" + supplierOrderId}, ${status}, 100000, 150000, 50000,
+      ${"external-" + supplierOrderId}, ${status}, ${attemptCount}, 100000, 150000, 50000,
       now() - interval '10 minutes', now() - interval '5 minutes', null)
   `.execute(ctx.db);
   return { ...seeded, supplierOrderId };
@@ -436,6 +437,120 @@ describe("critical durable recovery", () => {
       beforeState: "DEAD_WITH_AMBIGUOUS_SUPPLIER_ORDER",
       afterState: "SUPPLIER_RECONCILE_QUEUED",
     });
+  });
+  it("re-arms OrderPaid when its only SUBMITTED intent has not posted", async () => {
+    const seeded = await supplierOrder("SUBMITTED", 0);
+    const id = await deadOutbox("OrderPaid", seeded.orderId);
+    const beforeRecovery = new Date();
+
+    const result = await recoverCriticalJob(ctx.db, { family: "outbox", id, ...operator });
+    const afterRecovery = new Date();
+
+    expect(result).toEqual({ ok: true, family: "outbox", id, recovered: true });
+    const row = await sql<{
+      outbox_dead_lettered_at: Date | null;
+      outbox_next_attempt_at: Date | null;
+      outbox_last_error_code: string | null;
+      outbox_claimed_by: string | null;
+      outbox_claimed_at: Date | null;
+      outbox_claim_expires_at: Date | null;
+      outbox_claim_generation: string;
+      supplier_status: string;
+      supplier_attempt_count: number;
+      supplier_next_reconcile_at: Date | null;
+    }>`
+      select oe.dead_lettered_at as outbox_dead_lettered_at,
+        oe.next_attempt_at as outbox_next_attempt_at,
+        oe.last_error_code as outbox_last_error_code,
+        oe.claimed_by as outbox_claimed_by,
+        oe.claimed_at as outbox_claimed_at,
+        oe.claim_expires_at as outbox_claim_expires_at,
+        oe.claim_generation::text as outbox_claim_generation,
+        so.status as supplier_status,
+        so.attempt_count as supplier_attempt_count,
+        so.next_reconcile_at as supplier_next_reconcile_at
+      from outbox_event oe
+      join supplier_order so on so.order_id = oe.aggregate_id
+      where oe.id=${id}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toMatchObject({
+      outbox_dead_lettered_at: null,
+      outbox_last_error_code: null,
+      outbox_claimed_by: null,
+      outbox_claimed_at: null,
+      outbox_claim_expires_at: null,
+      outbox_claim_generation: "4",
+      supplier_status: "SUBMITTED",
+      supplier_attempt_count: 0,
+      supplier_next_reconcile_at: null,
+    });
+    const nextAttemptAt = row.rows[0]?.outbox_next_attempt_at;
+    expect(nextAttemptAt).toBeInstanceOf(Date);
+    expect(nextAttemptAt?.getTime()).toBeGreaterThanOrEqual(beforeRecovery.getTime());
+    expect(nextAttemptAt?.getTime()).toBeLessThanOrEqual(afterRecovery.getTime());
+  });
+
+  it("keeps OrderPaid dead when a supplier order already fulfilled", async () => {
+    const seeded = await supplierOrder("FULFILLED", 1);
+    const id = await deadOutbox("OrderPaid", seeded.orderId);
+    const before = await sql<{
+      attempt_count: number;
+      dead_lettered_at: Date | null;
+      last_error_code: string | null;
+      next_attempt_at: Date | null;
+      claim_generation: string;
+      published_at: Date | null;
+    }>`
+      select attempt_count, dead_lettered_at, last_error_code, next_attempt_at,
+             claim_generation::text, published_at
+      from outbox_event where id = ${id}
+    `.execute(ctx.db);
+
+    const result = await recoverCriticalJob(ctx.db, { family: "outbox", id, ...operator });
+    const after = await sql<{
+      attempt_count: number;
+      dead_lettered_at: Date | null;
+      last_error_code: string | null;
+      next_attempt_at: Date | null;
+      claim_generation: string;
+      published_at: Date | null;
+    }>`
+      select attempt_count, dead_lettered_at, last_error_code, next_attempt_at,
+             claim_generation::text, published_at
+      from outbox_event where id = ${id}
+    `.execute(ctx.db);
+
+    expect(result).toMatchObject({
+      ok: false,
+      family: "outbox",
+      id,
+      code: "MANUAL_REVIEW_REQUIRED",
+    });
+    expect(after.rows[0]).toEqual(before.rows[0]);
+  });
+
+  it("rejects an unattempted SUBMITTED supplier order without queueing reconciliation", async () => {
+    const seeded = await supplierOrder("SUBMITTED", 0);
+
+    const result = await recoverCriticalJob(ctx.db, {
+      family: "supplier_order",
+      id: seeded.supplierOrderId,
+      ...operator,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      family: "supplier_order",
+      id: seeded.supplierOrderId,
+      code: "NOT_TERMINAL",
+    });
+    const row = await sql<{ next_reconcile_at: Date | null; version: number }>`
+      select next_reconcile_at, version
+      from supplier_order
+      where id=${seeded.supplierOrderId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toEqual({ next_reconcile_at: null, version: 1 });
+    expect(await auditFor(seeded.supplierOrderId)).toHaveLength(0);
   });
 
   it("routes existing supplier ambiguity to reconciliation instead of create retry", async () => {

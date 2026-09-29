@@ -281,6 +281,8 @@ export interface CreateOrderInput {
 }
 
 export interface QueryOrderInput {
+  /** Provider SKU expected in the returned order identity. */
+  expectedSku: string;
   externalOrderId?: string;
   queryKey?: string;
 }

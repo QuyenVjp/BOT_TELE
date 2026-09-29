@@ -42,6 +42,20 @@ Customer/Reseller Order
  -> reconcile cost, margin and supplier status
 ```
 
+## Durable supplier-order claim and recovery
+
+Commerce writes a `SUBMITTED` create intent with `attempt_count=0`; that
+create-only row is never queried by recovery. One compare-and-set claim
+atomically preserves the SQL sale-price snapshot, increments `attempt_count`,
+and resets `submitted_at` to the claim time before the provider POST. The
+first POST receives a 60-second no-query grace from that timestamp, including
+the `UNKNOWN` outcome of an ambiguous first POST. After the grace, attempted
+`SUBMITTED` and `UNKNOWN` rows are query-only; `PENDING` follows its durable
+query schedule. Missing or invalid `submitted_at` on an attempted ambiguous
+row fails closed to manual review. The owner canary uses a separate aggregate
+whose `AUTHORIZED -> SUBMITTED` claim sets `submitted_at` immediately before
+its first POST.
+
 ## Price and margin
 
 - Snapshot supplier cost, sell price, markup/commission, FX/fees (nếu có) vào Order.

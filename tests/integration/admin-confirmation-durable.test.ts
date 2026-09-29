@@ -4,6 +4,7 @@ import { createAdminCallbacks } from "../../src/bot/callbacks/admin.js";
 import {
   createAdminConfirmation,
   DURABLE_ADMIN_COMMAND_REFS,
+  isGenericDurableAdminCommandRef,
 } from "../../src/modules/identity/admin-confirmation.js";
 import {
   getProductPublicationReadiness,
@@ -134,6 +135,62 @@ const actor = {
 };
 
 describe("durable AdminConfirmation (T163/T164)", () => {
+  it("expires atomically at the persisted expiry without invoking the target callback", async () => {
+    const seeded = await seed();
+    let now = new Date("2026-09-28T12:00:00.000Z");
+    const confirmation = createAdminConfirmation(ctx.db, { now: () => now });
+    const issued = await confirmation.issue({
+      rootChannelIdentityId: seeded.rootChannelIdentityId,
+      actionFingerprint: "expiry-bound-action",
+      correlationId: "expiry-bound-action",
+      allowlistedCommandRef: "discrepancy.resolve",
+      payloadRedacted: {
+        targetId: seeded.discrepancyId,
+        reason: "Expiry boundary",
+        resolutionCode: "MANUAL_SETTLE",
+        actorId: String(ROOT_ID),
+      },
+    });
+    expect(issued.ok).toBe(true);
+    if (!issued.ok) return;
+
+    const persisted = await sql<{ expires_at: string }>`
+      select expires_at::text as expires_at
+      from admin_confirmation
+      where id = ${issued.confirmationId}
+    `.execute(ctx.db);
+    now = new Date(persisted.rows[0]!.expires_at);
+
+    let callbackInvocations = 0;
+    const result = await confirmation.executeAtomically({
+      confirmationId: issued.confirmationId,
+      rootChannelIdentityId: seeded.rootChannelIdentityId,
+      challenge: issued.challenge,
+      execute: async (trx) => {
+        callbackInvocations += 1;
+        await sql`
+          update discrepancy
+          set status = 'RESOLVED', resolution_code = 'MANUAL_SETTLE'
+          where id = ${seeded.discrepancyId}
+        `.execute(trx);
+        return true;
+      },
+    });
+
+    expect(result).toMatchObject({ ok: false, code: "CHALLENGE_EXPIRED" });
+    expect(callbackInvocations).toBe(0);
+    const unchanged = await sql<{ discrepancy_status: string; confirmation_status: string }>`
+      select d.status as discrepancy_status, c.status as confirmation_status
+      from discrepancy d
+      cross join admin_confirmation c
+      where d.id = ${seeded.discrepancyId} and c.id = ${issued.confirmationId}
+    `.execute(ctx.db);
+    expect(unchanged.rows[0]).toEqual({
+      discrepancy_status: "OPEN",
+      confirmation_status: "EXPIRED",
+    });
+  });
+
   it("survives a process-composition restart with an allowlisted command and redacted payload", async () => {
     const seeded = await seed();
     const beforeRestart = callbacks(seeded.rootChannelIdentityId);
@@ -323,7 +380,7 @@ describe("durable AdminConfirmation (T163/T164)", () => {
     const seeded = await seed();
     const admin = callbacks(seeded.rootChannelIdentityId);
 
-    for (const command of DURABLE_ADMIN_COMMAND_REFS) {
+    for (const command of DURABLE_ADMIN_COMMAND_REFS.filter(isGenericDurableAdminCommandRef)) {
       const issued = await admin.handle({
         command,
         actor,

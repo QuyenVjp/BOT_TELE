@@ -7,8 +7,9 @@ import {
   validateRecoveryBatchSize,
   type RecoveryTelemetry,
 } from "../recovery-result.js";
-import { hasSupplierCapability, type SupplierPort, type SupplierProvider } from "./port.js";
+import { SUPPLIER_SUBMITTED_GRACE_SECONDS } from "./purchase-core.js";
 import { recoverUnknownSupplierOrder } from "./service.js";
+import { hasSupplierCapability, type SupplierPort, type SupplierProvider } from "./port.js";
 
 interface SupplierRecoveryRow {
   id: string;
@@ -33,10 +34,13 @@ export async function recoverSupplierOrdersBatch(
 ): Promise<RecoveryTelemetry> {
   validateRecoveryBatchSize(options.batchSize);
   const now = options.now ?? new Date();
-  const retryDelaySeconds = options.retryDelaySeconds ?? 60;
+  const retryDelaySeconds = options.retryDelaySeconds ?? SUPPLIER_SUBMITTED_GRACE_SECONDS;
   if (!Number.isInteger(retryDelaySeconds) || retryDelaySeconds < 1 || retryDelaySeconds > 3600) {
     throw new RangeError("supplier retryDelaySeconds must be an integer between 1 and 3600");
   }
+  const submittedGraceCutoff = new Date(
+    now.getTime() - SUPPLIER_SUBMITTED_GRACE_SECONDS * 1_000,
+  ).toISOString();
 
   let claimed = 0;
   let succeeded = 0;
@@ -52,10 +56,21 @@ export async function recoverSupplierOrdersBatch(
         where so.needs_review_at is null
           and (
             so.status in ('UNKNOWN','PENDING')
-            or (so.status = 'SUBMITTED' and so.submitted_at <= ${new Date(now.getTime() - retryDelaySeconds * 1000).toISOString()})
+            or (
+              so.status = 'SUBMITTED'
+              and so.attempt_count > 0
+              and (so.submitted_at is null or so.submitted_at <= ${submittedGraceCutoff})
+            )
           )
-          and coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at, now())
+          and (
+            (
+              so.status in ('SUBMITTED','UNKNOWN')
+              and so.attempt_count > 0
+              and so.submitted_at is null
+            )
+            or coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at, now())
               <= ${now.toISOString()}
+          )
         order by coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at) asc nulls first,
                  so.id asc
         limit 1
@@ -91,7 +106,7 @@ export async function recoverSupplierOrdersBatch(
       }
       const result = await recoverUnknownSupplierOrder(db, {
         supplierOrderId: candidate.id,
-        queryKey: candidate.external_order_id ?? candidate.idempotency_key,
+        queryKey: candidate.idempotency_key,
         expectedSku: candidate.external_sku,
         deliveryType: candidate.delivery_type,
         durationCode: candidate.duration_code,
@@ -111,7 +126,15 @@ export async function recoverSupplierOrdersBatch(
     select count(*)::int as backlog, min(coalesce(submitted_at, last_queried_at)) as oldest
     from supplier_order
     where needs_review_at is null
-      and status in ('UNKNOWN','PENDING','SUBMITTED')
+      and (
+        status in ('UNKNOWN','PENDING')
+        or (
+          status = 'SUBMITTED'
+          and attempt_count > 0
+          and submitted_at is not null
+          and submitted_at <= ${submittedGraceCutoff}
+        )
+      )
   `.execute(db);
   const row = remaining.rows[0];
   return {
