@@ -128,13 +128,16 @@ The next forward-only source migrations after the protected production head are:
 5. `096_notification_send_uncertain.sql`
 
 Migration `096_notification_send_uncertain.sql` is worker-cutover-sensitive.
-Before applying it, stop every pre-096 worker/replica, prevent supervisors
-from restarting old binaries, and wait for all in-flight outbox/notification
-handlers and their database transactions to settle. Do not apply `096` while
-any old worker can process `PaymentSettled`. Verify migration success before
-starting only the worker built from the exact release SHA; leave pending
-outbox work unclaimed until that worker is active. Rolling or overlapping
-old/new workers across this migration is unsafe.
+Before applying it, stop every pre-096 worker process/replica that can
+dispatch notifications, prevent supervisors from restarting old binaries,
+and wait for all in-flight outbox/notification handlers and their database
+transactions to settle. Do not apply `096` while any old worker can process
+`PaymentSettled`. Verify migration success before starting only the worker
+built from the exact release SHA; leave pending outbox work unclaimed until
+that worker is active. Rolling or overlapping old/new workers across this
+migration is unsafe. After `096` commits, never restart or roll back to a
+pre-096 worker; recovery must use a release that understands the stable
+campaign identity.
 
 
 This list records source order only; it is not an instruction to apply the
