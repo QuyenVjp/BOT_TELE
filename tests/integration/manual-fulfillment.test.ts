@@ -328,6 +328,7 @@ describe("manual fulfillment tasks", () => {
     });
     const safeTask = await getAdminManualFulfillmentTask(ctx.db, tasks[0]!.id);
     expect(safeTask?.orderNumber).toBe(`ORD-${f.orderId}`);
+    expect(safeTask?.instructions).toBe("Provision manually after checking customer account.");
 
     const input = {
       taskId: tasks[0]!.id,

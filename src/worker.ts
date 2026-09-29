@@ -913,6 +913,7 @@ export async function restockVariantLabel(db: Db, variantId: string): Promise<st
       where v.id = ${variantId}
         and v.is_active
         and p.is_active
+        and v.fulfillment_type not in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE')
         and not (${VARIANT_READY_SQL})
       limit 1
     `.execute(db)

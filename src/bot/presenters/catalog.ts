@@ -120,6 +120,10 @@ function isLowStock(
   );
 }
 
+function supportsStockRecovery(fulfillmentType: CatalogVariantRow["fulfillment_type"]): boolean {
+  return fulfillmentType !== "MANUAL_FULFILLMENT" && fulfillmentType !== "UNLIMITED_SERVICE";
+}
+
 function adminContactButton(): InlineButton {
   return { text: CATALOG_COPY.contactAdmin, url: ADMIN_CONTACT_URL, callbackData: "" };
 }
@@ -308,7 +312,7 @@ export function presentProductDetail(
       buttons.push([{ text: `${variant.name_vi} · ${price}`, callbackData: buyNow }]);
       continue;
     }
-    if (!variant.is_ready) {
+    if (!variant.is_ready && supportsStockRecovery(variant.fulfillment_type)) {
       buttons.push([
         {
           text: `🔔 ${variant.name_vi} · Báo khi có hàng`,
@@ -447,7 +451,7 @@ export function presentVariantDetail(
   ) {
     buttons.push([{ text: `🛒 ${CATALOG_COPY.buyNow}`, callbackData: buyNowCallbackData }]);
   }
-  if (!variant.is_ready) {
+  if (!variant.is_ready && supportsStockRecovery(variant.fulfillment_type)) {
     const preorder =
       preorderCallbackData ??
       (variant.preorder_enabled ? `preorder:consent:${variant.id}` : undefined);
@@ -501,10 +505,8 @@ function productStockStateLine(variants: ProductDetailView["variants"]): string 
       fulfillmentType,
     );
   }
-  const stockTrackedVariants = variants.filter(
-    (variant) =>
-      variant.fulfillment_type !== "MANUAL_FULFILLMENT" &&
-      variant.fulfillment_type !== "UNLIMITED_SERVICE",
+  const stockTrackedVariants = variants.filter((variant) =>
+    supportsStockRecovery(variant.fulfillment_type),
   );
   if (stockTrackedVariants.length === 0) {
     return ready ? "🟢 Có thể đặt" : "🔴 Tạm ngưng nhận đơn";

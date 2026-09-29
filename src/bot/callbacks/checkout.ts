@@ -508,9 +508,12 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
           ],
         };
       }
-      const manual = variant.fulfillment_type === "MANUAL_FULFILLMENT";
+      const requiresOwnerFollowUp =
+        result.order.fulfillmentType === "MANUAL_FULFILLMENT" ||
+        result.order.fulfillmentType === "UNLIMITED_SERVICE" ||
+        result.order.fulfillmentType === "QUANTITY_STOCK";
       return {
-        text: manual
+        text: requiresOwnerFollowUp
           ? `✅ Đã thanh toán.\n\nĐơn: ${result.order.orderNumber}\nShop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.`
           : `Đã thanh toán bằng ví. Chúng tôi sẽ giao tài khoản ngay.\n\nĐơn: ${result.order.orderNumber}`,
         buttons: [[{ text: "🧾 Xem đơn", callbackData: `ord:view:${result.order.orderNumber}` }]],

@@ -25,6 +25,7 @@ import {
 import {
   createSealedNotificationResponder,
   marketingBroadcastClassForAudience,
+  restockVariantLabel,
 } from "../../src/worker.js";
 import { subscribeRestock } from "../../src/modules/catalog/restock.js";
 import {
@@ -399,6 +400,22 @@ describe("notification service", () => {
     expect(rows.rows).not.toContainEqual({ customer_id: optedOut });
     expect(rows.rows).not.toContainEqual({ customer_id: restockOnly });
   });
+
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "does not expose restock subscription for unavailable %s variants",
+    async (fulfillmentType) => {
+      const stockVariantId = await seedVariant();
+      const serviceVariantId = await seedVariant();
+      await sql`
+        update product_variant
+        set fulfillment_type = ${fulfillmentType}
+        where id = ${serviceVariantId}
+      `.execute(ctx.db);
+
+      await expect(restockVariantLabel(ctx.db, stockVariantId)).resolves.toBe("Product — Variant");
+      await expect(restockVariantLabel(ctx.db, serviceVariantId)).resolves.toBeNull();
+    },
+  );
 
   it("rejects zero-stock, inactive, and unsupported stock announcements", async () => {
     for (const variantId of [

@@ -18,6 +18,7 @@ const sampleTask = (
   createdAt: new Date(Date.now() - 60 * 60_000).toISOString(),
   status: "OPEN",
   fulfillmentType: "MANUAL_FULFILLMENT",
+  instructions: "Provision manually after checking customer account.",
   taskVersion: 2,
   orderVersion: 4,
   expectedVersion: "4:2",
@@ -57,6 +58,14 @@ describe("presentAdminManualTasks", () => {
     expect(message.text).not.toContain("MANUAL_FULFILLMENT");
   });
 
+  it("communicates the stock-reservation action for quantity-stock work", () => {
+    const task = sampleTask({ fulfillmentType: "QUANTITY_STOCK" });
+    const message = presentAdminManualTasks({ tasks: [task], offset: 0, hasMore: false });
+
+    expect(message.text).toMatch(/tồn kho số lượng.*giữ chỗ/iu);
+    expect(message.text).not.toContain("tồn kho không áp dụng");
+  });
+
   it("pages beyond the first twenty without hiding the oldest-work navigation", () => {
     const tasks = Array.from({ length: 20 }, (_, index) =>
       sampleTask({ taskId: `task-${index}`, orderNumber: `ORD-${index}` }),
@@ -81,6 +90,7 @@ describe("presentAdminManualTaskDetail", () => {
 
     expect(message.text).toContain("🛠 Tác vụ xử lý thủ công");
     expect(message.text).toContain("ORD-12345678");
+    expect(message.text).toContain("230.000 ₫");
     expect(message.text).not.toContain(task.taskId);
     expect(message.text).not.toContain(task.orderId);
     expect(message.text).not.toContain("MANUAL_FULFILLMENT");
@@ -100,6 +110,17 @@ describe("presentAdminManualTaskDetail", () => {
       { text: "↩️ Danh sách", callbackData: "admin:manual" },
       { text: "⌂ Trang quản trị", callbackData: "admin:menu" },
     ]);
+  });
+
+  it("displays configured operator instructions without exposing task or order IDs", () => {
+    const task = sampleTask({
+      instructions: "Provision manually after checking customer account.",
+    });
+    const message = presentAdminManualTaskDetail({ task });
+
+    expect(message.text).toContain(task.instructions);
+    expect(message.text).not.toContain(task.taskId);
+    expect(message.text).not.toContain(task.orderId);
   });
 
   it("omits completion for completed tasks", () => {

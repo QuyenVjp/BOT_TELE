@@ -107,6 +107,7 @@ export interface AdminManualFulfillmentTask {
   customerName: string;
   productName: string;
   variantName: string;
+  instructions: string;
   amountVnd: string;
   createdAt: string;
   status: ManualTaskStatus;
@@ -265,6 +266,7 @@ type AdminManualTaskRow = {
   customer_name: string | null;
   product_name: string;
   variant_name: string;
+  instructions: string;
   amount_vnd: string;
   created_at: Date | string;
   status: ManualTaskStatus;
@@ -281,6 +283,7 @@ function mapAdminManualTask(row: AdminManualTaskRow): AdminManualFulfillmentTask
     customerName: row.customer_name ?? "Khách không có tên",
     productName: row.product_name,
     variantName: row.variant_name,
+    instructions: row.instructions,
     amountVnd: row.amount_vnd,
     createdAt: toIso(row.created_at)!,
     status: row.status,
@@ -304,6 +307,7 @@ async function loadAdminManualTaskRows(
       cps.display_name as customer_name,
       coalesce(nullif(o.product_name_vi, ''), p.name_vi) as product_name,
       coalesce(nullif(o.variant_name_vi, ''), v.name_vi) as variant_name,
+      m.instructions,
       o.price_vnd::text as amount_vnd,
       m.created_at,
       m.status,

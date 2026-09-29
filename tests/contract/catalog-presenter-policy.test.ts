@@ -118,6 +118,22 @@ describe("catalog presenter stock-policy guard", () => {
     expect(message.text).not.toContain("Tạm hết hàng");
   });
 
+  it("keeps unavailable non-stock variants on support-only recovery", () => {
+    for (const fulfillmentType of ["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const) {
+      const unavailable = {
+        ...variant("LOCAL_ONLY", fulfillmentType, false, 0),
+        preorder_enabled: true,
+      };
+      const callbacks = presentVariantDetail(unavailable)
+        .buttons.flat()
+        .map((button) => button.callbackData);
+
+      expect(callbacks.some((callback) => callback.startsWith("rst:sub:"))).toBe(false);
+      expect(callbacks.some((callback) => callback.startsWith("preorder:consent:"))).toBe(false);
+      expect(callbacks).toContain("supp:open");
+    }
+  });
+
   it("renders the chosen variant with Mua ngay, support and recovery rows", () => {
     const message = presentVariantDetail(
       { ...variant("LOCAL_ONLY"), category_id: "cat-1" },
@@ -294,6 +310,22 @@ describe("catalog product detail copy", () => {
     expect(callbacks).toContain(`rst:sub:${soldOut.id}`);
     expect(callbacks).toContain(`preorder:consent:${soldOut.id}`);
     expect(callbacks.some((callback) => callback.startsWith("buy:"))).toBe(false);
+  });
+
+  it("keeps unavailable non-stock product variants on support-only recovery", () => {
+    for (const fulfillmentType of ["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const) {
+      const unavailable = {
+        ...variant("LOCAL_ONLY", fulfillmentType, false, 0),
+        preorder_enabled: true,
+      };
+      const callbacks = presentProductDetail(detailView([unavailable]), {})
+        .buttons.flat()
+        .map((button) => button.callbackData);
+
+      expect(callbacks.some((callback) => callback.startsWith("rst:sub:"))).toBe(false);
+      expect(callbacks.some((callback) => callback.startsWith("preorder:consent:"))).toBe(false);
+      expect(callbacks).toContain("supp:open");
+    }
   });
 
   it("shows only aggregate verified-purchase review evidence", () => {

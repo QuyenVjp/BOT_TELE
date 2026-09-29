@@ -7,6 +7,17 @@ import type {
 const statusLabel = (status: AdminManualFulfillmentTask["status"]): string =>
   status === "OPEN" ? "Đang chờ" : "Đã hoàn tất";
 
+function fulfillmentLabel(type: AdminManualFulfillmentTask["fulfillmentType"]): string {
+  switch (type) {
+    case "QUANTITY_STOCK":
+      return "Tồn kho số lượng · đã giữ chỗ";
+    case "UNLIMITED_SERVICE":
+      return "Dịch vụ không giới hạn";
+    default:
+      return "Dịch vụ thủ công";
+  }
+}
+
 function ageLabel(createdAt: string): string {
   const minutes = Math.max(0, Math.floor((Date.now() - new Date(createdAt).getTime()) / 60_000));
   if (minutes < 1) return "vừa tạo";
@@ -21,7 +32,7 @@ function amountLabel(amountVnd: string): string {
 }
 
 function taskSummary(task: AdminManualFulfillmentTask): string {
-  return `• ${task.orderNumber} · ${task.productName} — ${task.variantName}\n  ${task.customerName} · ${amountLabel(task.amountVnd)} · chờ ${ageLabel(task.createdAt)}`;
+  return `• ${task.orderNumber} · ${task.productName} — ${task.variantName}\n  ${fulfillmentLabel(task.fulfillmentType)} · ${task.customerName} · ${amountLabel(task.amountVnd)} · chờ ${ageLabel(task.createdAt)}`;
 }
 
 export function presentAdminManualTasks(page: AdminManualFulfillmentTaskPage): PresentedMessage {
@@ -45,9 +56,7 @@ export function presentAdminManualTasks(page: AdminManualFulfillmentTaskPage): P
   return {
     text: [
       "🛠 Hàng chờ xử lý thủ công",
-      tasks.length === 0
-        ? "Không có đơn cần xử lý ở trang này."
-        : "Ưu tiên đơn chờ lâu nhất; tồn kho không áp dụng.",
+      tasks.length === 0 ? "Không có đơn cần xử lý ở trang này." : "Ưu tiên đơn chờ lâu nhất.",
       ...tasks.map(taskSummary),
     ].join("\n"),
     buttons,
@@ -67,6 +76,8 @@ export function presentAdminManualTaskDetail(input: {
       `Sản phẩm: ${input.task.productName}`,
       `Gói: ${input.task.variantName}`,
       `Số tiền: ${amountLabel(input.task.amountVnd)}`,
+      `Loại xử lý: ${fulfillmentLabel(input.task.fulfillmentType)}`,
+      `Hướng dẫn: ${input.task.instructions}`,
       `Đã chờ: ${ageLabel(input.task.createdAt)}`,
       `Trạng thái: ${statusLabel(input.task.status)}`,
     ].join("\n"),

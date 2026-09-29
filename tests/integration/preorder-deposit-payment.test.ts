@@ -51,7 +51,9 @@ beforeEach(async () => {
     customer_profile_snapshot, customer cascade`.execute(ctx.db);
 });
 
-async function seedPreorderVariant(): Promise<{ customerId: string; variantId: string }> {
+async function seedPreorderVariant(
+  fulfillmentType: "STOCK_ACCOUNT" | "MANUAL_FULFILLMENT" | "UNLIMITED_SERVICE" = "STOCK_ACCOUNT",
+): Promise<{ customerId: string; variantId: string }> {
   const customerId = newId();
   const categoryId = newId();
   const productId = newId();
@@ -85,7 +87,7 @@ async function seedPreorderVariant(): Promise<{ customerId: string; variantId: s
       min_deposit_vnd, hold_duration_hours, balance_due_hours
     ) values (
       ${variantId}, ${productId}, ${"SKU-" + variantId}, 'Gift Code 20$', ${PRICE_VND}, 'P1M',
-      'CREDENTIAL', 30, 'LOCAL_ONLY', true, 1, 'STOCK_ACCOUNT', 'RES-1', true, 'FIXED',
+      'CREDENTIAL', 30, 'LOCAL_ONLY', true, 1, ${fulfillmentType}, 'RES-1', true, 'FIXED',
       ${DEPOSIT_VND}, ${DEPOSIT_VND}, 24, 24
     )
   `.execute(ctx.db);
@@ -166,6 +168,19 @@ async function countRows(table: string, where = sql`true`): Promise<number> {
 }
 
 describe("preorder deposit settlement", () => {
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "refuses preorder for unavailable %s variants without creating a reservation",
+    async (fulfillmentType) => {
+      // No variant_service_fulfillment row makes these service variants unavailable.
+      const { customerId, variantId } = await seedPreorderVariant(fulfillmentType);
+
+      const created = await createPreorderReservation(ctx.db, { customerId, variantId });
+
+      expect(created).toEqual({ ok: false, code: "PREORDER_DISABLED" });
+      expect(await countRows("preorder_reservation", sql`variant_id = ${variantId}`)).toBe(0);
+    },
+  );
+
   it("stamps the deposit intent while the hold is unpaid, and confirms it only when money arrives", async () => {
     const f = await reserveDeposit();
 
