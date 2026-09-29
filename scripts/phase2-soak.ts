@@ -529,8 +529,9 @@ async function runTick(
     measured(metrics, "notification.claimAndComplete", async () => {
       const claims = await claimNotificationDeliveries(ctx.db, 20);
       for (const claim of claims) {
-        if (!(await markNotificationSent(ctx.db, claim.id, claim.generation))) {
-          throw new Error("notification completion lost lease");
+        const status = await markNotificationSent(ctx.db, claim, `phase2-soak:${claim.id}`);
+        if (status !== "SENT") {
+          throw new Error(`notification completion returned ${status}`);
         }
       }
     }),
