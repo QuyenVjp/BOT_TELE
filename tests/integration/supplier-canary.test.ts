@@ -14,7 +14,9 @@ import {
   supplierCommercePurchaseEnabled,
   type AppConfig,
 } from "../../src/config/index.js";
+import { SupplierPortError } from "../../src/modules/supplier/port.js";
 import type {
+  CreateOrderInput,
   QueryOrderInput,
   QueryOrderResult,
   SupplierProvider,
@@ -39,6 +41,10 @@ interface ProviderState {
   creates: number;
   queries: number;
   balance: number;
+  balanceCapability?: boolean;
+  createOrder?: SupplierProvider["createOrder"];
+  createInputs?: CreateOrderInput[];
+  availabilityReads?: number;
   readBalance?: () => Promise<{ available: number; currency: string }>;
   queryInputs?: QueryOrderInput[];
   queryResult?: QueryOrderResult;
@@ -141,14 +147,19 @@ function makeProvider(fixture: Fixture, state: ProviderState): SupplierProvider 
       "CATALOG_LIST",
       "ORDER_CREATE",
       "ORDER_READ",
-      "BALANCE_READ",
+      ...(state.balanceCapability === false ? [] : ["BALANCE_READ" as const]),
       "NATIVE_IDEMPOTENCY",
     ]),
     getBalance: async () =>
       state.readBalance ? state.readBalance() : { available: state.balance, currency: "VND" },
-    getAvailability: async () => ({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
-    createOrder: async () => {
+    getAvailability: async () => {
+      state.availabilityReads = (state.availabilityReads ?? 0) + 1;
+      return { status: "AVAILABLE", observedAt: new Date().toISOString() };
+    },
+    createOrder: async (input) => {
       state.creates += 1;
+      state.createInputs?.push(input);
+      if (state.createOrder) return state.createOrder(input);
       return {
         kind: "ACCEPTED",
         externalOrderId: `qcst-order-${state.creates}`,
@@ -325,7 +336,8 @@ async function seedSubmittedRun(fixture: Fixture, state: ProviderState) {
   if (!preview.ok) throw new Error(preview.code);
   await sql`
     update supplier_canary_run
-    set status = 'SUBMITTED', query_key = idempotency_key, submitted_at = now(),
+    set status = 'SUBMITTED', query_key = idempotency_key,
+        submitted_at = now() - interval '2 minutes',
         external_order_id = null
     where id = ${preview.runId}
   `.execute(ctx.db);
@@ -333,16 +345,67 @@ async function seedSubmittedRun(fixture: Fixture, state: ProviderState) {
 }
 
 async function commerceCounts() {
-  const result = await sql<{ orders: string; payments: string; assets: string }>`
+  const result = await sql<{
+    orders: string;
+    payments: string;
+    bank_transactions: string;
+    payment_allocations: string;
+    wallet_accounts: string;
+    wallet_ledger: string;
+    variant_quantity_stock: string;
+    quantity_stock_ledger: string;
+    assets: string;
+  }>`
     select
       (select count(*)::text from "order") as orders,
       (select count(*)::text from payment_intent) as payments,
+      (select count(*)::text from bank_transaction) as bank_transactions,
+      (select count(*)::text from payment_allocation) as payment_allocations,
+      (select count(*)::text from wallet_account) as wallet_accounts,
+      (select count(*)::text from wallet_ledger) as wallet_ledger,
+      (select count(*)::text from variant_quantity_stock) as variant_quantity_stock,
+      (select count(*)::text from quantity_stock_ledger) as quantity_stock_ledger,
       (select count(*)::text from digital_asset) as assets
   `.execute(ctx.db);
   return result.rows[0]!;
 }
 
 describe("owner supplier canary", () => {
+  it.each([
+    [{ numericUserId: ROOT_ID + 1, chatType: "private" }, "NOT_ROOT_ADMIN"],
+    [{ numericUserId: ROOT_ID, chatType: "group" }, "WRONG_CONTEXT"],
+  ] as const)("refuses canary preparation for an unauthorized %s actor", async (actor, code) => {
+    const fixture = await seed();
+    let balanceReads = 0;
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      readBalance: async () => {
+        balanceReads += 1;
+        return { available: 50000, currency: "VND" };
+      },
+    };
+
+    const preview = await makeService(fixture, state).prepare({
+      actor,
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: `unauthorized-${code}`,
+    });
+
+    expect(preview).toMatchObject({ ok: false, code });
+    expect(balanceReads).toBe(0);
+    expect(state.creates).toBe(0);
+    expect(state.availabilityReads ?? 0).toBe(0);
+    expect(state.queries).toBe(0);
+    const sideEffects = await sql<{ canaryRuns: string; confirmations: string }>`
+      select
+        (select count(*)::text from supplier_canary_run) as "canaryRuns",
+        (select count(*)::text from admin_confirmation) as confirmations
+    `.execute(ctx.db);
+    expect(sideEffects.rows[0]).toEqual({ canaryRuns: "0", confirmations: "0" });
+  });
+
   it("refuses canary preparation when step-up is enabled without a grant", async () => {
     const fixture = await seed();
     const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
@@ -410,10 +473,20 @@ describe("owner supplier canary", () => {
       challenge: preview.challenge,
       actor: { numericUserId: ROOT_ID, chatType: "private" as const },
     };
+    const beforeFirstConfirmation = new Date();
     const first = await service.confirmIfCanary({
       ...input,
       correlationId: "step-up-valid-confirm",
     });
+    const afterFirstConfirmation = new Date();
+    const claimed = await sql<{ submitted_at: Date | null }>`
+      select submitted_at from supplier_canary_run where id = ${preview.runId}
+    `.execute(ctx.db);
+    const submittedAt = claimed.rows[0]?.submitted_at;
+    expect(submittedAt).toBeInstanceOf(Date);
+    if (!(submittedAt instanceof Date)) throw new Error("missing submitted_at");
+    expect(submittedAt.getTime()).toBeGreaterThanOrEqual(beforeFirstConfirmation.getTime());
+    expect(submittedAt.getTime()).toBeLessThanOrEqual(afterFirstConfirmation.getTime());
     const replay = await service.confirmIfCanary({
       ...input,
       correlationId: "step-up-valid-replay",
@@ -812,7 +885,34 @@ describe("owner supplier canary", () => {
   });
   it("previews without POST, then creates exactly one pending run without commerce delivery", async () => {
     const fixture = await seed();
-    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const prepareBalance = 50_000;
+    const finalBalance = 47_000;
+    let balanceReads = 0;
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: prepareBalance,
+      createInputs: [],
+      readBalance: async () => {
+        balanceReads += 1;
+        return {
+          available: balanceReads === 1 ? prepareBalance : finalBalance,
+          currency: "VND",
+        };
+      },
+    };
+    const before = await commerceCounts();
+    expect(before).toEqual({
+      orders: "0",
+      payments: "0",
+      bank_transactions: "0",
+      payment_allocations: "0",
+      wallet_accounts: "0",
+      wallet_ledger: "0",
+      variant_quantity_stock: "0",
+      quantity_stock_ledger: "0",
+      assets: "0",
+    });
     const service = makeService(fixture, state);
     const actor = { numericUserId: ROOT_ID, chatType: "private" as const };
 
@@ -823,9 +923,12 @@ describe("owner supplier canary", () => {
     });
     expect(preview.ok).toBe(true);
     expect(state.creates).toBe(0);
-    const before = await commerceCounts();
-    expect(before).toEqual({ orders: "0", payments: "0", assets: "0" });
+    expect(await commerceCounts()).toEqual(before);
     if (!preview.ok) return;
+    expect(preview).toMatchObject({
+      balanceVnd: prepareBalance,
+      currency: "VND",
+    });
 
     const confirmed = await service.confirmIfCanary({
       confirmationId: preview.confirmationId,
@@ -839,10 +942,44 @@ describe("owner supplier canary", () => {
       execution: { ok: true, status: "PENDING" },
     });
     expect(state.creates).toBe(1);
-    const run = await sql<{ status: string }>`
-      select status from supplier_canary_run where id = ${preview.runId}
+    expect(state.createInputs).toEqual([
+      {
+        idempotencyKey: `supplier-canary:${preview.runId}`,
+        supplierSku: preview.externalSku,
+        costCeilingVnd: preview.costVnd,
+        orderId: preview.runId,
+        region: "VN",
+      },
+    ]);
+    const run = await sql<{
+      status: string;
+      provider_key: string;
+      external_sku: string;
+      approved_cost_vnd: string;
+      cost_vnd_snapshot: string;
+      balance_vnd_snapshot: string;
+      currency: string;
+      idempotency_key: string;
+      external_order_id: string | null;
+      query_key: string | null;
+    }>`
+      select status, provider_key, external_sku, approved_cost_vnd::text,
+             cost_vnd_snapshot::text, balance_vnd_snapshot::text, currency,
+             idempotency_key, external_order_id, query_key
+      from supplier_canary_run where id = ${preview.runId}
     `.execute(ctx.db);
-    expect(run.rows[0]?.status).toBe("PENDING");
+    expect(run.rows[0]).toEqual({
+      status: "PENDING",
+      provider_key: fixture.supplierId,
+      external_sku: preview.externalSku,
+      approved_cost_vnd: String(preview.costVnd),
+      cost_vnd_snapshot: String(preview.costVnd),
+      balance_vnd_snapshot: String(finalBalance),
+      currency: "VND",
+      idempotency_key: `supplier-canary:${preview.runId}`,
+      external_order_id: "qcst-order-1",
+      query_key: null,
+    });
     const after = await commerceCounts();
     expect(after).toEqual(before);
     const resale = await sql<{ resale_evidence_id: string | null }>`
@@ -850,10 +987,103 @@ describe("owner supplier canary", () => {
     `.execute(ctx.db);
     expect(resale.rows[0]?.resale_evidence_id).toBeNull();
   });
+  it("does not query a canary while its first supplier POST is in flight", async () => {
+    const fixture = await seed();
+    let createStarted!: () => void;
+    let releaseCreate!: () => void;
+    const started = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      createOrder: async () => {
+        createStarted();
+        await blocked;
+        return {
+          kind: "ACCEPTED",
+          externalOrderId: "qcst-order-in-flight",
+          status: "PENDING",
+        };
+      },
+    };
+    const service = makeService(fixture, state);
+    const actor = { numericUserId: ROOT_ID, chatType: "private" as const };
+    const preview = await service.prepare({
+      actor,
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "canary-in-flight",
+    });
+    if (!preview.ok) throw new Error(preview.code);
+
+    const confirmation = service.confirmIfCanary({
+      confirmationId: preview.confirmationId,
+      challenge: preview.challenge,
+      actor,
+      correlationId: "canary-in-flight-confirm",
+    });
+    await started;
+    try {
+      const duplicate = await service.executePending(preview.runId);
+      expect(duplicate).toMatchObject({ ok: true, status: "UNKNOWN" });
+      expect(state.queries).toBe(0);
+    } finally {
+      releaseCreate();
+    }
+    await expect(confirmation).resolves.toMatchObject({
+      ok: true,
+      execution: { ok: true, status: "PENDING", externalOrderId: "qcst-order-in-flight" },
+    });
+    expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 1, queries: 0 });
+  });
+  it("does not query an ambiguous canary create during the post-claim grace", async () => {
+    const fixture = await seed();
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      createOrder: async () => {
+        throw new SupplierPortError("TRANSPORT_TIMEOUT", "supplier create timed out");
+      },
+    };
+    const service = makeService(fixture, state);
+    const actor = { numericUserId: ROOT_ID, chatType: "private" as const };
+    const preview = await service.prepare({
+      actor,
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "canary-timeout-grace",
+    });
+    if (!preview.ok) throw new Error(preview.code);
+
+    const confirmation = await service.confirmIfCanary({
+      confirmationId: preview.confirmationId,
+      challenge: preview.challenge,
+      actor,
+      correlationId: "canary-timeout-grace-confirm",
+    });
+    expect(confirmation).toMatchObject({
+      ok: true,
+      execution: { ok: true, status: "UNKNOWN" },
+    });
+
+    const retry = await service.executePending(preview.runId);
+    expect(retry).toMatchObject({ ok: true, status: "UNKNOWN" });
+    expect({ creates: state.creates, queries: state.queries }).toEqual({ creates: 1, queries: 0 });
+  });
 
   it("replays a confirmation through query-only recovery and never creates twice", async () => {
     const fixture = await seed();
-    const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+    const state: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      createInputs: [],
+      queryInputs: [],
+    };
     const service = makeService(fixture, state);
     const actor = { numericUserId: ROOT_ID, chatType: "private" as const };
     const preview = await service.prepare({
@@ -863,12 +1093,33 @@ describe("owner supplier canary", () => {
     });
     if (!preview.ok) throw new Error(preview.code);
 
-    await service.confirmIfCanary({
+    const first = await service.confirmIfCanary({
       confirmationId: preview.confirmationId,
       challenge: preview.challenge,
       actor,
       correlationId: "replay-confirm",
     });
+    expect(first).toMatchObject({ ok: true, execution: { ok: true, status: "PENDING" } });
+    const persisted = await sql<{
+      provider_key: string;
+      external_sku: string;
+      idempotency_key: string;
+      external_order_id: string | null;
+    }>`
+      select provider_key, external_sku, idempotency_key, external_order_id
+      from supplier_canary_run where id = ${preview.runId}
+    `.execute(ctx.db);
+    expect(persisted.rows[0]).toEqual({
+      provider_key: fixture.supplierId,
+      external_sku: preview.externalSku,
+      idempotency_key: `supplier-canary:${preview.runId}`,
+      external_order_id: "qcst-order-1",
+    });
+    await sql`
+      update supplier_sku set external_sku = 'MAPPING-CHANGED'
+      where id = ${fixture.supplierSkuId}
+    `.execute(ctx.db);
+
     const replay = await service.confirmIfCanary({
       confirmationId: preview.confirmationId,
       challenge: preview.challenge,
@@ -876,8 +1127,16 @@ describe("owner supplier canary", () => {
       correlationId: "replay-again",
     });
     expect(replay).toMatchObject({ ok: true, execution: { ok: true, status: "PENDING" } });
+    expect(state.queryInputs).toEqual([
+      {
+        expectedSku: preview.externalSku,
+        externalOrderId: "qcst-order-1",
+        queryKey: `supplier-canary:${preview.runId}`,
+      },
+    ]);
     expect(state.creates).toBe(1);
-    expect(state.queries).toBe(1);
+    expect(state.createInputs?.[0]?.supplierSku).toBe(preview.externalSku);
+    expect(state.createInputs?.[0]?.idempotencyKey).toBe(`supplier-canary:${preview.runId}`);
   });
 
   it("serializes concurrent owner confirmation to one upstream create", async () => {
@@ -936,8 +1195,58 @@ describe("owner supplier canary", () => {
       ok: true,
       execution: { ok: false, code: "CANARY_COST_CHANGED" },
     });
+    const run = await sql<{ status: string; last_error_code: string | null }>`
+      select status, last_error_code from supplier_canary_run where id = ${preview.runId}
+    `.execute(ctx.db);
+    expect(run.rows[0]).toEqual({ status: "BLOCKED", last_error_code: "CANARY_COST_CHANGED" });
+    const resumed = await service.executePending(preview.runId);
+    expect(resumed).toMatchObject({ ok: false, code: "CANARY_NOT_AUTHORIZED" });
+    const blocked = await sql<{ status: string; last_error_code: string | null }>`
+      select status, last_error_code from supplier_canary_run where id = ${preview.runId}
+    `.execute(ctx.db);
+    expect(blocked.rows[0]).toEqual({ status: "BLOCKED", last_error_code: "CANARY_COST_CHANGED" });
     expect(state.creates).toBe(0);
   });
+  it.each(["external SKU", "region"] as const)(
+    "blocks a preview when the %s mapping changes before confirmation",
+    async (changedField) => {
+      const fixture = await seed();
+      const state: ProviderState = { creates: 0, queries: 0, balance: 50000 };
+      const service = makeService(fixture, state);
+      const actor = { numericUserId: ROOT_ID, chatType: "private" as const };
+      const preview = await service.prepare({
+        actor,
+        supplierSkuId: fixture.supplierSkuId,
+        correlationId: `mapping-change-${changedField}`,
+      });
+      if (!preview.ok) throw new Error(preview.code);
+
+      const mappingUpdate =
+        changedField === "external SKU"
+          ? sql`update supplier_sku set external_sku = 'CANARY-SKU-CHANGED' where id = ${fixture.supplierSkuId}`
+          : sql`update supplier_sku set region = 'US' where id = ${fixture.supplierSkuId}`;
+      await mappingUpdate.execute(ctx.db);
+
+      const result = await service.confirmIfCanary({
+        confirmationId: preview.confirmationId,
+        challenge: preview.challenge,
+        actor,
+        correlationId: `mapping-change-confirm-${changedField}`,
+      });
+      expect(result).toMatchObject({
+        ok: true,
+        execution: { ok: false, code: "CANARY_MAPPING_CHANGED" },
+      });
+      const run = await sql<{ status: string; last_error_code: string | null }>`
+        select status, last_error_code from supplier_canary_run where id = ${preview.runId}
+      `.execute(ctx.db);
+      expect(run.rows[0]).toEqual({
+        status: "BLOCKED",
+        last_error_code: "CANARY_MAPPING_CHANGED",
+      });
+      expect(state.creates).toBe(0);
+    },
+  );
 
   it("blocks over-budget and underfunded canaries before preview", async () => {
     const overBudgetFixture = await seed();
@@ -965,6 +1274,52 @@ describe("owner supplier canary", () => {
     });
     expect(underfunded).toMatchObject({ ok: false, code: "INSUFFICIENT_BALANCE" });
     expect(underfundedState.creates).toBe(0);
+  });
+  it("fails closed before preview when balance capability, read, or currency is unsafe", async () => {
+    const fixture = await seed();
+    const missingCapabilityState: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      balanceCapability: false,
+    };
+    const missingCapability = await makeService(fixture, missingCapabilityState).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "balance-capability-missing",
+    });
+    expect(missingCapability).toMatchObject({ ok: false, code: "BALANCE_UNSUPPORTED" });
+    expect(missingCapabilityState.creates).toBe(0);
+
+    const failedReadState: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      readBalance: async () => {
+        throw new Error("balance provider unavailable");
+      },
+    };
+    const failedRead = await makeService(fixture, failedReadState).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "balance-read-failed",
+    });
+    expect(failedRead).toMatchObject({ ok: false, code: "BALANCE_UNAVAILABLE" });
+    expect(failedReadState.creates).toBe(0);
+
+    const nonVndState: ProviderState = {
+      creates: 0,
+      queries: 0,
+      balance: 50000,
+      readBalance: async () => ({ available: 50000, currency: "USD" }),
+    };
+    const nonVnd = await makeService(fixture, nonVndState).prepare({
+      actor: { numericUserId: ROOT_ID, chatType: "private" },
+      supplierSkuId: fixture.supplierSkuId,
+      correlationId: "balance-currency-unsupported",
+    });
+    expect(nonVnd).toMatchObject({ ok: false, code: "BALANCE_CURRENCY_UNSUPPORTED" });
+    expect(nonVndState.creates).toBe(0);
   });
 
   it("requires automatic fulfillment with no customer inputs", async () => {

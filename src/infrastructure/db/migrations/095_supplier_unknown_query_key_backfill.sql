@@ -7,3 +7,8 @@ set query_key = external_order_id
 where status = 'UNKNOWN'
   and query_key is null
   and external_order_id is not null;
+
+-- A supplier lookup key must identify at most one order; NULL remains unset.
+create unique index supplier_order_query_key_uq
+  on supplier_order (supplier_id, query_key)
+  where query_key is not null;

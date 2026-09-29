@@ -10,6 +10,9 @@ import {
   type SupplierProvider,
 } from "./port.js";
 
+export const SUPPLIER_SUBMITTED_GRACE_SECONDS = 60;
+const SUPPLIER_SUBMITTED_GRACE_MS = SUPPLIER_SUBMITTED_GRACE_SECONDS * 1_000;
+
 export type SupplierPurchaseRecordStatus = SupplierOrderStatus | "AUTHORIZED" | "UNRECOGNIZED";
 
 export interface SupplierPurchaseRecord {
@@ -22,10 +25,12 @@ export interface SupplierPurchaseRecord {
   status: SupplierPurchaseRecordStatus;
   externalOrderId: string | null;
   queryKey?: string | null;
+  submittedAt: Date | string | null;
+  needsReviewAt?: Date | string | null;
   costVndSnapshot: number;
   version: number;
   responseFingerprint?: string | null;
-  attemptCount?: number;
+  attemptCount: number;
   blockCode?: string | null;
 }
 
@@ -48,11 +53,7 @@ export interface SupplierPurchaseRecordStore {
     inserted: boolean;
     record: SupplierPurchaseRecord;
   }>;
-  refreshIntent(
-    id: string,
-    input: { costCeilingVnd: number; externalSku?: string; region?: string | null },
-  ): Promise<void>;
-  markAttempt(id: string): Promise<boolean>;
+  markAttempt(id: string, input: { costCeilingVnd: number }): Promise<boolean>;
   markTransportFailure(
     id: string,
     input: { code: string; retryAfterSeconds?: number | null },
@@ -146,6 +147,60 @@ function hasReadCapability(port: SupplierPort | SupplierProvider): boolean {
 function unknownResult(record: SupplierPurchaseRecord, queryKey: string): SupplierPurchaseResult {
   return { kind: "UNKNOWN", record, queryKey };
 }
+function blockedByNeedsReview(record: SupplierPurchaseRecord): SupplierPurchaseResult | null {
+  if (record.needsReviewAt === undefined || record.needsReviewAt === null) return null;
+  return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_QUERYABLE", record };
+}
+
+function parseSubmittedAt(record: SupplierPurchaseRecord): number | null {
+  if (record.submittedAt instanceof Date) {
+    const timestamp = record.submittedAt.getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+  }
+  if (typeof record.submittedAt !== "string") return null;
+  const timestamp = Date.parse(record.submittedAt);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function deferAmbiguousRecovery(
+  record: SupplierPurchaseRecord,
+  fallbackQueryKey: string,
+): SupplierPurchaseResult | null {
+  if (record.status !== "SUBMITTED" && record.status !== "UNKNOWN") return null;
+  const queryKey = record.queryKey ?? fallbackQueryKey;
+  if (record.status === "SUBMITTED" && record.attemptCount === 0) {
+    return unknownResult(record, queryKey);
+  }
+  if (record.attemptCount === 0) return null;
+  const submittedAt = parseSubmittedAt(record);
+  if (submittedAt === null) {
+    return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_QUERYABLE", record };
+  }
+  if (Date.now() - submittedAt < SUPPLIER_SUBMITTED_GRACE_MS) {
+    return unknownResult(record, queryKey);
+  }
+  return null;
+}
+
+function resultAfterClaimLoss(
+  current: SupplierPurchaseRecord | null,
+  fallback: SupplierPurchaseRecord,
+  fallbackQueryKey: string,
+): SupplierPurchaseResult {
+  if (!current) return unknownResult(fallback, fallbackQueryKey);
+  if (current.status === "FULFILLED") return { kind: "REPLAY", record: current };
+  if (current.status === "REJECTED") return { kind: "REJECTED", record: current };
+  const blockedByReview = blockedByNeedsReview(current);
+  if (blockedByReview) return blockedByReview;
+  if (
+    current.status === "PENDING" ||
+    current.status === "UNKNOWN" ||
+    (current.status === "SUBMITTED" && current.attemptCount > 0)
+  ) {
+    return unknownResult(current, current.queryKey ?? fallbackQueryKey);
+  }
+  return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_ELIGIBLE", record: current };
+}
 
 function matchesPurchaseIntent(
   record: SupplierPurchaseRecord,
@@ -191,6 +246,8 @@ export async function executeSupplierPurchase(
     if (existing.status === "FULFILLED" || existing.status === "REJECTED") {
       return { kind: "REPLAY", record: existing };
     }
+    const blockedByReview = blockedByNeedsReview(existing);
+    if (blockedByReview) return blockedByReview;
     if (
       existing.status === "UNKNOWN" ||
       existing.status === "PENDING" ||
@@ -234,6 +291,8 @@ export async function executeSupplierPurchase(
       if (record.status === "FULFILLED" || record.status === "REJECTED") {
         return { kind: "REPLAY", record };
       }
+      const blockedByReview = blockedByNeedsReview(record);
+      if (blockedByReview) return blockedByReview;
       if (
         record.status === "UNKNOWN" ||
         record.status === "PENDING" ||
@@ -269,15 +328,12 @@ export async function executeSupplierPurchase(
 
   const externalSku = beforeCreate.externalSku ?? input.externalSku;
   const region = beforeCreate.region === undefined ? input.region : beforeCreate.region;
-  await input.store.refreshIntent(record.id, {
+  const claimed = await input.store.markAttempt(record.id, {
     costCeilingVnd: beforeCreate.costCeilingVnd,
-    externalSku,
-    region,
   });
-  const claimed = await input.store.markAttempt(record.id);
   if (!claimed) {
     const current = await input.store.findById(record.id);
-    return unknownResult(current ?? record, current?.externalOrderId ?? input.idempotencyKey);
+    return resultAfterClaimLoss(current, record, input.idempotencyKey);
   }
 
   let result: CreateOrderResult;
@@ -362,9 +418,16 @@ export async function recoverSupplierPurchase(input: {
   if (record.status === "FULFILLED" || record.status === "REJECTED") {
     return { kind: "REPLAY", record };
   }
+  const blockedByReview = blockedByNeedsReview(record);
+  if (blockedByReview) return blockedByReview;
   if (record.status !== "UNKNOWN" && record.status !== "PENDING" && record.status !== "SUBMITTED") {
     return { kind: "BLOCKED", code: "SUPPLIER_ORDER_NOT_QUERYABLE", record };
   }
+  const deferred = deferAmbiguousRecovery(record, input.queryKey);
+  if (deferred?.kind === "BLOCKED") {
+    await input.store.markNeedsReview(record.id, deferred.code);
+  }
+  if (deferred) return deferred;
   if (!hasReadCapability(input.port)) {
     await input.store.markNeedsReview(record.id, "ORDER_READ_UNSUPPORTED");
     return { kind: "BLOCKED", code: "ORDER_READ_UNSUPPORTED", record };

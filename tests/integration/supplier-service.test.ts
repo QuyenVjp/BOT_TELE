@@ -7,7 +7,11 @@ import {
   provisionFromSupplier,
   recoverUnknownSupplierOrder,
 } from "../../src/modules/supplier/service.js";
-import type { SupplierPort, SupplierProvider } from "../../src/modules/supplier/port.js";
+import {
+  SupplierPortError,
+  type SupplierPort,
+  type SupplierProvider,
+} from "../../src/modules/supplier/port.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 import { performance } from "node:perf_hooks";
 import { listActiveCategories } from "../../src/modules/catalog/repository.js";
@@ -155,6 +159,69 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     }
     expect((await pending).ok).toBe(true);
   });
+  it("returns an in-flight duplicate without querying and ingests the first fulfillment once", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    let createCalls = 0;
+    let queryCalls = 0;
+    let createStarted!: () => void;
+    let releaseCreate!: () => void;
+    const started = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const blocked = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const port: SupplierPort = {
+      ...sandbox,
+      async createOrder(input) {
+        createCalls += 1;
+        createStarted();
+        await blocked;
+        return sandbox.createOrder(input);
+      },
+      async queryOrder(input) {
+        queryCalls += 1;
+        return sandbox.queryOrder(input);
+      },
+    };
+    const input = {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL" as const,
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "in-flight-duplicate",
+      port,
+      vault: createInMemoryVault(),
+      purchaseEnabled: true,
+      idempotencyKey: "in-flight-duplicate",
+    };
+
+    const first = provisionFromSupplier(ctx.db, input);
+    await started;
+    try {
+      const duplicate = await provisionFromSupplier(ctx.db, input);
+      expect(duplicate).toMatchObject({ ok: true, kind: "UNKNOWN" });
+      expect(queryCalls).toBe(0);
+    } finally {
+      releaseCreate();
+    }
+    const fulfilled = await first;
+    expect(fulfilled).toMatchObject({ ok: true, kind: "FULFILLED" });
+    expect(createCalls).toBe(1);
+    const assets = await sql<{ count: string }>`
+      select count(*)::text as count
+      from digital_asset
+      where supplier_order_id = ${fulfilled.ok ? fulfilled.supplierOrderId : ""}
+    `.execute(ctx.db);
+    expect(Number(assets.rows[0]?.count)).toBe(1);
+  });
 
   it("does not call the upstream when the purchase gate is disabled", async () => {
     const f = await seedPaidOrderWithSupplierSku();
@@ -249,6 +316,7 @@ describe("supplier provision service (FR-015/FR-016)", () => {
   it("claims a pre-POST SUBMITTED intent instead of querying a nonexistent order", async () => {
     const f = await seedPaidOrderWithSupplierSku();
     const supplierOrderId = newId();
+    const initialSubmittedAt = new Date("2026-01-01T00:00:00.000Z");
     await sql`
       insert into supplier_order
         (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
@@ -257,8 +325,11 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       values
         (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId},
          ${`${f.orderId}:${f.supplierSkuId}`}, 'fp-before-post',
-         'SUBMITTED', 0, 150000, 199000, 49000, now())
+         'SUBMITTED', 0, 150000, 199000, 49000, ${initialSubmittedAt.toISOString()})
     `.execute(ctx.db);
+    await sql`update supplier_sku set cost_vnd = 140000 where id = ${f.supplierSkuId}`.execute(
+      ctx.db,
+    );
     const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
     let createCalls = 0;
     let queryCalls = 0;
@@ -280,7 +351,7 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       supplierSkuId: f.supplierSkuId,
       externalSku: f.externalSku,
       costCeilingVnd: 150000,
-      salePriceVnd: 199000,
+      salePriceVnd: 999000,
       expectedSku: f.externalSku,
       deliveryType: "CREDENTIAL",
       durationCode: "P1M",
@@ -293,10 +364,28 @@ describe("supplier provision service (FR-015/FR-016)", () => {
 
     expect(result).toMatchObject({ ok: true, kind: "FULFILLED", supplierOrderId });
     expect({ createCalls, queryCalls }).toEqual({ createCalls: 1, queryCalls: 0 });
-    const persisted = await sql<{ status: string; attempt_count: number }>`
-      select status, attempt_count from supplier_order where id = ${supplierOrderId}
+    const persisted = await sql<{
+      status: string;
+      attempt_count: number;
+      cost_vnd_snapshot: string;
+      sale_price_vnd_snapshot: string;
+      margin_vnd_snapshot: string;
+      submitted_at: Date | string | null;
+    }>`
+      select status, attempt_count, cost_vnd_snapshot::text, sale_price_vnd_snapshot::text,
+             margin_vnd_snapshot::text, submitted_at
+      from supplier_order where id = ${supplierOrderId}
     `.execute(ctx.db);
-    expect(persisted.rows[0]).toMatchObject({ status: "FULFILLED", attempt_count: 1 });
+    expect(persisted.rows[0]).toMatchObject({
+      status: "FULFILLED",
+      attempt_count: 1,
+      cost_vnd_snapshot: "140000",
+      sale_price_vnd_snapshot: "199000",
+      margin_vnd_snapshot: "59000",
+    });
+    expect(new Date(persisted.rows[0]!.submitted_at!).getTime()).toBeGreaterThan(
+      initialSubmittedAt.getTime(),
+    );
     const assets = await sql<{ count: number }>`
       select count(*)::int as count from digital_asset where supplier_order_id = ${supplierOrderId}
     `.execute(ctx.db);
@@ -355,6 +444,74 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       select status, attempt_count from supplier_order where id = ${supplierOrderId}
     `.execute(ctx.db);
     expect(persisted.rows[0]).toMatchObject({ status: "SUBMITTED", attempt_count: 0 });
+  });
+  it("quarantines an attempted submission with no timestamp for manual review", async () => {
+    const fixture = await seedPaidOrderWithSupplierSku();
+    const supplierOrderId = newId();
+    const idempotencyKey = `${fixture.orderId}:${fixture.supplierSkuId}`;
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, request_fingerprint,
+         status, attempt_count, cost_vnd_snapshot, sale_price_vnd_snapshot,
+         margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${fixture.supplierId}, ${fixture.supplierSkuId}, ${fixture.orderId},
+         ${idempotencyKey}, 'fp-missing-submitted-at',
+         'SUBMITTED', 1, 120000, 199000, 79000, null)
+    `.execute(ctx.db);
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    let creates = 0;
+    let queries = 0;
+    const port: SupplierPort = {
+      ...sandbox,
+      async createOrder(input) {
+        creates += 1;
+        return sandbox.createOrder(input);
+      },
+      async queryOrder(input) {
+        queries += 1;
+        return sandbox.queryOrder(input);
+      },
+    };
+
+    const result = await provisionFromSupplier(ctx.db, {
+      orderId: fixture.orderId,
+      supplierId: fixture.supplierId,
+      supplierSkuId: fixture.supplierSkuId,
+      externalSku: fixture.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: fixture.externalSku,
+      deliveryType: "CREDENTIAL",
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-missing-submitted-at",
+      port,
+      vault: createInMemoryVault(),
+      purchaseEnabled: true,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Không thể đối soát an toàn đơn nhà cung cấp; cần kiểm tra thủ công.",
+    });
+    expect({ creates, queries }).toEqual({ creates: 0, queries: 0 });
+    const persisted = await sql<{
+      status: string;
+      last_error_code: string;
+      needs_review_at: Date | null;
+      next_reconcile_at: Date | null;
+    }>`
+      select status, last_error_code, needs_review_at, next_reconcile_at
+      from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(persisted.rows[0]).toMatchObject({
+      status: "SUBMITTED",
+      last_error_code: "SUPPLIER_ORDER_NOT_QUERYABLE",
+      needs_review_at: expect.any(Date),
+      next_reconcile_at: null,
+    });
   });
 
   it("does not call the upstream when the provider lacks ORDER_CREATE", async () => {
@@ -635,6 +792,149 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     expect(Number(assets.rows[0]?.count)).toBe(0);
     expect(createCalls).toBe(0);
   });
+  it("does not ingest a stale fulfilled recovery after identity quarantine wins", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const vault = createInMemoryVault();
+    const supplierOrderId = newId();
+    const idempotencyKey = "idem-recover-identity-race";
+    const queryKey = "qk-recover-identity-race";
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, query_key,
+         request_fingerprint, status, last_error_code, attempt_count,
+         cost_vnd_snapshot, sale_price_vnd_snapshot, margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId},
+         ${idempotencyKey}, ${queryKey}, 'fp-recover-identity-race', 'UNKNOWN',
+         'TRANSPORT_TIMEOUT', 1, 150000, 199000, 49000, now() - interval '10 minutes')
+    `.execute(ctx.db);
+
+    let createCalls = 0;
+    let queryCalls = 0;
+    let queryStarted!: () => void;
+    let releaseFulfilled!: () => void;
+    const firstQueryStarted = new Promise<void>((resolve) => {
+      queryStarted = resolve;
+    });
+    const delayedFulfilled = new Promise<void>((resolve) => {
+      releaseFulfilled = resolve;
+    });
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    const port: SupplierPort = {
+      ...sandbox,
+      async createOrder() {
+        createCalls += 1;
+        throw new Error("create must not be called during recovery");
+      },
+      async queryOrder() {
+        queryCalls += 1;
+        if (queryCalls === 1) {
+          queryStarted();
+          await delayedFulfilled;
+          return {
+            status: "FULFILLED",
+            externalOrderId: "ext-recover-identity-fulfilled",
+            assetEnvelope: {
+              deliveryType: "CREDENTIAL",
+              expectedSku: f.externalSku,
+              region: "VN",
+              durationCode: "P1M",
+              expiresAt: null,
+              supplierAssetId: "asset-recover-identity",
+              fingerprint: "fp-asset-recover-identity",
+              vaultRef: "vault:asset-recover-identity",
+            },
+          };
+        }
+        throw new SupplierPortError("IDENTITY_MISMATCH", "QCST order identity mismatch");
+      },
+    };
+    const input = {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL" as const,
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-recover-identity-race",
+      port,
+      vault,
+      purchaseEnabled: true,
+      idempotencyKey,
+    };
+
+    const fulfilledRecovery = provisionFromSupplier(ctx.db, input);
+    await firstQueryStarted;
+    const identityRecovery = provisionFromSupplier(ctx.db, input);
+    const identityResult = await identityRecovery;
+
+    expect(identityResult).toEqual({
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Không thể đối soát an toàn đơn nhà cung cấp; cần kiểm tra thủ công.",
+    });
+    const quarantined = await sql<{
+      status: string;
+      last_error_code: string | null;
+      needs_review_at: Date | null;
+    }>`
+      select status, last_error_code, needs_review_at
+      from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(quarantined.rows[0]).toMatchObject({
+      status: "UNKNOWN",
+      last_error_code: "IDENTITY_MISMATCH",
+      needs_review_at: expect.any(Date),
+    });
+    const reviewAt = quarantined.rows[0]?.needs_review_at;
+
+    releaseFulfilled();
+    const staleResult = await fulfilledRecovery;
+    expect(staleResult).toMatchObject({ ok: true, kind: "UNKNOWN", supplierOrderId });
+
+    const finalRow = await sql<{
+      status: string;
+      last_error_code: string | null;
+      needs_review_at: Date | null;
+    }>`
+      select status, last_error_code, needs_review_at
+      from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(finalRow.rows[0]).toMatchObject({
+      status: "UNKNOWN",
+      last_error_code: "IDENTITY_MISMATCH",
+      needs_review_at: expect.any(Date),
+    });
+    expect(finalRow.rows[0]?.needs_review_at?.getTime()).toBe(reviewAt?.getTime());
+
+    const assets = await sql<{ total: string; ready: string; reserved: string }>`
+      select count(*)::text as total,
+             count(*) filter (where status = 'READY')::text as ready,
+             count(*) filter (where reserved_order_id is not null)::text as reserved
+      from digital_asset
+      where supplier_order_id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(assets.rows[0]).toEqual({ total: "0", ready: "0", reserved: "0" });
+
+    const replay = await provisionFromSupplier(ctx.db, input);
+    expect(replay).toEqual({
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Không thể đối soát an toàn đơn nhà cung cấp; cần kiểm tra thủ công.",
+    });
+    expect({ createCalls, queryCalls }).toEqual({ createCalls: 0, queryCalls: 2 });
+
+    const replayAssets = await sql<{ count: string }>`
+      select count(*)::text as count
+      from digital_asset
+      where supplier_order_id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(Number(replayAssets.rows[0]?.count)).toBe(0);
+  });
 
   it("returns durable fulfillment when a stale rejection arrives second", async () => {
     const f = await seedPaidOrderWithSupplierSku();
@@ -873,6 +1173,11 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     if (!first.ok) return;
     expect(first.kind).toBe("UNKNOWN");
     expect({ creates, queries }).toEqual({ creates: 1, queries: 0 });
+    await sql`
+      update supplier_order
+      set submitted_at = now() - interval '2 minutes'
+      where idempotency_key = ${input.idempotencyKey}
+    `.execute(ctx.db);
 
     const second = await provisionFromSupplier(ctx.db, input);
     expect(second.ok).toBe(true);
@@ -894,6 +1199,124 @@ describe("supplier provision service (FR-015/FR-016)", () => {
       select count(*)::text as count from supplier_order where order_id = ${f.orderId}
     `.execute(ctx.db);
     expect(Number(count.rows[0]?.count)).toBe(1);
+  });
+
+  it("marks an aged UNKNOWN identity collision for manual review and blocks later fulfillment replay", async () => {
+    const f = await seedPaidOrderWithSupplierSku();
+    const supplierOrderId = newId();
+    const queryKey = "client-order-collision-1";
+    await sql`
+      insert into supplier_order
+        (id, supplier_id, supplier_sku_id, order_id, idempotency_key, query_key, request_fingerprint,
+         status, last_error_code, attempt_count, cost_vnd_snapshot, sale_price_vnd_snapshot,
+         margin_vnd_snapshot, submitted_at)
+      values
+        (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId}, ${queryKey}, ${queryKey},
+         'fp-identity-collision', 'UNKNOWN', 'TRANSPORT_TIMEOUT', 1, 150000, 199000, 49000,
+         now() - interval '2 minutes')
+    `.execute(ctx.db);
+
+    let creates = 0;
+    let queries = 0;
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    const port: SupplierPort = {
+      ...sandbox,
+      async createOrder(input) {
+        creates += 1;
+        return sandbox.createOrder(input);
+      },
+      async queryOrder() {
+        queries += 1;
+        if (queries === 1) {
+          throw new SupplierPortError("IDENTITY_MISMATCH", "QCST order identity mismatch");
+        }
+        return {
+          status: "FULFILLED",
+          externalOrderId: "late-fulfillment",
+          assetEnvelope: {
+            deliveryType: "CREDENTIAL",
+            expectedSku: f.externalSku,
+            region: "VN",
+            durationCode: "P1M",
+            expiresAt: null,
+            supplierAssetId: "late-asset",
+            fingerprint: "late-fingerprint",
+            vaultRef: "vault:late-asset",
+          },
+        };
+      },
+    };
+
+    const input = {
+      orderId: f.orderId,
+      supplierId: f.supplierId,
+      supplierSkuId: f.supplierSkuId,
+      externalSku: f.externalSku,
+      costCeilingVnd: 150000,
+      salePriceVnd: 199000,
+      expectedSku: f.externalSku,
+      deliveryType: "CREDENTIAL" as const,
+      durationCode: "P1M",
+      region: "VN",
+      correlationId: "sup-identity-collision",
+      port,
+      vault: createInMemoryVault(),
+      purchaseEnabled: true,
+      idempotencyKey: queryKey,
+    };
+    const result = await provisionFromSupplier(ctx.db, input);
+
+    expect(result).toEqual({
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Không thể đối soát an toàn đơn nhà cung cấp; cần kiểm tra thủ công.",
+    });
+    expect({ creates, queries }).toEqual({ creates: 0, queries: 1 });
+
+    const persisted = await sql<{
+      status: string;
+      last_error_code: string | null;
+      needs_review_at: Date | null;
+      next_reconcile_at: Date | null;
+    }>`
+      select status, last_error_code, needs_review_at, next_reconcile_at
+      from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(persisted.rows[0]).toMatchObject({
+      status: "UNKNOWN",
+      last_error_code: "IDENTITY_MISMATCH",
+      needs_review_at: expect.any(Date),
+      next_reconcile_at: null,
+    });
+    const reviewAt = persisted.rows[0]?.needs_review_at;
+    expect(reviewAt).toBeInstanceOf(Date);
+
+    const replay = await provisionFromSupplier(ctx.db, input);
+    expect(replay).toEqual({
+      ok: false,
+      code: "UNSUPPORTED",
+      message: "Không thể đối soát an toàn đơn nhà cung cấp; cần kiểm tra thủ công.",
+    });
+    expect({ creates, queries }).toEqual({ creates: 0, queries: 1 });
+
+    const replayed = await sql<{
+      status: string;
+      last_error_code: string | null;
+      needs_review_at: Date | null;
+    }>`
+      select status, last_error_code, needs_review_at
+      from supplier_order where id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(replayed.rows[0]).toMatchObject({
+      status: "UNKNOWN",
+      last_error_code: "IDENTITY_MISMATCH",
+    });
+    expect(replayed.rows[0]?.needs_review_at?.getTime()).toBe(reviewAt?.getTime());
+
+    const assets = await sql<{ count: string }>`
+      select count(*)::text as count from digital_asset where supplier_order_id = ${supplierOrderId}
+    `.execute(ctx.db);
+    expect(Number(assets.rows[0]?.count)).toBe(0);
   });
 
   it("ambiguous accepted retry queries existing PENDING and never creates again", async () => {
@@ -947,7 +1370,7 @@ describe("supplier provision service (FR-015/FR-016)", () => {
     expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
   });
 
-  it("recovers a SUBMITTED idempotency record through query-only execution", async () => {
+  it("recovers an aged SUBMITTED idempotency record through query-only execution", async () => {
     const f = await seedPaidOrderWithSupplierSku();
     const vault = createInMemoryVault();
     const idempotencyKey = "idem-submitted-1";
@@ -959,7 +1382,7 @@ describe("supplier provision service (FR-015/FR-016)", () => {
          attempt_count)
       values
         (${supplierOrderId}, ${f.supplierId}, ${f.supplierSkuId}, ${f.orderId}, ${idempotencyKey}, 'fp-submitted',
-         'SUBMITTED', 150000, 199000, 49000, now(), 1)
+         'SUBMITTED', 150000, 199000, 49000, now() - interval '2 minutes', 1)
     `.execute(ctx.db);
     let queries = 0;
     const port: SupplierPort = {

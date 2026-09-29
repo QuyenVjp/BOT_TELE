@@ -99,6 +99,7 @@ interface SupplierOrderRow {
   external_order_id: string | null;
   query_key: string | null;
   cost_vnd_snapshot: number | string;
+  submitted_at: Date | string | null;
   version: number;
   response_fingerprint: string | null;
   last_error_code: string | null;
@@ -135,6 +136,8 @@ function toPurchaseRecord(row: SupplierOrderRow): SupplierPurchaseRecord {
     supplierId: row.supplier_id,
     supplierSkuId: row.supplier_sku_id,
     queryKey: row.query_key ?? legacyQueryKey,
+    submittedAt: row.submitted_at,
+    needsReviewAt: row.needs_review_at,
     idempotencyKey: row.idempotency_key,
     requestFingerprint: row.request_fingerprint,
     status,
@@ -155,7 +158,7 @@ async function findSupplierOrderByIdempotency(
   const result = await sql<SupplierOrderRow>`
     select id, supplier_id, supplier_sku_id, order_id, idempotency_key,
            request_fingerprint, status, external_order_id, query_key, cost_vnd_snapshot,
-           attempt_count, version, response_fingerprint, last_error_code, needs_review_at
+           submitted_at, attempt_count, version, response_fingerprint, last_error_code, needs_review_at
     from supplier_order
     where supplier_id = ${supplierId} and idempotency_key = ${idempotencyKey}
     limit 1
@@ -167,7 +170,7 @@ async function findSupplierOrderById(exec: Executor, id: string): Promise<Suppli
   const result = await sql<SupplierOrderRow>`
     select id, supplier_id, supplier_sku_id, order_id, idempotency_key,
            request_fingerprint, status, external_order_id, query_key, cost_vnd_snapshot,
-           attempt_count, version, response_fingerprint, last_error_code, needs_review_at
+           submitted_at, attempt_count, version, response_fingerprint, last_error_code, needs_review_at
     from supplier_order where id = ${id} limit 1
   `.execute(exec);
   return result.rows[0] ?? null;
@@ -196,7 +199,7 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
           (${id}, ${input.supplierId}, ${input.supplierSkuId}, ${input.requestReference},
            ${input.idempotencyKey}, ${input.idempotencyKey}, ${input.requestFingerprint}, 'SUBMITTED',
            ${input.costCeilingVnd}, ${salePriceVnd}, ${salePriceVnd - input.costCeilingVnd},
-           now(), now(), 0)
+           null, null, 0)
         on conflict (supplier_id, idempotency_key) do nothing
         returning id
       `.execute(db);
@@ -206,23 +209,17 @@ function createSupplierOrderStore(db: Db, salePriceVnd: number): SupplierPurchas
       if (!row) throw new Error("supplier idempotency winner was not visible after conflict wait");
       return { inserted: inserted.rows.length === 1, record: toPurchaseRecord(row) };
     },
-    async refreshIntent(id, input) {
-      await sql`
-        update supplier_order
-        set cost_vnd_snapshot = ${input.costCeilingVnd},
-            margin_vnd_snapshot = ${salePriceVnd - input.costCeilingVnd},
-            version = version + 1
-        where id = ${id}
-      `.execute(db);
-    },
-    async markAttempt(id) {
+    async markAttempt(id, input) {
       const result = await sql<{ id: string }>`
         update supplier_order
         set status = 'SUBMITTED', query_key = coalesce(query_key, idempotency_key),
-            attempt_count = attempt_count + 1, last_attempt_at = now(),
+            cost_vnd_snapshot = ${input.costCeilingVnd},
+            margin_vnd_snapshot = sale_price_vnd_snapshot - ${input.costCeilingVnd},
+            submitted_at = now(), attempt_count = attempt_count + 1, last_attempt_at = now(),
             last_error_code = null, retry_after_seconds = null, next_reconcile_at = null,
             version = version + 1
-        where id = ${id} and status in ('SUBMITTED','AUTHORIZED') and attempt_count = 0
+        where id = ${id} and needs_review_at is null
+          and status in ('SUBMITTED','AUTHORIZED') and attempt_count = 0
         returning id
       `.execute(db);
       return result.rows.length === 1;
@@ -354,7 +351,7 @@ function recoverResultFromAsset(asset: { id: string; status: string }): RecoverR
 /**
  * Ingest a validated supplier asset as a SUPPLIER/READY asset bound to the
  * order. The supplier row is locked and claimed in the same transaction so a
- * stale fulfilled observation cannot ingest after a terminal outcome wins.
+ * stale fulfilled observation cannot ingest after a terminal or quarantined outcome wins.
  */
 async function ingestFulfilledAsset(
   db: Db,
@@ -378,11 +375,16 @@ async function ingestFulfilledAsset(
   });
 
   return withTransaction(db, async (trx) => {
-    const locked = await sql<{ id: string; status: string }>`
-      select id, status from supplier_order where id = ${params.supplierOrderId} for update
+    const locked = await sql<{
+      status: string;
+      needs_review_at: Date | string | null;
+    }>`
+      select status, needs_review_at
+      from supplier_order where id = ${params.supplierOrderId} for update
     `.execute(trx);
     const row = locked.rows[0];
     if (!row) throw new Error("Supplier order disappeared during fulfilled ingest");
+    if (row.needs_review_at !== null) return false;
 
     const existing = await findAssetBySupplierOrder(trx, params.supplierOrderId);
     if (row.status === "FULFILLED") return existing !== null;
@@ -472,6 +474,18 @@ export async function provisionFromSupplier(
     ? provisionResultFromExisting(existingRow, await findAssetBySupplierOrder(db, existingRow.id))
     : null;
   if (known) return known;
+  if (
+    existingRow &&
+    existingRow.needs_review_at !== null &&
+    existingRow.status !== "FULFILLED" &&
+    existingRow.status !== "REJECTED"
+  ) {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: recoveryBlockedMessage("SUPPLIER_ORDER_NOT_QUERYABLE"),
+    };
+  }
   if (
     order.status === "COMPLETED" &&
     existingRecord?.status === "SUBMITTED" &&
@@ -659,6 +673,16 @@ export async function provisionFromSupplier(
     : { ok: true, kind: "FULFILLED", supplierOrderId: result.record.id, assetId: asset.id };
 }
 
+function recoveryBlockedMessage(code: string): string {
+  if (code === "DELIVERY_UNSUPPORTED") {
+    return "Nhà cung cấp trả về payload giao hàng chưa được hỗ trợ.";
+  }
+  if (code === "SUPPLIER_ORDER_NOT_QUERYABLE" || code === "IDENTITY_MISMATCH") {
+    return "Không thể đối soát an toàn đơn nhà cung cấp; cần kiểm tra thủ công.";
+  }
+  return "Nhà cung cấp chưa công bố capability truy vấn đơn hàng.";
+}
+
 /**
  * Recover an UNKNOWN, SUBMITTED, or pending supplier order by querying the provider.
  * Never re-creates upstream — query is the only path forward. A fulfilled
@@ -672,6 +696,13 @@ export async function recoverUnknownSupplierOrder(
   const so = await findSupplierOrderById(db, input.supplierOrderId);
   if (!so) {
     return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn nhà cung cấp." };
+  }
+  if (so.needs_review_at !== null && so.status !== "FULFILLED" && so.status !== "REJECTED") {
+    return {
+      ok: false,
+      code: "UNSUPPORTED",
+      message: recoveryBlockedMessage("SUPPLIER_ORDER_NOT_QUERYABLE"),
+    };
   }
   const order = await findOrderById(db, so.order_id);
   if (!order) {
@@ -701,10 +732,7 @@ export async function recoverUnknownSupplierOrder(
     return {
       ok: false,
       code: result.code === "NOT_FOUND" ? "NOT_FOUND" : "UNSUPPORTED",
-      message:
-        result.code === "DELIVERY_UNSUPPORTED"
-          ? "Nhà cung cấp trả về payload giao hàng chưa được hỗ trợ."
-          : "Nhà cung cấp chưa công bố capability truy vấn đơn hàng.",
+      message: recoveryBlockedMessage(result.code),
     };
   }
   if (result.kind === "REJECTED") return { ok: true, kind: "REJECTED" };

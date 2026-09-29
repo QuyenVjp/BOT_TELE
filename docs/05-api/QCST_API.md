@@ -17,6 +17,10 @@ The adapter accepts only the documented fields needed by the domain and rejects 
 - Product: `id`, Vietnamese/English names and descriptions, warranty text, customer-input contract, fulfillment mode, availability, stock type, integer `price`, `currency`, `updated_at`, and optional bounded quantity fields.
 - Balance: integer `available` and `currency`.
 - Order: identifiers, product/quantity, integer unit/total amounts, currency, status/payment/cancellation/delivery flags, status URL, polling hint, timestamps, and optional error. Delivery payload shape is not documented; an unknown delivery payload never becomes a delivered asset.
+
+- Client-order recovery requests `limit=2` and accepts one matching order only from a
+  complete page (`has_more=false`, `next_cursor=null`). Multiple matches, a further page, or
+  an inconsistent cursor state fails closed as `IDENTITY_MISMATCH`.
 - Attaching a supplier source to an existing local variant is mapping-only. It
   does not rewrite local product/variant names, descriptions, or selling price;
   supplier cost and availability remain upstream observations.

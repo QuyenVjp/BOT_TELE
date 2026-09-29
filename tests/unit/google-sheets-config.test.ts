@@ -217,6 +217,71 @@ describe("generic supplier platform configuration", () => {
       "SUPPLIER_COMMERCE_PURCHASE_ENABLED must remain false while SUPPLIER_CANARY_ENABLED is true",
     );
   });
+  it("fails closed when any production canary prerequisite gate is absent or off", () => {
+    const canaryRolloutEnv = {
+      ...productionSheetsEnv,
+      SUPPLIER_PURCHASE_ENABLED: "true",
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: "false",
+      QCST_PROVIDER_ENABLED: "true",
+      QCST_CATALOG_SYNC: "true",
+      QCST_ADMIN_PRODUCT_BROWSER: "true",
+      QCST_OWNER_SELECTION: "true",
+      QCST_LOCAL_PRICE_CONTROL: "true",
+      QCST_PURCHASE_ENABLED: "true",
+      QCST_API_KEY_VAULT_REF: "vault:qcst-api-key",
+    };
+
+    for (const value of [undefined, "false"] as const) {
+      resetConfigCache();
+      const config = loadConfig({
+        ...canaryRolloutEnv,
+        SUPPLIER_CANARY_ENABLED: value,
+      });
+      expect(config.SUPPLIER_CANARY_ENABLED).toBe(false);
+    }
+
+    for (const gate of ["SUPPLIER_PURCHASE_ENABLED", "QCST_PURCHASE_ENABLED"] as const) {
+      for (const value of [undefined, "false"] as const) {
+        resetConfigCache();
+        expect(() =>
+          loadConfig({
+            ...canaryRolloutEnv,
+            SUPPLIER_CANARY_ENABLED: "true",
+            [gate]: value,
+          }),
+        ).toThrow("SUPPLIER_CANARY_ENABLED requires generic and QCST purchase gates");
+      }
+    }
+  });
+
+  it("accepts only production canary max-cost boundaries from 1 to 1000000 VND", () => {
+    const canaryRolloutEnv = {
+      ...productionSheetsEnv,
+      SUPPLIER_PURCHASE_ENABLED: "true",
+      SUPPLIER_COMMERCE_PURCHASE_ENABLED: "false",
+      SUPPLIER_CANARY_ENABLED: "true",
+      QCST_PROVIDER_ENABLED: "true",
+      QCST_CATALOG_SYNC: "true",
+      QCST_ADMIN_PRODUCT_BROWSER: "true",
+      QCST_OWNER_SELECTION: "true",
+      QCST_LOCAL_PRICE_CONTROL: "true",
+      QCST_PURCHASE_ENABLED: "true",
+      QCST_API_KEY_VAULT_REF: "vault:qcst-api-key",
+    };
+
+    for (const value of ["1", "1000000"] as const) {
+      resetConfigCache();
+      expect(
+        loadConfig({ ...canaryRolloutEnv, SUPPLIER_CANARY_MAX_COST_VND: value }),
+      ).toMatchObject({ SUPPLIER_CANARY_MAX_COST_VND: Number(value) });
+    }
+    for (const value of ["0", "1000001"] as const) {
+      resetConfigCache();
+      expect(() =>
+        loadConfig({ ...canaryRolloutEnv, SUPPLIER_CANARY_MAX_COST_VND: value }),
+      ).toThrow("SUPPLIER_CANARY_MAX_COST_VND must stay between 1 and 1000000 in production");
+    }
+  });
 
   it("keeps Vô Không disabled without a Vault credential", () => {
     expect(() =>

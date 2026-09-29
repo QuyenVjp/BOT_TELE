@@ -43,17 +43,21 @@ retried. Missing generic/provider purchase authorization is false, and
 POST.
 
 Commerce intents persist `SUBMITTED` with `attempt_count=0` before provider I/O;
-a single compare-and-set increments the count before the first `POST`. A stale
+a single compare-and-set atomically commits the winning pre-POST cost and
+margin snapshots while incrementing `attempt_count` before the first `POST`. A stale
 pre-submit failure may reject only an intent with `attempt_count=0`.
-`SUBMITTED` with `attempt_count>0`, `PENDING`, and `UNKNOWN` remain query-only
-and never POST again.
-A `PENDING` provider result stays `PENDING`; a legacy `UNKNOWN` row's
+`SUBMITTED` with `attempt_count>0` and `UNKNOWN` outcomes of an ambiguous first
+POST are query-only only after the 60-second no-query grace; `PENDING` uses the
+durable query schedule. None may POST again. A legacy `UNKNOWN` row's
 `external_order_id` is a lookup key even after it is copied to `query_key`, and
 is never exposed as a confirmed provider order ID. Other persisted statuses are
 preserved; cancellation/refund, reconciled, created, and unrecognized statuses
 fail closed for owner review and are never coerced to `SUBMITTED`, queried, or
-re-created. In the owner-canary aggregate, only `AUTHORIZED` may claim a new
-`POST`; its transition to `SUBMITTED` is the durable create claim.
+re-created. Query keys are unique per supplier. If a provider query returns
+multiple orders for one client-order key, recovery marks the row for manual
+review; it never chooses the first result. In the owner-canary aggregate, only
+`AUTHORIZED` may claim a new `POST`; its transition to `SUBMITTED` is the durable
+create claim and atomically persists only the approved cost.
 
 Required checkpoints before enabling real purchase:
 

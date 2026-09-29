@@ -76,11 +76,17 @@ Created -> Submitted -> Pending -> Fulfilled
 ```
 
 `Unknown` is mandatory after a timeout with uncertain upstream outcome; the system queries/reconciles before retrying create.
-Commerce persists the initial `SUBMITTED` intent with `attempt_count=0`. One
-compare-and-set increments it before the first provider `POST`; attempted
-`SUBMITTED` rows (`attempt_count>0`) and `PENDING`/`UNKNOWN` rows are query-only.
-The owner-canary aggregate is separate: its `AUTHORIZED -> SUBMITTED` transition
-is already the create claim.
+Commerce persists the initial `SUBMITTED` intent with `attempt_count=0` as
+create-only state: recovery never queries that row. The durable create claim
+atomically commits the winning pre-POST cost/margin snapshot, increments
+`attempt_count`, and resets `submitted_at=now()`. The first provider POST then
+receives a 60-second no-query grace from that claim timestamp. An ambiguous
+`UNKNOWN` from that attempt keeps the same grace; attempted `SUBMITTED` and
+`UNKNOWN` rows are query-only afterward. `PENDING` follows its durable query
+schedule. Missing or invalid `submitted_at` fails closed to manual review.
+The owner-canary aggregate is separate: its `AUTHORIZED -> SUBMITTED`
+transition is already the create claim and sets `submitted_at=now()` before
+the first POST.
 
 ## Delivery Bundle
 

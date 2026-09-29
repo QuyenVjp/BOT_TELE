@@ -34,6 +34,13 @@
    refund-request case; never invent a secret.
 5. On still-unknown: leave in `UNKNOWN` and re-schedule; do not re-create.
 
+### Dead-lettered `OrderPaid`
+
+- Ambiguous `UNKNOWN`, `PENDING`, or attempted `SUBMITTED` orders stay out of create/re-arm and are routed to query-only reconciliation; never re-POST them.
+- Without an ambiguous row, re-arm a dead `OrderPaid` only when no supplier-order row exists or
+  exactly one `SUBMITTED` row remains unattempted (`attempt_count=0`, no `needs_review_at`);
+  other terminal, quarantined, or multiple supplier-order histories require manual review.
+
 ### Invalid asset
 
 1. An envelope that fails validation is quarantined (`SUPPLIER_NEEDS_REVIEW`). The vault ref is never

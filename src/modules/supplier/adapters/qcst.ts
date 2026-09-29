@@ -499,12 +499,19 @@ export function createQcstSupplierPort(
     }
     const queryKey = input.queryKey?.trim();
     if (!queryKey) throw new SupplierPortError("INVALID_QUERY", "QCST order query is invalid");
-    const query = new URLSearchParams({ client_order_id: queryKey, limit: "1" });
+    const query = new URLSearchParams({ client_order_id: queryKey, limit: "2" });
     const response = await request({
       method: "GET",
       path: `/v1/orders?${query}`,
       parse: (value) => OrderListResponseSchema.parse(value),
     });
+    if (
+      response.data.has_more ||
+      response.data.next_cursor !== null ||
+      response.data.items.length > 1
+    ) {
+      throw new SupplierPortError(IDENTITY_MISMATCH_CODE, IDENTITY_MISMATCH_MESSAGE);
+    }
     const order = response.data.items[0];
     if (!order) throw new SupplierPortError("NOT_FOUND", "QCST order was not found");
     return order;

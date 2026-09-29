@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  SUPPLIER_SUBMITTED_GRACE_SECONDS,
   executeSupplierPurchase,
   recoverSupplierPurchase,
   type SupplierPurchaseRecord,
@@ -71,6 +72,7 @@ function makeStore(): SupplierPurchaseRecordStore & {
         requestFingerprint: input.requestFingerprint,
         status: "SUBMITTED",
         externalOrderId: null,
+        submittedAt: null,
         attemptCount: 0,
         costVndSnapshot: input.costCeilingVnd,
         version: 1,
@@ -79,12 +81,7 @@ function makeStore(): SupplierPurchaseRecordStore & {
       byKey.set(key, record.id);
       return { inserted: true, record };
     },
-    async refreshIntent(id, input) {
-      await patch(id, {
-        ...(input.costCeilingVnd === undefined ? {} : { costVndSnapshot: input.costCeilingVnd }),
-      });
-    },
-    async markAttempt(id) {
+    async markAttempt(id, input) {
       const record = rows.get(id);
       if (
         claimed.has(id) ||
@@ -99,6 +96,8 @@ function makeStore(): SupplierPurchaseRecordStore & {
         status: "SUBMITTED",
         attemptCount: 1,
         queryKey: record.idempotencyKey,
+        submittedAt: new Date(),
+        costVndSnapshot: input.costCeilingVnd,
       });
       return true;
     },
@@ -214,6 +213,17 @@ describe("durable supplier purchase core", () => {
     const first = await executeSupplierPurchase(input(store, { port }));
     expect(first).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
     const row = [...store.rows.values()][0]!;
+    const immediateRetry = await recoverSupplierPurchase({
+      store,
+      recordId: row.id,
+      queryKey: "canary-1",
+      expectedSku: "SKU-1",
+      port,
+    });
+    expect(immediateRetry).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
+    expect(queries).toBe(0);
+
+    row.submittedAt = new Date(Date.now() - (SUPPLIER_SUBMITTED_GRACE_SECONDS + 1) * 1_000);
     const recovered = await recoverSupplierPurchase({
       store,
       recordId: row.id,
@@ -245,6 +255,7 @@ describe("durable supplier purchase core", () => {
     const first = await executeSupplierPurchase(input(store, { port }));
     const row = [...store.rows.values()][0]!;
     expect(first).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
+    row.submittedAt = new Date(Date.now() - (SUPPLIER_SUBMITTED_GRACE_SECONDS + 1) * 1_000);
 
     const recovered = await recoverSupplierPurchase({
       store,
@@ -297,9 +308,10 @@ describe("durable supplier purchase core", () => {
     expect({ creates, queries }).toEqual({ creates: 1, queries: 0 });
   });
 
-  it("lets one concurrent caller claim an unattempted SUBMITTED intent", async () => {
+  it("persists the winning preflight cost when concurrent callers race to claim", async () => {
     const store = makeStore();
     let creates = 0;
+    let postedCost: number | undefined;
     let queries = 0;
     let preflightStarted!: () => void;
     let releasePreflight!: () => void;
@@ -310,8 +322,9 @@ describe("durable supplier purchase core", () => {
       releasePreflight = resolve;
     });
     const port = makePort({
-      createOrder: async () => {
+      createOrder: async ({ costCeilingVnd }) => {
         creates += 1;
+        postedCost = costCeilingVnd;
         return { kind: "ACCEPTED", externalOrderId: "ext-concurrent", status: "PENDING" };
       },
       queryOrder: async () => {
@@ -319,34 +332,284 @@ describe("durable supplier purchase core", () => {
         return { status: "REJECTED", externalOrderId: "never-created" };
       },
     });
-    const beforeCreate = async (pause: boolean) => {
+    const beforeCreate = async (pause: boolean, costCeilingVnd: number) => {
       if (pause) {
         preflightStarted();
         await preflightGate;
       }
-      return { ok: true as const, costCeilingVnd: 23000 };
+      return { ok: true as const, costCeilingVnd };
     };
 
     const first = executeSupplierPurchase(
-      input(store, { port, beforeCreate: () => beforeCreate(true) }),
+      input(store, { port, beforeCreate: () => beforeCreate(true, 24000) }),
     );
     await started;
     const winner = await executeSupplierPurchase(
-      input(store, { port, beforeCreate: () => beforeCreate(false) }),
+      input(store, { port, beforeCreate: () => beforeCreate(false, 23000) }),
     );
     releasePreflight();
     const loser = await first;
 
     expect(winner).toMatchObject({ kind: "ACCEPTED", externalOrderId: "ext-concurrent" });
-    expect(loser).toMatchObject({ kind: "UNKNOWN", queryKey: "ext-concurrent" });
+    expect(loser).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
     expect([...store.rows.values()]).toHaveLength(1);
     expect([...store.rows.values()][0]).toMatchObject({
       status: "PENDING",
       attemptCount: 1,
       externalOrderId: "ext-concurrent",
+      costVndSnapshot: 23000,
     });
-    expect({ creates, queries }).toEqual({ creates: 1, queries: 0 });
+    expect({ creates, queries, postedCost }).toEqual({
+      creates: 1,
+      queries: 0,
+      postedCost: 23000,
+    });
   });
+  it("does not query a fresh attempted SUBMITTED record during the post-claim grace", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    seeded.record.attemptCount = 1;
+    seeded.record.submittedAt = new Date();
+    let queries = 0;
+    const result = await recoverSupplierPurchase({
+      store,
+      recordId: seeded.record.id,
+      queryKey: "canary-1",
+      expectedSku: "SKU-1",
+      port: makePort({
+        queryOrder: async () => {
+          queries += 1;
+          return { status: "REJECTED", externalOrderId: "must-not-query" };
+        },
+      }),
+    });
+
+    expect(result).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
+    expect(queries).toBe(0);
+  });
+  it("queries at the exact post-claim grace boundary", async () => {
+    const now = new Date("2026-09-27T00:00:00.000Z");
+    vi.useFakeTimers();
+    vi.setSystemTime(now);
+    try {
+      const store = makeStore();
+      const seeded = await store.insertIntent({
+        supplierId: "supplier-1",
+        supplierSkuId: "sku-1",
+        requestReference: "run-1",
+        idempotencyKey: "canary-1",
+        requestFingerprint: "fingerprint",
+        costCeilingVnd: 23000,
+      });
+      seeded.record.attemptCount = 1;
+      seeded.record.status = "SUBMITTED";
+      seeded.record.submittedAt = new Date(
+        now.getTime() - SUPPLIER_SUBMITTED_GRACE_SECONDS * 1_000,
+      );
+      let queries = 0;
+
+      const result = await recoverSupplierPurchase({
+        store,
+        recordId: seeded.record.id,
+        queryKey: "canary-1",
+        expectedSku: "SKU-1",
+        port: makePort({
+          queryOrder: async () => {
+            queries += 1;
+            return { status: "PENDING", externalOrderId: "grace-boundary-order" };
+          },
+        }),
+      });
+
+      expect(result).toMatchObject({
+        kind: "UNKNOWN",
+        queryKey: "grace-boundary-order",
+        record: { status: "PENDING", externalOrderId: "grace-boundary-order" },
+      });
+      expect(queries).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("fails closed without querying an attempted SUBMITTED record with no timestamp", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    seeded.record.attemptCount = 1;
+    seeded.record.submittedAt = null;
+    let queries = 0;
+    const result = await recoverSupplierPurchase({
+      store,
+      recordId: seeded.record.id,
+      queryKey: "canary-1",
+      expectedSku: "SKU-1",
+      port: makePort({
+        queryOrder: async () => {
+          queries += 1;
+          return { status: "REJECTED", externalOrderId: "must-not-query" };
+        },
+      }),
+    });
+
+    expect(result).toMatchObject({
+      kind: "BLOCKED",
+      code: "SUPPLIER_ORDER_NOT_QUERYABLE",
+    });
+    expect(queries).toBe(0);
+    expect(store.reviewCodes).toEqual(["SUPPLIER_ORDER_NOT_QUERYABLE"]);
+  });
+
+  it("does not query a SUBMITTED/0 create intent during recovery", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    let queries = 0;
+    const result = await recoverSupplierPurchase({
+      store,
+      recordId: seeded.record.id,
+      queryKey: "canary-1",
+      expectedSku: "SKU-1",
+      port: makePort({
+        queryOrder: async () => {
+          queries += 1;
+          return { status: "REJECTED", externalOrderId: "must-not-query" };
+        },
+      }),
+    });
+
+    expect(result).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
+    expect(queries).toBe(0);
+  });
+
+  it("returns the latest terminal state when the create claim CAS loses", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    seeded.record.status = "AUTHORIZED";
+    store.markAttempt = async () => {
+      seeded.record.status = "REJECTED";
+      return false;
+    };
+
+    const result = await executeSupplierPurchase(input(store));
+
+    expect(result).toMatchObject({ kind: "REJECTED", record: { status: "REJECTED" } });
+  });
+  it("fails closed when the create claim loses to a non-queryable supplier state", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    seeded.record.status = "AUTHORIZED";
+    store.markAttempt = async () => {
+      seeded.record.status = "CANCELLED";
+      return false;
+    };
+
+    const result = await executeSupplierPurchase(input(store));
+
+    expect(result).toMatchObject({
+      kind: "BLOCKED",
+      code: "SUPPLIER_ORDER_NOT_ELIGIBLE",
+      record: { status: "CANCELLED" },
+    });
+  });
+
+  it("returns the durable query key when the create claim CAS loses to a queryable state", async () => {
+    const store = makeStore();
+    const seeded = await store.insertIntent({
+      supplierId: "supplier-1",
+      supplierSkuId: "sku-1",
+      requestReference: "run-1",
+      idempotencyKey: "canary-1",
+      requestFingerprint: "fingerprint",
+      costCeilingVnd: 23000,
+    });
+    seeded.record.status = "AUTHORIZED";
+    store.markAttempt = async () => {
+      seeded.record.status = "UNKNOWN";
+      seeded.record.queryKey = "provider-query-key";
+      return false;
+    };
+
+    const result = await executeSupplierPurchase(input(store));
+
+    expect(result).toMatchObject({
+      kind: "UNKNOWN",
+      queryKey: "provider-query-key",
+      record: { status: "UNKNOWN", queryKey: "provider-query-key" },
+    });
+  });
+
+  it("returns the duplicate as pending while the first POST is in flight and ingests fulfillment once", async () => {
+    const store = makeStore();
+    let createStarted!: () => void;
+    let releaseCreate!: () => void;
+    const firstPost = new Promise<void>((resolve) => {
+      createStarted = resolve;
+    });
+    const release = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    let queries = 0;
+    let ingested = 0;
+    const port = makePort({
+      createOrder: async () => {
+        createStarted();
+        await release;
+        return { kind: "FULFILLED", externalOrderId: "ext-in-flight", assetEnvelope: envelope };
+      },
+      queryOrder: async () => {
+        queries += 1;
+        return { status: "REJECTED", externalOrderId: "must-not-query" };
+      },
+    });
+    const first = executeSupplierPurchase(
+      input(store, { port, onFulfilled: async () => void (ingested += 1) }),
+    );
+    await firstPost;
+
+    const duplicate = await executeSupplierPurchase(
+      input(store, { port, onFulfilled: async () => void (ingested += 1) }),
+    );
+    expect(duplicate).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
+    expect(queries).toBe(0);
+
+    releaseCreate();
+    expect(await first).toMatchObject({ kind: "FULFILLED", externalOrderId: "ext-in-flight" });
+    expect(ingested).toBe(1);
+  });
+
   it("does not block a submitted intent after another caller claims it", async () => {
     const store = makeStore();
     let preflightStarted!: () => void;
@@ -421,6 +684,7 @@ describe("durable supplier purchase core", () => {
       costCeilingVnd: 23000,
     });
     seeded.record.attemptCount = 1;
+    seeded.record.submittedAt = new Date(Date.now() - 120_000);
     let creates = 0;
     let queries = 0;
     const port = makePort({
@@ -462,8 +726,8 @@ describe("durable supplier purchase core", () => {
     });
     seeded.record.status = "AUTHORIZED";
     const markAttempt = store.markAttempt.bind(store);
-    store.markAttempt = async (id) => {
-      const claimed = await markAttempt(id);
+    store.markAttempt = async (id, input) => {
+      const claimed = await markAttempt(id, input);
       if (claimed) throw new Error("simulated crash after durable claim");
       return claimed;
     };
@@ -488,10 +752,88 @@ describe("durable supplier purchase core", () => {
       status: "SUBMITTED",
       queryKey: "canary-1",
     });
+    seeded.record.submittedAt = new Date(
+      Date.now() - (SUPPLIER_SUBMITTED_GRACE_SECONDS + 1) * 1_000,
+    );
 
     const resumed = await executeSupplierPurchase(input(store, { purchaseEnabled: false, port }));
     expect(resumed).toMatchObject({ kind: "UNKNOWN", queryKey: "ext-crash-1" });
     expect({ creates, queries }).toEqual({ creates: 0, queries: 1 });
+  });
+  it("recovers an accepted create after response persistence fails without creating again", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-27T00:00:00.000Z"));
+    try {
+      const store = makeStore();
+      const markResponse = store.markResponse.bind(store);
+      let failResponsePersistence = true;
+      store.markResponse = async (id, fingerprint) => {
+        if (failResponsePersistence) {
+          failResponsePersistence = false;
+          throw new Error("simulated response persistence failure");
+        }
+        await markResponse(id, fingerprint);
+      };
+      let creates = 0;
+      let queries = 0;
+      const port = makePort({
+        createOrder: async () => {
+          creates += 1;
+          return { kind: "ACCEPTED", externalOrderId: "ext-post-crash", status: "PENDING" };
+        },
+        queryOrder: async ({ queryKey, externalOrderId, expectedSku }) => {
+          queries += 1;
+          expect({ queryKey, externalOrderId, expectedSku }).toEqual({
+            queryKey: "canary-1",
+            externalOrderId: undefined,
+            expectedSku: "SKU-1",
+          });
+          return {
+            status: "FULFILLED",
+            externalOrderId: "ext-post-crash",
+            assetEnvelope: envelope,
+          };
+        },
+      });
+
+      await expect(executeSupplierPurchase(input(store, { port }))).rejects.toThrow(
+        "simulated response persistence failure",
+      );
+      const row = [...store.rows.values()][0]!;
+      expect(row).toMatchObject({
+        status: "SUBMITTED",
+        attemptCount: 1,
+        queryKey: "canary-1",
+        externalOrderId: null,
+        submittedAt: new Date("2026-09-27T00:00:00.000Z"),
+      });
+
+      row.submittedAt = new Date("2026-09-26T23:58:00.000Z");
+      const recovered = await recoverSupplierPurchase({
+        store,
+        recordId: row.id,
+        queryKey: "canary-1",
+        expectedSku: "SKU-1",
+        port,
+      });
+
+      expect(recovered).toMatchObject({
+        kind: "FULFILLED",
+        externalOrderId: "ext-post-crash",
+        record: {
+          status: "FULFILLED",
+          externalOrderId: "ext-post-crash",
+        },
+      });
+      expect(store.rows.get(row.id)).toMatchObject({
+        status: "FULFILLED",
+        externalOrderId: "ext-post-crash",
+        responseFingerprint: expect.any(String),
+      });
+      expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("blocks a concurrent idempotency-key claim for another supplier SKU", async () => {

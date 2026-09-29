@@ -15,6 +15,14 @@ describe("owner supplier canary preview", () => {
       currency: "VND",
     });
 
+    expect(message.text).toContain("Provider: QCST");
+    expect(message.text).toContain("SKU: SKU-1");
+    expect(message.text).toContain("Chi phí tối đa: 23.000 VND");
+    expect(message.text).toContain("Số dư đọc được: 50.000 VND");
+    expect(message.text).toContain("Run: run-1");
+    expect(message.text).toContain("ID: confirmation-1");
+    expect(message.text).toContain("Mã: challenge");
+    expect(message.text).toContain("Hết hạn: 2026-09-25T00:00:00Z");
     expect(message.text).toContain("Commerce supplier fulfillment: OFF");
     expect(message.text).toContain("Canary supplier purchase: LOCKED until confirmation");
   });

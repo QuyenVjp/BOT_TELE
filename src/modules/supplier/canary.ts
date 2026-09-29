@@ -23,6 +23,7 @@ import { newId } from "../../shared/ids/index.js";
 import {
   executeSupplierPurchase,
   recoverSupplierPurchase,
+  SUPPLIER_SUBMITTED_GRACE_SECONDS,
   type SupplierPurchaseRecord,
   type SupplierPurchaseRecordStore,
 } from "./purchase-core.js";
@@ -37,7 +38,7 @@ import type { SupplierProviderRegistry } from "./registry.js";
 const CANARY_ACTION = "supplier.canary.purchase" as const;
 const CANARY_RESOURCE = "SupplierCanaryRun" as const;
 const VND = "VND";
-const CANARY_RETRY_DELAY_SECONDS = 60;
+const CANARY_RETRY_DELAY_SECONDS = SUPPLIER_SUBMITTED_GRACE_SECONDS;
 
 type CanaryStatus =
   | "PREVIEWED"
@@ -67,7 +68,9 @@ interface CanaryRow {
   balance_vnd_snapshot: number | string | null;
   currency: string;
   external_order_id: string | null;
+  submitted_at: Date | string | null;
   response_fingerprint: string | null;
+  needs_review_at: Date | string | null;
   last_error_code: string | null;
   retry_after_seconds: number | null;
   version: number;
@@ -163,8 +166,8 @@ async function loadCanary(exec: Executor, id: string): Promise<CanaryRow | null>
     select id, confirmation_id, supplier_id, supplier_sku_id, variant_id, provider_key,
            external_sku, region, idempotency_key, query_key, request_fingerprint, status,
            approved_cost_vnd, cost_vnd_snapshot, balance_vnd_snapshot, currency,
-           external_order_id, response_fingerprint, last_error_code, retry_after_seconds,
-           version, created_by
+           external_order_id, submitted_at, response_fingerprint, needs_review_at,
+           last_error_code, retry_after_seconds, version, created_by
     from supplier_canary_run
     where id = ${id}
     limit 1
@@ -237,7 +240,12 @@ async function blockAuthorizedCanary(
   return executionFromCanaryRow(current, id);
 }
 
-function canaryStore(db: Db, authorizedVersion: number): SupplierPurchaseRecordStore {
+function canaryStore(
+  db: Db,
+  authorizedVersion: number,
+  catalogListCapability = false,
+  getBalanceVndSnapshot: () => number | null = () => null,
+): SupplierPurchaseRecordStore {
   const load = (id: string) => loadCanary(db, id);
   const toRecord = (row: CanaryRow): SupplierPurchaseRecord => ({
     id: row.id,
@@ -245,7 +253,8 @@ function canaryStore(db: Db, authorizedVersion: number): SupplierPurchaseRecordS
     supplierSkuId: row.supplier_sku_id,
     requestReference: row.id,
     idempotencyKey: row.idempotency_key,
-    queryKey: row.query_key,
+    needsReviewAt: row.needs_review_at,
+    submittedAt: row.submitted_at,
     requestFingerprint: row.request_fingerprint,
     status:
       row.status === "AUTHORIZED" ||
@@ -258,19 +267,31 @@ function canaryStore(db: Db, authorizedVersion: number): SupplierPurchaseRecordS
         : "SUBMITTED",
     externalOrderId: row.external_order_id,
     costVndSnapshot: Number(row.cost_vnd_snapshot),
+    attemptCount: row.status === "AUTHORIZED" || row.status === "PREVIEWED" ? 0 : 1,
     version: row.version,
     responseFingerprint: row.response_fingerprint,
     blockCode: row.last_error_code,
   });
 
+  let expectedVersion = authorizedVersion;
+  let writeLost = false;
+  const rememberVersion = (rows: readonly { version: number }[]) => {
+    const updated = rows[0];
+    if (!updated) {
+      writeLost = true;
+      return false;
+    }
+    expectedVersion = updated.version;
+    return true;
+  };
   return {
     async findByIdempotency(input) {
       const row = await sql<CanaryRow>`
         select id, confirmation_id, supplier_id, supplier_sku_id, variant_id, provider_key,
                external_sku, region, idempotency_key, query_key, request_fingerprint, status,
                approved_cost_vnd, cost_vnd_snapshot, balance_vnd_snapshot, currency,
-               external_order_id, response_fingerprint, last_error_code, retry_after_seconds,
-               version, created_by
+               external_order_id, submitted_at, response_fingerprint, needs_review_at,
+               last_error_code, retry_after_seconds, version, created_by
         from supplier_canary_run
         where supplier_id = ${input.supplierId} and idempotency_key = ${input.idempotencyKey}
         limit 1
@@ -305,30 +326,65 @@ function canaryStore(db: Db, authorizedVersion: number): SupplierPurchaseRecordS
       if (!row) throw new Error("supplier canary intent was not visible after conflict wait");
       return { inserted: inserted.rows.length === 1, record: toRecord(row) };
     },
-    async refreshIntent(id, input) {
-      await sql`
-        update supplier_canary_run
-        set cost_vnd_snapshot = ${input.costCeilingVnd},
-            external_sku = coalesce(${input.externalSku ?? null}, external_sku),
-            region = coalesce(${input.region ?? null}, region),
-            updated_at = now(), version = version + 1
-        where id = ${id}
-      `.execute(db);
-    },
-    async markAttempt(id) {
-      const result = await sql<{ id: string }>`
-        update supplier_canary_run
-        set status = 'SUBMITTED', query_key = coalesce(query_key, idempotency_key),
-            submitted_at = coalesce(submitted_at, now()),
+    async markAttempt(id, input) {
+      const balanceVndSnapshot = getBalanceVndSnapshot();
+      if (writeLost || balanceVndSnapshot === null) return false;
+      const result = await sql<{ version: number }>`
+        update supplier_canary_run as run
+        set status = 'SUBMITTED', query_key = coalesce(run.query_key, run.idempotency_key),
+            cost_vnd_snapshot = ${input.costCeilingVnd},
+            balance_vnd_snapshot = ${balanceVndSnapshot},
+            submitted_at = now(),
             last_error_code = null, retry_after_seconds = null, next_reconcile_at = null,
-            updated_at = now(), version = version + 1
-        where id = ${id} and status = 'AUTHORIZED'
-        returning id
+            updated_at = now(), version = run.version + 1
+        where run.id = ${id}
+          and run.status = 'AUTHORIZED'
+          and run.needs_review_at is null
+          and run.version = ${expectedVersion}
+          and run.approved_cost_vnd = ${input.costCeilingVnd}
+          and exists (
+            select 1
+            from supplier s
+            join supplier_sku ss on ss.supplier_id = s.id
+            join product_variant v on v.id = ss.variant_id
+            join supplier_catalog_product cp
+              on cp.supplier_id = s.id and cp.supplier_sku_id = ss.id
+            where s.id = run.supplier_id
+              and ss.id = run.supplier_sku_id
+              and ss.variant_id = run.variant_id
+              and v.supplier_sku_id = ss.id
+              and s.status = 'ACTIVE'
+              and ss.is_active = true
+              and ss.external_sku = run.external_sku
+              and ss.region is not distinct from run.region
+              and ss.cost_vnd = run.approved_cost_vnd
+              and upper(trim(cp.fulfillment_mode)) = 'AUTOMATIC'
+              and cp.requires_customer_input = false
+              and cp.customer_inputs_per_item = 0
+              and (
+                (
+                  not ${catalogListCapability}
+                  and not coalesce(
+                    s.provider_capabilities @> '["CATALOG_LIST"]'::jsonb,
+                    false
+                  )
+                )
+                or (
+                  cp.selection_status = 'SELECTED'
+                  and cp.is_enabled = true
+                  and cp.domain_status = 'SUPPORTED'
+                  and cp.is_missing = false
+                  and cp.availability in ('AVAILABLE','LOW')
+                )
+              )
+          )
+        returning run.version
       `.execute(db);
-      return result.rows.length === 1;
+      return rememberVersion(result.rows);
     },
     async markTransportFailure(id, input) {
-      await sql`
+      if (writeLost) return;
+      const result = await sql<{ version: number }>`
         update supplier_canary_run
         set last_error_code = ${input.code}, retry_after_seconds = ${input.retryAfterSeconds ?? null},
             next_reconcile_at = ${
@@ -338,19 +394,29 @@ function canaryStore(db: Db, authorizedVersion: number): SupplierPurchaseRecordS
             },
             updated_at = now(), version = version + 1
         where id = ${id}
+          and version = ${expectedVersion}
+          and needs_review_at is null
           and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+        returning version
       `.execute(db);
+      rememberVersion(result.rows);
     },
     async markResponse(id, fingerprint) {
-      await sql`
+      if (writeLost) return;
+      const result = await sql<{ version: number }>`
         update supplier_canary_run
         set response_fingerprint = ${fingerprint}, updated_at = now(), version = version + 1
         where id = ${id}
+          and version = ${expectedVersion}
+          and needs_review_at is null
           and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+        returning version
       `.execute(db);
+      rememberVersion(result.rows);
     },
     async markUnknown(id, input) {
-      await sql`
+      if (writeLost) return;
+      const result = await sql<{ version: number }>`
         update supplier_canary_run
         set status = 'UNKNOWN', query_key = ${input.queryKey}, external_order_id = null,
             uncertain_at = now(), last_error_code = ${input.reason},
@@ -358,51 +424,85 @@ function canaryStore(db: Db, authorizedVersion: number): SupplierPurchaseRecordS
             next_reconcile_at = now() + make_interval(secs => ${CANARY_RETRY_DELAY_SECONDS}),
             updated_at = now(), version = version + 1
         where id = ${id}
+          and version = ${expectedVersion}
+          and needs_review_at is null
           and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+        returning version
       `.execute(db);
+      rememberVersion(result.rows);
     },
     async markPending(id, externalOrderId) {
-      await sql`
+      if (writeLost) return;
+      const result = await sql<{ version: number }>`
         update supplier_canary_run
         set status = 'PENDING', external_order_id = ${externalOrderId}, query_key = null,
             last_error_code = null, retry_after_seconds = ${CANARY_RETRY_DELAY_SECONDS},
             next_reconcile_at = now() + make_interval(secs => ${CANARY_RETRY_DELAY_SECONDS}),
             updated_at = now(), version = version + 1
         where id = ${id}
+          and version = ${expectedVersion}
+          and needs_review_at is null
           and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+        returning version
       `.execute(db);
+      rememberVersion(result.rows);
     },
     async markFulfilled(id, externalOrderId) {
-      await sql`
+      if (writeLost) return;
+      const result = await sql<{ version: number }>`
         update supplier_canary_run
         set status = 'FULFILLED', external_order_id = ${externalOrderId}, query_key = null,
             last_error_code = null, retry_after_seconds = null, next_reconcile_at = null,
             updated_at = now(), version = version + 1
         where id = ${id}
+          and version = ${expectedVersion}
+          and needs_review_at is null
           and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+        returning version
       `.execute(db);
+      rememberVersion(result.rows);
     },
     async markRejected(id) {
-      await sql`
+      if (writeLost) return;
+      const result = await sql<{ version: number }>`
         update supplier_canary_run
         set status = 'REJECTED', last_error_code = null, retry_after_seconds = null,
             next_reconcile_at = null, updated_at = now(), version = version + 1
         where id = ${id}
+          and version = ${expectedVersion}
+          and needs_review_at is null
           and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+        returning version
       `.execute(db);
+      rememberVersion(result.rows);
     },
     async markNeedsReview(id, code) {
-      await sql`
+      if (writeLost) return;
+      const result = await sql<{ version: number }>`
         update supplier_canary_run
-        set status = 'BLOCKED', last_error_code = ${code}, needs_review_at = coalesce(needs_review_at, now()),
+        set status = 'BLOCKED', last_error_code = ${code},
+            needs_review_at = coalesce(needs_review_at, now()),
             retry_after_seconds = null, next_reconcile_at = null,
             updated_at = now(), version = version + 1
         where id = ${id}
+          and version = ${expectedVersion}
           and status in ('AUTHORIZED','SUBMITTED','PENDING','UNKNOWN')
+        returning version
       `.execute(db);
+      rememberVersion(result.rows);
     },
     async markBlocked(id, code) {
-      await markCanaryBlocked(db, id, code, "AUTHORIZED", authorizedVersion);
+      if (writeLost) return;
+      const result = await sql<{ version: number }>`
+        update supplier_canary_run
+        set status = 'BLOCKED', last_error_code = ${code}, retry_after_seconds = null,
+            next_reconcile_at = null, updated_at = now(), version = version + 1
+        where id = ${id}
+          and status = 'AUTHORIZED'
+          and version = ${expectedVersion}
+        returning version
+      `.execute(db);
+      rememberVersion(result.rows);
     },
   };
 }
@@ -426,6 +526,8 @@ function safeFailure(code: string): { ok: false; code: string; message: string }
     CONFIRMATION_FAILED: "Không tạo được xác nhận canary.",
     AUTHORIZATION_REQUIRED: "Canary cần xác thực owner/step-up.",
     CANARY_NOT_AUTHORIZED: "Canary chưa được xác nhận hoặc đã hết hạn.",
+    SUPPLIER_ORDER_NOT_QUERYABLE:
+      "Đơn nhà cung cấp không thể tự động truy vấn; cần kiểm tra thủ công.",
     DELIVERY_UNSUPPORTED: "Payload giao hàng provider chưa có schema được chấp nhận.",
     IDENTITY_MISMATCH: "Định danh đơn hàng nhà cung cấp không khớp; cần kiểm tra thủ công.",
   };
@@ -467,8 +569,31 @@ async function recoverCanaryRun(
   if (row.status === "FULFILLED" || row.status === "REJECTED") {
     return { execution: executionFromCanaryRow(row, runId), queried: false };
   }
+  if (row.needs_review_at !== null) {
+    return {
+      execution: {
+        runId,
+        ...safeFailure(row.last_error_code ?? "SUPPLIER_ORDER_NOT_QUERYABLE"),
+      },
+      queried: false,
+    };
+  }
   if (row.status !== "SUBMITTED" && row.status !== "PENDING" && row.status !== "UNKNOWN") {
     return { execution: { runId, ...safeFailure("CANARY_NOT_AUTHORIZED") }, queried: false };
+  }
+  const isSubmittedOrUnknown = row.status === "SUBMITTED" || row.status === "UNKNOWN";
+  let submittedAt = Number.NaN;
+  if (row.submitted_at instanceof Date) {
+    submittedAt = row.submitted_at.getTime();
+  } else if (typeof row.submitted_at === "string") {
+    submittedAt = Date.parse(row.submitted_at);
+  }
+  if (isSubmittedOrUnknown && !Number.isFinite(submittedAt)) {
+    await canaryStore(db, row.version).markNeedsReview(row.id, "SUPPLIER_ORDER_NOT_QUERYABLE");
+    return {
+      execution: executionFromCanaryRow(await loadCanary(db, runId), runId),
+      queried: false,
+    };
   }
   const provider = registry.get(row.provider_key);
   if (!provider) {
@@ -482,7 +607,10 @@ async function recoverCanaryRun(
     port: provider,
   });
 
+  const withinCreateGrace =
+    isSubmittedOrUnknown && Date.now() - submittedAt < SUPPLIER_SUBMITTED_GRACE_SECONDS * 1_000;
   const queried =
+    !withinCreateGrace &&
     recovered.kind !== "REPLAY" &&
     (recovered.kind !== "BLOCKED" ||
       (recovered.code !== "ORDER_READ_UNSUPPORTED" && recovered.code !== "NOT_FOUND"));
@@ -534,7 +662,9 @@ export async function recoverSupplierCanariesBatch(
   if (!Number.isInteger(retryDelaySeconds) || retryDelaySeconds < 1 || retryDelaySeconds > 3600) {
     throw new RangeError("supplier canary retryDelaySeconds must be an integer between 1 and 3600");
   }
-  const submittedGraceCutoff = new Date(now.getTime() - retryDelaySeconds * 1_000).toISOString();
+  const submittedGraceCutoff = new Date(
+    now.getTime() - SUPPLIER_SUBMITTED_GRACE_SECONDS * 1_000,
+  ).toISOString();
   const deferUntil = new Date(now.getTime() + retryDelaySeconds * 1_000).toISOString();
   let claimed = 0;
   let succeeded = 0;
@@ -567,15 +697,22 @@ export async function recoverSupplierCanariesBatch(
             )
           )
           and (
-            canary.status <> 'SUBMITTED'
+            canary.status not in ('SUBMITTED','UNKNOWN')
+            or canary.submitted_at is null
             or canary.submitted_at <= ${submittedGraceCutoff}
           )
-          and coalesce(
-                canary.next_reconcile_at,
-                canary.last_queried_at,
-                canary.submitted_at,
-                canary.created_at
-              ) <= ${now.toISOString()}
+          and (
+            (
+              canary.status in ('SUBMITTED','UNKNOWN')
+              and canary.submitted_at is null
+            )
+            or coalesce(
+                 canary.next_reconcile_at,
+                 canary.last_queried_at,
+                 canary.submitted_at,
+                 canary.created_at
+               ) <= ${now.toISOString()}
+          )
         order by coalesce(
                    canary.next_reconcile_at,
                    canary.last_queried_at,
@@ -749,7 +886,9 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       balance_vnd_snapshot: balance.value.available,
       currency: balance.value.currency,
       external_order_id: null,
+      submitted_at: null,
       response_fingerprint: null,
+      needs_review_at: null,
       last_error_code: null,
       retry_after_seconds: null,
       version: 1,
@@ -827,6 +966,12 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
         ...(row.external_order_id ? { externalOrderId: row.external_order_id } : {}),
       };
     }
+    if (row.needs_review_at !== null) {
+      return {
+        runId,
+        ...safeFailure(row.last_error_code ?? "SUPPLIER_ORDER_NOT_QUERYABLE"),
+      };
+    }
     if (row.status === "SUBMITTED" || row.status === "PENDING" || row.status === "UNKNOWN") {
       return (await recoverCanaryRun(options.db, options.registry, row)).execution;
     }
@@ -850,6 +995,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       return blockAuthorizedCanary(options.db, runId, row.version, safety.code);
     }
 
+    let balanceVndSnapshot: number | null = null;
     const result = await executeSupplierPurchase({
       supplierId: row.supplier_id,
       supplierSkuId: row.supplier_sku_id,
@@ -860,7 +1006,12 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
       correlationId: `canary:${runId}`,
       region: row.region,
       port: provider,
-      store: canaryStore(options.db, row.version),
+      store: canaryStore(
+        options.db,
+        row.version,
+        hasSupplierCapability(provider, "CATALOG_LIST"),
+        () => balanceVndSnapshot,
+      ),
       purchaseEnabled: true,
       beforeCreate: async () => {
         const latest = await checkSupplierPurchaseReadiness(options.db, {
@@ -885,11 +1036,7 @@ export function createSupplierCanaryService(options: SupplierCanaryOptions) {
         if (latestBalance.value.currency !== VND || latestBalance.value.available < approvedCost) {
           return { ok: false, code: "INSUFFICIENT_BALANCE" };
         }
-        await sql`
-          update supplier_canary_run
-          set balance_vnd_snapshot = ${latestBalance.value.available}, updated_at = now(), version = version + 1
-          where id = ${runId} and status = 'AUTHORIZED'
-        `.execute(options.db);
+        balanceVndSnapshot = latestBalance.value.available;
         return {
           ok: true,
           costCeilingVnd: approvedCost,

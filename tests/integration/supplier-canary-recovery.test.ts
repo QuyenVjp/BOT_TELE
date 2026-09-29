@@ -59,8 +59,13 @@ type SeededRecoveryRun = {
 
 async function seedCanaryRun(
   status: "AUTHORIZED" | "SUBMITTED" | "PENDING" | "UNKNOWN",
-  options: { submittedAgeSeconds?: number; nextReconcileInSeconds?: number } = {},
-) {
+  options: {
+    submittedAgeSeconds?: number;
+    nextReconcileInSeconds?: number;
+    invalidSubmittedAt?: boolean;
+    missingSubmittedAt?: boolean;
+  } = {},
+): Promise<SeededRecoveryRun> {
   const categoryId = newId();
   const productId = newId();
   const variantId = newId();
@@ -68,7 +73,9 @@ async function seedCanaryRun(
   const supplierSkuId = newId();
   const runId = newId();
   const idempotencyKey = `canary-client-${runId}`;
-  const submittedAt = new Date(Date.now() - (options.submittedAgeSeconds ?? 300) * 1_000);
+  const submittedAt = options.missingSubmittedAt
+    ? null
+    : new Date(Date.now() - (options.submittedAgeSeconds ?? 300) * 1_000);
   const externalOrderId = status === "PENDING" ? `qcst-order-${runId}` : null;
   const lastQueriedAt = new Date(Date.now() - 120_000);
   const nextReconcileAt =
@@ -113,10 +120,17 @@ async function seedCanaryRun(
     values
       (${runId}, ${supplierId}, ${supplierSkuId}, ${variantId}, ${supplierId}, 'RECOVERY-SKU', 'VN',
        ${idempotencyKey}, ${status === "PENDING" ? null : idempotencyKey}, ${`fp-${runId}`},
-       ${status}, 23000, 23000, 'VND', ${externalOrderId}, ${submittedAt.toISOString()},
+       ${status}, 23000, 23000, 'VND', ${externalOrderId}, ${submittedAt?.toISOString() ?? null},
        ${status === "SUBMITTED" ? null : lastQueriedAt.toISOString()},
        ${status === "SUBMITTED" ? null : nextReconcileAt.toISOString()}, 'test-owner', ${`recovery:${runId}`})
   `.execute(ctx.db);
+  if (options.invalidSubmittedAt) {
+    await sql`
+      update supplier_canary_run
+      set submitted_at = '-infinity'::timestamptz
+      where id = ${runId}
+    `.execute(ctx.db);
+  }
 
   return { runId, supplierId, supplierSkuId, variantId, idempotencyKey, externalOrderId };
 }
@@ -203,6 +217,7 @@ function makeProvider(input: {
   providerKey: string;
   capabilities?: readonly SupplierCapability[];
   balanceVnd?: number;
+  onBalance?: (call: number) => void | Promise<void>;
   createResult?: { kind: "ACCEPTED"; externalOrderId: string; status: "PENDING" };
   createError?: Error;
   queryResult?: (
@@ -213,12 +228,17 @@ function makeProvider(input: {
 }) {
   const queryInputs: QueryOrderInput[] = [];
   let createCalls = 0;
+  let balanceCalls = 0;
   const provider: SupplierProvider = {
     providerKey: input.providerKey,
     displayName: "Recovery provider",
     capabilities: new Set(input.capabilities ?? ["ORDER_CREATE", "ORDER_READ"]),
     getAvailability: async () => ({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
-    getBalance: async () => ({ available: input.balanceVnd ?? 100_000, currency: "VND" }),
+    getBalance: async () => {
+      balanceCalls += 1;
+      await input.onBalance?.(balanceCalls);
+      return { available: input.balanceVnd ?? 100_000, currency: "VND" };
+    },
     createOrder: async () => {
       createCalls += 1;
       if (input.createError) throw input.createError;
@@ -323,6 +343,85 @@ async function deliveryCounts() {
 }
 
 describe("worker-dispatched supplier canary recovery", () => {
+  it.each(["SUBMITTED", "UNKNOWN"] as const)(
+    "quarantines a %s canary with no submission timestamp",
+    async (status) => {
+      const run = await seedCanaryRun(status, { missingSubmittedAt: true });
+      const provider = makeProvider({
+        providerKey: run.supplierId,
+        capabilities: ["ORDER_READ"],
+      });
+      const registry = createSupplierProviderRegistry([provider.provider]);
+      const result = await dispatchRecovery(registry);
+
+      expect(result.supplierCanary).toMatchObject({ claimed: 1, failed: 1 });
+      expect(provider.createCalls).toBe(0);
+      const row = await canaryRun(run.runId);
+      expect(row).toMatchObject({
+        status: "BLOCKED",
+        last_error_code: "SUPPLIER_ORDER_NOT_QUERYABLE",
+        needs_review_at: expect.any(Date),
+        retry_after_seconds: null,
+        next_reconcile_at: null,
+      });
+      expect(await makeRecoveryService(registry).executePending(run.runId)).toMatchObject({
+        ok: false,
+        code: "SUPPLIER_ORDER_NOT_QUERYABLE",
+      });
+      expect(provider.queryInputs).toEqual([]);
+    },
+  );
+
+  it.each(["SUBMITTED", "UNKNOWN"] as const)(
+    "quarantines a %s canary with an invalid submission timestamp before provider lookup",
+    async (status) => {
+      const run = await seedCanaryRun(status, { invalidSubmittedAt: true });
+      const result = await dispatchRecovery(createSupplierProviderRegistry([]));
+
+      expect(result.supplierCanary).toMatchObject({ claimed: 1, failed: 1 });
+      expect(await canaryRun(run.runId)).toMatchObject({
+        status: "BLOCKED",
+        last_error_code: "SUPPLIER_ORDER_NOT_QUERYABLE",
+        needs_review_at: expect.any(Date),
+        retry_after_seconds: null,
+        next_reconcile_at: null,
+      });
+    },
+  );
+
+  it("does not create after mapping cost changes between preflight and claim", async () => {
+    const run = await seedAuthorizedCanaryRun();
+    const provider = makeProvider({
+      providerKey: run.supplierId,
+      capabilities: ["ORDER_CREATE", "ORDER_READ", "BALANCE_READ", "CATALOG_LIST"],
+      onBalance: async (call) => {
+        if (call === 2) {
+          await sql`update supplier_sku set cost_vnd = 24000 where id = ${run.supplierSkuId}`.execute(
+            ctx.db,
+          );
+        }
+      },
+      createResult: {
+        kind: "ACCEPTED",
+        externalOrderId: `unexpected-${run.runId}`,
+        status: "PENDING",
+      },
+    });
+    const service = makeRecoveryService(createSupplierProviderRegistry([provider.provider]), {
+      canaryEnabled: true,
+      canaryPurchaseEnabled: () => true,
+    });
+
+    const result = await service.executePending(run.runId);
+
+    expect(result).toMatchObject({ ok: false, runId: run.runId });
+    expect(provider.createCalls).toBe(0);
+    expect(await canaryRun(run.runId)).toMatchObject({
+      status: "BLOCKED",
+      last_error_code: "SUPPLIER_ORDER_NOT_ELIGIBLE",
+    });
+  });
+
   it("resumes a confirmed AUTHORIZED canary through worker recovery and persists PENDING", async () => {
     const run = await seedAuthorizedCanaryRun();
     if (!run.confirmationId || !run.actionFingerprint)
@@ -436,7 +535,8 @@ describe("worker-dispatched supplier canary recovery", () => {
     expect(uncertain.next_reconcile_at).toBeInstanceOf(Date);
     await sql`
       update supplier_canary_run
-      set next_reconcile_at = now() - interval '1 second'
+      set submitted_at = now() - interval '61 seconds',
+          next_reconcile_at = now() - interval '1 second'
       where id = ${run.runId} and status = 'UNKNOWN'
     `.execute(ctx.db);
 
@@ -531,6 +631,41 @@ describe("worker-dispatched supplier canary recovery", () => {
     await sql`
       update admin_confirmation
       set payload_redacted = jsonb_build_object('runId', ${run.runId}::text, 'actorId', '999'::text)
+      where id = ${run.confirmationId}
+    `.execute(ctx.db);
+    const provider = makeProvider({
+      providerKey: run.supplierId,
+      capabilities: ["ORDER_CREATE", "ORDER_READ", "BALANCE_READ", "CATALOG_LIST"],
+      createResult: {
+        kind: "ACCEPTED",
+        externalOrderId: `qcst-created-${run.runId}`,
+        status: "PENDING",
+      },
+    });
+    const service = makeRecoveryService(createSupplierProviderRegistry([provider.provider]), {
+      canaryEnabled: true,
+      canaryPurchaseEnabled: () => true,
+    });
+
+    const result = await service.executePending(run.runId);
+
+    expect(result).toMatchObject({
+      ok: false,
+      runId: run.runId,
+      code: "CONFIRMATION_FAILED",
+    });
+    expect(provider.createCalls).toBe(0);
+    expect(await canaryRun(run.runId)).toMatchObject({
+      status: "BLOCKED",
+      last_error_code: "CONFIRMATION_FAILED",
+    });
+  });
+  it("blocks an AUTHORIZED canary when consumed confirmation fingerprint is mismatched", async () => {
+    const run = await seedAuthorizedCanaryRun();
+    if (!run.confirmationId) throw new Error("missing confirmation fixture");
+    await sql`
+      update admin_confirmation
+      set action_fingerprint = ${`wrong:${run.runId}`}
       where id = ${run.confirmationId}
     `.execute(ctx.db);
     const provider = makeProvider({
@@ -718,16 +853,62 @@ describe("worker-dispatched supplier canary recovery", () => {
     },
   );
 
-  it("respects the submitted grace delay before the first read", async () => {
-    const run = await seedCanaryRun("SUBMITTED", { submittedAgeSeconds: 5 });
-    const provider = makeProvider({ providerKey: run.supplierId });
-    const result = await dispatchRecovery(createSupplierProviderRegistry([provider.provider]));
+  it.each(["SUBMITTED", "UNKNOWN"] as const)(
+    "queries exactly at the submitted grace boundary but not before it for %s",
+    async (status) => {
+      const exact = await seedCanaryRun(status);
+      const under = await seedCanaryRun(status);
+      const now = new Date();
+      const exactSubmittedAt = new Date(now.getTime() - 60_000);
+      const underSubmittedAt = new Date(now.getTime() - 59_999);
+      await sql`
+        update supplier_canary_run
+        set submitted_at = ${exactSubmittedAt.toISOString()},
+            last_queried_at = null,
+            next_reconcile_at = null
+        where id = ${exact.runId}
+      `.execute(ctx.db);
+      await sql`
+        update supplier_canary_run
+        set submitted_at = ${underSubmittedAt.toISOString()},
+            last_queried_at = null,
+            next_reconcile_at = null
+        where id = ${under.runId}
+      `.execute(ctx.db);
+      const exactProvider = makeProvider({ providerKey: exact.supplierId });
+      const underProvider = makeProvider({ providerKey: under.supplierId });
+      const result = await dispatchRecovery(
+        createSupplierProviderRegistry([exactProvider.provider, underProvider.provider]),
+        now,
+        2,
+      );
 
-    expect(result).toHaveProperty("supplierCanary.claimed", 0);
-    expect(provider.queryInputs).toHaveLength(0);
-    expect(provider.createCalls).toBe(0);
-    expect((await canaryRun(run.runId)).status).toBe("SUBMITTED");
-  });
+      expect(result.supplierCanary).toMatchObject({
+        claimed: 1,
+        succeeded: 1,
+        failed: 0,
+        backlog: 2,
+      });
+      expect(exactProvider.queryInputs).toEqual([
+        { queryKey: exact.idempotencyKey, expectedSku: "RECOVERY-SKU" },
+      ]);
+      expect(underProvider.queryInputs).toHaveLength(0);
+      expect(exactProvider.createCalls).toBe(0);
+      expect(underProvider.createCalls).toBe(0);
+      expect(await canaryRun(exact.runId)).toMatchObject({
+        status: "PENDING",
+        external_order_id: expect.any(String),
+        last_queried_at: expect.any(Date),
+        retry_after_seconds: 60,
+      });
+      expect(await canaryRun(under.runId)).toMatchObject({
+        status,
+        external_order_id: null,
+        last_queried_at: null,
+        next_reconcile_at: null,
+      });
+    },
+  );
   it("honors next_reconcile_at for PENDING and UNKNOWN rows", async () => {
     const pending = await seedCanaryRun("PENDING", { nextReconcileInSeconds: 30 });
     const unknown = await seedCanaryRun("UNKNOWN", { nextReconcileInSeconds: 30 });
@@ -797,6 +978,37 @@ describe("worker-dispatched supplier canary recovery", () => {
     expect(provider.queryInputs).toHaveLength(1);
     expect(provider.createCalls).toBe(0);
     expect((await canaryRun(run.runId)).status).toBe("PENDING");
+  });
+  it("keeps the first pending identity when a concurrent stale query completes later", async () => {
+    const run = await seedCanaryRun("UNKNOWN");
+    const bothQueriesStarted = Promise.withResolvers<void>();
+    const firstResponse = Promise.withResolvers<QueryOrderResult>();
+    const secondResponse = Promise.withResolvers<QueryOrderResult>();
+    const responses = [firstResponse.promise, secondResponse.promise];
+    const resolveResponse = [firstResponse.resolve, secondResponse.resolve];
+    const provider = makeProvider({
+      providerKey: run.supplierId,
+      queryResult: async (_query, call) => {
+        if (call === 2) bothQueriesStarted.resolve();
+        return responses[call - 1]!;
+      },
+    });
+    const service = makeRecoveryService(createSupplierProviderRegistry([provider.provider]));
+    const first = service.executePending(run.runId);
+    const second = service.executePending(run.runId);
+
+    await bothQueriesStarted.promise;
+    resolveResponse[0]!({ status: "PENDING", externalOrderId: "first-query-order" });
+    await first;
+    resolveResponse[1]!({ status: "PENDING", externalOrderId: "stale-query-order" });
+    await second;
+
+    expect(provider.queryInputs).toHaveLength(2);
+    expect(await canaryRun(run.runId)).toMatchObject({
+      status: "PENDING",
+      external_order_id: "first-query-order",
+      query_key: null,
+    });
   });
 
   it("keeps provider-unavailable rows nonterminal and schedules another read", async () => {

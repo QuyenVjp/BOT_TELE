@@ -191,7 +191,7 @@ TIER20 SHOP does not use Telegram Mini Apps. Canonical UX is Telegram Bot API on
 - Inventory correction must not masquerade as a customer-facing announcement unless explicitly toggled and derived from a real stock delta.
 - Marketing `all` is `SHOP_UPDATE` and requires `shop_updates` consent at preview, recipient creation and send time. Only genuine service-critical campaigns retain opt-out-independent delivery; marketing navigation cannot select that class.
 - Owner-triggered stock announcements from an inventory variant view are optional `SHOP_UPDATE` marketing broadcasts. The preview content is rebuilt from product/variant/stock/price tables, then confirmed through the existing broadcast campaign flow; product restock subscriptions never imply shop-update consent.
-- A commerce supplier order persists `SUBMITTED` before dispatch with `attempt_count=0`; one compare-and-set increments it before the first provider `POST`. Only an intent with `attempt_count=0` may be claimed or blocked. `SUBMITTED` with `attempt_count>0`, `PENDING`, and `UNKNOWN` recover by querying the original provider identity and never issue another purchase; no database transaction spans provider I/O.
+- A commerce supplier order persists `SUBMITTED` before dispatch with `attempt_count=0`; one compare-and-set atomically commits the winning pre-POST cost/margin snapshot while incrementing `attempt_count` before the first provider `POST`. Only an intent with `attempt_count=0` may be claimed or blocked. An ambiguous `UNKNOWN` from that first attempted `POST` shares its 60-second no-query grace; attempted `SUBMITTED`/`UNKNOWN` rows then query the original provider identity and never issue another purchase. `PENDING` stays query-only on its durable schedule; missing/invalid `submitted_at` fails closed to manual review. No database transaction spans provider I/O. The owner-canary `AUTHORIZED -> SUBMITTED` transition is the create claim and atomically persists only its approved cost.
 
 ## 8. Safety invariants
 
@@ -623,6 +623,12 @@ missing. It runs after `094`, so it also covers databases that already recorded
 the schema migration. It retains the old field for rollback compatibility; the
 mapper treats it as a query key for `UNKNOWN`, never a provider order ID.
 Provider external IDs on other states remain unchanged.
+Migration `095` also establishes per-supplier uniqueness for each non-null
+`supplier_order.query_key`. Its backfill and index creation share one
+transaction; a collision aborts the migration without persisting the backfill
+or receipt. Until `095` completes, QCST query-by-client-order fails closed when
+the provider returns multiple matching orders instead of selecting the first.
+
 
 Upstream existence never publishes a product. Every provider sync creates or
 updates `DISCOVERED`/unselected disabled rows. The owner explicitly chooses the
@@ -692,9 +698,15 @@ service rechecks current master/canary/provider gates, approved and current
 cost, mapping/support/availability, automatic fulfillment with no customer
 input, and VND balance. Proof or gate failures block only the exact `AUTHORIZED`
 version they evaluated; stale preflight and pre-submit failures MUST NOT
-overwrite a newer `SUBMITTED`, `PENDING`, or `UNKNOWN` run. The shared
-executor's `AUTHORIZED -> SUBMITTED` compare-and-set is the sole create claim
-and occurs before provider I/O.
+overwrite a newer `SUBMITTED`, `PENDING`, or `UNKNOWN` run.
+The shared executor's `AUTHORIZED -> SUBMITTED` compare-and-set is the sole create claim.
+It atomically commits the winning pre-POST cost/margin snapshot
+(`supplier_order`) or approved cost and current VND balance (`supplier_canary_run`)
+before provider I/O. The canary claim also fences the expected run version and
+rechecks the live supplier, primary SKU, cost, region, automatic no-input
+fulfillment, and catalog readiness when catalog-managed. Subsequent canary
+response and status updates are version-fenced so stale queries cannot replace
+a newer provider identity.
 `SUBMITTED` means the provider may already have received the request.
 `SUBMITTED`, `PENDING`, and `UNKNOWN` recover only by querying with the stable
 idempotency/client order key or a known external order ID. Each recovered
@@ -715,10 +727,11 @@ identity or purchase gates; `AUTHORIZED` resume is dispatched only when the
 live canary service is available and it revalidates the consumed confirmation
 and current create gates. Batches claim due rows with `FOR UPDATE SKIP LOCKED`,
 defer each row before network I/O, and keep transient failures nonterminal with
-a bounded retry delay. `SUBMITTED` receives a 60-second grace period before its
-first query; `PENDING` and `UNKNOWN` use the durable `next_reconcile_at`
-schedule. Recovery status writes are conditional on an active source state;
-stale provider observations MUST NOT overwrite terminal states.
+a bounded retry delay. `SUBMITTED` and its ambiguous `UNKNOWN` outcome receive
+the same 60-second no-query grace from the create claim before their first
+query; `PENDING` follows the durable `next_reconcile_at` schedule. Recovery
+status writes are conditional on an active source state; stale provider
+observations MUST NOT overwrite terminal states.
 
 Final confirmation re-reads the authoritative provider, primary mapping,
 catalog support/availability, automatic fulfillment with no customer input,

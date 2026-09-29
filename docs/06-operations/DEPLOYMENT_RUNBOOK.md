@@ -8,10 +8,11 @@ Telegram, payment, delivery/outbox, and recovery lanes. VietQR generates payment
 payloads/images only; verified SePay evidence is required before settlement or delivery.
 
 Production requires Node.js >=24, npm 10, PostgreSQL with `DATABASE_URL`, configured Telegram
-bot token/webhook secret, SePay credentials, vault endpoint/credentials, supplier credentials,
-and a non-zero `ADMIN_TELEGRAM_USER_ID`. Production must not use `memory` or `fixture` drivers.
-Docker/OrbStack is needed only for container-backed integration/migration tests; it is not
-needed for local pure-path checks.
+bot token/webhook secret, SePay credentials, Vault endpoint/credentials, and a non-zero
+`ADMIN_TELEGRAM_USER_ID`. Configure supplier credentials only for each provider explicitly
+enabled in production. Production must not use `memory` or `fixture` drivers. Docker/OrbStack is
+needed only for container-backed integration/migration tests; it is not needed for local
+pure-path checks.
 
 ## Local benchmark (no external services)
 
@@ -34,9 +35,10 @@ Docker/OrbStack.
 - [ ] `npm run typecheck`, `lint`, `format:check`, `secret-scan`, `audit` all green.
 - [ ] Unit / contract / property / security / integration / acceptance / performance suites green.
 - [ ] Migrations reviewed; no destructive change without a forward-compatible plan.
-- [ ] Production env has real values for: `ADMIN_TELEGRAM_USER_ID`, SePay secrets, vault endpoint,
-      supplier credentials, Telegram bot token / webhook secret. `loadConfig` fails closed if
-      production still has `memory`/`fixture` drivers or a zero admin id.
+- [ ] Production env has real values for: `ADMIN_TELEGRAM_USER_ID`, SePay secrets, Vault endpoint /
+  credentials, Telegram bot token / webhook secret. Supplier credentials are required only for
+  providers explicitly enabled in production. `loadConfig` fails closed if production still has
+  `memory`/`fixture` drivers or a zero admin id.
 
 ## Health and readiness
 
@@ -132,6 +134,11 @@ has already been recorded: it copies the legacy lookup key into `query_key`
 while retaining `external_order_id` for rollback compatibility. The mapper
 treats it as a query key only while status is `UNKNOWN`; provider IDs on other
 states remain unchanged.
+The `095` backfill also creates a per-supplier unique query-key index in the
+same migration transaction. A duplicate key aborts both the backfill and its
+receipt; leave the release blocked rather than guessing which upstream order
+owns the key.
+
 Source history and a PR merge are not deployment approval. No production
 migration is authorized by this task. Do not run production migrations from
 any artifact containing unapproved `094_supplier_owner_canary.sql` or

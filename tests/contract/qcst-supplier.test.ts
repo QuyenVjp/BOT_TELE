@@ -317,6 +317,79 @@ describe("QCST supplier adapter", () => {
     },
   );
 
+  it("fails closed when a client-order query returns duplicate identities despite complete pagination metadata", async () => {
+    let requestedLimit: string | null = null;
+    const server = await startServer((request, response) => {
+      const url = new URL(request.url ?? "", "http://127.0.0.1");
+      requestedLimit = url.searchParams.get("limit");
+      sendJson(response, {
+        success: true,
+        data: {
+          items: [ORDER, { ...ORDER, id: "qcst-order-duplicate" }],
+          has_more: false,
+          next_cursor: null,
+        },
+      });
+    });
+    const { port } = await createPort(server.baseUrl);
+
+    await expect(
+      port.queryOrder({ queryKey: ORDER.client_order_id, expectedSku: PRODUCT.id }),
+    ).rejects.toMatchObject({
+      supplierCode: "IDENTITY_MISMATCH",
+      message: "QCST order identity mismatch",
+    });
+    expect(requestedLimit).toBe("2");
+  });
+
+  it.each([
+    ["client order", { client_order_id: "supplier-order:other" }],
+    ["external order", { id: "qcst-order-other" }],
+  ] as const)(
+    "fails closed when a dual-identity external query returns the wrong %s identity",
+    async (_field, mismatch) => {
+      const server = await startServer((_request, response) => {
+        sendJson(response, { success: true, data: { ...ORDER, ...mismatch } });
+      });
+      const { port } = await createPort(server.baseUrl);
+
+      await expect(
+        port.queryOrder({
+          externalOrderId: ORDER.id,
+          queryKey: ORDER.client_order_id,
+          expectedSku: PRODUCT.id,
+        }),
+      ).rejects.toMatchObject({
+        supplierCode: "IDENTITY_MISMATCH",
+        message: "QCST order identity mismatch",
+      });
+    },
+  );
+
+  it.each([
+    ["has_more without a cursor", true, null],
+    ["has_more with a next cursor", true, "next-page"],
+    ["cursor without has_more", false, "next-page"],
+  ] as const)(
+    "fails closed when a client-order query page is incomplete: %s",
+    async (_state, hasMore, nextCursor) => {
+      const server = await startServer((_request, response) => {
+        sendJson(response, {
+          success: true,
+          data: { items: [ORDER], has_more: hasMore, next_cursor: nextCursor },
+        });
+      });
+      const { port } = await createPort(server.baseUrl);
+
+      await expect(
+        port.queryOrder({ queryKey: ORDER.client_order_id, expectedSku: PRODUCT.id }),
+      ).rejects.toMatchObject({
+        supplierCode: "IDENTITY_MISMATCH",
+        message: "QCST order identity mismatch",
+      });
+    },
+  );
+
   it("uses the documented QCST cancel endpoint without inventing a refund API", async () => {
     let seen: { method: string; path: string; idempotencyKey: string | undefined } | undefined;
     const server = await startServer((request, response) => {
