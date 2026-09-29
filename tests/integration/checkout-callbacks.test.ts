@@ -242,6 +242,31 @@ describe("checkout callbacks (T056)", () => {
     expect(paid.text).not.toMatch(/trong vòng|ngay sau khi thanh toán|\b\d+\s*(phút|giờ)/iu);
   });
 
+  it("keeps quantity-stock payment refresh copy on the owner follow-up path", async () => {
+    const cat = await seedCatalog({ fulfillmentType: "QUANTITY_STOCK" });
+    const cb = callbacks(cat);
+    await cb.buyFromSignedCallback("quantity-stock-copy");
+    await applyPaymentEvidence(
+      ctx.db,
+      verifiedSePayEvidence({
+        provider: "sepay",
+        providerTransactionId: "SEPAY-" + newId(),
+        direction: "IN",
+        merchantAccountId: cat.account,
+        amountVnd: cat.price,
+        content: cb.lastTransferContent()!,
+        reference: "FT-QUANTITY-STOCK-COPY",
+        transactedAt: new Date(),
+        rawHash: "quantity-stock-copy-hash",
+        correlationId: "quantity-stock-copy-settle",
+      }),
+    );
+
+    const refreshed = await cb.refresh(cb.lastOrderNumber()!, cat.customerId);
+    expect(refreshed.text).toContain("Shop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.");
+    expect(refreshed.text).not.toContain("Đang giao sản phẩm...");
+  });
+
   it("unpaid cancel transitions the order to CANCELLED", async () => {
     const cat = await seedCatalog();
     const cb = callbacks(cat);

@@ -328,11 +328,12 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     if (order.status === "PAID" || order.status === "PROCESSING") {
       const isManual = order.fulfillmentType === "MANUAL_FULFILLMENT";
       const isUnlimitedService = order.fulfillmentType === "UNLIMITED_SERVICE";
+      const isQuantityStock = order.fulfillmentType === "QUANTITY_STOCK";
       let text = `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`;
       if (isUnlimitedService) {
         text = `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang chờ nhân viên xử lý thủ công. Shop sẽ thông báo qua tin nhắn khi hoàn tất.`;
       }
-      if (isManual) {
+      if (isManual || isQuantityStock) {
         text = `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nShop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.`;
       }
       return {
