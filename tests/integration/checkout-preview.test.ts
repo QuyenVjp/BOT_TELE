@@ -327,4 +327,34 @@ describe("wallet choice", () => {
     expect(new Set(orderIds).size).toBe(1);
     expect(second.text).toContain("Đã thanh toán bằng ví");
   });
+
+  it.each(["UNLIMITED_SERVICE", "QUANTITY_STOCK"] as const)(
+    "promises private staff follow-up after paying a %s by wallet",
+    async (fulfillmentType) => {
+      const catalog = await seedCatalog();
+      await sql`
+        update product_variant
+           set fulfillment_type = ${fulfillmentType}
+         where id = ${catalog.variantId}
+      `.execute(ctx.db);
+      await sql`
+        insert into variant_service_fulfillment (variant_id, fulfillment_type, instructions)
+        values (${catalog.variantId}, ${fulfillmentType}, 'Contact privately after payment.')
+      `.execute(ctx.db);
+      if (fulfillmentType === "QUANTITY_STOCK") {
+        await sql`
+          insert into variant_quantity_stock (variant_id, available_quantity)
+          values (${catalog.variantId}, 1)
+        `.execute(ctx.db);
+      }
+
+      const { wallet, walletToken, payOrderWithWallet } = build(catalog, 500_000n);
+      const message = await wallet(walletToken());
+
+      expect(payOrderWithWallet).toHaveBeenCalledTimes(1);
+      expect(await orderCount()).toBe(1);
+      expect(message.text).toContain("Shop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.");
+      expect(message.text).not.toContain("Chúng tôi sẽ giao tài khoản ngay.");
+    },
+  );
 });

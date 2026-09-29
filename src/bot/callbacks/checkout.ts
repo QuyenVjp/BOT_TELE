@@ -326,13 +326,18 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       };
     }
     if (order.status === "PAID" || order.status === "PROCESSING") {
-      const isManual =
-        order.fulfillmentType === "MANUAL_FULFILLMENT" ||
-        order.fulfillmentType === "UNLIMITED_SERVICE";
+      const isManual = order.fulfillmentType === "MANUAL_FULFILLMENT";
+      const isUnlimitedService = order.fulfillmentType === "UNLIMITED_SERVICE";
+      const isQuantityStock = order.fulfillmentType === "QUANTITY_STOCK";
+      let text = `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`;
+      if (isUnlimitedService) {
+        text = `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang chờ nhân viên xử lý thủ công. Shop sẽ thông báo qua tin nhắn khi hoàn tất.`;
+      }
+      if (isManual || isQuantityStock) {
+        text = `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nShop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.`;
+      }
       return {
-        text: isManual
-          ? `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang chờ nhân viên xử lý thủ công. Shop sẽ thông báo qua tin nhắn khi hoàn tất.`
-          : `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`,
+        text,
         buttons: [
           [
             { text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` },
@@ -504,8 +509,14 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
           ],
         };
       }
+      const requiresOwnerFollowUp =
+        result.order.fulfillmentType === "MANUAL_FULFILLMENT" ||
+        result.order.fulfillmentType === "UNLIMITED_SERVICE" ||
+        result.order.fulfillmentType === "QUANTITY_STOCK";
       return {
-        text: `Đã thanh toán bằng ví. Chúng tôi sẽ giao tài khoản ngay.\n\nĐơn: ${result.order.orderNumber}`,
+        text: requiresOwnerFollowUp
+          ? `✅ Đã thanh toán.\n\nĐơn: ${result.order.orderNumber}\nShop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.`
+          : `Đã thanh toán bằng ví. Chúng tôi sẽ giao tài khoản ngay.\n\nĐơn: ${result.order.orderNumber}`,
         buttons: [[{ text: "🧾 Xem đơn", callbackData: `ord:view:${result.order.orderNumber}` }]],
       };
     },

@@ -120,6 +120,10 @@ function isLowStock(
   );
 }
 
+function supportsStockRecovery(fulfillmentType: CatalogVariantRow["fulfillment_type"]): boolean {
+  return fulfillmentType !== "MANUAL_FULFILLMENT" && fulfillmentType !== "UNLIMITED_SERVICE";
+}
+
 function adminContactButton(): InlineButton {
   return { text: CATALOG_COPY.contactAdmin, url: ADMIN_CONTACT_URL, callbackData: "" };
 }
@@ -239,13 +243,16 @@ export function presentProductDetail(
 ): PresentedMessage {
   const prices = detail.variants.map((v) => BigInt(v.price_vnd)).filter((p) => p > 0n);
   const minPrice = prices.length ? prices.reduce((a, b) => (a < b ? a : b)) : null;
-  const anyReady = detail.variants.some((v) => v.is_ready);
-  const lowStock = detail.variants.some((v) =>
-    isLowStock(v.available_quantity, v.low_stock_threshold),
+  const hasNonImmediateFulfillment = detail.variants.some(
+    (variant) =>
+      variant.fulfillment_type === "MANUAL_FULFILLMENT" ||
+      variant.fulfillment_type === "UNLIMITED_SERVICE",
   );
   const deliveryModes = [
     ...new Set(detail.variants.map((v) => DELIVERY_MODE_COPY[v.fulfillment_type] ?? "Tự động")),
   ];
+  const deliveryEta =
+    detail.delivery_eta_vi || (!hasNonImmediateFulfillment ? "vài giây sau khi thanh toán" : null);
 
   const lines = [
     `📦 ${detail.name_vi}`,
@@ -257,9 +264,9 @@ export function presentProductDetail(
           `⭐ ${reviewSummary.averageRating.toFixed(1)}/5 · ${reviewSummary.visibleCount} đánh giá ✅ Đã mua hàng`,
         ]
       : []),
-    stockStateLine(anyReady, lowStock),
+    productStockStateLine(detail.variants),
     `⚡ Giao hàng: ${deliveryModes.join(" / ") || "Tự động"}`,
-    `⏱ Dự kiến: ${detail.delivery_eta_vi || "vài giây sau khi thanh toán"}`,
+    ...(deliveryEta ? [`⏱ Dự kiến: ${deliveryEta}`] : []),
   ];
 
   if (detail.description_vi) {
@@ -307,7 +314,7 @@ export function presentProductDetail(
       buttons.push([{ text: `${variant.name_vi} · ${price}`, callbackData: buyNow }]);
       continue;
     }
-    if (!variant.is_ready) {
+    if (!variant.is_ready && supportsStockRecovery(variant.fulfillment_type)) {
       buttons.push([
         {
           text: `🔔 ${variant.name_vi} · Báo khi có hàng`,
@@ -420,6 +427,7 @@ export function presentVariantDetail(
     stockStateLine(
       variant.is_ready,
       isLowStock(variant.available_quantity, variant.low_stock_threshold),
+      variant.fulfillment_type,
     ),
     `⚡ Giao hàng: ${DELIVERY_MODE_COPY[variant.fulfillment_type] ?? "Tự động"}`,
     `⏱ Dự kiến: ${eta}`,
@@ -445,7 +453,7 @@ export function presentVariantDetail(
   ) {
     buttons.push([{ text: `🛒 ${CATALOG_COPY.buyNow}`, callbackData: buyNowCallbackData }]);
   }
-  if (!variant.is_ready) {
+  if (!variant.is_ready && supportsStockRecovery(variant.fulfillment_type)) {
     const preorder =
       preorderCallbackData ??
       (variant.preorder_enabled ? `preorder:consent:${variant.id}` : undefined);
@@ -474,10 +482,46 @@ function bulletLines(value: string): string[] {
     .map((line) => `• ${line}`);
 }
 
-/** The three customer-facing stock states; a raw enum or `Tạm hết hàng` never renders. */
-function stockStateLine(ready: boolean, lowStock: boolean): string {
+/** Non-inventory services expose readiness, never an invented stock count. */
+function stockStateLine(ready: boolean, lowStock: boolean, fulfillmentType: string): string {
+  if (fulfillmentType === "MANUAL_FULFILLMENT")
+    return ready ? "🟢 Có thể đặt · xử lý thủ công" : "🔴 Tạm ngưng nhận đơn";
+  if (fulfillmentType === "UNLIMITED_SERVICE")
+    return ready ? "🟢 Có thể đặt" : "🔴 Tạm ngưng nhận đơn";
   if (!ready) return "🔴 Tình trạng: Hết hàng";
   return lowStock ? "🟡 Tình trạng: Sắp hết hàng" : "🟢 Tình trạng: Còn hàng";
+}
+
+function productStockStateLine(variants: ProductDetailView["variants"]): string {
+  const ready = variants.some((variant) => variant.is_ready);
+  const fulfillmentType = variants[0]?.fulfillment_type;
+  if (
+    fulfillmentType &&
+    variants.every((variant) => variant.fulfillment_type === fulfillmentType)
+  ) {
+    return stockStateLine(
+      ready,
+      variants.some((variant) =>
+        isLowStock(variant.available_quantity, variant.low_stock_threshold),
+      ),
+      fulfillmentType,
+    );
+  }
+  const stockTrackedVariants = variants.filter((variant) =>
+    supportsStockRecovery(variant.fulfillment_type),
+  );
+  if (stockTrackedVariants.length === 0) {
+    return ready ? "🟢 Có thể đặt" : "🔴 Tạm ngưng nhận đơn";
+  }
+  const stockReady = stockTrackedVariants.some((variant) => variant.is_ready);
+  if (!stockReady && ready) return "🟢 Có thể đặt";
+  return stockStateLine(
+    stockReady,
+    stockTrackedVariants.some((variant) =>
+      isLowStock(variant.available_quantity, variant.low_stock_threshold),
+    ),
+    "MIXED",
+  );
 }
 
 /** Delivery wording per fulfillment type — mirrors the checkout screen; enums stay backend-only. */
@@ -487,7 +531,7 @@ const DELIVERY_MODE_COPY: Readonly<Record<string, string>> = Object.freeze({
   DIGITAL_FILE: "Tự động (tệp số)",
   QUANTITY_STOCK: "Tự động",
   UNLIMITED_SERVICE: "Kích hoạt sau khi thanh toán",
-  MANUAL_FULFILLMENT: "Nhân viên xử lý",
+  MANUAL_FULFILLMENT: "Shop liên hệ riêng qua Telegram sau khi thanh toán",
   SUPPLIER_API: "Tự động (nhà cung cấp)",
 });
 

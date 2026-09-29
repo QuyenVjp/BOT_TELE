@@ -33,6 +33,7 @@ export type DispatchDecision =
  * by an older worker.
  */
 export const KNOWN_OUTBOX_EVENT_TYPES = [
+  "OrderCreated",
   "OrderPaid",
   "PaymentSettled",
   "PaymentNeedsReview",

@@ -116,7 +116,7 @@ describe("sensitive action policy table", () => {
 
     expect(SENSITIVE_ACTION_POLICY).toEqual({
       "wallet.refund": "REFUND",
-      "manual_fulfillment.complete": "REFUND",
+      "manual_fulfillment.complete": null,
       "support.replacement.approve": "REFUND",
       "inventory.ready.release": "STOCK_ADJUSTMENT",
       "fulfillment.reconcile": "DELIVERY_REISSUE",
@@ -146,6 +146,25 @@ describe("sensitive action policy table", () => {
       "inventory.stock.adjust": "STOCK_ADJUSTMENT",
       "preorder.cancel": "REFUND",
     });
+  });
+  it("authorizes manual completion without TOTP while retaining identity and audit", async () => {
+    const { db, statements, auditRows } = stubDb(() => []);
+    const result = await authorizeSensitiveAdminAction(
+      { ...DEPS, db, stepUpEnabled: true },
+      {
+        actor: { numericUserId: ADMIN_ID, chatType: "private" },
+        actionKey: "manual_fulfillment.complete",
+        resourceType: "ManualFulfillmentTask",
+        resourceId: "task-1",
+        correlationId: "manual-no-totp",
+        consumeGrant: true,
+      },
+    );
+
+    expect(result).toEqual({ ok: true, stepUpConsumed: false });
+    expect(statements).toHaveLength(0);
+    expect(auditRows).toHaveLength(1);
+    expect(auditRows[0]).toContain("admin.sensitive.authorized");
   });
 
   it("never claims a category for a verb outside the policy", () => {

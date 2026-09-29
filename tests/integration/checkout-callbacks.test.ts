@@ -76,7 +76,12 @@ async function seedCatalog(options: { fulfillmentType?: string } = {}): Promise<
            published_by = 'test'
      where id = ${variantId}
   `.execute(ctx.db);
-  if (options.fulfillmentType === "QUANTITY_STOCK") {
+  if (["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"].includes(options.fulfillmentType ?? "")) {
+    await sql`
+      insert into variant_service_fulfillment (variant_id, fulfillment_type, instructions)
+      values (${variantId}, ${options.fulfillmentType}, 'Contact privately after payment.')
+    `.execute(ctx.db);
+  } else if (options.fulfillmentType === "QUANTITY_STOCK") {
     await sql`insert into variant_quantity_stock (variant_id, available_quantity) values (${variantId}, 5)`.execute(
       ctx.db,
     );
@@ -90,7 +95,6 @@ async function seedCatalog(options: { fulfillmentType?: string } = {}): Promise<
       `.execute(ctx.db);
     }
   }
-
   return { customerId, variantId, price, account };
 }
 
@@ -197,12 +201,70 @@ describe("checkout callbacks (T056)", () => {
     const completed = await cb.refresh(orderNumber, cat.customerId);
     expect(completed.text).toContain("Đơn hàng đã hoàn tất");
 
-    // Manual / unlimited service wording
+    // Unlimited services keep their existing in-progress and follow-up channel.
     await sql`update "order" set status = 'PROCESSING', fulfillment_type = 'UNLIMITED_SERVICE' where order_number = ${orderNumber}`.execute(
       ctx.db,
     );
-    const manualProcessing = await cb.refresh(orderNumber, cat.customerId);
-    expect(manualProcessing.text).toContain("Đang chờ nhân viên xử lý thủ công");
+    const serviceProcessing = await cb.refresh(orderNumber, cat.customerId);
+    expect(serviceProcessing.text).toContain("Đang chờ nhân viên xử lý thủ công");
+    expect(serviceProcessing.text).toContain("thông báo qua tin nhắn");
+  });
+
+  it("shows manual processing before payment and private owner follow-up only after verified payment", async () => {
+    const cat = await seedCatalog({ fulfillmentType: "MANUAL_FULFILLMENT" });
+    const cb = callbacks(cat);
+    const payment = await cb.buyFromSignedCallback("manual-copy");
+    const pendingStatus = await sql<{ status: string }>`
+      select status from "order" where order_number = ${cb.lastOrderNumber()!}
+    `.execute(ctx.db);
+    expect(pendingStatus.rows[0]?.status).toBe("PENDING_PAYMENT");
+    expect(payment.text).not.toContain("Shop sẽ liên hệ riêng qua Telegram");
+    expect(payment.text).not.toMatch(/trong vòng|ngay sau khi thanh toán|\b\d+\s*(phút|giờ)/iu);
+
+    await applyPaymentEvidence(
+      ctx.db,
+      verifiedSePayEvidence({
+        provider: "sepay",
+        providerTransactionId: "SEPAY-" + newId(),
+        direction: "IN",
+        merchantAccountId: cat.account,
+        amountVnd: cat.price,
+        content: cb.lastTransferContent()!,
+        reference: "FT-MANUAL-COPY",
+        transactedAt: new Date(),
+        rawHash: "manual-copy-hash",
+        correlationId: "manual-copy-settle",
+      }),
+    );
+    const paid = await cb.refresh(cb.lastOrderNumber()!, cat.customerId);
+    expect(paid.text).toContain("✅ Đã thanh toán.");
+    expect(paid.text).toContain("Shop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.");
+    expect(paid.text).not.toMatch(/trong vòng|ngay sau khi thanh toán|\b\d+\s*(phút|giờ)/iu);
+  });
+
+  it("keeps quantity-stock payment refresh copy on the owner follow-up path", async () => {
+    const cat = await seedCatalog({ fulfillmentType: "QUANTITY_STOCK" });
+    const cb = callbacks(cat);
+    await cb.buyFromSignedCallback("quantity-stock-copy");
+    await applyPaymentEvidence(
+      ctx.db,
+      verifiedSePayEvidence({
+        provider: "sepay",
+        providerTransactionId: "SEPAY-" + newId(),
+        direction: "IN",
+        merchantAccountId: cat.account,
+        amountVnd: cat.price,
+        content: cb.lastTransferContent()!,
+        reference: "FT-QUANTITY-STOCK-COPY",
+        transactedAt: new Date(),
+        rawHash: "quantity-stock-copy-hash",
+        correlationId: "quantity-stock-copy-settle",
+      }),
+    );
+
+    const refreshed = await cb.refresh(cb.lastOrderNumber()!, cat.customerId);
+    expect(refreshed.text).toContain("Shop sẽ liên hệ riêng qua Telegram để hoàn tất đơn.");
+    expect(refreshed.text).not.toContain("Đang giao sản phẩm...");
   });
 
   it("unpaid cancel transitions the order to CANCELLED", async () => {

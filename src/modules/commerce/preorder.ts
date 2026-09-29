@@ -8,6 +8,7 @@ import { insertOrder, transitionOrder } from "./repository.js";
 import { voidLiveIntentsForPreorder } from "../payments/repository.js";
 import type { OrderSnapshot } from "./order.js";
 import { canPurchase } from "./store-mode.js";
+import type { FulfillmentType } from "../catalog/fulfillment-type.js";
 
 export type PreorderStatus =
   | "CREATED"
@@ -57,6 +58,7 @@ export interface PreorderVariantConfig {
   sku: string;
   priceVnd: number;
   preorderEnabled: boolean;
+  fulfillmentType: FulfillmentType;
   isTest?: boolean;
   depositMode: "FIXED" | "PERCENT";
   depositAmountVnd: number;
@@ -80,6 +82,7 @@ export async function loadPreorderVariantConfig(
     sku: string;
     price_vnd: string;
     preorder_enabled: boolean;
+    fulfillment_type: FulfillmentType;
     is_test: boolean;
     deposit_mode: "FIXED" | "PERCENT";
     deposit_amount_vnd: string;
@@ -96,6 +99,7 @@ export async function loadPreorderVariantConfig(
       p.name_vi as product_name,
       v.name_vi as variant_name,
       v.sku,
+      v.fulfillment_type,
       v.price_vnd::text,
       coalesce(v.preorder_enabled, false) as preorder_enabled,
       coalesce(p.is_test, false) as is_test,
@@ -125,6 +129,7 @@ export async function loadPreorderVariantConfig(
     sku: row.sku,
     priceVnd: Number(row.price_vnd),
     preorderEnabled: row.preorder_enabled,
+    fulfillmentType: row.fulfillment_type,
     isTest: row.is_test,
     depositMode: row.deposit_mode,
     depositAmountVnd: Number(row.deposit_amount_vnd),
@@ -135,6 +140,10 @@ export async function loadPreorderVariantConfig(
     balanceDueHours: row.balance_due_hours,
     forfeitPolicyVersion: row.forfeit_policy_version,
   };
+}
+
+export function supportsPreorder(fulfillmentType: FulfillmentType): boolean {
+  return fulfillmentType !== "MANUAL_FULFILLMENT" && fulfillmentType !== "UNLIMITED_SERVICE";
 }
 
 export function computePreorderDeposit(config: PreorderVariantConfig): {
@@ -162,6 +171,13 @@ export function computePreorderDeposit(config: PreorderVariantConfig): {
  * Renders explicit deposit consent terms (FR requirement 17).
  */
 export function presentPreorderConsent(config: PreorderVariantConfig): PresentedMessage {
+  if (!supportsPreorder(config.fulfillmentType)) {
+    return {
+      text: "Sản phẩm không tồn tại hoặc chưa hỗ trợ đặt cọc.",
+      buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]],
+    };
+  }
+
   const { depositVnd, balanceVnd } = computePreorderDeposit(config);
 
   const lines = [
@@ -240,7 +256,8 @@ export async function createPreorderReservation(
     variantIsTest: config.isTest ?? false,
   });
   if (!gate.ok) return { ok: false, code: gate.code as "STORE_CLOSED" | "STORE_TEST_ONLY" };
-  if (!config.preorderEnabled) return { ok: false, code: "PREORDER_DISABLED" };
+  if (!config.preorderEnabled || !supportsPreorder(config.fulfillmentType))
+    return { ok: false, code: "PREORDER_DISABLED" };
 
   return await withTransaction(db, async (trx) => {
     // Check queue limit
@@ -297,6 +314,7 @@ export async function createPreorderReservation(
 export interface PreorderSettlementTarget {
   id: string;
   status: PreorderStatus;
+  fulfillmentType: FulfillmentType;
   productName: string;
   variantName: string;
   depositVnd: number;
@@ -324,6 +342,7 @@ export async function lockPreorderForSettlement(
   const res = await sql<{
     id: string;
     status: PreorderStatus;
+    fulfillment_type: FulfillmentType;
     product_name: string;
     variant_name: string;
     deposit_amount_vnd: string;
@@ -331,7 +350,7 @@ export async function lockPreorderForSettlement(
     hold_until: Date | string | null;
     balance_due_until: Date | string | null;
   }>`
-    select pr.id, pr.status, p.name_vi as product_name, v.name_vi as variant_name,
+    select pr.id, pr.status, v.fulfillment_type, p.name_vi as product_name, v.name_vi as variant_name,
            pr.deposit_amount_vnd::text, pr.balance_amount_vnd::text,
            pr.hold_until, pr.balance_due_until
     from preorder_reservation pr
@@ -347,6 +366,7 @@ export async function lockPreorderForSettlement(
   return {
     id: row.id,
     status: row.status,
+    fulfillmentType: row.fulfillment_type,
     productName: row.product_name,
     variantName: row.variant_name,
     depositVnd: Number(row.deposit_amount_vnd),
@@ -815,6 +835,7 @@ export interface CustomerPreorderSummary {
   productName: string;
   variantName: string;
   status: PreorderStatus;
+  fulfillmentType: FulfillmentType;
   depositVnd: number;
   balanceVnd: number;
   queuePosition: number | null;
@@ -835,6 +856,7 @@ export async function listCustomerPreorders(
   const rows = await sql<{
     id: string;
     status: PreorderStatus;
+    fulfillment_type: FulfillmentType;
     product_name: string;
     variant_name: string;
     deposit_amount_vnd: string;
@@ -844,7 +866,7 @@ export async function listCustomerPreorders(
     order_id: string | null;
     queue_position: number;
   }>`
-    select pr.id, pr.status, p.name_vi as product_name, v.name_vi as variant_name,
+    select pr.id, pr.status, v.fulfillment_type, p.name_vi as product_name, v.name_vi as variant_name,
            pr.deposit_amount_vnd::text, pr.balance_amount_vnd::text,
            pr.balance_due_until, pr.hold_until, pr.order_id,
            (select count(*)::int from preorder_reservation q
@@ -863,6 +885,7 @@ export async function listCustomerPreorders(
     id: row.id,
     productName: row.product_name,
     variantName: row.variant_name,
+    fulfillmentType: row.fulfillment_type,
     status: row.status,
     depositVnd: Number(row.deposit_amount_vnd),
     balanceVnd: Number(row.balance_amount_vnd),

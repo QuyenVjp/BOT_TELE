@@ -2,6 +2,7 @@ import { sql } from "kysely";
 import type { Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import type { Db } from "../../infrastructure/db/transaction.js";
+import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import {
   findOrderByIdempotency,
   findOrderByIdForOwnerForUpdate,
@@ -22,6 +23,7 @@ import { canPurchase } from "./store-mode.js";
 import { normalizePromoCode, quotePromotion, reservePromotion } from "../promotions/service.js";
 import { releasePromotion } from "../promotions/service.js";
 import { recordFunnelEvent } from "../operations/funnel.js";
+import { newId } from "../../shared/ids/index.js";
 /**
  * BuyNow command (FR-006, FR-007, FR-008, FR-010).
  *
@@ -334,6 +336,16 @@ export async function buyNow(db: Db, input: BuyNowInput): Promise<BuyNowResult> 
         return matchesBuyNowFingerprint(order, input)
           ? { kind: "ORDER", order }
           : { kind: "REJECT", code: "IDEMPOTENCY_CONFLICT" };
+      }
+      if (order.fulfillmentType === "MANUAL_FULFILLMENT") {
+        await enqueueOutboxEvent(trx, {
+          id: newId(),
+          aggregateType: "Order",
+          aggregateId: order.id,
+          aggregateVersion: order.version,
+          eventType: "OrderCreated",
+          payloadRedacted: { orderId: order.id, correlationId: input.correlationId },
+        });
       }
 
       if (promotionQuote && input.promoCode) {

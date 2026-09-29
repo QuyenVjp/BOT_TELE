@@ -341,6 +341,45 @@ describe("Buy Now revalidation (FR-006)", () => {
 });
 
 describe("Buy Now fulfillment route readiness", () => {
+  it("accepts an enabled manual service with zero local assets and emits one idempotent owner event", async () => {
+    const s = await seed({ fulfillmentType: "MANUAL_FULFILLMENT", assetCount: 0 });
+    await sql`
+      insert into variant_service_fulfillment (variant_id, fulfillment_type, instructions, is_active)
+      values (${s.variantId}, 'MANUAL_FULFILLMENT', 'Contact privately after payment.', true)
+    `.execute(ctx.db);
+
+    const input = {
+      customerId: s.customerId,
+      variantId: s.variantId,
+      expectedPriceVnd: s.price,
+      idempotencyKey: "buy-manual-no-stock",
+      correlationId: "corr-manual-no-stock",
+    };
+    const first = await buyNow(ctx.db, input);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const replay = await buyNow(ctx.db, input);
+    expect(replay.ok).toBe(true);
+    if (!replay.ok) return;
+    expect(replay.order.id).toBe(first.order.id);
+
+    const events = await sql<{ event_type: string }>`
+      select event_type from outbox_event
+      where aggregate_type = 'Order' and aggregate_id = ${first.order.id}
+        and event_type = 'OrderCreated'
+    `.execute(ctx.db);
+    expect(events.rows).toHaveLength(1);
+    const assets = await sql<{ count: number }>`
+      select count(*)::int as count from digital_asset
+      where variant_id = ${s.variantId} and status in ('RESERVED', 'DELIVERED')
+    `.execute(ctx.db);
+    expect(assets.rows[0]?.count).toBe(0);
+    const supplierOrders = await sql<{ count: number }>`
+      select count(*)::int as count from supplier_order where order_id = ${first.order.id}
+    `.execute(ctx.db);
+    expect(supplierOrders.rows[0]?.count).toBe(0);
+  });
   it("creates a supplier-only SUPPLIER_API order when a supplier SKU is configured", async () => {
     const s = await seed({
       stockPolicy: "SUPPLIER_ONLY",

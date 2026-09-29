@@ -79,6 +79,7 @@ export class TelegramRetryableError extends Error {
   constructor(
     message: string,
     readonly retryAfterSeconds: number | null = null,
+    readonly error_code: number | null = null,
   ) {
     super(message);
   }
@@ -140,13 +141,18 @@ async function callTelegram<T>(method: string, call: () => Promise<T>): Promise<
     return await call();
   } catch (error) {
     const retryAfter = retryAfterSeconds(error);
-    if (classifyTelegramError(error) === "rate-limited") {
-      throw new TelegramRetryableError(`Telegram ${method} rate-limited`, retryAfter);
+    const classification = classifyTelegramError(error);
+    if (classification === "rate-limited") {
+      throw new TelegramRetryableError(
+        `Telegram ${method} rate-limited`,
+        retryAfter,
+        error instanceof GrammyError ? error.error_code : null,
+      );
     }
     if (isSendMethod(method) && (error instanceof HttpError || !(error instanceof GrammyError))) {
       throw new TelegramAmbiguousSendError();
     }
-    if (classifyTelegramError(error) === "transient") {
+    if (classification === "transient") {
       throw new TelegramRetryableError(`Telegram ${method} is retryable`, retryAfter);
     }
     throw error;

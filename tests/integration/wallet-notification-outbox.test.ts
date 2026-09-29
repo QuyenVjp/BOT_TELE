@@ -128,6 +128,7 @@ describe("wallet notification outbox", () => {
         await processNotificationDeliveryClaim(ctx.db, claim, {
           send: async (input) => {
             sent.push(input.chatId);
+            return { messageId: `wallet-notification-${sent.length}` };
           },
         }),
       ).toBe("SENT");

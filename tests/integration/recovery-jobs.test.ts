@@ -1123,9 +1123,12 @@ describe("bounded recovery jobs (T167/T168)", () => {
       reconcile: async () => ({ observations: [], nextCursor: null }),
     };
 
+    const databaseClock = await sql<{ timestamp: Date }>`
+      select now() as timestamp
+    `.execute(ctx.db);
     const result = await recoverSupplierOrdersBatch(ctx.db, {
       batchSize: 3,
-      now: new Date(),
+      now: databaseClock.rows[0]!.timestamp,
       retryDelaySeconds: 60,
       resolvePort: () => port,
       vault: createInMemoryVault(),

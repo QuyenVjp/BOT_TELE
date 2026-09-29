@@ -10,6 +10,7 @@ import type { StorefrontProductSummary } from "../../modules/catalog/repository.
 import type { TrustScreenData } from "../../modules/marketing/social-proof.js";
 import {
   preorderPayableLeg,
+  supportsPreorder,
   type CustomerPreorderSummary,
   type PreorderStatus,
 } from "../../modules/commerce/preorder.js";
@@ -266,8 +267,14 @@ export function presentCustomerPreorders(
     lines.push("Bạn chưa có suất đặt cọc nào.");
   }
   for (const preorder of preorders) {
+    const preorderSupported = supportsPreorder(preorder.fulfillmentType);
     lines.push(`• ${preorder.productName} · ${preorder.variantName}`);
     lines.push(`   ${PREORDER_STATUS_LINE[preorder.status]}`);
+    if (!preorderSupported) {
+      lines.push(
+        "   Suất đặt cọc này không còn hỗ trợ thanh toán tự động. Vui lòng liên hệ hỗ trợ.",
+      );
+    }
     if (preorder.status === "DEPOSIT_PAID") {
       lines.push(`   Đã cọc: ${formatVnd(makeVnd(BigInt(preorder.depositVnd)))}`);
       const position = preorder.queuePosition;
@@ -281,14 +288,17 @@ export function presentCustomerPreorders(
       preorder.balanceDueUntil !== null
         ? formatExpiryVietnam(preorder.balanceDueUntil.toISOString())
         : null;
-    if (preorder.status === "ALLOCATED" || preorder.status === "BALANCE_DUE") {
+    if (
+      preorderSupported &&
+      (preorder.status === "ALLOCATED" || preorder.status === "BALANCE_DUE")
+    ) {
       lines.push(`   Còn phải trả: ${formatVnd(makeVnd(BigInt(preorder.balanceVnd)))}`);
       if (balanceDueLabel) lines.push(`   Hạn thanh toán: ${balanceDueLabel}`);
     }
-    if (preorder.status === "WAITING_DEPOSIT") {
+    if (preorderSupported && preorder.status === "WAITING_DEPOSIT") {
       lines.push(`   Tiền cọc: ${formatVnd(makeVnd(BigInt(preorder.depositVnd)))}`);
     }
-    const leg = preorderPayableLeg(preorder.status);
+    const leg = preorderSupported ? preorderPayableLeg(preorder.status) : null;
     if (leg) {
       const amount = leg === "DEPOSIT" ? preorder.depositVnd : preorder.balanceVnd;
       buttons.push([

@@ -48,7 +48,7 @@ describe("privileged owner verbs are gated or explicitly low-risk", () => {
     );
   });
 
-  it("keeps the money- and audience-moving verbs in the step-up policy", () => {
+  it("keeps money- and audience-moving verbs in policy, with only manual completion exempt from TOTP", () => {
     for (const command of [
       "wallet.refund",
       "manual_fulfillment.complete",
@@ -56,14 +56,31 @@ describe("privileged owner verbs are gated or explicitly low-risk", () => {
       "discrepancy.resolve",
       "store.open",
     ] as const) {
-      expect(isSensitiveActionKey(command), `${command} must be step-up gated`).toBe(true);
-      expect(SENSITIVE_ACTION_POLICY[command]).not.toBeNull();
+      expect(
+        isSensitiveActionKey(command),
+        `${command} must be in the sensitive-action policy`,
+      ).toBe(true);
+    }
+    expect(SENSITIVE_ACTION_POLICY["manual_fulfillment.complete"]).toBeNull();
+    for (const command of [
+      "wallet.refund",
+      "support.replacement.approve",
+      "discrepancy.resolve",
+      "store.open",
+    ] as const) {
+      expect(SENSITIVE_ACTION_POLICY[command], `${command} must require step-up`).not.toBeNull();
     }
   });
 
-  it("never maps a gated verb to a null category", () => {
+  it("allows exactly manual completion as a null-category sensitive action", () => {
+    const nullCategoryVerbs = Object.entries(SENSITIVE_ACTION_POLICY)
+      .filter(([, category]) => category === null)
+      .map(([action]) => action);
+    expect(nullCategoryVerbs).toEqual(["manual_fulfillment.complete"]);
     for (const [action, category] of Object.entries(SENSITIVE_ACTION_POLICY)) {
-      expect(category, `${action} is in the policy table but requires no category`).not.toBeNull();
+      if (action !== "manual_fulfillment.complete") {
+        expect(category, `${action} must remain categorized`).not.toBeNull();
+      }
     }
   });
 

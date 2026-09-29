@@ -22,7 +22,7 @@ import { searchCatalog } from "../src/modules/catalog/search.js";
 import { listOrderHistory } from "../src/modules/commerce/history.js";
 import {
   claimNotificationDeliveries,
-  markNotificationSent,
+  processNotificationDeliveryClaim,
 } from "../src/modules/notification/service.js";
 import { createWalletLedgerService } from "../src/modules/wallet/ledger.js";
 import { newId } from "../src/shared/ids/index.js";
@@ -37,6 +37,10 @@ const TICK_MS = 1_000;
 const SAMPLE_MS = 5_000;
 const LATENCY_SAMPLE_LIMIT = 2_048;
 const EVENT_LOOP_SAMPLE_LIMIT = 2_048;
+let syntheticNotificationMessageId = 0;
+const phase2SoakNotificationResponder = {
+  send: async () => ({ messageId: `phase2-soak:${++syntheticNotificationMessageId}` }),
+};
 interface ErrorRecord {
   operation: string;
   message: string;
@@ -475,7 +479,7 @@ async function runTick(
       if (page.items.length === 0) throw new Error("RC catalog page is empty");
     }),
     measured(metrics, "catalog.searchCatalog", async () => {
-      const page = await searchCatalog(ctx.db, { query: "RC" }, { limit: 20 });
+      const page = await searchCatalog(ctx.db, { query: "RC" }, { limit: 20, audience: "test" });
       if (page.items.length === 0) throw new Error("RC search page is empty");
     }),
     measured(metrics, "commerce.listOrderHistory", async () => {
@@ -529,8 +533,13 @@ async function runTick(
     measured(metrics, "notification.claimAndComplete", async () => {
       const claims = await claimNotificationDeliveries(ctx.db, 20);
       for (const claim of claims) {
-        if (!(await markNotificationSent(ctx.db, claim.id, claim.generation))) {
-          throw new Error("notification completion lost lease");
+        const status = await processNotificationDeliveryClaim(
+          ctx.db,
+          claim,
+          phase2SoakNotificationResponder,
+        );
+        if (status !== "SENT" && status !== "SUPPRESSED") {
+          throw new Error(`notification completion returned ${status}`);
         }
       }
     }),

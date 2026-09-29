@@ -262,6 +262,41 @@ describe("createGrammyResponder admin keyboards", () => {
 
     expect(sent).toEqual({ chatId: "customer-chat", messageId: "909" });
   });
+  it("preserves Telegram 429 metadata as a retryable error", async () => {
+    const api = {
+      sendMessage: vi.fn().mockRejectedValue(
+        new GrammyError(
+          "Call to 'sendMessage' failed!",
+          {
+            ok: false,
+            error_code: 429,
+            description: "Too Many Requests: retry after 7",
+            parameters: { retry_after: 7 },
+          },
+          "sendMessage",
+          { chat_id: "customer-chat", text: "hello" },
+        ),
+      ),
+      editMessageText: vi.fn(),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    const error = await responder
+      .send({
+        chatId: "customer-chat",
+        messageId: null,
+        message: presentStorefront({ actorName: "An", isRootAdmin: false }),
+      })
+      .then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+
+    expect(error).toBeInstanceOf(TelegramRetryableError);
+    expect(error).toMatchObject({ retryAfterSeconds: 7, error_code: 429 });
+  });
 
   it("reports the edited message identity, including a no-op edit", async () => {
     const api = {
@@ -352,6 +387,38 @@ describe("createGrammyResponder admin keyboards", () => {
     expect(failure).toBeInstanceOf(TelegramRetryableError);
     expect((failure as TelegramRetryableError).retryAfterSeconds).toBe(30);
     expect(api.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("does not classify other Telegram transient errors as rate limits", async () => {
+    const api = {
+      sendMessage: vi.fn().mockResolvedValue({ message_id: 913 }),
+      editMessageText: vi.fn().mockRejectedValue(
+        new GrammyError(
+          "Call to 'editMessageText' failed!",
+          {
+            ok: false,
+            error_code: 500,
+            description: "Internal Server Error",
+          },
+          "editMessageText",
+          {},
+        ),
+      ),
+      sendPhoto: vi.fn(),
+      editMessageMedia: vi.fn(),
+    };
+    const responder = createGrammyResponder(BOT_TOKEN, api as never);
+
+    const failure = await responder
+      .send({
+        chatId: "customer-chat",
+        messageId: "42",
+        message: presentStorefront({ actorName: "An", isRootAdmin: false }),
+      })
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(TelegramRetryableError);
+    expect(failure).toMatchObject({ error_code: null, retryAfterSeconds: null });
   });
 
   it("renders contact-request reply keyboard for the account screen", async () => {

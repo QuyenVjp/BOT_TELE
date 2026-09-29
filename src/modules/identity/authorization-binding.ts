@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { sql } from "kysely";
-import type { Db } from "../../infrastructure/db/transaction.js";
+import type { Executor } from "../../infrastructure/db/transaction.js";
 import { hashAuthorizationPayload, type AuthorizationJsonValue } from "./authorization-payload.js";
 
 export interface SensitiveBindingRequest {
@@ -23,7 +23,7 @@ function requestedString(data: AuthorizationJsonValue | undefined, key: string):
 
 /** Re-read the authoritative state immediately before preview/consume. */
 export async function loadSensitiveAuthorizationBinding(
-  db: Db,
+  db: Executor,
   input: SensitiveBindingRequest,
 ): Promise<SensitiveAuthorizationBinding> {
   let resourceVersion = "missing";
@@ -416,6 +416,137 @@ export async function loadSensitiveAuthorizationBinding(
           status: value.status,
           eventType: value.event_type,
           dispositionCode: value.disposition_code,
+        }
+      : null;
+  } else if (input.actionKey === "manual_fulfillment.complete") {
+    const row = await sql<{
+      task_version: number;
+      task_status: string;
+      fulfillment_type: string;
+      order_version: number;
+      order_status: string;
+      order_fulfillment_type: string;
+      order_id: string;
+      sepay_evidence: AuthorizationJsonValue[];
+      wallet_purchase_evidence: AuthorizationJsonValue[];
+    }>`
+      select
+        m.version as task_version,
+        m.status as task_status,
+        m.fulfillment_type,
+        o.version as order_version,
+        o.status as order_status,
+        o.fulfillment_type as order_fulfillment_type,
+        o.id as order_id,
+        coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'paymentIntentId', pi.id,
+            'paymentIntentStatus', pi.status,
+            'paymentIntentAmountVnd', pi.amount_vnd::text,
+            'merchantAccountId', pi.merchant_account_id,
+            'allocationId', pa.id,
+            'allocationStatus', pa.status,
+            'allocatedAmountVnd', pa.allocated_amount_vnd::text,
+            'bankTransactionId', bt.id,
+            'provider', bt.provider,
+            'direction', bt.direction,
+            'bankMerchantAccountId', bt.merchant_account_id,
+            'bankAmountVnd', bt.amount_vnd::text,
+            'signatureStatus', bt.signature_status
+          ) order by pi.id, pa.id, bt.id)
+          from payment_intent pi
+          join payment_allocation pa on pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
+          join bank_transaction bt on bt.id = pa.bank_transaction_id
+            and lower(bt.provider) = 'sepay'
+            and bt.direction = 'IN'
+            and bt.signature_status = 'VERIFIED'
+            and bt.merchant_account_id = pi.merchant_account_id
+          where pi.order_id = o.id
+            and pi.status = 'SUCCEEDED'
+            and pi.amount_vnd = o.price_vnd
+            and bt.amount_vnd = pi.amount_vnd
+            and pa.allocated_amount_vnd = bt.amount_vnd
+        ), '[]'::jsonb) as sepay_evidence,
+        coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'walletLedgerId', wl.id,
+            'walletAccountId', wa.id,
+            'customerId', wa.customer_id,
+            'walletEntryType', wl.entry_type,
+            'walletAmountVnd', wl.amount_vnd::text,
+            'walletIdempotencyKey', wl.idempotency_key,
+            'ledgerTransactionId', lt.id,
+            'transactionType', lt.transaction_type,
+            'transactionStatus', lt.status,
+            'transactionIdempotencyKey', lt.idempotency_key,
+            'postings', (
+              select jsonb_agg(jsonb_build_object(
+                'postingId', p.id,
+                'accountId', a.id,
+                'accountCode', a.code,
+                'accountType', a.account_type,
+                'accountWalletAccountId', a.wallet_account_id,
+                'side', p.side,
+                'amountMinor', p.amount_minor::text
+              ) order by p.id)
+              from ledger_posting p
+              join ledger_account a on a.id = p.account_id
+              where p.transaction_id = lt.id
+            )
+          ) order by wl.id, lt.id)
+          from wallet_ledger wl
+          join wallet_account wa on wa.id = wl.wallet_account_id
+            and wa.customer_id = o.customer_id
+          join ledger_transaction lt on lt.wallet_account_id = wa.id
+            and lt.idempotency_key = 'wallet_ledger:' || wl.id
+            and lt.transaction_type = 'PURCHASE'
+            and lt.status = 'POSTED'
+          where wl.entry_type = 'DEBIT'
+            and wl.amount_vnd = o.price_vnd
+            and left(wl.idempotency_key, length('purchase:' || o.id || ':')) =
+              'purchase:' || o.id || ':'
+            and (select count(*) from ledger_posting p where p.transaction_id = lt.id) = 2
+            and exists (
+              select 1 from ledger_posting p
+              join ledger_account a on a.id = p.account_id
+              where p.transaction_id = lt.id
+                and p.side = 'DEBIT'
+                and p.amount_minor = wl.amount_vnd
+                and a.wallet_account_id = wa.id
+                and a.account_type = 'LIABILITY'
+            )
+            and exists (
+              select 1 from ledger_posting p
+              join ledger_account a on a.id = p.account_id
+              where p.transaction_id = lt.id
+                and p.side = 'CREDIT'
+                and p.amount_minor = wl.amount_vnd
+                and a.code = 'SHOP:REVENUE'
+                and a.account_type = 'REVENUE'
+            )
+        ), '[]'::jsonb) as wallet_purchase_evidence
+      from manual_fulfillment_task m
+      join "order" o on o.id = m.order_id
+      where m.id = ${input.resourceId}
+      limit 1
+    `.execute(db);
+    const value = row.rows[0];
+    resourceVersion = value ? `${value.order_version}:${value.task_version}` : "missing";
+    current = value
+      ? {
+          expectedVersion: `${value.order_version}:${value.task_version}`,
+          taskStatus: value.task_status,
+          taskFulfillmentType: value.fulfillment_type,
+          orderId: value.order_id,
+          orderVersion: value.order_version,
+          orderStatus: value.order_status,
+          orderFulfillmentType: value.order_fulfillment_type,
+          paymentVerified:
+            value.sepay_evidence.length > 0 || value.wallet_purchase_evidence.length > 0,
+          paymentEvidence: {
+            sepay: value.sepay_evidence,
+            walletPurchases: value.wallet_purchase_evidence,
+          },
         }
       : null;
   } else if (input.actionKey === "fulfillment.reconcile") {

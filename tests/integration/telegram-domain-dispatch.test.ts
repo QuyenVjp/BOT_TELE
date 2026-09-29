@@ -779,6 +779,14 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       actorUserId: USER,
       chatId: USER,
       chatType: "private",
+      messageId: "manual-page",
+      action: "ADMIN",
+      callbackData: "admin:manual:page:20",
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
       messageId: "manual-2",
       action: "ADMIN",
       callbackData: "admin:manual:view:task-1",
@@ -792,10 +800,16 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData: "admin:manual:complete:state-1",
     });
 
-    expect(adminManualTasks).toHaveBeenCalledWith({
+    expect(adminManualTasks).toHaveBeenNthCalledWith(1, {
       telegramUserId: USER,
       chatType: "private",
       correlationId: "telegram:manual-1",
+    });
+    expect(adminManualTasks).toHaveBeenNthCalledWith(2, {
+      telegramUserId: USER,
+      chatType: "private",
+      offset: 20,
+      correlationId: "telegram:manual-page",
     });
     expect(adminManualTask).toHaveBeenCalledWith({
       telegramUserId: USER,
@@ -809,7 +823,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       stateId: "state-1",
       correlationId: "telegram:manual-3",
     });
-    expect(send).toHaveBeenCalledTimes(3);
+    expect(send).toHaveBeenCalledTimes(4);
   });
 
   it("parses the product list's filter and page out of the route", async () => {

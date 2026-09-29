@@ -1,13 +1,63 @@
 import { sql } from "kysely";
-import { guardRootAction } from "../../bot/middleware/root-admin.js";
-import type { Executor, Db } from "../../infrastructure/db/transaction.js";
-import { withTransaction } from "../../infrastructure/db/transaction.js";
+import type { Executor, Trx } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { nextVersion } from "../../infrastructure/db/version.js";
 import { newId } from "../../shared/ids/index.js";
 import { findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
-import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { appendAuditEvent } from "../identity/audit.js";
+
+export const manualServicePaymentEvidence = sql<boolean>`
+  (
+    exists (
+      select 1
+      from payment_intent pi
+      join payment_allocation pa on pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
+      join bank_transaction bt on bt.id = pa.bank_transaction_id
+        and lower(bt.provider) = 'sepay'
+        and bt.direction = 'IN'
+        and bt.signature_status = 'VERIFIED'
+        and bt.merchant_account_id = pi.merchant_account_id
+      where pi.order_id = o.id
+        and pi.status = 'SUCCEEDED'
+        and pi.amount_vnd = o.price_vnd
+        and bt.amount_vnd = pi.amount_vnd
+        and pa.allocated_amount_vnd = bt.amount_vnd
+    )
+    or exists (
+      select 1
+      from wallet_ledger wl
+      join wallet_account wa on wa.id = wl.wallet_account_id
+        and wa.customer_id = o.customer_id
+      join ledger_transaction lt on lt.wallet_account_id = wa.id
+        and lt.idempotency_key = 'wallet_ledger:' || wl.id
+        and lt.transaction_type = 'PURCHASE'
+        and lt.status = 'POSTED'
+      where wl.entry_type = 'DEBIT'
+        and wl.amount_vnd = o.price_vnd
+        and left(wl.idempotency_key, length('purchase:' || o.id || ':')) =
+          'purchase:' || o.id || ':'
+        and (select count(*) from ledger_posting p where p.transaction_id = lt.id) = 2
+        and exists (
+          select 1 from ledger_posting p
+          join ledger_account a on a.id = p.account_id
+          where p.transaction_id = lt.id
+            and p.side = 'DEBIT'
+            and p.amount_minor = wl.amount_vnd
+            and a.wallet_account_id = wa.id
+            and a.account_type = 'LIABILITY'
+        )
+        and exists (
+          select 1 from ledger_posting p
+          join ledger_account a on a.id = p.account_id
+          where p.transaction_id = lt.id
+            and p.side = 'CREDIT'
+            and p.amount_minor = wl.amount_vnd
+            and a.code = 'SHOP:REVENUE'
+            and a.account_type = 'REVENUE'
+        )
+    )
+  )
+`;
 
 export type ManualTaskStatus = "OPEN" | "COMPLETED";
 export type ManualTaskFulfillmentType =
@@ -50,13 +100,40 @@ export interface ManualFulfillmentTask {
   version: number;
 }
 
+export interface AdminManualFulfillmentTask {
+  taskId: string;
+  orderId: string;
+  orderNumber: string;
+  customerName: string;
+  productName: string;
+  variantName: string;
+  instructions: string;
+  amountVnd: string;
+  createdAt: string;
+  status: ManualTaskStatus;
+  fulfillmentType: ManualTaskFulfillmentType;
+  taskVersion: number;
+  orderVersion: number;
+  expectedVersion: string;
+}
+
+export interface AdminManualFulfillmentTaskPage {
+  tasks: AdminManualFulfillmentTask[];
+  offset: number;
+  hasMore: boolean;
+}
+
 export type CreateManualTaskResult =
   | { ok: true; task: ManualFulfillmentTask; inserted: boolean }
   | { ok: false; code: "NOT_CONFIGURED" };
 
 export type CompleteManualTaskResult =
   | { ok: true; taskId: string; orderId: string; alreadyCompleted: boolean }
-  | { ok: false; code: "NOT_FOUND" | "ORDER_NOT_PROCESSING" | "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" };
+  | {
+      ok: false;
+      code: "NOT_FOUND" | "ORDER_NOT_PROCESSING" | "PAYMENT_NOT_SETTLED" | "STALE";
+      message: string;
+    };
 
 function toIso(value: Date | string | null): string | null {
   if (value === null) return null;
@@ -168,37 +245,183 @@ export async function listManualFulfillmentTasks(
 ): Promise<ManualFulfillmentTask[]> {
   const limit = Math.max(1, Math.min(input.limit ?? 50, 200));
   const result = await sql<ManualTaskRow>`
-    select * from manual_fulfillment_task
-    where (${input.status ?? null}::text is null or status = ${input.status ?? null})
-    order by created_at asc, id asc
+    select m.*
+    from manual_fulfillment_task m
+    join "order" o on o.id = m.order_id
+    where (${input.status ?? null}::text is null or m.status = ${input.status ?? null})
+      and (
+        m.fulfillment_type not in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE')
+        or ${manualServicePaymentEvidence}
+      )
+    order by m.created_at asc, m.id asc
     limit ${limit}
   `.execute(exec);
   return result.rows.map(mapTask);
 }
 
+type AdminManualTaskRow = {
+  task_id: string;
+  order_id: string;
+  order_number: string;
+  customer_name: string | null;
+  product_name: string;
+  variant_name: string;
+  instructions: string;
+  amount_vnd: string;
+  created_at: Date | string;
+  status: ManualTaskStatus;
+  fulfillment_type: ManualTaskFulfillmentType;
+  task_version: number;
+  order_version: number;
+};
+
+function mapAdminManualTask(row: AdminManualTaskRow): AdminManualFulfillmentTask {
+  return {
+    taskId: row.task_id,
+    orderId: row.order_id,
+    orderNumber: row.order_number,
+    customerName: row.customer_name ?? "Khách không có tên",
+    productName: row.product_name,
+    variantName: row.variant_name,
+    instructions: row.instructions,
+    amountVnd: row.amount_vnd,
+    createdAt: toIso(row.created_at)!,
+    status: row.status,
+    fulfillmentType: row.fulfillment_type,
+    taskVersion: row.task_version,
+    orderVersion: row.order_version,
+    expectedVersion: `${row.order_version}:${row.task_version}`,
+  };
+}
+
+async function loadAdminManualTaskRows(
+  exec: Executor,
+  input: { taskId?: string; limit: number; offset: number },
+): Promise<AdminManualTaskRow[]> {
+  const taskId = input.taskId ?? null;
+  const result = await sql<AdminManualTaskRow>`
+    select
+      m.id as task_id,
+      o.id as order_id,
+      o.order_number,
+      cps.display_name as customer_name,
+      coalesce(nullif(o.product_name_vi, ''), p.name_vi) as product_name,
+      coalesce(nullif(o.variant_name_vi, ''), v.name_vi) as variant_name,
+      m.instructions,
+      o.price_vnd::text as amount_vnd,
+      m.created_at,
+      m.status,
+      m.fulfillment_type,
+      m.version as task_version,
+      o.version as order_version
+    from manual_fulfillment_task m
+    join "order" o on o.id = m.order_id
+    join product_variant v on v.id = o.variant_id
+    join product p on p.id = v.product_id
+    left join customer_profile_snapshot cps on cps.customer_id = o.customer_id
+    where (${taskId}::text is null or m.id = ${taskId})
+      and (${taskId}::text is not null or m.status = 'OPEN')
+      and (${taskId}::text is not null or o.status = 'PROCESSING')
+      and not p.is_test
+      and p.name_vi not ilike '%canary%'
+      and not exists (
+        select 1 from test_customer_allowlist a
+        join channel_identity ci
+          on ci.channel = 'TELEGRAM'
+         and ci.channel_user_id = a.telegram_user_id
+         and ci.customer_id = o.customer_id
+      )
+      and (
+        m.fulfillment_type not in ('MANUAL_FULFILLMENT', 'UNLIMITED_SERVICE')
+        or ${manualServicePaymentEvidence}
+      )
+    order by m.created_at asc, m.id asc
+    limit ${input.limit} offset ${input.offset}
+  `.execute(exec);
+  return result.rows;
+}
+
+export async function listAdminManualFulfillmentTasks(
+  exec: Executor,
+  input: { offset?: number; limit?: number } = {},
+): Promise<AdminManualFulfillmentTaskPage> {
+  const offset = input.offset ?? 0;
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 10_000)
+    throw new RangeError("manual task offset must be 0..10000");
+  const limit = Math.min(20, Math.max(1, input.limit ?? 20));
+  const rows = await loadAdminManualTaskRows(exec, { limit: limit + 1, offset });
+  return {
+    tasks: rows.slice(0, limit).map(mapAdminManualTask),
+    offset,
+    hasMore: rows.length > limit,
+  };
+}
+
+export async function getAdminManualFulfillmentTask(
+  exec: Executor,
+  taskId: string,
+): Promise<AdminManualFulfillmentTask | null> {
+  const [row] = await loadAdminManualTaskRows(exec, { taskId, limit: 1, offset: 0 });
+  return row ? mapAdminManualTask(row) : null;
+}
+
 export async function completeManualFulfillmentTaskInTransaction(
-  trx: Executor,
-  input: { taskId: string; actorId: string; correlationId: string },
+  trx: Trx,
+  input: {
+    taskId: string;
+    actorId: string;
+    correlationId: string;
+    expectedVersion: string;
+  },
 ): Promise<CompleteManualTaskResult> {
+  const expected = /^(0|[1-9][0-9]*):(0|[1-9][0-9]*)$/.exec(input.expectedVersion);
+  if (!expected)
+    return { ok: false, code: "STALE", message: "Tác vụ đã thay đổi. Vui lòng mở lại danh sách." };
   const existing = await getManualTaskById(trx, input.taskId);
-  if (!existing) return { ok: false, code: "NOT_FOUND" };
+  if (!existing) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy tác vụ." };
 
   const order = await findOrderByIdForUpdate(trx, existing.orderId);
-  if (!order || (order.status !== "PROCESSING" && order.status !== "COMPLETED")) {
-    return { ok: false, code: "ORDER_NOT_PROCESSING" };
-  }
+  if (!order) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
 
   const taskResult = await sql<ManualTaskRow>`
     select * from manual_fulfillment_task where id = ${input.taskId} for update
   `.execute(trx);
   const task = taskResult.rows[0];
-  if (!task) return { ok: false, code: "NOT_FOUND" };
-  if (task.order_id !== order.id) return { ok: false, code: "ORDER_NOT_PROCESSING" };
-
-  if (task.status === "COMPLETED") {
+  if (!task) return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy tác vụ." };
+  if (task.order_id !== order.id)
+    return {
+      ok: false,
+      code: "ORDER_NOT_PROCESSING",
+      message: "Trạng thái đơn hàng không còn phù hợp.",
+    };
+  if (task.status === "COMPLETED")
     return { ok: true, taskId: task.id, orderId: task.order_id, alreadyCompleted: true };
+
+  if (order.version !== Number(expected[1]) || task.version !== Number(expected[2]))
+    return { ok: false, code: "STALE", message: "Tác vụ đã thay đổi. Vui lòng mở lại danh sách." };
+  if (order.status !== "PROCESSING")
+    return {
+      ok: false,
+      code: "ORDER_NOT_PROCESSING",
+      message: "Trạng thái đơn hàng không còn phù hợp.",
+    };
+
+  if (
+    task.fulfillment_type === "MANUAL_FULFILLMENT" ||
+    task.fulfillment_type === "UNLIMITED_SERVICE"
+  ) {
+    const payment = await sql<{ verified: boolean }>`
+      select ${manualServicePaymentEvidence} as verified
+      from "order" o
+      where o.id = ${order.id}
+    `.execute(trx);
+    if (!payment.rows[0]?.verified)
+      return {
+        ok: false,
+        code: "PAYMENT_NOT_SETTLED",
+        message: "Đơn chưa xác nhận thanh toán.",
+      };
   }
-  if (order.status !== "PROCESSING") return { ok: false, code: "ORDER_NOT_PROCESSING" };
 
   let quantityReserve: { id: string; variant_id: string; quantity_after: number } | null = null;
   if (task.fulfillment_type === "QUANTITY_STOCK") {
@@ -214,10 +437,15 @@ export async function completeManualFulfillmentTaskInTransaction(
       for update of r, s
     `.execute(trx);
     quantityReserve = reserved.rows[0] ?? null;
-    if (!quantityReserve) return { ok: false, code: "ORDER_NOT_PROCESSING" };
+    if (!quantityReserve)
+      return {
+        ok: false,
+        code: "ORDER_NOT_PROCESSING",
+        message: "Trạng thái đơn hàng không còn phù hợp.",
+      };
   }
 
-  const newVersion = nextVersion(task.version);
+  const newTaskVersion = nextVersion(task.version);
   const completed = await sql<ManualTaskRow>`
     update manual_fulfillment_task
     set status = 'COMPLETED',
@@ -225,12 +453,11 @@ export async function completeManualFulfillmentTaskInTransaction(
         completed_at = now(),
         completion_correlation_id = ${input.correlationId},
         updated_at = now(),
-        version = ${newVersion}
+        version = ${newTaskVersion}
     where id = ${task.id} and version = ${task.version} and status = 'OPEN'
     returning *
   `.execute(trx);
-  const completedTask = completed.rows[0];
-  if (!completedTask) throw new Error("manual task completion lost its row lock");
+  if (!completed.rows[0]) throw new Error("manual task completion lost its row lock");
 
   if (quantityReserve) {
     await sql`
@@ -241,16 +468,13 @@ export async function completeManualFulfillmentTaskInTransaction(
     `.execute(trx);
   }
 
-  await transitionOrder(
+  const completedOrder = await transitionOrder(
     trx,
     order,
     "COMPLETED",
     "MANUAL_FULFILLMENT_COMPLETED",
     input.correlationId,
-    {
-      type: "ROOT_ADMIN",
-      id: input.actorId,
-    },
+    { type: "ROOT_ADMIN", id: input.actorId },
   );
 
   await appendAuditEvent(trx, {
@@ -261,14 +485,19 @@ export async function completeManualFulfillmentTaskInTransaction(
     targetId: task.id,
     reason: "manual fulfillment completed",
     correlationId: input.correlationId,
-    metadataRedacted: { orderId: task.order_id, fulfillmentType: task.fulfillment_type },
+    metadataRedacted: {
+      orderId: task.order_id,
+      orderVersion: completedOrder.version,
+      taskVersion: newTaskVersion,
+      fulfillmentType: task.fulfillment_type,
+    },
   });
 
   await enqueueOutboxEvent(trx, {
     id: newId(),
     aggregateType: "ManualFulfillmentTask",
     aggregateId: task.id,
-    aggregateVersion: newVersion,
+    aggregateVersion: newTaskVersion,
     eventType: "ManualFulfillmentTaskCompleted",
     payloadRedacted: {
       taskId: task.id,
@@ -280,32 +509,4 @@ export async function completeManualFulfillmentTaskInTransaction(
   });
 
   return { ok: true, taskId: task.id, orderId: task.order_id, alreadyCompleted: false };
-}
-
-export async function completeManualFulfillmentTask(
-  db: Db,
-  input: {
-    taskId: string;
-    actor: RootActor;
-    config: RootAdminConfig;
-    correlationId: string;
-  },
-): Promise<CompleteManualTaskResult> {
-  const gate = await guardRootAction(db, {
-    actor: input.actor,
-    config: input.config,
-    correlationId: input.correlationId,
-    action: "manual_fulfillment.complete",
-    targetType: "ManualFulfillmentTask",
-    targetId: input.taskId,
-  });
-  if (!gate.ok) return { ok: false, code: gate.reason };
-
-  return withTransaction(db, (trx) =>
-    completeManualFulfillmentTaskInTransaction(trx, {
-      taskId: input.taskId,
-      actorId: String(input.actor.numericUserId),
-      correlationId: input.correlationId,
-    }),
-  );
 }

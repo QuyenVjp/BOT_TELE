@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import {
   createPreorderReservation,
+  listCustomerPreorders,
   releaseExpiredPreorderHolds,
 } from "../../src/modules/commerce/preorder.js";
 import {
@@ -12,6 +13,7 @@ import {
 import { classifyPaymentCode } from "../../src/modules/payments/payment-code.js";
 import { isKnownOutboxEventType } from "../../src/infrastructure/outbox/dispatch-policy.js";
 import { presentPreorderPaymentScreen } from "../../src/bot/presenters/payment.js";
+import { presentCustomerPreorders } from "../../src/bot/presenters/customer.js";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
@@ -51,7 +53,9 @@ beforeEach(async () => {
     customer_profile_snapshot, customer cascade`.execute(ctx.db);
 });
 
-async function seedPreorderVariant(): Promise<{ customerId: string; variantId: string }> {
+async function seedPreorderVariant(
+  fulfillmentType: "STOCK_ACCOUNT" | "MANUAL_FULFILLMENT" | "UNLIMITED_SERVICE" = "STOCK_ACCOUNT",
+): Promise<{ customerId: string; variantId: string }> {
   const customerId = newId();
   const categoryId = newId();
   const productId = newId();
@@ -85,7 +89,7 @@ async function seedPreorderVariant(): Promise<{ customerId: string; variantId: s
       min_deposit_vnd, hold_duration_hours, balance_due_hours
     ) values (
       ${variantId}, ${productId}, ${"SKU-" + variantId}, 'Gift Code 20$', ${PRICE_VND}, 'P1M',
-      'CREDENTIAL', 30, 'LOCAL_ONLY', true, 1, 'STOCK_ACCOUNT', 'RES-1', true, 'FIXED',
+      'CREDENTIAL', 30, 'LOCAL_ONLY', true, 1, ${fulfillmentType}, 'RES-1', true, 'FIXED',
       ${DEPOSIT_VND}, ${DEPOSIT_VND}, 24, 24
     )
   `.execute(ctx.db);
@@ -93,12 +97,15 @@ async function seedPreorderVariant(): Promise<{ customerId: string; variantId: s
   return { customerId, variantId };
 }
 
-async function reserveDeposit(): Promise<{
+type ReservedDeposit = {
   customerId: string;
+  variantId: string;
   reservationId: string;
   transferContent: string;
   intentId: string;
-}> {
+};
+
+async function reserveDeposit(): Promise<ReservedDeposit> {
   const { customerId, variantId } = await seedPreorderVariant();
   const created = await createPreorderReservation(ctx.db, { customerId, variantId });
   if (!created.ok) throw new Error(`reservation seed failed: ${created.code}`);
@@ -114,10 +121,22 @@ async function reserveDeposit(): Promise<{
 
   return {
     customerId,
+    variantId,
     reservationId: created.reservationId,
     transferContent: presented.presentation.transferContent,
     intentId: presented.intentId,
   };
+}
+async function reserveUnsupportedLegacyPreorder(
+  fulfillmentType: "MANUAL_FULFILLMENT" | "UNLIMITED_SERVICE",
+): Promise<Awaited<ReturnType<typeof reserveDeposit>>> {
+  const fixture = await reserveDeposit();
+  await sql`
+    update product_variant
+       set fulfillment_type = ${fulfillmentType}
+     where id = ${fixture.variantId}
+  `.execute(ctx.db);
+  return fixture;
 }
 
 function depositEvidence(f: { transferContent: string }): PaymentEvidence {
@@ -166,6 +185,19 @@ async function countRows(table: string, where = sql`true`): Promise<number> {
 }
 
 describe("preorder deposit settlement", () => {
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "refuses preorder for unavailable %s variants without creating a reservation",
+    async (fulfillmentType) => {
+      // No variant_service_fulfillment row makes these service variants unavailable.
+      const { customerId, variantId } = await seedPreorderVariant(fulfillmentType);
+
+      const created = await createPreorderReservation(ctx.db, { customerId, variantId });
+
+      expect(created).toEqual({ ok: false, code: "PREORDER_DISABLED" });
+      expect(await countRows("preorder_reservation", sql`variant_id = ${variantId}`)).toBe(0);
+    },
+  );
+
   it("stamps the deposit intent while the hold is unpaid, and confirms it only when money arrives", async () => {
     const f = await reserveDeposit();
 
@@ -221,6 +253,57 @@ describe("preorder deposit settlement", () => {
     expect(callbacks).toContain("cust:preorders");
     expect((await readReservation(f.reservationId)).status).toBe("WAITING_DEPOSIT");
   });
+
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "refuses to reopen a legacy %s preorder payment QR",
+    async (fulfillmentType) => {
+      const f = await reserveUnsupportedLegacyPreorder(fulfillmentType);
+
+      const reopened = await presentPreorderPayment(ctx.db, {
+        ...MERCHANT_INPUT,
+        reservationId: f.reservationId,
+        customerId: f.customerId,
+        leg: "DEPOSIT",
+        correlationId: "test-preorder-unsupported-refresh",
+      });
+      const reservation = await readReservation(f.reservationId);
+
+      expect(reopened).toEqual({ ok: false, error: "UNSUPPORTED_FULFILLMENT_TYPE" });
+      expect(reservation.status).toBe("WAITING_DEPOSIT");
+      expect(reservation.deposit_payment_intent_id).toBe(f.intentId);
+      expect(await countRows("payment_intent")).toBe(1);
+    },
+  );
+
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "routes a verified transfer for a legacy %s preorder to review without settling",
+    async (fulfillmentType) => {
+      const f = await reserveUnsupportedLegacyPreorder(fulfillmentType);
+
+      const result = await applyPaymentEvidence(ctx.db, verifiedSePayEvidence(depositEvidence(f)));
+
+      expect(result).toMatchObject({ ok: true, kind: "DISCREPANCY", type: "UNMATCHED" });
+      expect((await readReservation(f.reservationId)).status).toBe("WAITING_DEPOSIT");
+      expect((await readIntent(f.intentId)).status).toBe("NEEDS_REVIEW");
+      expect(await countRows("payment_allocation", sql`status = 'SETTLED'`)).toBe(0);
+      expect(await countRows("outbox_event", sql`event_type = 'PaymentSettled'`)).toBe(0);
+      expect(await countRows("discrepancy", sql`type = 'UNMATCHED'`)).toBe(1);
+    },
+  );
+
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "directs a legacy %s preorder list entry to support instead of payment",
+    async (fulfillmentType) => {
+      const f = await reserveUnsupportedLegacyPreorder(fulfillmentType);
+      const message = presentCustomerPreorders(await listCustomerPreorders(ctx.db, f.customerId));
+      const callbacks = message.buttons.flat().map((button) => button.callbackData);
+
+      expect(message.text).toContain("liên hệ hỗ trợ");
+      expect(message.text).not.toContain("Tiền cọc: 50.000 ₫");
+      expect(callbacks).not.toContain(`preorder:pay:${f.reservationId}`);
+      expect(callbacks).toContain("supp:open");
+    },
+  );
 
   it("ignores a replayed deposit transfer: no double confirm, no second allocation", async () => {
     const f = await reserveDeposit();

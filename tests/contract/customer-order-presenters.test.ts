@@ -339,6 +339,7 @@ describe("customer preorder consent layout and copy", () => {
       sku: "SKU-1",
       priceVnd: 150000,
       preorderEnabled: true,
+      fulfillmentType: "STOCK_ACCOUNT",
       depositMode: "FIXED",
       depositAmountVnd: 50000,
       depositPercent: 0,
@@ -355,4 +356,32 @@ describe("customer preorder consent layout and copy", () => {
       [{ text: "❌ Huỷ", callbackData: "shop:home" }],
     ]);
   });
+
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "refuses preorder consent for %s variants",
+    (fulfillmentType) => {
+      const message = presentPreorderConsent({
+        id: "var-1",
+        productId: "prod-1",
+        productName: "Kiro Pro",
+        variantName: "1 tháng",
+        sku: "SKU-1",
+        priceVnd: 150000,
+        preorderEnabled: true,
+        fulfillmentType,
+        depositMode: "FIXED",
+        depositAmountVnd: 50000,
+        depositPercent: 0,
+        minDepositVnd: 50000,
+        maxPreorderQueue: 50,
+        holdDurationHours: 24,
+        balanceDueHours: 24,
+        forfeitPolicyVersion: 1,
+      });
+      const callbacks = message.buttons.flat().map((button) => button.callbackData);
+
+      expect(message.text).toContain("chưa hỗ trợ đặt cọc");
+      expect(callbacks).not.toContain("preorder:create:var-1");
+    },
+  );
 });

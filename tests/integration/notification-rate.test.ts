@@ -16,9 +16,12 @@ afterAll(async () => {
   await ctx?.teardown();
 });
 
-async function seedDelivery(chatId: string, suffix = chatId): Promise<string> {
+async function seedDelivery(
+  chatId: string,
+  suffix = chatId,
+  campaignId: string = newId(),
+): Promise<string> {
   const customerId = newId();
-  const campaignId = newId();
   const deliveryId = newId();
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
     ctx.db,
@@ -39,6 +42,46 @@ async function resetNotifications(): Promise<void> {
 }
 
 describe("persistent notification rate", () => {
+  it("does not send queued admin payment alerts when admin alert mode is OFF", async () => {
+    await resetNotifications();
+    const orderId = newId();
+    const paymentAlert = await seedDelivery(
+      "3001",
+      "payment-alert",
+      `admin-payment-settled:${orderId}`,
+    );
+    const unrelated = await seedDelivery("3002", "unrelated");
+    const sender = { send: vi.fn(async () => ({ messageId: "notification-rate-off" })) };
+
+    await runNotificationDeliveryLane({
+      db: ctx.db,
+      responder: sender,
+      ratePerSecond: 20,
+      maxAttempts: 5,
+      workers: 1,
+      sleep: async () => undefined,
+      adminAlertMode: "OFF",
+    });
+
+    expect(sender.send).toHaveBeenCalledTimes(1);
+    expect(sender.send).toHaveBeenCalledWith({
+      chatId: "3002",
+      telegramUserId: "3002",
+      messageId: null,
+      message: { text: "hello", buttons: [] },
+    });
+    const deliveries = await sql<{ id: string; status: string }>`
+      select id, status from notification_delivery
+      where id in (${paymentAlert}, ${unrelated})
+      order by id
+    `.execute(ctx.db);
+    expect(deliveries.rows).toEqual(
+      [
+        { id: paymentAlert, status: "PENDING" },
+        { id: unrelated, status: "SENT" },
+      ].sort((a, b) => a.id.localeCompare(b.id)),
+    );
+  });
   it("shares global and individual-chat reservations across callers", async () => {
     await sql`truncate notification_rate_slot`.execute(ctx.db);
     await reserveNotificationSlot(ctx.db, "one", 20);
@@ -59,7 +102,7 @@ describe("persistent notification rate", () => {
     await seedDelivery("1002");
     let paused = false;
     const sleeps: number[] = [];
-    const sender = { send: vi.fn(async () => undefined) };
+    const sender = { send: vi.fn(async () => ({ messageId: "notification-rate-pause" })) };
     await runNotificationDeliveryLane({
       db: ctx.db,
       responder: sender,
@@ -109,7 +152,7 @@ describe("persistent notification rate", () => {
     expect([sentClaim?.id, staleClaim?.id, dueClaim?.id].sort()).toEqual(
       [sentBeforeRestart, stale, stillDue].sort(),
     );
-    const sender = { send: vi.fn(async () => undefined) };
+    const sender = { send: vi.fn(async () => ({ messageId: "notification-rate-restart" })) };
 
     await runNotificationDeliveryLane({
       db: ctx.db,
