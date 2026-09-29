@@ -192,7 +192,7 @@ describe("compiled production migration entrypoint (T173)", () => {
   it("applies the UNKNOWN query-key backfill after 094 is already recorded and scopes keys per supplier", async () => {
     if (!hasDocker) return;
     const started = await startPostgres();
-    const baselineDir = await createPreCanaryMigrationDir();
+    const baselineDir = await createPreMigrationDir("094_supplier_owner_canary.sql");
     const recorded094Dir = await createSingle094MigrationDir();
     try {
       await sql`drop schema public cascade`.execute(started.handle.db);
@@ -371,7 +371,7 @@ describe("compiled production migration entrypoint (T173)", () => {
   it("rolls back the UNKNOWN query-key backfill on a per-supplier collision", async () => {
     if (!hasDocker) return;
     const started = await startPostgres();
-    const baselineDir = await createPreCanaryMigrationDir();
+    const baselineDir = await createPreMigrationDir("094_supplier_owner_canary.sql");
     const recorded094Dir = await createSingle094MigrationDir();
     try {
       await sql`drop schema public cascade`.execute(started.handle.db);
@@ -442,15 +442,16 @@ describe("compiled production migration entrypoint (T173)", () => {
       await started.stop();
     }
   }, 180_000);
-  it("upgrades pre-095 notification deliveries without loss and records migration once", async () => {
+  it("upgrades pre-096 notification deliveries without loss and records migration once", async () => {
     if (!hasDocker) return;
     const started = await startPostgres();
-    const pre095Dir = await createPreMigrationDir("095_notification_send_uncertain.sql");
+    const pre096Dir = await createPreMigrationDir("096_notification_send_uncertain.sql");
     try {
       await sql`drop schema public cascade`.execute(started.handle.db);
       await sql`create schema public`.execute(started.handle.db);
-      const baseline = await runMigrations(started.handle.db, pre095Dir);
+      const baseline = await runMigrations(started.handle.db, pre096Dir);
       expect(baseline.applied).toContain("094_supplier_owner_canary.sql");
+      expect(baseline.applied).toContain("095_supplier_unknown_query_key_backfill.sql");
 
       await sql`
         insert into customer (id) values
@@ -545,7 +546,16 @@ describe("compiled production migration entrypoint (T173)", () => {
       `.execute(started.handle.db);
       await sql`
         insert into notification_campaign_audience (campaign_id, stage, customer_id, chat_id)
-        values ('admin-payment-settled:pre095-manual-sent-order', 'PREVIEW', 'pre095-sent-customer', '10007')
+        values
+          ('admin-payment-settled:pre095-manual-retry-order', 'PREVIEW', 'pre095-sent-customer', '10008'),
+          ('admin-payment-settled:pre095-manual-retry-order', 'CONFIRMED', 'pre095-sent-customer', '10008')
+      `.execute(started.handle.db);
+      await sql`
+        update notification_campaign
+        set previewed_at = '2020-01-02T03:04:05.000Z',
+            confirmed_at = '2020-01-02T03:04:05.000Z',
+            confirmed_by = 'test-owner'
+        where id = 'admin-payment-settled:pre095-manual-retry-order'
       `.execute(started.handle.db);
 
       const fulfillmentTypes = await sql<{ id: string; fulfillment_type: string }>`
@@ -567,8 +577,22 @@ describe("compiled production migration entrypoint (T173)", () => {
         idempotency_key: string;
         created_by: string;
         created_at: Date;
+        audience: string;
+        previewed_at: Date | null;
+        product_variant_id: string | null;
+        revision: number;
+        previewed_content_hash: string | null;
+        previewed_audience_hash: string | null;
+        previewed_audience_count: number | null;
+        confirmed_at: Date | null;
+        confirmed_by: string | null;
+        audience_hash: string | null;
+        buttons: unknown;
       }>`
-        select id, class, content, status, idempotency_key, created_by, created_at
+        select id, class, content, status, idempotency_key, created_by, created_at,
+          audience, previewed_at, product_variant_id, revision,
+          previewed_content_hash, previewed_audience_hash, previewed_audience_count,
+          confirmed_at, confirmed_by, audience_hash, buttons
         from notification_campaign
         where id like 'admin-payment-settled:pre095-%'
         order by id
@@ -599,7 +623,8 @@ describe("compiled production migration entrypoint (T173)", () => {
       }>`
         select campaign_id, stage, customer_id, chat_id
         from notification_campaign_audience
-        where campaign_id = 'admin-payment-settled:pre095-manual-sent-order'
+        where campaign_id = 'admin-payment-settled:pre095-manual-retry-order'
+        order by stage, customer_id
       `.execute(started.handle.db);
       const rekeyManualCampaign = (id: string): string =>
         id.startsWith("admin-payment-settled:pre095-manual-")
@@ -608,7 +633,7 @@ describe("compiled production migration entrypoint (T173)", () => {
 
       expect(campaignBefore.rows).toHaveLength(3);
       expect(manualDeliveriesBefore.rows).toHaveLength(3);
-      expect(audienceBefore.rows).toHaveLength(1);
+      expect(audienceBefore.rows).toHaveLength(2);
 
       const manualCampaignIds = new Set([
         "admin-payment-settled:pre095-manual-sent-order",
@@ -671,6 +696,23 @@ describe("compiled production migration entrypoint (T173)", () => {
         order by id
       `.execute(started.handle.db);
       expect(deliveriesAfterCollision.rows).toEqual(manualDeliveriesBefore.rows);
+      const audienceAfterCollision = await sql<{
+        campaign_id: string;
+        stage: string;
+        customer_id: string;
+        chat_id: string;
+      }>`
+        select campaign_id, stage, customer_id, chat_id
+        from notification_campaign_audience
+        where campaign_id = 'admin-payment-settled:pre095-manual-retry-order'
+        order by stage, customer_id
+      `.execute(started.handle.db);
+      expect(audienceAfterCollision.rows).toEqual(audienceBefore.rows);
+      const receiptAfterCollision = await sql<{ count: string }>`
+        select count(*)::text as count from schema_migrations
+        where filename = '096_notification_send_uncertain.sql'
+      `.execute(started.handle.db);
+      expect(receiptAfterCollision.rows[0]?.count).toBe("0");
       await sql`
         delete from notification_campaign
         where id = 'admin-manual-order:pre095-manual-retry-order'
@@ -708,7 +750,7 @@ describe("compiled production migration entrypoint (T173)", () => {
         last_error: "temporary-pre095-failure",
       });
       const upgrade = await runMigrations(started.handle.db);
-      expect(upgrade.applied).toContain("095_notification_send_uncertain.sql");
+      expect(upgrade.applied).toContain("096_notification_send_uncertain.sql");
       const after = await sql<{
         id: string;
         status: string;
@@ -732,8 +774,22 @@ describe("compiled production migration entrypoint (T173)", () => {
         idempotency_key: string;
         created_by: string;
         created_at: Date;
+        audience: string;
+        previewed_at: Date | null;
+        product_variant_id: string | null;
+        revision: number;
+        previewed_content_hash: string | null;
+        previewed_audience_hash: string | null;
+        previewed_audience_count: number | null;
+        confirmed_at: Date | null;
+        confirmed_by: string | null;
+        audience_hash: string | null;
+        buttons: unknown;
       }>`
-        select id, class, content, status, idempotency_key, created_by, created_at
+        select id, class, content, status, idempotency_key, created_by, created_at,
+          audience, previewed_at, product_variant_id, revision,
+          previewed_content_hash, previewed_audience_hash, previewed_audience_count,
+          confirmed_at, confirmed_by, audience_hash, buttons
         from notification_campaign
         where id in (
           'admin-manual-order:pre095-manual-sent-order',
@@ -772,18 +828,48 @@ describe("compiled production migration entrypoint (T173)", () => {
       }>`
         select campaign_id, stage, customer_id, chat_id
         from notification_campaign_audience
-        where campaign_id = 'admin-manual-order:pre095-manual-sent-order'
+        where campaign_id = 'admin-manual-order:pre095-manual-retry-order'
+        order by stage, customer_id
       `.execute(started.handle.db);
       expect(afterAudience.rows).toEqual(expectedAudience);
+      const preservedConfirmedAudience = await sql<{
+        campaign_id: string;
+        stage: string;
+        customer_id: string;
+        chat_id: string;
+      }>`
+        select campaign_id, stage, customer_id, chat_id
+        from notification_campaign_audience
+        where campaign_id = 'admin-payment-settled:pre095-manual-retry-order'
+          and stage = 'CONFIRMED'
+        order by stage, customer_id
+      `.execute(started.handle.db);
+      expect(preservedConfirmedAudience.rows).toEqual(
+        audienceBefore.rows.filter(({ stage }) => stage === "CONFIRMED"),
+      );
 
-      const remainingLegacyManual = await sql<{ count: string }>`
-        select count(*)::text as count from notification_campaign
-        where id in (
+      const retainedLegacyManual = await sql<{
+        id: string;
+        status: string;
+        delivery_count: number;
+      }>`
+        select legacy.id, legacy.status, count(delivery.id)::int as delivery_count
+        from notification_campaign legacy
+        left join notification_delivery delivery on delivery.campaign_id = legacy.id
+        where legacy.id in (
           'admin-payment-settled:pre095-manual-sent-order',
           'admin-payment-settled:pre095-manual-retry-order'
         )
+        group by legacy.id, legacy.status
+        order by legacy.id
       `.execute(started.handle.db);
-      expect(remainingLegacyManual.rows[0]?.count).toBe("0");
+      expect(retainedLegacyManual.rows).toEqual([
+        {
+          id: "admin-payment-settled:pre095-manual-retry-order",
+          status: "CANCELLED",
+          delivery_count: 0,
+        },
+      ]);
 
       await sql`
         insert into notification_delivery (id, campaign_id, customer_id, chat_id, status)
@@ -801,15 +887,15 @@ describe("compiled production migration entrypoint (T173)", () => {
       expect(unchanged.rows).toEqual([{ status: "PENDING" }]);
 
       const replay = await runMigrations(started.handle.db);
-      expect(replay.applied).not.toContain("095_notification_send_uncertain.sql");
-      expect(replay.alreadyApplied).toContain("095_notification_send_uncertain.sql");
+      expect(replay.applied).not.toContain("096_notification_send_uncertain.sql");
+      expect(replay.alreadyApplied).toContain("096_notification_send_uncertain.sql");
       const receipt = await sql<{ count: string }>`
         select count(*)::text as count from schema_migrations
-        where filename = '095_notification_send_uncertain.sql'
+        where filename = '096_notification_send_uncertain.sql'
       `.execute(started.handle.db);
       expect(receipt.rows[0]?.count).toBe("1");
     } finally {
-      await rm(pre095Dir, { recursive: true, force: true });
+      await rm(pre096Dir, { recursive: true, force: true });
       await started.stop();
     }
   }, 180_000);

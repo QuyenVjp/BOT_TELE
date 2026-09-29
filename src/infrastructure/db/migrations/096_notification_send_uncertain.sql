@@ -24,7 +24,7 @@ begin
           or target.idempotency_key = 'admin-manual-order:' || o.id
       )
   ) then
-    raise exception 'manual alert campaign identity collision during migration 095';
+    raise exception 'manual alert campaign identity collision during migration 096';
   end if;
 end;
 $$;
@@ -65,13 +65,47 @@ from "order" o
 where o.fulfillment_type = 'MANUAL_FULFILLMENT'
   and d.campaign_id = 'admin-payment-settled:' || o.id;
 
+-- CONFIRMED audience rows are append-only evidence: copy them to the stable
+-- campaign identity and retain the legacy parent; only PREVIEW rows can move.
+insert into notification_campaign_audience (campaign_id, stage, customer_id, chat_id)
+select 'admin-manual-order:' || o.id, a.stage, a.customer_id, a.chat_id
+from notification_campaign_audience a
+join "order" o
+  on a.campaign_id = 'admin-payment-settled:' || o.id
+where o.fulfillment_type = 'MANUAL_FULFILLMENT'
+  and a.stage = 'CONFIRMED';
+
 update notification_campaign_audience a
 set campaign_id = 'admin-manual-order:' || o.id
 from "order" o
 where o.fulfillment_type = 'MANUAL_FULFILLMENT'
-  and a.campaign_id = 'admin-payment-settled:' || o.id;
+  and a.campaign_id = 'admin-payment-settled:' || o.id
+  and a.stage = 'PREVIEW';
 
+-- Migration retirement only: retained legacy parents have no deliveries. Mark
+-- old DRAFT/QUEUED rows CANCELLED without changing the stable campaign.
+update notification_campaign legacy
+set status = 'CANCELLED'
+from "order" o
+where o.fulfillment_type = 'MANUAL_FULFILLMENT'
+  and legacy.id = 'admin-payment-settled:' || o.id
+  and legacy.status in ('DRAFT', 'QUEUED')
+  and exists (
+    select 1
+    from notification_campaign_audience a
+    where a.campaign_id = legacy.id
+      and a.stage = 'CONFIRMED'
+  );
+
+-- Keep the legacy campaign only as the required FK parent for immutable
+-- confirmed audience history; its deliveries have already moved above.
 delete from notification_campaign legacy
 using "order" o
 where o.fulfillment_type = 'MANUAL_FULFILLMENT'
-  and legacy.id = 'admin-payment-settled:' || o.id;
+  and legacy.id = 'admin-payment-settled:' || o.id
+  and not exists (
+    select 1
+    from notification_campaign_audience a
+    where a.campaign_id = legacy.id
+      and a.stage = 'CONFIRMED'
+  );
