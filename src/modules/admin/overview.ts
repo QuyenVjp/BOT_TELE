@@ -1,5 +1,6 @@
 import { sql } from "kysely";
 import type { Executor } from "../../infrastructure/db/transaction.js";
+import { manualServicePaymentEvidence } from "../digital-goods/manual-fulfillment.js";
 
 /**
  * Admin overview aggregate (goal §71 summary block, §136 business overview).
@@ -80,15 +81,7 @@ export async function getAdminOverview(
            join test_customer_allowlist a on a.telegram_user_id = ci.channel_user_id
            where ci.channel = 'TELEGRAM' and ci.customer_id = o.customer_id
          )
-         and exists (
-           select 1 from payment_intent pi
-           join payment_allocation pa on pa.payment_intent_id = pi.id and pa.status = 'SETTLED'
-           join bank_transaction bt on bt.id = pa.bank_transaction_id
-             and lower(bt.provider) = 'sepay' and bt.direction = 'IN'
-             and bt.signature_status = 'VERIFIED'
-           where pi.order_id = o.id and pi.status = 'SUCCEEDED'
-             and pa.allocated_amount_vnd = o.price_vnd
-         )
+        and ${manualServicePaymentEvidence}
       ) as manual_orders_needing_work
   `.execute(exec);
 

@@ -6,7 +6,7 @@ import { newId } from "../../shared/ids/index.js";
 import { findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
 import { appendAuditEvent } from "../identity/audit.js";
 
-const manualServicePaymentEvidence = sql<boolean>`
+export const manualServicePaymentEvidence = sql<boolean>`
   (
     exists (
       select 1

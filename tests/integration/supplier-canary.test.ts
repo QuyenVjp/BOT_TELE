@@ -473,20 +473,28 @@ describe("owner supplier canary", () => {
       challenge: preview.challenge,
       actor: { numericUserId: ROOT_ID, chatType: "private" as const },
     };
-    const beforeFirstConfirmation = new Date();
+    const beforeFirstConfirmation = await sql<{ timestamp: Date }>`
+      select now() as timestamp
+    `.execute(ctx.db);
     const first = await service.confirmIfCanary({
       ...input,
       correlationId: "step-up-valid-confirm",
     });
-    const afterFirstConfirmation = new Date();
+    const afterFirstConfirmation = await sql<{ timestamp: Date }>`
+      select now() as timestamp
+    `.execute(ctx.db);
     const claimed = await sql<{ submitted_at: Date | null }>`
       select submitted_at from supplier_canary_run where id = ${preview.runId}
     `.execute(ctx.db);
     const submittedAt = claimed.rows[0]?.submitted_at;
     expect(submittedAt).toBeInstanceOf(Date);
     if (!(submittedAt instanceof Date)) throw new Error("missing submitted_at");
-    expect(submittedAt.getTime()).toBeGreaterThanOrEqual(beforeFirstConfirmation.getTime());
-    expect(submittedAt.getTime()).toBeLessThanOrEqual(afterFirstConfirmation.getTime());
+    expect(submittedAt.getTime()).toBeGreaterThanOrEqual(
+      beforeFirstConfirmation.rows[0]!.timestamp.getTime(),
+    );
+    expect(submittedAt.getTime()).toBeLessThanOrEqual(
+      afterFirstConfirmation.rows[0]!.timestamp.getTime(),
+    );
     const replay = await service.confirmIfCanary({
       ...input,
       correlationId: "step-up-valid-replay",

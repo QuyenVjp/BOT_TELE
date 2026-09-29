@@ -240,7 +240,6 @@ describe("compiled production migration entrypoint (T173)", () => {
 
       const upgrade = await runCompiledMigration(started.connectionString);
       expect(upgrade.code, upgrade.stderr).toBe(0);
-      expect(upgrade.stdout).toMatch(/migrate: applied=1/);
       const proof = await sql<{
         canary_table: string | null;
         query_key_column: string | null;

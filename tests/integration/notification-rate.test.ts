@@ -51,7 +51,7 @@ describe("persistent notification rate", () => {
       `admin-payment-settled:${orderId}`,
     );
     const unrelated = await seedDelivery("3002", "unrelated");
-    const sender = { send: vi.fn(async () => undefined) };
+    const sender = { send: vi.fn(async () => ({ messageId: "notification-rate-off" })) };
 
     await runNotificationDeliveryLane({
       db: ctx.db,
@@ -102,7 +102,7 @@ describe("persistent notification rate", () => {
     await seedDelivery("1002");
     let paused = false;
     const sleeps: number[] = [];
-    const sender = { send: vi.fn(async () => undefined) };
+    const sender = { send: vi.fn(async () => ({ messageId: "notification-rate-pause" })) };
     await runNotificationDeliveryLane({
       db: ctx.db,
       responder: sender,
@@ -152,7 +152,7 @@ describe("persistent notification rate", () => {
     expect([sentClaim?.id, staleClaim?.id, dueClaim?.id].sort()).toEqual(
       [sentBeforeRestart, stale, stillDue].sort(),
     );
-    const sender = { send: vi.fn(async () => undefined) };
+    const sender = { send: vi.fn(async () => ({ messageId: "notification-rate-restart" })) };
 
     await runNotificationDeliveryLane({
       db: ctx.db,

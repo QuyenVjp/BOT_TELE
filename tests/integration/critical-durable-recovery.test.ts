@@ -454,10 +454,14 @@ describe("critical durable recovery", () => {
   it("re-arms OrderPaid when its only SUBMITTED intent has not posted", async () => {
     const seeded = await supplierOrder("SUBMITTED", 0);
     const id = await deadOutbox("OrderPaid", seeded.orderId);
-    const beforeRecovery = new Date();
+    const beforeRecovery = await sql<{ timestamp: Date }>`
+      select now() as timestamp
+    `.execute(ctx.db);
 
     const result = await recoverCriticalJob(ctx.db, { family: "outbox", id, ...operator });
-    const afterRecovery = new Date();
+    const afterRecovery = await sql<{ timestamp: Date }>`
+      select now() as timestamp
+    `.execute(ctx.db);
 
     expect(result).toEqual({ ok: true, family: "outbox", id, recovered: true });
     const row = await sql<{
@@ -499,8 +503,12 @@ describe("critical durable recovery", () => {
     });
     const nextAttemptAt = row.rows[0]?.outbox_next_attempt_at;
     expect(nextAttemptAt).toBeInstanceOf(Date);
-    expect(nextAttemptAt?.getTime()).toBeGreaterThanOrEqual(beforeRecovery.getTime());
-    expect(nextAttemptAt?.getTime()).toBeLessThanOrEqual(afterRecovery.getTime());
+    expect(nextAttemptAt?.getTime()).toBeGreaterThanOrEqual(
+      beforeRecovery.rows[0]!.timestamp.getTime(),
+    );
+    expect(nextAttemptAt?.getTime()).toBeLessThanOrEqual(
+      afterRecovery.rows[0]!.timestamp.getTime(),
+    );
   });
 
   it("keeps OrderPaid dead when a supplier order already fulfilled", async () => {

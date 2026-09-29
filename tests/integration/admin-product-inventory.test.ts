@@ -247,6 +247,7 @@ describe("admin product creation and selected-variant inventory import", () => {
     const result = await processNotificationDeliveryClaim(ctx.db, claim!, {
       send: async () => {
         sent += 1;
+        return { messageId: "stock-announcement" };
       },
     });
     expect(result).toBe("SENT");

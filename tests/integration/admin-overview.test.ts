@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { getAdminOverview, vietnamDayStart } from "../../src/modules/admin/overview.js";
+import { createWalletLedgerService } from "../../src/modules/wallet/ledger.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
@@ -242,9 +243,39 @@ describe("admin overview", () => {
       `.execute(ctx.db);
     }
 
+    const walletOrderId = await addOrder(seedRow, {
+      status: "PROCESSING",
+      priceVnd: 199000,
+      createdAt: now,
+      fulfillmentType: "MANUAL_FULFILLMENT",
+    });
+    await sql`
+      insert into manual_fulfillment_task
+        (id, order_id, customer_id, variant_id, fulfillment_type, instructions, status)
+      values (${newId()}, ${walletOrderId}, ${seedRow.customerId}, ${seedRow.realVariantId},
+        'MANUAL_FULFILLMENT', 'Owner fulfills privately', 'OPEN')
+    `.execute(ctx.db);
+    const walletLedger = createWalletLedgerService(ctx.db);
+    const topup = await walletLedger.credit({
+      customerId: seedRow.customerId,
+      amountVnd: 199000n,
+      idempotencyKey: "topup:manual-overview-fixture",
+      correlationId: "manual-overview-fixture-topup",
+      reason: "TEST_FIXTURE",
+    });
+    expect(topup.ok).toBe(true);
+    const purchase = await walletLedger.debit({
+      customerId: seedRow.customerId,
+      amountVnd: 199000n,
+      idempotencyKey: `purchase:${walletOrderId}:manual-overview-fixture`,
+      correlationId: "manual-overview-fixture-purchase",
+      reason: "TEST_FIXTURE",
+    });
+    expect(purchase.ok).toBe(true);
+
     const overview = await getAdminOverview(ctx.db, now);
 
-    expect(overview.manualOrdersNeedingWork).toBe(1);
+    expect(overview.manualOrdersNeedingWork).toBe(2);
   });
 
   it("counts open and manual-review tickets as new work", async () => {

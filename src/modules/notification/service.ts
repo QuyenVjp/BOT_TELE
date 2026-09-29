@@ -793,11 +793,14 @@ export async function markNotificationSent(
     )
     update notification_delivery d
     set status = case
-          when c.needs_followup and coalesce(${messageId}, d.message_id) is null then 'SEND_UNCERTAIN'
+          when coalesce(${messageId}, d.message_id) is null then 'SEND_UNCERTAIN'
           when c.needs_followup then 'RETRY'
           else 'SENT'
         end,
-        sent_at = case when c.needs_followup then d.sent_at else now() end,
+        sent_at = case
+          when c.needs_followup or coalesce(${messageId}, d.message_id) is null then d.sent_at
+          else now()
+        end,
         message_id = coalesce(${messageId}, d.message_id),
         next_attempt_at = case
           when c.needs_followup and coalesce(${messageId}, d.message_id) is not null then now()
@@ -806,6 +809,7 @@ export async function markNotificationSent(
         last_error = case
           when c.needs_followup and coalesce(${messageId}, d.message_id) is null
             then 'followup_message_identity_missing'
+          when coalesce(${messageId}, d.message_id) is null then 'message_identity_missing'
           else null
         end,
         claimed_by = null, claim_expires_at = null
@@ -1966,6 +1970,15 @@ export async function handleNotificationOutboxEvent(
   const ticketAdmin = ticketOpenedAdminAlert(event);
   const warrantyCustomer = warrantyCustomerNotice(event);
   const manualOrderId = eventPayloadString(event, "orderId");
+
+  if (
+    event.eventType === "PaymentSettled" &&
+    !manualOrderId &&
+    eventPayloadString(event, "preorderId") &&
+    (event.payloadRedacted.leg === "DEPOSIT" || event.payloadRedacted.leg === "BALANCE")
+  )
+    return { kind: "PUBLISHED" };
+
   const manualOrderEvent = [
     "OrderCreated",
     "PaymentSettled",

@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
+import { TelegramRetryableError } from "../../src/bot/grammy-responder.js";
 import { enqueueOutboxEvent } from "../../src/infrastructure/outbox/repository.js";
 import { drainOutboxOnce } from "../../src/infrastructure/outbox/worker.js";
 import { createCallbackTokenCodec } from "../../src/bot/callback-codec.js";
@@ -580,7 +581,7 @@ describe("notification service", () => {
     const [claim] = await claimNotificationDeliveries(ctx.db, 1);
 
     const result = await processNotificationDeliveryClaim(ctx.db, claim!, {
-      send: async () => undefined,
+      send: async () => ({ messageId: "accepted-notification" }),
     });
     const row = await sql<{
       status: string;
@@ -650,6 +651,7 @@ describe("notification service", () => {
     const result = await processNotificationDeliveryClaim(ctx.db, claim!, {
       send: async () => {
         sent += 1;
+        return { messageId: "accepted-notification" };
       },
     });
 
@@ -731,6 +733,7 @@ describe("notification service", () => {
       const result = await processNotificationDeliveryClaim(ctx.db, claim, {
         send: async () => {
           sent += 1;
+          return { messageId: "accepted-notification" };
         },
       });
       if (claim.class === "PURCHASE_ACTIVITY") expect(result).toBe("SUPPRESSED");
@@ -895,6 +898,92 @@ describe("notification service", () => {
     expect(await claimNotificationDeliveries(ctx.db, 1)).toEqual([]);
     expect(providerSends).toBe(1);
   });
+
+  it("retries adapter-classified Telegram 429 errors", async () => {
+    const customerId = await seedCustomer("111113");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "hello",
+      createdBy: "admin",
+      idempotencyKey: "adapter-retry-after",
+    });
+    await sql`insert into notification_delivery(id, campaign_id, customer_id, chat_id) values (${newId()}, ${campaignId}, ${customerId}, '111113')`.execute(
+      ctx.db,
+    );
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    const before = Date.now();
+    let rateLimitPause: number | undefined;
+    const result = await processNotificationDeliveryClaim(
+      ctx.db,
+      claim!,
+      {
+        send: async () => {
+          throw new TelegramRetryableError("Telegram rate limit", 3, 429);
+        },
+      },
+      {
+        maxAttempts: 5,
+        onRateLimit: async (seconds) => {
+          rateLimitPause = seconds;
+        },
+      },
+    );
+    const row = await sql<{ status: string; next_attempt_at: Date }>`
+      select status, next_attempt_at
+      from notification_delivery where id = ${claim!.id}
+    `.execute(ctx.db);
+
+    expect(result).toBe("RETRY");
+    expect(rateLimitPause).toBe(3);
+    expect(row.rows[0]?.status).toBe("RETRY");
+    expect(row.rows[0]!.next_attempt_at.getTime() - before).toBeGreaterThanOrEqual(2_000);
+  });
+
+  it("does not mark a fresh accepted send sent without its message identity", async () => {
+    const customerId = await seedCustomer("111114");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "hello",
+      createdBy: "admin",
+      idempotencyKey: "fresh-send-without-message-id",
+    });
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${deliveryId}, ${campaignId}, ${customerId}, '111114')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    let providerSends = 0;
+
+    const result = await processNotificationDeliveryClaim(ctx.db, claim!, {
+      send: async () => {
+        providerSends += 1;
+        return undefined;
+      },
+    });
+    const row = await sql<{
+      status: string;
+      message_id: string | null;
+      sent_at: Date | null;
+      last_error: string | null;
+    }>`
+      select status, message_id, sent_at, last_error
+      from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+
+    expect(result).toBe("SEND_UNCERTAIN");
+    expect(row.rows[0]).toEqual({
+      status: "SEND_UNCERTAIN",
+      message_id: null,
+      sent_at: null,
+      last_error: "message_identity_missing",
+    });
+    expect(await claimNotificationDeliveries(ctx.db, 1)).toEqual([]);
+    expect(providerSends).toBe(1);
+  });
+
   it("turns positive stock deltas into detailed restock deliveries for actual subscribers", async () => {
     const variantId = await seedVariant();
     const subscribed = await seedCustomer("111111");
@@ -954,6 +1043,7 @@ describe("notification service", () => {
     const result = await processNotificationDeliveryClaim(ctx.db, claim!, {
       send: async (input) => {
         sentButtons = input.message.buttons;
+        return { messageId: "restock-notification" };
       },
     });
 
@@ -1501,7 +1591,7 @@ describe("notification service", () => {
     expect(retry.rows[0]?.status).toBe("RETRY");
     expect(retry.rows[0]?.last_error).toBe("telegram_rate_limited");
     expect(retryDelayMs).toBeGreaterThan(9_000);
-    expect(retryDelayMs).toBeLessThanOrEqual(12_000);
+    expect(retryDelayMs).toBeLessThanOrEqual(12_500);
     expect(pauseRequests).toEqual([12]);
   });
 
@@ -1684,4 +1774,42 @@ describe("notification service", () => {
     expect(restartedWorkerClaims).toEqual([]);
     expect(providerSends).toBe(1);
   });
+
+  it.each(["DEPOSIT", "BALANCE"] as const)(
+    "acknowledges preorder %s settlements without an order instead of dead-lettering them",
+    async (leg) => {
+      const result = await handleNotificationOutboxEvent(ctx.db, {
+        id: newId(),
+        aggregateType: "PaymentIntent",
+        aggregateId: newId(),
+        aggregateVersion: 1,
+        eventType: "PaymentSettled",
+        payloadRedacted: { preorderId: newId(), leg },
+        attemptCount: 1,
+        claimedBy: "notification-outbox-test",
+        generation: 1,
+      });
+      const malformed = await handleNotificationOutboxEvent(ctx.db, {
+        id: newId(),
+        aggregateType: "PaymentIntent",
+        aggregateId: newId(),
+        aggregateVersion: 1,
+        eventType: "PaymentSettled",
+        payloadRedacted: { preorderId: newId(), leg: "INVALID" },
+        attemptCount: 1,
+        claimedBy: "notification-outbox-test",
+        generation: 1,
+      });
+      const campaigns = await sql<{ count: string }>`
+        select count(*)::text as count from notification_campaign
+      `.execute(ctx.db);
+
+      expect(result).toEqual({ kind: "PUBLISHED" });
+      expect(malformed).toEqual({
+        kind: "TERMINAL_REVIEW",
+        errorCode: "MANUAL_ORDER_ALERT_PAYLOAD_INVALID",
+      });
+      expect(campaigns.rows[0]?.count).toBe("0");
+    },
+  );
 });
