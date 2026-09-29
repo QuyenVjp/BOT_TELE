@@ -125,6 +125,17 @@ The next forward-only source migrations after the protected production head are:
 2. `093_supplier_catalog_platform.sql`
 3. `094_supplier_owner_canary.sql`
 4. `095_supplier_unknown_query_key_backfill.sql`
+5. `096_notification_send_uncertain.sql`
+
+Migration `096_notification_send_uncertain.sql` is worker-cutover-sensitive.
+Before applying it, stop every pre-096 worker/replica, prevent supervisors
+from restarting old binaries, and wait for all in-flight outbox/notification
+handlers and their database transactions to settle. Do not apply `096` while
+any old worker can process `PaymentSettled`. Verify migration success before
+starting only the worker built from the exact release SHA; leave pending
+outbox work unclaimed until that worker is active. Rolling or overlapping
+old/new workers across this migration is unsafe.
+
 
 This list records source order only; it is not an instruction to apply the
 migrations as a set. Apply a production migration only after that exact
@@ -141,14 +152,17 @@ owns the key.
 
 Source history and a PR merge are not deployment approval. No production
 migration is authorized by this task. Do not run production migrations from
-any artifact containing unapproved `094_supplier_owner_canary.sql` or
-`095_supplier_unknown_query_key_backfill.sql`; those migrations remain
-branch-only until separately approved through the production change process.
-The release sequence is linear only after that independent approval:
+any artifact containing unapproved
+`094_supplier_owner_canary.sql`,
+`095_supplier_unknown_query_key_backfill.sql`, or
+`096_notification_send_uncertain.sql`; each requires separate approval for
+the exact release artifact and window. The release sequence is linear only
+after that independent approval:
 automated CI and security gates → protected PR merge → build the exact clean
 SHA with an empty compiled migration directory → keep the store `CLOSED` and
 risky flags off → apply only the separately approved ordered migrations →
-restart the existing API/worker supervisors → verify `/health`, `/ready`, and
+start/restart the API and worker supervisors from that exact release SHA after
+migration success → verify `/health`, `/ready`, and
 `npm run preflight:production` → run direct live Telegram/browser smoke →
 enable one feature flag at a time with rollback evidence. Migration application
 must not wait on a first-sale or workbook write; those are separate acceptance
