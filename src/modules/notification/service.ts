@@ -828,12 +828,13 @@ export async function markNotificationSuppressed(
   id: string,
   generation: number,
   reason: string,
+  expectedStatus: "RETRY" | "SEND_UNCERTAIN",
 ): Promise<boolean> {
   const result = await sql<{ id: string }>`
     update notification_delivery
     set status = 'SUPPRESSED', last_error = ${reason.slice(0, 200)},
       claimed_by = null, claim_expires_at = null
-    where id = ${id} and status in ('RETRY', 'SEND_UNCERTAIN')
+    where id = ${id} and status = ${expectedStatus}
       and claim_generation = ${generation}
     returning id
   `.execute(exec);
@@ -975,6 +976,7 @@ export async function processNotificationDeliveryClaim(
       delivery.id,
       delivery.generation,
       "preference_opt_out",
+      "RETRY",
     ))
       ? "SUPPRESSED"
       : "STALE";
@@ -1013,6 +1015,7 @@ export async function processNotificationDeliveryClaim(
         delivery.id,
         delivery.generation,
         "chat_unreachable",
+        "SEND_UNCERTAIN",
       );
       if (changed)
         await sql`

@@ -14,6 +14,7 @@ import {
   getBroadcastStatus,
   getNotificationPreferences,
   handleNotificationOutboxEvent,
+  markNotificationSuppressed,
   markNotificationSent,
   NotificationPreSubmitError,
   processNotificationDeliveryClaim,
@@ -1508,6 +1509,73 @@ describe("notification service", () => {
       last_error: null,
       claim_generation: "1",
       claim_active: true,
+    });
+  });
+  it("does not suppress a delivery after its send fence is acquired", async () => {
+    const customerId = await seedCustomer("444108");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "PURCHASE_ACTIVITY",
+      queued: true,
+      content: "purchase notice",
+      createdBy: "system",
+      idempotencyKey: "notification-stale-preference-suppression",
+    });
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${deliveryId}, ${campaignId}, ${customerId}, '444108')
+    `.execute(ctx.db);
+    await setNotificationPreferences(ctx.db, { customerId, purchaseActivity: true });
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    let providerSends = 0;
+    let sendStarted!: () => void;
+    let releaseSend!: (response: unknown) => void;
+    const sendStartedPromise = new Promise<void>((resolve) => {
+      sendStarted = resolve;
+    });
+    const providerResponse = new Promise<unknown>((resolve) => {
+      releaseSend = resolve;
+    });
+
+    const inFlight = processNotificationDeliveryClaim(ctx.db, claim!, {
+      send: async () => {
+        providerSends += 1;
+        sendStarted();
+        return providerResponse;
+      },
+    });
+    await sendStartedPromise;
+    const fenced = await sql<{ status: string }>`
+      select status from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+    expect(fenced.rows[0]?.status).toBe("SEND_UNCERTAIN");
+
+    await setNotificationPreferences(ctx.db, { customerId, purchaseActivity: false });
+    const suppressed = await markNotificationSuppressed(
+      ctx.db,
+      claim!.id,
+      claim!.generation,
+      "preference_opt_out",
+      "RETRY",
+    );
+    expect(suppressed).toBe(false);
+
+    releaseSend({ messageId: "notification-race-safe" });
+    await expect(inFlight).resolves.toBe("SENT");
+    const persisted = await sql<{
+      status: string;
+      message_id: string | null;
+      last_error: string | null;
+    }>`
+      select status, message_id, last_error
+      from notification_delivery where id = ${deliveryId}
+    `.execute(ctx.db);
+
+    expect(providerSends).toBe(1);
+    expect(persisted.rows[0]).toEqual({
+      status: "SENT",
+      message_id: "notification-race-safe",
+      last_error: null,
     });
   });
 
