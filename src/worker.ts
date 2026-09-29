@@ -2197,6 +2197,12 @@ async function bootstrap(): Promise<void> {
       ...merchant,
       correlationId: input.correlationId,
     });
+    if (!presented.ok && presented.error === "UNSUPPORTED_FULFILLMENT_TYPE") {
+      return {
+        text: "Suất đặt cọc này không còn hỗ trợ thanh toán tự động. Vui lòng liên hệ hỗ trợ.",
+        buttons: [[{ text: "💬 Hỗ trợ", callbackData: "supp:open" }], ...preorderHomeButtons],
+      };
+    }
     if (!presented.ok) {
       return {
         text: "Chưa tạo được mã thanh toán cho suất đặt cọc này. Vui lòng mở “Đặt cọc của tôi” để thử lại.",

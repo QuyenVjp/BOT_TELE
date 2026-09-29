@@ -10,6 +10,7 @@ import {
   lockPreorderForSettlement,
   preorderPayableLeg,
   recordPreorderPaymentIntent,
+  supportsPreorder,
   type PreorderSettlementTarget,
 } from "../commerce/preorder.js";
 import { canPurchase, getStoreMode } from "../commerce/store-mode.js";
@@ -348,7 +349,10 @@ export type PresentPreorderPaymentResult =
       productName: string;
       variantName: string;
     }
-  | { ok: false; error: "NOT_FOUND" | "NOT_PAYABLE" | "AMOUNT_INVALID" };
+  | {
+      ok: false;
+      error: "NOT_FOUND" | "NOT_PAYABLE" | "AMOUNT_INVALID" | "UNSUPPORTED_FULFILLMENT_TYPE";
+    };
 
 /** Bounded deposit-QR window: long enough to open a bank app, short enough to free the queue. */
 const MIN_PREORDER_TTL_SECONDS = 300;
@@ -370,6 +374,9 @@ export async function presentPreorderPayment(
   return withTransaction(db, async (trx) => {
     const reservation = await lockPreorderForSettlement(trx, input.reservationId, input.customerId);
     if (!reservation) return { ok: false, error: "NOT_FOUND" };
+    if (!supportsPreorder(reservation.fulfillmentType)) {
+      return { ok: false, error: "UNSUPPORTED_FULFILLMENT_TYPE" };
+    }
     if (preorderPayableLeg(reservation.status) !== input.leg) {
       return { ok: false, error: "NOT_PAYABLE" };
     }
@@ -497,7 +504,7 @@ const SIGNATURE_STATUS = "VERIFIED";
  * authoritative. All money-safety outcomes are explicit:
  *  - reservation still payable → allocation + intent SUCCEEDED + PaymentSettled,
  *    then the domain transition (deposit confirmed / purchase finalised + OrderPaid);
- *  - reservation no longer payable (forfeited, cancelled, already settled) →
+ *  - reservation no longer payable (unsupported type, forfeited, cancelled, already settled) →
  *    ops discrepancy, never a silent settle and never a silent drop.
  * A replay of the same evidence never reaches here (bank_transaction dedupe), and
  * a second distinct transfer against a settled intent is a `decideMatch`
@@ -517,17 +524,17 @@ async function settlePreorderLeg(
   const payable =
     leg !== null &&
     reservation !== null &&
+    supportsPreorder(reservation.fulfillmentType) &&
     (leg === "DEPOSIT"
       ? reservation.status === "WAITING_DEPOSIT"
       : preorderPayableLeg(reservation.status) === "BALANCE");
-
   if (!payable) {
     const discrepancyId = await insertDiscrepancy(trx, {
       type: "UNMATCHED",
       bankTransactionId: input.bankTransactionId,
       paymentIntentId: intent.id,
       orderId: null,
-      reason: `money arrived for non-payable preorder leg=${leg ?? "UNKNOWN"} status=${reservation?.status ?? "MISSING"}`,
+      reason: `money arrived for non-payable preorder leg=${leg ?? "UNKNOWN"} status=${reservation?.status ?? "MISSING"} fulfillmentType=${reservation?.fulfillmentType ?? "MISSING"}`,
       owner: "payments",
     });
     // A live intent is flagged so it cannot settle later; an already non-live

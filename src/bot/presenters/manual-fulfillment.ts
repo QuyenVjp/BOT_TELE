@@ -31,15 +31,28 @@ function amountLabel(amountVnd: string): string {
   return `${BigInt(amountVnd).toLocaleString("vi-VN")} ₫`;
 }
 
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  let end = maxLength - 1;
+  const last = value.charCodeAt(end - 1);
+  const next = value.charCodeAt(end);
+  if (last >= 0xd800 && last <= 0xdbff && next >= 0xdc00 && next <= 0xdfff) end--;
+  return `${value.slice(0, end)}…`;
+}
+
+function boundedLabel(value: string, maxLength: number): string {
+  return truncateText(value.replace(/\s+/gu, " ").trim(), maxLength);
+}
+
 function taskSummary(task: AdminManualFulfillmentTask): string {
-  return `• ${task.orderNumber} · ${task.productName} — ${task.variantName}\n  ${fulfillmentLabel(task.fulfillmentType)} · ${task.customerName} · ${amountLabel(task.amountVnd)} · chờ ${ageLabel(task.createdAt)}`;
+  return `• ${boundedLabel(task.orderNumber, 24)} · ${boundedLabel(task.productName, 24)} — ${boundedLabel(task.variantName, 24)}\n  ${fulfillmentLabel(task.fulfillmentType)} · ${boundedLabel(task.customerName, 24)} · ${amountLabel(task.amountVnd)} · chờ ${ageLabel(task.createdAt)}`;
 }
 
 export function presentAdminManualTasks(page: AdminManualFulfillmentTaskPage): PresentedMessage {
   const { tasks, offset, hasMore } = page;
   const buttons = tasks.map((task) => [
     {
-      text: `${statusLabel(task.status)} · ${task.orderNumber}`,
+      text: `${statusLabel(task.status)} · ${boundedLabel(task.orderNumber, 24)}`,
       callbackData: `admin:manual:view:${task.taskId}`,
     },
   ]);
@@ -71,13 +84,13 @@ export function presentAdminManualTaskDetail(input: {
   return {
     text: [
       "🛠 Tác vụ xử lý thủ công",
-      `Đơn: ${input.task.orderNumber}`,
-      `Khách: ${input.task.customerName}`,
-      `Sản phẩm: ${input.task.productName}`,
-      `Gói: ${input.task.variantName}`,
+      `Đơn: ${boundedLabel(input.task.orderNumber, 32)}`,
+      `Khách: ${boundedLabel(input.task.customerName, 96)}`,
+      `Sản phẩm: ${boundedLabel(input.task.productName, 96)}`,
+      `Gói: ${boundedLabel(input.task.variantName, 96)}`,
       `Số tiền: ${amountLabel(input.task.amountVnd)}`,
       `Loại xử lý: ${fulfillmentLabel(input.task.fulfillmentType)}`,
-      `Hướng dẫn: ${input.task.instructions}`,
+      `Hướng dẫn: ${truncateText(input.task.instructions, 2400)}`,
       `Đã chờ: ${ageLabel(input.task.createdAt)}`,
       `Trạng thái: ${statusLabel(input.task.status)}`,
     ].join("\n"),

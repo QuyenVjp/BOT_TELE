@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { getAdminOverview, vietnamDayStart } from "../../src/modules/admin/overview.js";
+import { listAdminManualFulfillmentTasks } from "../../src/modules/digital-goods/manual-fulfillment.js";
 import { createWalletLedgerService } from "../../src/modules/wallet/ledger.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -276,6 +277,57 @@ describe("admin overview", () => {
     const overview = await getAdminOverview(ctx.db, now);
 
     expect(overview.manualOrdersNeedingWork).toBe(2);
+  });
+
+  it("keeps paid open manual work counted after its product is archived", async () => {
+    const seedRow = await seed();
+    const now = new Date("2026-09-10T18:00:00.000Z");
+    const orderId = await addOrder(seedRow, {
+      status: "PROCESSING",
+      priceVnd: 199000,
+      createdAt: now,
+      fulfillmentType: "MANUAL_FULFILLMENT",
+    });
+    const taskId = newId();
+    await sql`
+      insert into manual_fulfillment_task
+        (id, order_id, customer_id, variant_id, fulfillment_type, instructions, status)
+      values (${taskId}, ${orderId}, ${seedRow.customerId}, ${seedRow.realVariantId},
+        'MANUAL_FULFILLMENT', 'Owner fulfills privately', 'OPEN')
+    `.execute(ctx.db);
+
+    const paymentIntentId = newId();
+    const bankTransactionId = newId();
+    await sql`
+      insert into payment_intent
+        (id, order_id, status, amount_vnd, merchant_account_id, transfer_content, expires_at, settled_at)
+      values (${paymentIntentId}, ${orderId}, 'SUCCEEDED', 199000, 'test-account',
+        'MANUAL-ARCHIVED', ${new Date(now.getTime() + 900_000).toISOString()}, ${now.toISOString()})
+    `.execute(ctx.db);
+    await sql`
+      insert into bank_transaction
+        (id, provider, provider_transaction_id, direction, merchant_account_id, amount_vnd,
+         transacted_at, raw_hash, signature_status, schema_version)
+      values (${bankTransactionId}, 'sepay', ${"txn-" + taskId}, 'IN', 'test-account',
+        199000, ${now.toISOString()}, ${"hash-" + taskId}, 'VERIFIED', '1.1.0')
+    `.execute(ctx.db);
+    await sql`
+      insert into payment_allocation
+        (id, bank_transaction_id, payment_intent_id, allocated_amount_vnd, status, decision_code, correlation_id)
+      values (${newId()}, ${bankTransactionId}, ${paymentIntentId}, 199000,
+        'SETTLED', 'EXACT_AMOUNT', ${"archived-manual-" + taskId})
+    `.execute(ctx.db);
+    await sql`
+      update product
+         set is_archived = true
+       where id = (select product_id from product_variant where id = ${seedRow.realVariantId})
+    `.execute(ctx.db);
+
+    const overview = await getAdminOverview(ctx.db, now);
+    const queue = await listAdminManualFulfillmentTasks(ctx.db);
+
+    expect(overview.manualOrdersNeedingWork).toBe(1);
+    expect(queue.tasks.map((task) => task.orderId)).toContain(orderId);
   });
 
   it("counts open and manual-review tickets as new work", async () => {

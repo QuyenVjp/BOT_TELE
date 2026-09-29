@@ -4,6 +4,11 @@ import {
   presentAdminManualTasks,
 } from "../../src/bot/presenters/manual-fulfillment.js";
 import type { AdminManualFulfillmentTask } from "../../src/modules/digital-goods/manual-fulfillment.js";
+const MAX_PRODUCT_NAME = "P".repeat(2000);
+const MAX_VARIANT_NAME = "V".repeat(2000);
+const MAX_CUSTOMER_NAME = "C".repeat(2000);
+const INSTRUCTION_PREFIX = "SERVICE_INSTRUCTIONS_PREFIX:";
+const MAX_SERVICE_INSTRUCTIONS = `${INSTRUCTION_PREFIX}${"I".repeat(2000 - INSTRUCTION_PREFIX.length)}`;
 
 const sampleTask = (
   overrides: Partial<AdminManualFulfillmentTask> = {},
@@ -77,6 +82,28 @@ describe("presentAdminManualTasks", () => {
       { text: "Tiếp ➡️", callbackData: "admin:manual:page:40" },
     ]);
   });
+
+  it("keeps a full 20-task page within Telegram's 4096-character message limit", () => {
+    const tasks = Array.from({ length: 20 }, (_, index) =>
+      sampleTask({
+        taskId: `task-${index}`,
+        orderNumber: `ORD-${index}`,
+        productName: MAX_PRODUCT_NAME,
+        variantName: MAX_VARIANT_NAME,
+        customerName: MAX_CUSTOMER_NAME,
+      }),
+    );
+    const message = presentAdminManualTasks({ tasks, offset: 20, hasMore: true });
+
+    expect(message.text.length).toBeLessThanOrEqual(4096);
+    expect(message.buttons.slice(0, 20).map((row) => row[0]?.callbackData)).toEqual(
+      tasks.map((task) => `admin:manual:view:${task.taskId}`),
+    );
+    expect(message.buttons[20]).toEqual([
+      { text: "⬅️ Trước", callbackData: "admin:manual:page:0" },
+      { text: "Tiếp ➡️", callbackData: "admin:manual:page:40" },
+    ]);
+  });
 });
 
 describe("presentAdminManualTaskDetail", () => {
@@ -121,6 +148,20 @@ describe("presentAdminManualTaskDetail", () => {
     expect(message.text).toContain(task.instructions);
     expect(message.text).not.toContain(task.taskId);
     expect(message.text).not.toContain(task.orderId);
+  });
+
+  it("keeps maximum-sized task details within Telegram's limit and preserves instruction prefix", () => {
+    const message = presentAdminManualTaskDetail({
+      task: sampleTask({
+        productName: MAX_PRODUCT_NAME,
+        variantName: MAX_VARIANT_NAME,
+        customerName: MAX_CUSTOMER_NAME,
+        instructions: MAX_SERVICE_INSTRUCTIONS,
+      }),
+    });
+
+    expect(message.text.length).toBeLessThanOrEqual(4096);
+    expect(message.text).toContain(INSTRUCTION_PREFIX);
   });
 
   it("omits completion for completed tasks", () => {

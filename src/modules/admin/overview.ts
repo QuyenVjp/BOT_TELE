@@ -5,7 +5,8 @@ import { manualServicePaymentEvidence } from "../digital-goods/manual-fulfillmen
 /**
  * Admin overview aggregate (goal §71 summary block, §136 business overview).
  *
- * Read-only. Revenue and order figures exclude test and archived products; support workload also
+ * Read-only. Revenue and general order figures exclude test and archived products. Manual work
+ * includes paid open obligations for archived products but excludes test/canary rows; support workload
  * excludes customers on the explicit test allowlist.
  *
  * The Vietnam day boundary is computed in JS from an injected `now` so the window is
@@ -74,7 +75,7 @@ export async function getAdminOverview(
        where o.fulfillment_type = 'MANUAL_FULFILLMENT'
          and m.fulfillment_type = 'MANUAL_FULFILLMENT'
          and o.status = 'PROCESSING' and m.status = 'OPEN'
-         and not p.is_test and not p.is_archived
+         and not p.is_test
          and p.name_vi not ilike '%canary%'
          and not exists (
            select 1 from channel_identity ci
