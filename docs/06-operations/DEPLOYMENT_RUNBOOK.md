@@ -168,13 +168,21 @@ not edit older migration files.
 ## Owner supplier canary commissioning
 
 This is a future, separately owner-approved one-shot procedure, not permission
-to change production flags during PR review. Keep the store `CLOSED`; customer
-publication and delivery remain disabled.
+to change production flags during PR review. Keep the store `CLOSED`; it blocks
+purchases but not public catalog browsing. Before commissioning, verify that the
+mapped variant is unpublished; withdraw it through the owner catalog workflow if
+needed. The canary must not publish the variant or expose provider delivery to
+customers.
+
+Before enabling any of these flags, verify the persisted store mode is `CLOSED`
+on the root owner's private Telegram `Store control` screen; it reads
+`store_control.id='main'`. If it is not closed, choose `Đóng cửa hàng`, complete
+the durable confirmation, reopen `Store control`, and verify `CLOSED` before
+continuing. `STORE` is not a runtime environment key and cannot close the store.
 
 The isolated canary configuration is:
 
 ```text
-STORE=CLOSED
 SUPPLIER_PURCHASE_ENABLED=true
 SUPPLIER_COMMERCE_PURCHASE_ENABLED=false
 QCST_PROVIDER_ENABLED=true
