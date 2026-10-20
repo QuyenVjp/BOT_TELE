@@ -24,6 +24,15 @@ const PUBLIC_CATEGORY_SLUG_SQL = sql.join(
   sql`, `,
 );
 
+const SUPPLIER_READY_SQL = sql`
+  exists (
+    select 1
+    from supplier_sku ss
+    join supplier s on s.id = ss.supplier_id
+    where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
+  )
+`;
+
 /**
  * Catalog persistence + cursor queries (FR-002).
  *
@@ -95,10 +104,7 @@ export const VARIANT_READY_SQL = sql`
     when v.fulfillment_type = 'DIGITAL_FILE' then exists (
       select 1 from variant_file_artifact f where f.variant_id = v.id and f.is_active
     )
-    when v.fulfillment_type = 'SUPPLIER_API' then exists (
-      select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-      where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-    )
+    when v.fulfillment_type = 'SUPPLIER_API' then ${SUPPLIER_READY_SQL}
     when v.fulfillment_type in ('MANUAL_FULFILLMENT','UNLIMITED_SERVICE') then exists (
       select 1 from variant_service_fulfillment sf
       where sf.variant_id = v.id and sf.fulfillment_type = v.fulfillment_type and sf.is_active
@@ -110,10 +116,7 @@ export const VARIANT_READY_SQL = sql`
 export const SELLABLE_ROUTE_SQL = sql`
   (
     (v.stock_policy in ('LOCAL_ONLY','LOCAL_THEN_SUPPLIER') and v.fulfillment_type <> 'SUPPLIER_API')
-    or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and exists (
-      select 1 from supplier_sku ss join supplier s on s.id = ss.supplier_id
-      where ss.variant_id = v.id and ss.is_active and s.status = 'ACTIVE'
-    ))
+    or (v.stock_policy = 'SUPPLIER_ONLY' and v.fulfillment_type = 'SUPPLIER_API' and ${SUPPLIER_READY_SQL})
   )
 `;
 
@@ -388,6 +391,7 @@ export async function getVariantById(
       v.low_stock_threshold,
       q.available_quantity::int as available_quantity,
       ${VARIANT_READY_SQL} as is_ready,
+      coalesce(v.preorder_enabled, false) as preorder_enabled,
       p.description_vi, p.what_customer_receives_vi, p.usage_instructions_vi,
       p.delivery_eta_vi, p.warranty_vi, p.support_vi,
       v.compare_at_price_vnd::text as compare_at_price_vnd,

@@ -1,9 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { createCheckoutCallbacks } from "../../src/bot/callbacks/checkout.js";
-import { createBuyNowCallbackCodec } from "../../src/bot/callback-codec.js";
+import {
+  createBuyNowCallbackCodec,
+  createCallbackTokenCodec,
+} from "../../src/bot/callback-codec.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 
 let ctx: PgTestContext;
 const TELEGRAM_USER_ID = "123456789";
@@ -23,6 +27,7 @@ beforeEach(async () => {
       product_variant, product, category, customer cascade
   `.execute(ctx.db);
   await sql`drop function if exists test_lose_reservation() cascade`.execute(ctx.db);
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 interface Seed {
@@ -39,7 +44,7 @@ async function seed(withAsset: boolean): Promise<Seed> {
   const variantId = newId();
   const assetId = withAsset ? newId() : null;
   const price = 199000;
-  const slug = categoryId.slice(-8);
+  const slug = "ai";
 
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
     ctx.db,
@@ -53,10 +58,10 @@ async function seed(withAsset: boolean): Promise<Seed> {
   await sql`
     insert into product_variant
       (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
-       stock_policy, resale_evidence_id)
+       stock_policy, resale_evidence_id, fulfillment_type)
     values
       (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', ${price}, 'P1M',
-       'CREDENTIAL', 'LOCAL_ONLY', 'RES-1')
+       'CREDENTIAL', 'LOCAL_ONLY', 'RES-1', 'STOCK_ACCOUNT')
   `.execute(ctx.db);
   await sql`
     insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
@@ -80,8 +85,14 @@ async function seed(withAsset: boolean): Promise<Seed> {
   return { customerId, variantId, assetId, price };
 }
 
-function buyFromSignedCallback(seed: Seed, correlationId: string) {
+async function renderBuyCallback(seed: Seed, correlationId: string) {
   const callbackCodec = createBuyNowCallbackCodec({
+    key: CALLBACK_KEY,
+    keyVersion: 1,
+    ttlSeconds: 900,
+    clockSkewSeconds: 5,
+  });
+  const tokenCodec = createCallbackTokenCodec({
     key: CALLBACK_KEY,
     keyVersion: 1,
     ttlSeconds: 900,
@@ -97,15 +108,29 @@ function buyFromSignedCallback(seed: Seed, correlationId: string) {
       bankName: "MB Bank",
     },
     callbackCodec,
+    tokenCodec,
     resolveCustomerId: async (telegramUserId) =>
       telegramUserId === TELEGRAM_USER_ID ? seed.customerId : null,
   });
-  return callbacks.buyNowFromCallback({
-    callbackData: callbackCodec.issue({
+  const preview = await callbacks.previewFromCallback({
+    callbackData: tokenCodec.issue({
+      action: "CHECKOUT_PREVIEW",
       telegramUserId: TELEGRAM_USER_ID,
-      variantId: seed.variantId,
-      expectedPriceVnd: seed.price,
+      resourceId: seed.variantId,
     }),
+    telegramUserId: TELEGRAM_USER_ID,
+    correlationId: `${correlationId}-preview`,
+  });
+  const callbackData = preview.buttons
+    .flat()
+    .find((button) => button.text === "🏦 VietQR")?.callbackData;
+  if (!callbackData) throw new Error("checkout preview did not issue VietQR callback");
+  return { callbacks, callbackData, correlationId };
+}
+async function buyFromSignedCallback(seed: Seed, correlationId: string) {
+  const flow = await renderBuyCallback(seed, correlationId);
+  return flow.callbacks.buyNowFromCallback({
+    callbackData: flow.callbackData,
     telegramUserId: TELEGRAM_USER_ID,
     correlationId,
   });
@@ -121,9 +146,15 @@ async function assertNoOrphans(): Promise<void> {
 }
 
 describe("checkout typed stock outcomes", () => {
-  it("renders NO_STOCK copy once for an empty shelf", async () => {
-    const s = await seed(false);
-    const msg = await buyFromSignedCallback(s, "stock-empty");
+  it("renders NO_STOCK copy once when stock disappears after preview", async () => {
+    const s = await seed(true);
+    const flow = await renderBuyCallback(s, "stock-empty");
+    await sql`delete from digital_asset where id = ${s.assetId}`.execute(ctx.db);
+    const msg = await flow.callbacks.buyNowFromCallback({
+      callbackData: flow.callbackData,
+      telegramUserId: TELEGRAM_USER_ID,
+      correlationId: "stock-empty",
+    });
     expect(msg.text).toBe(
       "Sản phẩm hiện đã hết hàng. Bạn chưa bị trừ tiền và chưa có phiên thanh toán.",
     );

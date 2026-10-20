@@ -1232,6 +1232,32 @@ async function handoffEvidenceForClaim(
   return readDeliveryNotificationHandoffEvidence(row.rows[0]?.payload_redacted);
 }
 
+async function reconcileProviderEvidence(db: Db, claim: DeliveryNotificationClaim): Promise<void> {
+  const linked = await sql<{ order_id: string }>`
+    select b.order_id
+    from delivery_bundle b
+    where b.id = ${claim.bundleId} and b.customer_id = ${claim.customerId}
+    limit 1
+  `.execute(db);
+  const linkedRow = linked.rows[0];
+  if (!linkedRow) throw new Error("DELIVERY_PROVIDER_EVIDENCE_RECONCILIATION_FAILED");
+  const orderId = linkedRow.order_id;
+  const resolved = await withTransaction(db, (trx) =>
+    reconcilePaidDeliveryDeliveredInTransaction(trx, {
+      orderId,
+      actorId: "delivery-worker",
+      actorType: "SYSTEM",
+      reason: "Finalize delivery after durable Telegram provider success.",
+      correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
+      requestId: claim.id,
+      handoffId: claim.id,
+      claimOwner: claim.owner,
+      claimGeneration: claim.generation,
+    }),
+  );
+  if (!resolved.ok) throw new Error("DELIVERY_PROVIDER_EVIDENCE_RECONCILIATION_FAILED");
+}
+
 async function markDeliveryNotificationSent(
   db: Db,
   claim: DeliveryNotificationClaim,
@@ -1320,28 +1346,7 @@ export async function processDeliveryNotificationBatch(input: {
     try {
       const handoffEvidence = await handoffEvidenceForClaim(input.db, claim);
       if (handoffEvidence.provider) {
-        const linked = await sql<{ order_id: string }>`
-          select b.order_id
-          from delivery_bundle b
-          where b.id = ${claim.bundleId} and b.customer_id = ${claim.customerId}
-          limit 1
-        `.execute(input.db);
-        const resolved = linked.rows[0]
-          ? await withTransaction(input.db, (trx) =>
-              reconcilePaidDeliveryDeliveredInTransaction(trx, {
-                orderId: linked.rows[0]!.order_id,
-                actorId: "delivery-worker",
-                actorType: "SYSTEM",
-                reason: "Finalize delivery after durable Telegram provider success.",
-                correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
-                requestId: claim.id,
-                handoffId: claim.id,
-                claimOwner: claim.owner,
-                claimGeneration: claim.generation,
-              }),
-            )
-          : { ok: false as const, code: "RECONCILIATION_NOT_SAFE" as const };
-        if (!resolved.ok) throw new Error("DELIVERY_PROVIDER_EVIDENCE_RECONCILIATION_FAILED");
+        await reconcileProviderEvidence(input.db, claim);
         sent += 1;
         continue;
       }
@@ -1438,28 +1443,7 @@ export async function processDeliveryNotificationBatch(input: {
       if (!(await persistDeliveryNotificationProviderEvidence(input.db, claim, provider))) {
         throw new Error("DELIVERY_PROVIDER_EVIDENCE_PERSIST_FAILED");
       }
-      const linked = await sql<{ order_id: string }>`
-        select b.order_id
-        from delivery_bundle b
-        where b.id = ${claim.bundleId} and b.customer_id = ${claim.customerId}
-        limit 1
-      `.execute(input.db);
-      const resolved = linked.rows[0]
-        ? await withTransaction(input.db, (trx) =>
-            reconcilePaidDeliveryDeliveredInTransaction(trx, {
-              orderId: linked.rows[0]!.order_id,
-              actorId: "delivery-worker",
-              actorType: "SYSTEM",
-              reason: "Finalize delivery after durable Telegram provider success.",
-              correlationId: `delivery-notification:${claim.id}:${claim.generation}`,
-              requestId: claim.id,
-              handoffId: claim.id,
-              claimOwner: claim.owner,
-              claimGeneration: claim.generation,
-            }),
-          )
-        : { ok: false as const, code: "RECONCILIATION_NOT_SAFE" as const };
-      if (!resolved.ok) throw new Error("DELIVERY_PROVIDER_EVIDENCE_RECONCILIATION_FAILED");
+      await reconcileProviderEvidence(input.db, claim);
       sent += 1;
     } catch (error) {
       const evidence = await handoffEvidenceForClaim(input.db, claim);

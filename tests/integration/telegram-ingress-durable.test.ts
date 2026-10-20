@@ -1,11 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { sql } from "kysely";
+import { createCallbackTokenCodec } from "../../src/bot/callback-codec.js";
 import { createApp } from "../../src/app.js";
 import {
   createPostgresTelegramInbox,
   processTelegramInboxBatch,
   type TelegramCommandEnvelope,
 } from "../../src/infrastructure/inbox/telegram.js";
+import { newId } from "../../src/shared/ids/index.js";
 import { createPostgresRateLimiter } from "../../src/modules/risk/service.js";
 import type { Vault } from "../../src/infrastructure/vault/port.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
@@ -97,6 +99,60 @@ describe("durable Telegram inbox T121/T126", () => {
       expect(JSON.stringify(stored.rows[0])).not.toContain("pasted-secret");
       expect(JSON.stringify(stored.rows[0])).not.toContain("must-not-persist");
       expect(stored.rows[0]?.raw_hash).toMatch(/^[a-f0-9]{64}$/);
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("classifies signed support callbacks as SUPPORT at webhook ingress", async () => {
+    const inbox = createPostgresTelegramInbox(ctx.db);
+    const app = await createApp({
+      db: ctx.db,
+      vault: fakeVault(),
+      telegram: {
+        path: "/telegram/webhook",
+        secretToken: WEBHOOK_HEADER_VALUE,
+        inbox,
+      },
+      sepay: { path: "/sepay", handler: vi.fn() },
+      bodyLimitBytes: 4096,
+    });
+    const callbackData = createCallbackTokenCodec({
+      key: "test-only-support-callback-key-material",
+      keyVersion: 1,
+      ttlSeconds: 900,
+      clockSkewSeconds: 5,
+    }).issue({
+      action: "SUPPORT_TICKET_CLOSE",
+      resourceId: newId(),
+      telegramUserId: "123456789",
+    });
+    try {
+      const response = await app.inject({
+        method: "POST",
+        url: "/telegram/webhook",
+        headers: HEADERS,
+        payload: {
+          update_id: 102,
+          callback_query: {
+            id: "support-close-callback",
+            from: { id: 123456789 },
+            data: callbackData,
+            message: {
+              message_id: 11,
+              chat: { id: 123456789, type: "private" },
+            },
+          },
+        },
+      });
+      expect(response.statusCode).toBe(200);
+      const stored = await sql<{ envelope: TelegramCommandEnvelope }>`
+        select envelope
+        from webhook_inbox
+        where source_event_id = '102'
+      `.execute(ctx.db);
+
+      expect(stored.rows[0]?.envelope).toMatchObject({ action: "SUPPORT" });
     } finally {
       await app.close();
     }

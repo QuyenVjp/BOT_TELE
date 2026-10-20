@@ -56,7 +56,12 @@ function dispatcherFor(uiSurface?: {
     support: {
       reasonMenu: vi.fn(() => presentSupportReasonMenu()),
       open: vi.fn(),
+      beginDescription: vi.fn(),
+      submitDescription: vi.fn(),
+      cancelDescription: vi.fn(),
       list: vi.fn(),
+      view: vi.fn(),
+      close: vi.fn(),
     },
     responder: { ack, send },
     ...(uiSurface ? { uiSurface } : {}),

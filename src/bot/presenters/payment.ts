@@ -1,4 +1,5 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
+import { CUSTOMER_BUTTONS } from "./customer-buttons.js";
 import { toBuffer } from "qrcode";
 import type { FulfillmentType } from "../../modules/catalog/fulfillment-type.js";
 import type { PaymentPresentation } from "../../modules/payments/vietqr.js";
@@ -35,7 +36,7 @@ export const PAYMENT_COPY = {
   cancel: "❌ Huỷ đơn",
   reopen: "🛒 Tạo lại thanh toán",
   support: "💬 Hỗ trợ",
-  mainMenu: "🏠 Menu",
+  mainMenu: CUSTOMER_BUTTONS.home,
   copyAccount: "📋 Sao chép STK",
   copyContent: "📋 Nội dung CK",
   copyAmount: "📋 Số tiền",
@@ -218,25 +219,36 @@ function joinCaptionBlocks(blocks: readonly CaptionBlock[]): string {
  * ascending drop rank until it fits, then truncate by CODE POINT as the last resort so a
  * surrogate pair is never split into a replacement character.
  */
-function renderCaption(blocks: readonly CaptionBlock[]): string {
-  let kept = blocks.filter((block) => block.lines.length > 0);
+interface RenderedCaption {
+  readonly text: string;
+  readonly fullText: string;
+  readonly fitsPhotoCaption: boolean;
+}
+
+function renderCaption(blocks: readonly CaptionBlock[]): RenderedCaption {
+  const kept = blocks.filter((block) => block.lines.length > 0);
   let text = joinCaptionBlocks(kept);
-  while ([...text].length > TELEGRAM_PHOTO_CAPTION_LIMIT) {
+  let codePoints = [...text];
+  while (codePoints.length > TELEGRAM_PHOTO_CAPTION_LIMIT) {
     let victim = -1;
     let victimRank = Number.POSITIVE_INFINITY;
-    kept.forEach((block, index) => {
+    for (const [index, block] of kept.entries()) {
       if (block.dropRank !== null && block.dropRank < victimRank) {
         victimRank = block.dropRank;
         victim = index;
       }
-    });
+    }
     if (victim < 0) break;
-    kept = kept.filter((_, index) => index !== victim);
+    kept.splice(victim, 1);
     text = joinCaptionBlocks(kept);
+    codePoints = [...text];
   }
-  return [...text].length > TELEGRAM_PHOTO_CAPTION_LIMIT
-    ? [...text].slice(0, TELEGRAM_PHOTO_CAPTION_LIMIT).join("")
-    : text;
+  const fitsPhotoCaption = codePoints.length <= TELEGRAM_PHOTO_CAPTION_LIMIT;
+  return {
+    text: fitsPhotoCaption ? text : codePoints.slice(0, TELEGRAM_PHOTO_CAPTION_LIMIT).join(""),
+    fullText: text,
+    fitsPhotoCaption,
+  };
 }
 
 /** Caption blocks in render order, each with the rank at which it may be dropped. */
@@ -291,7 +303,7 @@ export function buildPaymentCaption(
   context: PaymentScreenContext,
   profile: PaymentPresentationProfile,
 ): string {
-  return renderCaption(paymentCaptionBlocks(presentation, context, profile));
+  return renderCaption(paymentCaptionBlocks(presentation, context, profile)).text;
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -352,21 +364,28 @@ export async function presentPaymentScreen(
   if (status === "CANCELLED") return presentPaymentCancelled(presentation.orderNumber);
 
   const profile = resolveProfile(context);
-  const photo = await renderPaymentQrPng(presentation.payload, context.qrRenderer);
   const blocks = paymentCaptionBlocks(presentation, { ...context, status }, profile);
+  let renderedCaption = renderCaption(blocks);
+  const buttons = buildMobilePaymentKeyboard({
+    presentation,
+    profile,
+    refreshCallbackData: `pay:refresh:${presentation.orderNumber}`,
+    cancelCallbackData: `pay:cancel:${presentation.orderNumber}`,
+  });
+  if (!renderedCaption.fitsPhotoCaption) {
+    return { text: renderedCaption.fullText, buttons };
+  }
+
+  const photo = await renderPaymentQrPng(presentation.payload, context.qrRenderer);
   // No QR: the copy instruction is what carries the customer, so it outranks the product
   // name when the caption has to give something up (K7 does not rank this line).
   if (!photo) {
     blocks.push({ lines: ["", PAYMENT_COPY.qrFallback], dropRank: DROP_PRODUCT_LINE });
+    renderedCaption = renderCaption(blocks);
   }
   const message: PresentedMessage = {
-    text: renderCaption(blocks),
-    buttons: buildMobilePaymentKeyboard({
-      presentation,
-      profile,
-      refreshCallbackData: `pay:refresh:${presentation.orderNumber}`,
-      cancelCallbackData: `pay:cancel:${presentation.orderNumber}`,
-    }),
+    text: renderedCaption.text,
+    buttons,
   };
   if (photo) message.photo = photo;
   return message;
@@ -385,6 +404,9 @@ export interface PreorderPaymentScreenInput {
   depositVnd: bigint;
   balanceVnd: bigint;
   presentation: PaymentPresentation;
+  /** Canonical reservation cutoffs for the balance leg. */
+  balanceDueUntil?: Date | null;
+  holdUntil?: Date | null;
   /** Reservation id the refresh/back callbacks resolve against. */
   reservationId: string;
   qrRenderer?: (payload: string) => Promise<Buffer>;
@@ -397,6 +419,12 @@ export async function presentPreorderPaymentScreen(
   const bankLine = input.presentation.bankName
     ? `${PAYMENT_COPY.accountLabel}: ${input.presentation.accountNumber} — ${input.presentation.bankName} (${input.presentation.accountName})`
     : `${PAYMENT_COPY.accountLabel}: ${input.presentation.accountNumber} (${input.presentation.accountName})`;
+  const balanceDueLabel = input.balanceDueUntil
+    ? formatExpiryVietnam(input.balanceDueUntil.toISOString())
+    : "Xem «📌 Đặt cọc của tôi» để biết hạn hiện tại";
+  const holdUntilLabel = input.holdUntil
+    ? formatExpiryVietnam(input.holdUntil.toISOString())
+    : "Xem «📌 Đặt cọc của tôi» để biết hạn hiện tại";
   const lines =
     input.leg === "DEPOSIT"
       ? [
@@ -419,36 +447,44 @@ export async function presentPreorderPaymentScreen(
           `📦 Sản phẩm: ${input.productName} · ${input.variantName}`,
           `Còn phải trả: ${amount}`,
           `Tiền cọc đã trả: ${formatVnd(makeVnd(input.depositVnd))}`,
+          `Hạn thanh toán phần còn lại: ${balanceDueLabel}`,
+          `Hạn giữ hàng đến: ${holdUntilLabel}`,
           "",
           bankLine,
           `${PAYMENT_COPY.contentLabel}: ${input.presentation.transferContent}`,
           `${PAYMENT_COPY.expiresLabel}: ${formatExpiryVietnam(input.presentation.expiresAt)}`,
           "",
-          "Hàng đang được giữ riêng cho bạn. Vui lòng thanh toán trước hạn trên.",
+          "Hàng đang được giữ riêng cho bạn. Vui lòng thanh toán trước hạn thanh toán phần còn lại.",
           PAYMENT_COPY.noScreenshot,
         ];
   const profile = resolvePaymentPresentationProfile({
     patch: { showPaymentCheckButton: true, showCancelButton: false },
   });
+  const caption = lines.join("\n");
+  const buttons = buildMobilePaymentKeyboard({
+    presentation: input.presentation,
+    profile,
+    refreshCallbackData: `preorder:pay:${input.reservationId}`,
+    extraRows: [
+      [
+        { text: CUSTOMER_BUTTONS.preorders, callbackData: "cust:preorders" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "supp:open" },
+      ],
+    ],
+  });
+  if ([...caption].length > TELEGRAM_PHOTO_CAPTION_LIMIT) {
+    return { text: caption, buttons };
+  }
+
   const photo = await renderPaymentQrPng(input.presentation.payload, input.qrRenderer);
-  let caption = lines.join("\n");
+  let renderedCaption = caption;
   if (!photo) {
     const withFallback = `${caption}\n\n${PAYMENT_COPY.qrFallback}`;
-    caption = withFallback.length <= TELEGRAM_PHOTO_CAPTION_LIMIT ? withFallback : caption;
+    renderedCaption = withFallback.length <= TELEGRAM_PHOTO_CAPTION_LIMIT ? withFallback : caption;
   }
   const message: PresentedMessage = {
-    text: caption,
-    buttons: buildMobilePaymentKeyboard({
-      presentation: input.presentation,
-      profile,
-      refreshCallbackData: `preorder:pay:${input.reservationId}`,
-      extraRows: [
-        [
-          { text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" },
-          { text: PAYMENT_COPY.support, callbackData: "supp:open" },
-        ],
-      ],
-    }),
+    text: renderedCaption,
+    buttons,
   };
   if (photo) message.photo = photo;
   return message;
@@ -463,8 +499,8 @@ export function presentPaymentExpired(orderNumber: string): PresentedMessage {
     buttons: [
       [styledButton(PAYMENT_COPY.reopen, `pay:reopen:${orderNumber}`)],
       [
-        { text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` },
-        styledButton(PAYMENT_COPY.support, `sup:open:${orderNumber}`),
+        { text: CUSTOMER_BUTTONS.viewOrder, callbackData: `ord:view:${orderNumber}` },
+        styledButton(CUSTOMER_BUTTONS.support, `sup:open:${orderNumber}`),
       ],
     ],
   };
@@ -477,7 +513,7 @@ export function presentPaymentSettled(orderNumber: string): PresentedMessage {
       "\n",
     ),
     buttons: [
-      [{ text: "📦 Xem đơn", callbackData: `ord:view:${orderNumber}` }],
+      [{ text: CUSTOMER_BUTTONS.viewOrder, callbackData: `ord:view:${orderNumber}` }],
       ...navButtons(orderNumber),
     ],
   };
@@ -629,6 +665,6 @@ export function presentWalletHistory(input: {
   }
   return {
     text: lines.join("\n"),
-    buttons: [[{ text: "🏠 Trang chủ", callbackData: "shop:home" }]],
+    buttons: [[{ text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" }]],
   };
 }

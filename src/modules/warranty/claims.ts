@@ -101,6 +101,7 @@ interface OrderRow {
   price_vnd: string;
   warranty_days: number;
   completed_at: Date | string | null;
+  status: string;
 }
 
 /** The structured policy as it stands on the variant when a claim is opened. */
@@ -162,7 +163,7 @@ export async function openWarrantyClaim(input: OpenClaimInput): Promise<OpenClai
       }
     >`
       select o.id, o.order_number, o.customer_id, o.variant_id, o.price_vnd::text as price_vnd,
-             o.warranty_days, o.completed_at,
+             o.warranty_days, o.completed_at, o.status,
              v.warranty_enabled, v.warranty_proration_enabled, v.warranty_replacement_allowed,
              v.warranty_refund_allowed, v.warranty_replacement_behavior, v.warranty_coverage_vi,
              v.warranty_exclusions_vi, v.warranty_policy_version, v.warranty_sla_hours
@@ -171,11 +172,14 @@ export async function openWarrantyClaim(input: OpenClaimInput): Promise<OpenClai
       where o.id = ${input.orderId}
         and o.customer_id = ${input.customerId}
       limit 1
+      for update of o
     `.execute(trx);
+
     const order = orders.rows[0];
     // Ownership is in the query: a claim is never opened for someone else's order, and a
     // foreign order is indistinguishable from a missing one.
     if (!order) return { ok: false, code: "ORDER_NOT_FOUND" };
+    if (order.status !== "COMPLETED") return { ok: false, code: "NOT_FULFILLED" };
 
     // A variant without a warranty (or with the days set to zero) has no claim to open; the owner
     // can still handle the customer through ordinary support.
@@ -365,6 +369,8 @@ export interface AdminClaimActionInput {
   actor: RootActor;
   config: RootAdminConfig;
   claimId: string;
+  /** Exact claim version rendered with the admin action/confirmation. */
+  expectedVersion: number;
   correlationId: string;
   now?: Date | undefined;
 }
@@ -384,15 +390,31 @@ export type AdminClaimResult =
         | "NOT_ROOT_ADMIN"
         | "WRONG_CONTEXT"
         | "NOT_FOUND"
+        | "STALE_VERSION"
         | "ILLEGAL_STATE"
         | "INVALID_REASON"
         | "OUT_OF_STOCK"
         | "NOT_ALLOWED_BY_POLICY";
     };
 
+const STALE_VERSION_SIGNAL = Symbol("STALE_VERSION");
+
+async function runAdminClaimMutation(
+  input: AdminClaimActionInput,
+  fn: (trx: Executor) => Promise<AdminClaimResult>,
+): Promise<AdminClaimResult> {
+  try {
+    return await withTransaction(input.db, fn);
+  } catch (error) {
+    if (error === STALE_VERSION_SIGNAL) return { ok: false, code: "STALE_VERSION" };
+    throw error;
+  }
+}
+
 async function loadClaimForUpdate(exec: Executor, claimId: string) {
   const rows = await sql<{
     id: string;
+    version: number;
     status: WarrantyClaimStatus;
     customer_id: string;
     order_id: string;
@@ -407,7 +429,7 @@ async function loadClaimForUpdate(exec: Executor, claimId: string) {
     bank_name: string | null;
     account_holder: string | null;
   }>`
-    select id, status, customer_id, order_id, original_asset_id,
+    select id, version, status, customer_id, order_id, original_asset_id,
            calculated_refund_vnd::text as calculated_refund_vnd,
            approved_refund_vnd::text as approved_refund_vnd,
            refund_obligation_id, replacement_case_id, refund_allowed, replacement_allowed,
@@ -421,20 +443,26 @@ async function loadClaimForUpdate(exec: Executor, claimId: string) {
 async function setStatus(
   exec: Executor,
   claimId: string,
+  expectedVersion: number,
   status: WarrantyClaimStatus,
-  extra: { reviewedBy?: string; resolved?: boolean } = {},
-): Promise<void> {
+  extra: { reviewedBy?: string; resolved?: boolean; rejectionReason?: string } = {},
+): Promise<boolean> {
   // Postgres cannot infer a parameter's type inside `case when $1 is null`, so both are cast.
-  await sql`
+  const hasRejectionReason = extra.rejectionReason !== undefined;
+  const updated = await sql<{ id: string }>`
     update warranty_claim
     set status = ${status},
+        rejection_reason = case when ${hasRejectionReason}::boolean
+          then ${extra.rejectionReason ?? null}::text else rejection_reason end,
         reviewed_by = coalesce(${extra.reviewedBy ?? null}::text, reviewed_by),
         reviewed_at = case when ${extra.reviewedBy ?? null}::text is null then reviewed_at else now() end,
         resolved_at = case when ${extra.resolved === true}::boolean then now() else resolved_at end,
         updated_at = now(),
         version = version + 1
-    where id = ${claimId}
+    where id = ${claimId} and version = ${expectedVersion}
+    returning id
   `.execute(exec);
+  return Boolean(updated.rows[0]);
 }
 
 function guard(
@@ -453,12 +481,18 @@ export async function requestClaimInfo(
   if (!gate.ok) return gate;
   const note = input.note.trim().slice(0, 500);
   if (!note) return { ok: false, code: "INVALID_REASON" };
-  return withTransaction(input.db, async (trx) => {
+  return runAdminClaimMutation(input, async (trx) => {
     const claim = await loadClaimForUpdate(trx, input.claimId);
     if (!claim) return { ok: false, code: "NOT_FOUND" };
+    if (claim.version !== input.expectedVersion) return { ok: false, code: "STALE_VERSION" };
     if (!["SUBMITTED", "TRIAGE"].includes(claim.status))
       return { ok: false, code: "ILLEGAL_STATE" };
-    await setStatus(trx, claim.id, "WAITING_CUSTOMER", { reviewedBy: gate.actorId });
+    if (
+      !(await setStatus(trx, claim.id, input.expectedVersion, "WAITING_CUSTOMER", {
+        reviewedBy: gate.actorId,
+      }))
+    )
+      throw STALE_VERSION_SIGNAL;
     await appendClaimEvent(trx, claim.id, "WAITING_CUSTOMER", note);
     await appendAuditEvent(trx, {
       actorType: "ROOT_ADMIN",
@@ -491,14 +525,20 @@ export async function verifyClaimDefect(
 ): Promise<AdminClaimResult> {
   const gate = guard(input);
   if (!gate.ok) return gate;
-  return withTransaction(input.db, async (trx) => {
+  return runAdminClaimMutation(input, async (trx) => {
     const claim = await loadClaimForUpdate(trx, input.claimId);
     if (!claim) return { ok: false, code: "NOT_FOUND" };
+    if (claim.version !== input.expectedVersion) return { ok: false, code: "STALE_VERSION" };
     if (claim.status === "VERIFIED_DEFECT")
       return { ok: true, claimId: claim.id, status: claim.status, idempotent: true };
     if (!["SUBMITTED", "TRIAGE", "WAITING_CUSTOMER"].includes(claim.status))
       return { ok: false, code: "ILLEGAL_STATE" };
-    await setStatus(trx, claim.id, "VERIFIED_DEFECT", { reviewedBy: gate.actorId });
+    if (
+      !(await setStatus(trx, claim.id, input.expectedVersion, "VERIFIED_DEFECT", {
+        reviewedBy: gate.actorId,
+      }))
+    )
+      throw STALE_VERSION_SIGNAL;
     await appendClaimEvent(trx, claim.id, "VERIFIED_DEFECT", input.note ?? null);
     await appendAuditEvent(trx, {
       actorType: "ROOT_ADMIN",
@@ -529,17 +569,22 @@ export async function rejectClaim(
   if (!gate.ok) return gate;
   const reason = input.reason.trim().slice(0, 300);
   if (!reason) return { ok: false, code: "INVALID_REASON" };
-  return withTransaction(input.db, async (trx) => {
+  return runAdminClaimMutation(input, async (trx) => {
     const claim = await loadClaimForUpdate(trx, input.claimId);
     if (!claim) return { ok: false, code: "NOT_FOUND" };
+    if (claim.version !== input.expectedVersion) return { ok: false, code: "STALE_VERSION" };
     if (claim.status === "REJECTED")
       return { ok: true, claimId: claim.id, status: "REJECTED", idempotent: true };
     if (["REFUND_PAID", "RESOLVED", "CANCELLED"].includes(claim.status))
       return { ok: false, code: "ILLEGAL_STATE" };
-    await setStatus(trx, claim.id, "REJECTED", { reviewedBy: gate.actorId, resolved: true });
-    await sql`update warranty_claim set rejection_reason = ${reason} where id = ${claim.id}`.execute(
-      trx,
-    );
+    if (
+      !(await setStatus(trx, claim.id, input.expectedVersion, "REJECTED", {
+        reviewedBy: gate.actorId,
+        resolved: true,
+        rejectionReason: reason,
+      }))
+    )
+      throw STALE_VERSION_SIGNAL;
     await appendClaimEvent(trx, claim.id, "REJECTED", reason);
     await appendAuditEvent(trx, {
       actorType: "ROOT_ADMIN",
@@ -572,9 +617,10 @@ export async function approveClaimRefund(
 ): Promise<AdminClaimResult> {
   const gate = guard(input);
   if (!gate.ok) return gate;
-  return withTransaction(input.db, async (trx) => {
+  return runAdminClaimMutation(input, async (trx) => {
     const claim = await loadClaimForUpdate(trx, input.claimId);
     if (!claim) return { ok: false, code: "NOT_FOUND" };
+    if (claim.version !== input.expectedVersion) return { ok: false, code: "STALE_VERSION" };
     if (claim.refund_obligation_id)
       return {
         ok: true,
@@ -609,7 +655,7 @@ export async function approveClaimRefund(
       )
     `.execute(trx);
 
-    await sql`
+    const updated = await sql<{ id: string }>`
       update warranty_claim
       set status = 'REFUND_DUE',
           approved_refund_vnd = ${approved.toString()},
@@ -619,8 +665,10 @@ export async function approveClaimRefund(
           reviewed_at = now(),
           updated_at = now(),
           version = version + 1
-      where id = ${claim.id}
+      where id = ${claim.id} and version = ${input.expectedVersion}
+      returning id
     `.execute(trx);
+    if (!updated.rows[0]) throw STALE_VERSION_SIGNAL;
     await appendClaimEvent(trx, claim.id, "REFUND_DUE", `Hoàn dự kiến ${approved.toString()} đ`);
     await appendAuditEvent(trx, {
       actorType: "ROOT_ADMIN",
@@ -662,9 +710,10 @@ export async function markRefundPaid(
 ): Promise<AdminClaimResult> {
   const gate = guard(input);
   if (!gate.ok) return gate;
-  return withTransaction(input.db, async (trx) => {
+  return runAdminClaimMutation(input, async (trx) => {
     const claim = await loadClaimForUpdate(trx, input.claimId);
     if (!claim) return { ok: false, code: "NOT_FOUND" };
+    if (claim.version !== input.expectedVersion) return { ok: false, code: "STALE_VERSION" };
     if (claim.status === "REFUND_PAID")
       return { ok: true, claimId: claim.id, status: "REFUND_PAID", idempotent: true };
     if (claim.status !== "REFUND_DUE" || !claim.refund_obligation_id)
@@ -680,11 +729,17 @@ export async function markRefundPaid(
       where id = ${claim.refund_obligation_id} and status = 'OPEN'
       returning id
     `.execute(trx);
-    // Exactly-once: a replay finds the obligation already PAID and does not write a second record.
-    if (!paid.rows[0])
-      return { ok: true, claimId: claim.id, status: "REFUND_PAID", idempotent: true };
+    // The claim is still REFUND_DUE, so a failed OPEN→PAID transition is an illegal state rather
+    // than evidence that the payout was already recorded. A replay is idempotent only after the
+    // claim itself is positively observed as REFUND_PAID above.
+    if (!paid.rows[0]) return { ok: false, code: "ILLEGAL_STATE" };
 
-    await setStatus(trx, claim.id, "REFUND_PAID", { resolved: true });
+    if (
+      !(await setStatus(trx, claim.id, input.expectedVersion, "REFUND_PAID", {
+        resolved: true,
+      }))
+    )
+      throw STALE_VERSION_SIGNAL;
     await appendClaimEvent(trx, claim.id, "REFUND_PAID", "Shop đã xác nhận chuyển khoản");
     await appendAuditEvent(trx, {
       actorType: "ROOT_ADMIN",
@@ -721,9 +776,10 @@ export async function approveClaimReplacement(
 ): Promise<AdminClaimResult> {
   const gate = guard(input);
   if (!gate.ok) return gate;
-  return withTransaction(input.db, async (trx) => {
+  return runAdminClaimMutation(input, async (trx) => {
     const claim = await loadClaimForUpdate(trx, input.claimId);
     if (!claim) return { ok: false, code: "NOT_FOUND" };
+    if (claim.version !== input.expectedVersion) return { ok: false, code: "STALE_VERSION" };
     if (claim.status === "REPLACEMENT_APPROVED" && claim.replacement_case_id)
       return {
         ok: true,
@@ -770,7 +826,7 @@ export async function approveClaimReplacement(
       `.execute(trx);
     }
 
-    await sql`
+    const updated = await sql<{ id: string }>`
       update warranty_claim
       set status = 'REPLACEMENT_APPROVED',
           replacement_case_id = ${caseId},
@@ -778,8 +834,10 @@ export async function approveClaimReplacement(
           reviewed_at = now(),
           updated_at = now(),
           version = version + 1
-      where id = ${claim.id}
+      where id = ${claim.id} and version = ${input.expectedVersion}
+      returning id
     `.execute(trx);
+    if (!updated.rows[0]) throw STALE_VERSION_SIGNAL;
     await appendClaimEvent(trx, claim.id, "REPLACEMENT_APPROVED", "Đã duyệt đổi tài khoản");
     await appendAuditEvent(trx, {
       actorType: "ROOT_ADMIN",

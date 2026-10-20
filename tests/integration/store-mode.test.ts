@@ -39,8 +39,10 @@ beforeEach(async () => {
   `.execute(ctx.db);
 });
 
-/** Publishes one product with one available credential, so only the gate can block OPEN. */
-async function seedReadyStore(): Promise<void> {
+/** Publishes one product whose configured fulfillment route is ready to accept orders. */
+async function seedReadyStore(
+  fulfillmentType: "STOCK_ACCOUNT" | "MANUAL_FULFILLMENT" | "UNLIMITED_SERVICE" = "STOCK_ACCOUNT",
+): Promise<void> {
   const categoryId = newId();
   const productId = newId();
   const variantId = newId();
@@ -58,12 +60,19 @@ async function seedReadyStore(): Promise<void> {
        fulfillment_type, warranty_days, stock_policy, is_active, sort_order)
     values
       (${variantId}, ${productId}, ${`GPT-${variantId}`}, '1 tháng', 250000, 'P1M', 'CREDENTIAL',
-       'STOCK_ACCOUNT', 30, 'LOCAL_ONLY', true, 1)
+       ${fulfillmentType}, 30, 'LOCAL_ONLY', true, 1)
   `.execute(ctx.db);
-  await sql`
-    insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
-    values (${newId()}, ${variantId}, 'TEST_FIXTURE', 'test-vault-ref', ${newId()}, 'AVAILABLE')
-  `.execute(ctx.db);
+  if (fulfillmentType === "STOCK_ACCOUNT") {
+    await sql`
+      insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+      values (${newId()}, ${variantId}, 'TEST_FIXTURE', 'test-vault-ref', ${newId()}, 'AVAILABLE')
+    `.execute(ctx.db);
+  } else {
+    await sql`
+      insert into variant_service_fulfillment (variant_id, fulfillment_type, instructions, is_active)
+      values (${variantId}, ${fulfillmentType}, 'Provision manually after checking the order.', true)
+    `.execute(ctx.db);
+  }
   const evidence = await registerResaleEvidence(ctx.db, {
     variantId,
     source: "OWNER_ATTESTATION",
@@ -310,6 +319,18 @@ describe("store OPEN readiness gate", () => {
       control: { status: "OPEN", version: 2 },
     });
   });
+  it("opens for a configured manual service without representing it as stock", async () => {
+    await seedReadyStore("MANUAL_FULFILLMENT");
+    await expect(getStoreOpenReadiness(ctx.db)).resolves.toEqual({
+      activeProducts: 1,
+      inStockVariants: 1,
+      openDiscrepancies: 0,
+      terminalOutboxOrphans: 0,
+      criticalSupportTickets: 0,
+    });
+    await expect(openStore("gate-open-manual-service")).resolves.toMatchObject({ ok: true });
+  });
+
 
   it("keeps the store CLOSED while an unresolved discrepancy exists", async () => {
     await seedReadyStore();

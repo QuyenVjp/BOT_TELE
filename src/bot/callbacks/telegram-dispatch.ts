@@ -15,6 +15,7 @@ import {
   presentCustomerWarranty,
   CUSTOMER_COPY,
 } from "../presenters/customer.js";
+import { CUSTOMER_BUTTONS } from "../presenters/customer-buttons.js";
 import type { TelegramUpdate } from "../webhook.js";
 import { isId } from "../../shared/ids/index.js";
 import { presentSearchPrompt, type PresentedMessage } from "../presenters/catalog.js";
@@ -22,7 +23,7 @@ import type { CheckoutCallbacks } from "./checkout.js";
 import type { TelegramCommandEnvelope } from "../../infrastructure/inbox/telegram.js";
 import type { CallbackTokenCodec, VerifiedCallbackToken } from "../callback-codec.js";
 import { sealPresentedMessageCallbacks } from "../callback-sealer.js";
-import { SUPPORT_REASON_CODES } from "../../modules/support/domain.js";
+import { SUPPORT_REASON_CODES, supportTicketStatusFromCode } from "../../modules/support/domain.js";
 import type { InlineQueryResultArticle, SentTelegramMessage } from "../grammy-responder.js";
 
 export type TelegramBuyNowDispatchResult =
@@ -125,18 +126,18 @@ export interface TelegramDomainDispatcherDeps {
       }): Promise<PresentedMessage>;
       issueTypes(input: {
         telegramUserId: string;
-        variantId: string;
+        orderId: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
       preview(input: {
         telegramUserId: string;
-        variantId: string;
+        orderId: string;
         issueType: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
       report(input: {
         telegramUserId: string;
-        variantId: string;
+        orderId: string;
         issueType: string;
         correlationId: string;
       }): Promise<PresentedMessage>;
@@ -181,8 +182,14 @@ export interface TelegramDomainDispatcherDeps {
       correlationId: string;
     }): Promise<PresentedMessage>;
     list(customerId: string): Promise<PresentedMessage>;
+    view(ticketId: string, customerId: string): Promise<PresentedMessage>;
+    close(input: {
+      ticketId: string;
+      customerId: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
   };
-  walletAccount?(ctx: TelegramActionContext): Promise<PresentedMessage>;
+  customerAccount?(ctx: TelegramActionContext): Promise<PresentedMessage>;
   /** Goal §38 `📜 Lịch sử ví`: the customer's own wallet movements. */
   walletHistory?(ctx: TelegramActionContext): Promise<PresentedMessage>;
   /** Goal §65 warranty home: the customer's eligible completed orders. */
@@ -203,7 +210,7 @@ export interface TelegramDomainDispatcherDeps {
   adminRootUserId?: number | undefined;
   sepayReconciliationText?: (() => Promise<string>) | undefined;
   preorder?: {
-    consent(variantId: string): Promise<PresentedMessage>;
+    consent(input: { variantId: string; telegramUserId: string }): Promise<PresentedMessage>;
     create(input: {
       customerId: string;
       variantId: string;
@@ -381,24 +388,28 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyInfo?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyRejectReason?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyReject?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
       reason: string;
     }): Promise<PresentedMessage>;
     warrantyReplace?(input: {
@@ -406,24 +417,28 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyRefund?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyRefundConfirm?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyRefundAdjust?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyRefundQueue?(input: {
       telegramUserId: string;
@@ -435,18 +450,21 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyPaid?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     warrantyPaidConfirm?(input: {
       telegramUserId: string;
       chatType: string;
       correlationId: string;
       claimId: string;
+      expectedVersion: number;
     }): Promise<PresentedMessage>;
     inventoryItems?(input: {
       telegramUserId: string;
@@ -539,6 +557,7 @@ export interface TelegramDomainDispatcherDeps {
     importConfirm?(input: {
       telegramUserId: string;
       chatType: string;
+      stateId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
     importCancel?(input: {
@@ -674,6 +693,7 @@ export interface TelegramDomainDispatcherDeps {
       chatType: string;
       ticketId: string;
       toStatus: string;
+      expectedVersion: number;
       correlationId: string;
     }): Promise<PresentedMessage>;
     customers?(input: {
@@ -1208,7 +1228,7 @@ export function createTelegramDomainDispatcher(
         message = deps.catalog.warranty
           ? await deps.catalog.warranty.issueTypes({
               telegramUserId: envelope.actorUserId,
-              variantId: envelope.callbackData.slice("warranty:report:".length),
+              orderId: envelope.callbackData.slice("warranty:report:".length),
               correlationId,
             })
           : safeError("Bảo hành không khả dụng.");
@@ -1222,25 +1242,25 @@ export function createTelegramDomainDispatcher(
           : safeError("Bảo hành không khả dụng.");
       } else if (envelope.callbackData?.startsWith("warranty:type:")) {
         // Choosing a symptom previews the claim — goal §41 — it does not submit it.
-        const [issueType, variantId] = envelope.callbackData
+        const [issueType, orderId] = envelope.callbackData
           .slice("warranty:type:".length)
           .split(":");
         message = deps.catalog.warranty
           ? await deps.catalog.warranty.preview({
               telegramUserId: envelope.actorUserId,
-              variantId: variantId ?? "",
+              orderId: orderId ?? "",
               issueType: issueType ?? "",
               correlationId,
             })
           : safeError("Bảo hành không khả dụng.");
       } else if (envelope.callbackData?.startsWith("warranty:submit:")) {
-        const [variantId, issueType] = envelope.callbackData
+        const [orderId, issueType] = envelope.callbackData
           .slice("warranty:submit:".length)
           .split(":");
         message = deps.catalog.warranty
           ? await deps.catalog.warranty.report({
               telegramUserId: envelope.actorUserId,
-              variantId: variantId ?? "",
+              orderId: orderId ?? "",
               issueType: issueType ?? "",
               correlationId,
             })
@@ -1343,7 +1363,10 @@ export function createTelegramDomainDispatcher(
       } else if (envelope.callbackData?.startsWith("preorder:consent:")) {
         const variantId = envelope.callbackData.slice("preorder:consent:".length);
         message = deps.preorder
-          ? await deps.preorder.consent(variantId)
+          ? await deps.preorder.consent({
+              variantId,
+              telegramUserId: envelope.actorUserId,
+            })
           : safeError("Đặt cọc không khả dụng.");
       } else if (envelope.callbackData?.startsWith("preorder:create:")) {
         const variantId = envelope.callbackData.slice("preorder:create:".length);
@@ -2079,14 +2102,17 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Xác nhận tệp không khả dụng.");
-        } else if (route === "inventory:confirm") {
+        } else if (route.startsWith("inventory:confirm:")) {
           message = admin.importConfirm
             ? await admin.importConfirm({
                 telegramUserId: envelope.actorUserId,
                 chatType: envelope.chatType,
+                stateId: route.slice("inventory:confirm:".length),
                 correlationId,
               })
             : safeError("Xác nhận nhập kho không khả dụng.");
+        } else if (route === "inventory:confirm") {
+          message = safeError("Phiên xác nhận nhập kho đã hết hạn.");
         } else if (route.startsWith("inventory:template:")) {
           message = admin.importTemplate
             ? ((await admin.importTemplate({
@@ -2452,17 +2478,36 @@ export function createTelegramDomainDispatcher(
               })
             : safeError("Yêu cầu hỗ trợ không khả dụng.");
         } else if (route.startsWith("support:status:")) {
-          // `support:status:<ticketId>:<toStatus>` — both halves are validated by the worker,
-          // so a half-parsed route must not reach it as a status.
-          const rest = route.slice("support:status:".length);
-          const separator = rest.indexOf(":");
+          // Status is one base-36-safe code; the version is canonical base-36 to fit Telegram's limit.
+          // Legacy callbacks with raw status names, missing versions, or extra fields fail closed.
+          const parts = route.split(":");
+          const ticketId = parts[2] ?? "";
+          const toStatus = supportTicketStatusFromCode(parts[3] ?? "");
+          const rawExpectedVersion = parts[4] ?? "";
+          const parsedExpectedVersion = Number.parseInt(rawExpectedVersion, 36);
+          const expectedVersion =
+            /^[1-9a-z][0-9a-z]*$/u.test(rawExpectedVersion) &&
+            Number.isSafeInteger(parsedExpectedVersion) &&
+            parsedExpectedVersion > 0 &&
+            parsedExpectedVersion.toString(36) === rawExpectedVersion
+              ? parsedExpectedVersion
+              : null;
+          const malformed =
+            parts.length !== 5 ||
+            ticketId.length === 0 ||
+            toStatus === undefined ||
+            expectedVersion === null;
           message =
-            admin.supportTicketStatus && separator > 0 && separator < rest.length - 1
+            admin.supportTicketStatus &&
+            toStatus !== undefined &&
+            expectedVersion !== null &&
+            !malformed
               ? await admin.supportTicketStatus({
                   telegramUserId: envelope.actorUserId,
                   chatType: envelope.chatType,
-                  ticketId: rest.slice(0, separator),
-                  toStatus: rest.slice(separator + 1),
+                  ticketId,
+                  toStatus,
+                  expectedVersion,
                   correlationId,
                 })
               : safeError("Cập nhật trạng thái không khả dụng.");
@@ -2588,8 +2633,8 @@ export function createTelegramDomainDispatcher(
         command === "/account" ||
         envelope.callbackData === "wallet:account"
       ) {
-        message = deps.walletAccount
-          ? await deps.walletAccount(ctx)
+        message = deps.customerAccount
+          ? await deps.customerAccount(ctx)
           : presentCustomerAccountPrompt();
       } else if (command === "/topup" || envelope.messageText === CUSTOMER_COPY.topup) {
         message = safeError("Nạp ví chưa nằm trong retail MVP.");
@@ -2696,8 +2741,8 @@ export function createTelegramDomainDispatcher(
         envelope.messageText === CUSTOMER_COPY.account ||
         envelope.messageText === "👤 Tài khoản"
       ) {
-        message = deps.walletAccount
-          ? await deps.walletAccount(ctx)
+        message = deps.customerAccount
+          ? await deps.customerAccount(ctx)
           : presentCustomerAccountPrompt();
       } else if (
         envelope.messageText === CUSTOMER_COPY.back ||
@@ -3094,8 +3139,20 @@ async function dispatchVerified(
         correlationId,
       });
     }
-    case "SUPPORT_TICKET_VIEW":
+    case "SUPPORT_TICKET_LIST":
       return deps.support.list(customerId);
+    case "SUPPORT_TICKET_VIEW":
+      return token.resourceId
+        ? deps.support.view(token.resourceId, customerId)
+        : safeError("Không tìm thấy ticket.");
+    case "SUPPORT_TICKET_CLOSE":
+      return token.resourceId
+        ? deps.support.close({
+            ticketId: token.resourceId,
+            customerId,
+            correlationId,
+          })
+        : safeError("Không tìm thấy ticket.");
     case "RESTOCK_SUBSCRIBE":
       return deps.restock
         ? deps.restock.subscribe(customerId, token.resourceId!)
@@ -3136,6 +3193,14 @@ async function dispatchVerified(
       return customerId && deps.warrantyHome
         ? deps.warrantyHome(customerId)
         : presentCustomerWarranty();
+    case "WARRANTY_REPORT":
+      return token.resourceId && deps.catalog.warranty
+        ? deps.catalog.warranty.issueTypes({
+            telegramUserId: envelope.actorUserId,
+            orderId: token.resourceId,
+            correlationId,
+          })
+        : safeError("Bảo hành không khả dụng.");
     case "CUSTOMER_NOTIFICATIONS":
       return deps.notificationPreferences
         ? deps.notificationPreferences.get(customerId)
@@ -3158,7 +3223,10 @@ async function dispatchVerified(
       return safeError("Thanh toán ví chưa nằm trong retail MVP.");
     case "PREORDER_CONSENT":
       return deps.preorder && token.resourceId
-        ? deps.preorder.consent(token.resourceId)
+        ? deps.preorder.consent({
+            variantId: token.resourceId,
+            telegramUserId: envelope.actorUserId,
+          })
         : safeError("Đặt cọc không khả dụng.");
     case "PREORDER_CREATE":
       return customerId && deps.preorder && token.resourceId
@@ -3213,7 +3281,7 @@ function catalogActorIdentity(
 }
 
 function safeError(text: string): PresentedMessage {
-  return { text, buttons: [[{ text: "Menu chính", callbackData: "menu:main" }]] };
+  return { text, buttons: [[{ text: CUSTOMER_BUTTONS.home, callbackData: "menu:main" }]] };
 }
 
 function isCatalogId(value: string): boolean {
@@ -3244,6 +3312,11 @@ async function routeAdminWarranty(
 ): Promise<PresentedMessage> {
   const [head, ...rest] = route.split(":");
   const claimId = rest[0] ?? "";
+  const rawExpectedVersion = rest[1] ?? "";
+  const expectedVersion =
+    /^\d{1,9}$/u.test(rawExpectedVersion) && Number(rawExpectedVersion) > 0
+      ? Number(rawExpectedVersion)
+      : null;
   const actor = { telegramUserId: envelope.actorUserId, chatType: envelope.chatType };
   const missing = safeError("Bảo hành không khả dụng.");
   switch (head) {
@@ -3261,53 +3334,54 @@ async function routeAdminWarranty(
         ? surface.warrantyClaim({ ...actor, correlationId, claimId })
         : missing;
     case "verify":
-      return surface.warrantyVerify
-        ? surface.warrantyVerify({ ...actor, correlationId, claimId })
+      return surface.warrantyVerify && expectedVersion !== null
+        ? surface.warrantyVerify({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "info":
-      return surface.warrantyInfo
-        ? surface.warrantyInfo({ ...actor, correlationId, claimId })
+      return surface.warrantyInfo && expectedVersion !== null
+        ? surface.warrantyInfo({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "reject":
-      return surface.warrantyRejectReason
-        ? surface.warrantyRejectReason({ ...actor, correlationId, claimId })
+      return surface.warrantyRejectReason && expectedVersion !== null
+        ? surface.warrantyRejectReason({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "reject-confirm":
-      return surface.warrantyReject && claimId
+      return surface.warrantyReject && claimId && expectedVersion !== null
         ? surface.warrantyReject({
             ...actor,
             correlationId,
             claimId,
-            reason: rest.slice(1).join(":"),
+            expectedVersion,
+            reason: rest[2] ?? "",
           })
         : missing;
     case "replace":
-      return surface.warrantyReplace
-        ? surface.warrantyReplace({ ...actor, correlationId, claimId })
+      return surface.warrantyReplace && expectedVersion !== null
+        ? surface.warrantyReplace({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "refund":
-      return surface.warrantyRefund
-        ? surface.warrantyRefund({ ...actor, correlationId, claimId })
+      return surface.warrantyRefund && expectedVersion !== null
+        ? surface.warrantyRefund({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "refund-confirm":
-      return surface.warrantyRefundConfirm
-        ? surface.warrantyRefundConfirm({ ...actor, correlationId, claimId })
+      return surface.warrantyRefundConfirm && expectedVersion !== null
+        ? surface.warrantyRefundConfirm({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "refund-adjust":
-      return surface.warrantyRefundAdjust
-        ? surface.warrantyRefundAdjust({ ...actor, correlationId, claimId })
+      return surface.warrantyRefundAdjust && expectedVersion !== null
+        ? surface.warrantyRefundAdjust({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "payout":
-      return surface.warrantyPayout
-        ? surface.warrantyPayout({ ...actor, correlationId, claimId })
+      return surface.warrantyPayout && expectedVersion !== null
+        ? surface.warrantyPayout({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "paid":
-      return surface.warrantyPaid
-        ? surface.warrantyPaid({ ...actor, correlationId, claimId })
+      return surface.warrantyPaid && expectedVersion !== null
+        ? surface.warrantyPaid({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     case "paid-confirm":
-      return surface.warrantyPaidConfirm
-        ? surface.warrantyPaidConfirm({ ...actor, correlationId, claimId })
+      return surface.warrantyPaidConfirm && expectedVersion !== null
+        ? surface.warrantyPaidConfirm({ ...actor, correlationId, claimId, expectedVersion })
         : missing;
     default:
       return missing;

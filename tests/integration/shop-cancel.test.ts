@@ -2,7 +2,11 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { shopCancelPreorder } from "../../src/modules/commerce/shop-cancel.js";
-import { releaseExpiredPreorderHolds } from "../../src/modules/commerce/preorder.js";
+import {
+  listCustomerPreorders,
+  releaseExpiredPreorderHolds,
+} from "../../src/modules/commerce/preorder.js";
+import { presentCustomerPreorders } from "../../src/bot/presenters/customer.js";
 import { handleNotificationOutboxEvent } from "../../src/modules/notification/service.js";
 import { generateCustomerAlias } from "../../src/modules/marketing/social-proof.js";
 import { presentAdminPreorders } from "../../src/bot/presenters/admin.js";
@@ -310,6 +314,66 @@ describe("shop-cancel refund-due writer", () => {
     expect(campaign.rows[0]?.content).toContain("Shop không thể cung cấp sản phẩm này.");
     expect(campaign.rows[0]?.content).toContain("Đang chờ hoàn tiền");
     expect(campaign.rows[0]?.content).not.toContain("đã hoàn tiền");
+    const customerView = presentCustomerPreorders(
+      await listCustomerPreorders(ctx.db, seed.customerId),
+    );
+    expect(customerView.text).toContain("💸 Shop đang xử lý hoàn tiền cọc");
+    expect(customerView.text).toContain("Số tiền chờ hoàn: 50.000");
+    expect(customerView.text).not.toContain("Số tiền chờ hoàn: 250.000");
+  });
+
+  it("does not show preorder refund state or amount without its matching obligation", async () => {
+    const seed = await seedVariant();
+    const id = await insertReservation({
+      ...seed,
+      status: "DEPOSIT_PAID",
+      deposit: 50000,
+      balance: 200000,
+      total: 250000,
+      depositPaid: true,
+    });
+    await shopCancelPreorder(ctx.db, {
+      preorderId: id,
+      actorTelegramUserId: "1",
+      reason: "Hết nguồn.",
+      correlationId: "c-missing-obligation",
+    });
+    await sql`delete from shop_refund_obligation where preorder_id = ${id}`.execute(ctx.db);
+
+    const message = presentCustomerPreorders(await listCustomerPreorders(ctx.db, seed.customerId));
+    expect(message.text).toContain("Cần hỗ trợ xác minh khoản hoàn tiền");
+    expect(message.text).not.toContain("Shop đang xử lý hoàn tiền cọc");
+    expect(message.text).not.toContain("Số tiền chờ hoàn:");
+  });
+
+  it("does not show an obligation attached to a different customer", async () => {
+    const seed = await seedVariant();
+    const otherCustomer = newId();
+    await sql`insert into customer (id, status, locale) values (${otherCustomer}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    const id = await insertReservation({
+      ...seed,
+      status: "DEPOSIT_PAID",
+      deposit: 50000,
+      balance: 200000,
+      total: 250000,
+      depositPaid: true,
+    });
+    await shopCancelPreorder(ctx.db, {
+      preorderId: id,
+      actorTelegramUserId: "1",
+      reason: "Hết nguồn.",
+      correlationId: "c-foreign-customer",
+    });
+    await sql`
+      update shop_refund_obligation
+      set customer_id = ${otherCustomer}
+      where preorder_id = ${id}
+    `.execute(ctx.db);
+
+    const message = presentCustomerPreorders(await listCustomerPreorders(ctx.db, seed.customerId));
+    expect(message.text).not.toContain("Số tiền chờ hoàn: 50.000");
   });
 
   it("admin preorder list uses HMAC alias, never raw customer id", () => {

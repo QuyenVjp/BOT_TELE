@@ -1,3 +1,4 @@
+import { CUSTOMER_BUTTONS } from "../presenters/customer-buttons.js";
 import type { Db } from "../../infrastructure/db/transaction.js";
 import { buyNow, cancelUnpaidOrder, isStockOutcomeCode } from "../../modules/commerce/buy-now.js";
 import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
@@ -23,7 +24,6 @@ import {
   loadVariantPresentationOverride,
 } from "../../modules/catalog/repository.js";
 import { loadOrderReservedQuantity } from "../../modules/digital-goods/repository.js";
-import type { PaymentCheckResult } from "../../modules/payments/check-now.js";
 import type { FulfillmentType } from "../../modules/catalog/fulfillment-type.js";
 import type { CatalogAudience } from "../../modules/catalog/visibility.js";
 
@@ -70,12 +70,6 @@ export interface CheckoutCallbackDeps {
     idempotencyKey: string;
     correlationId: string;
   }) => Promise<{ ok: boolean; message: string }>;
-  /**
-   * On-demand, read-only payment check behind the "Kiểm tra thanh toán" button.
-   * Bounded SePay reconciliation with its own cooldown/lock; absent means the
-   * button falls back to the internal projection only (no provider call).
-   */
-  reconcileForCheck?: () => Promise<PaymentCheckResult>;
 }
 
 /**
@@ -160,7 +154,21 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       isRootAdmin: input.isRootAdmin,
     });
     if (!result.ok) {
-      if (isStockOutcomeCode(result.code)) return presentStockOutcome(result.code);
+      if (result.code === "PRICE_CHANGED") {
+        const liveVariant = await loadCheckoutVariant(input.telegramUserId, input.variantId);
+        const reopenCallbackData = liveVariant
+          ? (choiceToken("SHOP_PRODUCT", input.telegramUserId, liveVariant.product_id) ??
+            "shop:home")
+          : "shop:home";
+        return priceChangedMessage(reopenCallbackData);
+      }
+      if (isStockOutcomeCode(result.code)) {
+        const liveVariant =
+          result.code === "NO_STOCK" || result.code === "RESERVATION_LOST"
+            ? await loadCheckoutVariant(input.telegramUserId, input.variantId)
+            : undefined;
+        return presentStockOutcome(result.code, liveVariant ?? undefined);
+      }
       return errorMessage(result.message);
     }
 
@@ -254,7 +262,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     buttons: [
       [
         { text: "🔄 Mở lại sản phẩm", callbackData: cancelCallbackData },
-        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "sup:open" },
       ],
     ],
   });
@@ -262,40 +270,23 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
   /**
    * The payment/status screen for one owned order.
    *
-   * `check` is the "Kiểm tra thanh toán" intent: before reading the projection it asks the
-   * bounded, cooldown-guarded, read-only reconciliation to look at the provider once. That
-   * path can only ever record evidence the normal rules accept (it runs the same
-   * `applyPaymentEvidence` as the webhook), so this handler still never marks an order paid
-   * itself — it merely re-reads the projection afterwards. Navigation actions (reopen) pass
-   * `check: false` so they cannot spend a provider call.
-   *
-   * A reconciliation failure is deliberately NOT caught: it means the database itself is
-   * unhealthy, and the surrounding dispatcher retry is the right response — silently
-   * pretending the check happened would be the worse failure.
+   * Refresh and reopen both re-read the customer-owned internal projection. They never
+   * query the provider or mutate payment state; only webhook/background reconciliation
+   * may apply payment evidence.
    */
   const presentOrderPayment = async (
     orderNumber: string,
     customerId: string,
-    check: boolean,
   ): Promise<PresentedMessage> => {
-    let order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
+    const order = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
     if (!order) return errorMessage("Không tìm thấy đơn hàng.");
-
-    if (check && deps.reconcileForCheck && order.status === "PENDING_PAYMENT") {
-      const outcome = await deps.reconcileForCheck();
-      if (outcome.reason === "RAN") {
-        // Evidence may have settled this order while the provider was being read.
-        const reread = await findOrderByNumberForOwner(deps.db, orderNumber, customerId);
-        if (reread) order = reread;
-      }
-    }
 
     if (order.status === "COMPLETED") {
       return {
         text: `✅ Đơn hàng đã hoàn tất.\n\nĐơn: ${order.orderNumber}`,
         buttons: [
           [
-            { text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` },
+            { text: CUSTOMER_BUTTONS.viewOrder, callbackData: `ord:view:${order.orderNumber}` },
             { text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" },
           ],
         ],
@@ -311,7 +302,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
           : `✅ Đã thanh toán.\n\nĐơn: ${order.orderNumber}\nĐang giao sản phẩm...`,
         buttons: [
           [
-            { text: "📦 Xem đơn hàng", callbackData: `ord:view:${order.orderNumber}` },
+            { text: CUSTOMER_BUTTONS.viewOrder, callbackData: `ord:view:${order.orderNumber}` },
             { text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" },
           ],
         ],
@@ -409,7 +400,8 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       // Charge the price the customer confirmed, never a freshly-read one: buyNow compares it
       // with the live price and rejects a mismatch, so a price change cannot pass silently.
       const confirmedPriceVnd = verified.value.amountVnd;
-      if (!confirmedPriceVnd) return priceChangedMessage(cancelCallbackData);
+      if (!confirmedPriceVnd || BigInt(confirmedPriceVnd) !== priceVnd)
+        return priceChangedMessage(cancelCallbackData);
       const balanceVnd = deps.walletBalanceVnd ? await deps.walletBalanceVnd(customerId) : null;
 
       if (balanceVnd !== null && balanceVnd < priceVnd) {
@@ -452,7 +444,13 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       });
       if (!result.ok) {
         if (result.code === "PRICE_CHANGED") return priceChangedMessage(cancelCallbackData);
-        if (isStockOutcomeCode(result.code)) return presentStockOutcome(result.code);
+        if (isStockOutcomeCode(result.code)) {
+          const liveVariant =
+            result.code === "NO_STOCK" || result.code === "RESERVATION_LOST"
+              ? await loadCheckoutVariant(telegramUserId, variant.id)
+              : undefined;
+          return presentStockOutcome(result.code, liveVariant ?? undefined);
+        }
         return errorMessage(result.message);
       }
       lastOrderNumber = result.order.orderNumber;
@@ -470,13 +468,20 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
             ...(qrCallbackData
               ? [[{ text: "🏦 Thanh toán VietQR", callbackData: qrCallbackData }]]
               : []),
-            [{ text: "💬 Hỗ trợ", callbackData: "sup:open" }],
+            [{ text: CUSTOMER_BUTTONS.support, callbackData: "sup:open" }],
           ],
         };
       }
       return {
         text: `Đã thanh toán bằng ví. Chúng tôi sẽ giao tài khoản ngay.\n\nĐơn: ${result.order.orderNumber}`,
-        buttons: [[{ text: "🧾 Xem đơn", callbackData: `ord:view:${result.order.orderNumber}` }]],
+        buttons: [
+          [
+            {
+              text: CUSTOMER_BUTTONS.viewOrder,
+              callbackData: `ord:view:${result.order.orderNumber}`,
+            },
+          ],
+        ],
       };
     },
 
@@ -520,13 +525,11 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
     },
 
     async refresh(orderNumber, customerId) {
-      return presentOrderPayment(orderNumber, customerId, true);
+      return presentOrderPayment(orderNumber, customerId);
     },
 
     async reopen(orderNumber, customerId) {
-      // Same screen as refresh, but reopen is a navigation action: it must not spend a
-      // provider call. The "Kiểm tra thanh toán" button owns that side effect.
-      return presentOrderPayment(orderNumber, customerId, false);
+      return presentOrderPayment(orderNumber, customerId);
     },
 
     async cancel(orderNumber, customerId, correlationId) {

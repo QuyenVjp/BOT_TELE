@@ -23,9 +23,20 @@ describe("automatic delivery presenter", () => {
     expect(message.text).not.toContain("chỉ hiện một lần");
     expect(message.text).not.toContain("Nhấn nút");
     expect(message.buttons.flat().map((button) => button.text)).not.toContain("🔐 Nhận hàng ngay");
+    expect(message.buttons[1]).toEqual([
+      { text: "🗑 Đã lưu, xóa tin nhắn", callbackData: "delivery:delete" },
+    ]);
     expect(message.buttons.flat()).toContainEqual({
-      text: "🗑 Đã lưu, xóa tin nhắn",
-      callbackData: "delivery:delete",
+      text: "🧾 Xem đơn",
+      callbackData: "ord:view:ORD-123",
+    });
+    expect(message.buttons.flat()).toContainEqual({
+      text: "🛡 Bảo hành",
+      callbackData: "cust:warranty",
+    });
+    expect(message.buttons.flat()).toContainEqual({
+      text: "💬 Hỗ trợ",
+      callbackData: "sup:open:ORD-123",
     });
   });
   it("sets protectContent: true on credential-bearing delivery reveal", () => {

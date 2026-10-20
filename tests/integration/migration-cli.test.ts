@@ -1,3 +1,4 @@
+import { sql } from "kysely";
 import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
@@ -94,7 +95,7 @@ describe.skipIf(!hasDocker)("migration CLI against a real database (T117/T120)",
           digitalAssets: "0",
           broadcasts: "0",
           auditEvents: "0",
-          storeStatus: "OPEN",
+          storeStatus: "CLOSED",
         },
       ]);
     } finally {
@@ -165,6 +166,185 @@ describe.skipIf(!hasDocker)("migration CLI against a real database (T117/T120)",
       }
     } finally {
       await rm(before065, { recursive: true, force: true });
+      await rm(allMigrations, { recursive: true, force: true });
+    }
+  }, 180_000);
+  it("repairs supplier catalog owner intent from the latest explicit audit", async () => {
+    const started = await startPostgres();
+    stop = started.stop;
+    const { sql } = await import("kysely");
+    const before097 = await copyMigrationTree(96);
+    const allMigrations = await copyMigrationTree();
+
+    try {
+      await sql`drop schema public cascade`.execute(started.handle.db);
+      await sql`create schema public`.execute(started.handle.db);
+      await started.handle.close();
+
+      await runMigrationsOnPinnedConnection(started.connectionString, before097);
+
+      const seed = createDb({ connectionString: started.connectionString });
+      try {
+        await sql`
+          insert into supplier
+            (id, name, adapter_type, credential_vault_ref, status, timeout_policy)
+          values
+            ('owner-intent-test', 'Owner intent test', 'TEST', 'vault:test',
+             'ACTIVE', '{}'::jsonb)
+        `.execute(seed.db);
+        await sql`
+          insert into supplier_catalog_product
+            (id, supplier_id, external_product_id, upstream_name_vi, availability,
+             domain_status, domain_unsupported_reason, supplier_cost_vnd, currency,
+             selection_status, is_enabled, is_missing, version, updated_at)
+          values
+            ('catalog-latest-true', 'owner-intent-test', 'external-enabled', 'Enabled',
+             'MISSING', 'UNSUPPORTED', 'TEST_UNSUPPORTED', 100, 'VND',
+             'SELECTED', false, true, 4, timestamptz '2026-01-01T00:00:00Z'),
+            ('catalog-latest-false', 'owner-intent-test', 'external-disabled', 'Disabled',
+             'MISSING', 'UNSUPPORTED', 'TEST_UNSUPPORTED', 100, 'VND',
+             'SELECTED', false, true, 5, timestamptz '2026-01-01T00:00:00Z'),
+            ('catalog-no-audit', 'owner-intent-test', 'external-unknown', 'Unknown',
+             'MISSING', 'UNSUPPORTED', 'TEST_UNSUPPORTED', 100, 'VND',
+             'SELECTED', false, true, 6, timestamptz '2026-01-01T00:00:00Z')
+        `.execute(seed.db);
+        await sql`
+          insert into audit_event
+            (id, actor_type, actor_id, action, target_type, target_id, reason,
+             correlation_id, occurred_at, metadata_redacted)
+          values
+            ('audit-owner-intent-true', 'ROOT_ADMIN', 'owner',
+             'supplier.catalog.configure', 'SupplierCatalogProduct',
+             'catalog-latest-true', 'owner decision', 'migration-test-true',
+             timestamptz '2026-01-02T00:00:00Z', '{"enabled": true}'::jsonb),
+            ('audit-owner-intent-false', 'ROOT_ADMIN', 'owner',
+             'supplier.catalog.configure', 'SupplierCatalogProduct',
+             'catalog-latest-false', 'owner decision', 'migration-test-false-1',
+             timestamptz '2026-01-02T00:00:00Z', '{"enabled": true}'::jsonb),
+            ('audit-owner-intent-disable', 'ROOT_ADMIN', 'owner',
+             'supplier.catalog.disable', 'SupplierCatalogProduct',
+             'catalog-latest-false', 'owner decision', 'migration-test-false-2',
+             timestamptz '2026-01-03T00:00:00Z', '{"enabled": false}'::jsonb)
+        `.execute(seed.db);
+      } finally {
+        await seed.close();
+      }
+
+      await runMigrationsOnPinnedConnection(started.connectionString, allMigrations);
+
+      const check = createDb({ connectionString: started.connectionString });
+      try {
+        const rows = await sql<{
+          id: string;
+          isEnabled: boolean;
+          version: number;
+          touched: boolean;
+          selectionStatus: string;
+          domainStatus: string;
+          isMissing: boolean;
+        }>`
+          select
+            id,
+            is_enabled as "isEnabled",
+            version,
+            updated_at > timestamptz '2026-01-01T00:00:00Z' as touched,
+            selection_status as "selectionStatus",
+            domain_status as "domainStatus",
+            is_missing as "isMissing"
+          from supplier_catalog_product
+          order by id
+        `.execute(check.db);
+        expect(rows.rows).toEqual([
+          {
+            id: "catalog-latest-false",
+            isEnabled: false,
+            version: 5,
+            touched: false,
+            selectionStatus: "SELECTED",
+            domainStatus: "UNSUPPORTED",
+            isMissing: true,
+          },
+          {
+            id: "catalog-latest-true",
+            isEnabled: true,
+            version: 5,
+            touched: true,
+            selectionStatus: "SELECTED",
+            domainStatus: "UNSUPPORTED",
+            isMissing: true,
+          },
+          {
+            id: "catalog-no-audit",
+            isEnabled: false,
+            version: 6,
+            touched: false,
+            selectionStatus: "SELECTED",
+            domainStatus: "UNSUPPORTED",
+            isMissing: true,
+          },
+        ]);
+
+        const coupling = await sql<{ definition: string }>`
+          select pg_get_constraintdef(oid) as definition
+          from pg_constraint
+          where conrelid = 'supplier_catalog_product'::regclass
+            and contype = 'c'
+            and pg_get_constraintdef(oid) ~* $$domain_status[[:space:]]*=[[:space:]]*'SUPPORTED'$$
+            and pg_get_constraintdef(oid) ~* $$not[[:space:]]+is_enabled$$
+        `.execute(check.db);
+        expect(coupling.rows).toEqual([]);
+      } finally {
+        await check.close();
+      }
+    } finally {
+      await rm(before097, { recursive: true, force: true });
+      await rm(allMigrations, { recursive: true, force: true });
+    }
+  }, 180_000);
+  it("preserves explicit owner-open state during migration upgrade", async () => {
+    const started = await startPostgres();
+    stop = started.stop;
+    const before101 = await copyMigrationTree(100);
+    const allMigrations = await copyMigrationTree();
+
+    try {
+      await sql`drop schema public cascade`.execute(started.handle.db);
+      await sql`create schema public`.execute(started.handle.db);
+      await started.handle.close();
+
+      await runMigrationsOnPinnedConnection(started.connectionString, before101);
+
+      const owner = createDb({ connectionString: started.connectionString });
+      try {
+        await sql`
+          update store_control
+             set status = 'OPEN',
+                 updated_at = now(),
+                 updated_by = 'owner-upgrade-test',
+                 version = version + 1
+           where id = 'main'
+        `.execute(owner.db);
+      } finally {
+        await owner.close();
+      }
+
+      await runMigrationsOnPinnedConnection(started.connectionString, allMigrations);
+
+      const check = createDb({ connectionString: started.connectionString });
+      try {
+        const rows = await sql<{ status: string; updatedBy: string | null; version: number }>`
+          select status, updated_by as "updatedBy", version
+          from store_control
+          where id = 'main'
+        `.execute(check.db);
+        expect(rows.rows).toEqual([
+          { status: "OPEN", updatedBy: "owner-upgrade-test", version: 2 },
+        ]);
+      } finally {
+        await check.close();
+      }
+    } finally {
+      await rm(before101, { recursive: true, force: true });
       await rm(allMigrations, { recursive: true, force: true });
     }
   }, 180_000);

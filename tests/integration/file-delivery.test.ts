@@ -9,6 +9,8 @@ import {
   processFileDelivery,
   type TelegramDocumentSender,
 } from "../../src/modules/digital-goods/file-delivery.js";
+import { createWalletLedgerService } from "../../src/modules/wallet/ledger.js";
+import { createWalletRefundService } from "../../src/modules/wallet/refund.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -156,6 +158,36 @@ describe("file delivery jobs", () => {
     });
   });
 
+  it("treats a sender throw as uncertain and never retries the same job", async () => {
+    const seeded = await seedPaidDigitalOrder();
+    const queued = await queueFileDelivery({ db: ctx.db, orderId: seeded.orderId });
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    const calls: Array<Parameters<TelegramDocumentSender["sendDocument"]>[0]> = [];
+    const sender: TelegramDocumentSender = {
+      async sendDocument(input) {
+        calls.push(input);
+        throw new Error("simulated remote acceptance");
+      },
+    };
+
+    await expect(
+      processFileDelivery({ db: ctx.db, job: queued.job, storageRoots: [storageRoot], sender }),
+    ).resolves.toEqual({ ok: false, code: "SEND_UNCERTAIN" });
+
+    const state = await sql<{ status: string; last_error: string | null }>`
+      select status, last_error
+      from file_delivery_job
+      where order_id = ${seeded.orderId}
+    `.execute(ctx.db);
+    expect(state.rows[0]).toEqual({ status: "FAILED", last_error: "SEND_UNCERTAIN" });
+
+    await expect(
+      processFileDelivery({ db: ctx.db, job: queued.job, storageRoots: [storageRoot], sender }),
+    ).resolves.toEqual({ ok: false, code: "SEND_UNCERTAIN" });
+    expect(calls).toHaveLength(1);
+  });
+
   it("reuses a cached Telegram file_id without reading private storage", async () => {
     const seeded = await seedPaidDigitalOrder();
     await sql`update variant_file_artifact set telegram_file_id = 'cached_file_id_1234567890', telegram_file_unique_id = 'cached_unique' where id = ${seeded.artifactId}`.execute(
@@ -212,6 +244,77 @@ describe("file delivery jobs", () => {
       processFileDelivery({ db: ctx.db, job: queued.job, storageRoots: [storageRoot], sender }),
     ).resolves.toEqual({ ok: false, code: "FILE_HASH_MISMATCH" });
     expect(sender.calls).toHaveLength(0);
+  });
+
+  it("keeps an invalid symlink delivery refundable without sending", async () => {
+    const seeded = await seedPaidDigitalOrder();
+    const wallet = createWalletLedgerService(ctx.db);
+    await wallet.credit({
+      customerId: seeded.customerId,
+      amountVnd: 100000n,
+      idempotencyKey: "topup:file-refund",
+      correlationId: "file-refund-seed",
+      reason: "seed wallet credit",
+    });
+    await wallet.debit({
+      customerId: seeded.customerId,
+      amountVnd: 100000n,
+      idempotencyKey: `purchase:${seeded.orderId}:wallet`,
+      correlationId: "file-refund-purchase",
+      reason: "seed wallet purchase",
+    });
+
+    const outside = join(tmpdir(), `${newId()}.bin`);
+    const link = join(storageRoot, `${newId()}.bin`);
+    try {
+      const queued = await queueFileDelivery({ db: ctx.db, orderId: seeded.orderId });
+      expect(queued.ok).toBe(true);
+      if (!queued.ok) return;
+      await writeFile(outside, seeded.bytes);
+      await symlink(outside, link);
+      await sql`update variant_file_artifact set storage_reference = ${link} where id = ${seeded.artifactId}`.execute(
+        ctx.db,
+      );
+      const sender = recordingSender({ fileId: "symlink_escape_unused_file_id" });
+
+      await expect(
+        processFileDelivery({ db: ctx.db, job: queued.job, storageRoots: [storageRoot], sender }),
+      ).resolves.toEqual({ ok: false, code: "INVALID_STORAGE_REFERENCE" });
+      expect(sender.calls).toHaveLength(0);
+
+      const beforeRefund = await sql<{
+        order_status: string;
+        job_status: string;
+        last_error: string | null;
+      }>`
+        select o.status as order_status, j.status as job_status, j.last_error
+        from "order" o join file_delivery_job j on j.order_id = o.id
+        where o.id = ${seeded.orderId}
+      `.execute(ctx.db);
+      expect(beforeRefund.rows[0]).toEqual({
+        order_status: "PAID",
+        job_status: "FAILED",
+        last_error: "INVALID_STORAGE_REFERENCE",
+      });
+
+      await expect(
+        createWalletRefundService(ctx.db).refund({
+          orderId: seeded.orderId,
+          correlationId: "file-symlink-refund",
+          approvedBy: "12345",
+        }),
+      ).resolves.toMatchObject({ ok: true, kind: "REFUNDED", orderId: seeded.orderId });
+
+      const afterRefund = await sql<{ order_status: string; balance_vnd: string }>`
+        select
+          (select status from "order" where id = ${seeded.orderId}) as order_status,
+          (select balance_vnd from wallet_account where customer_id = ${seeded.customerId}) as balance_vnd
+      `.execute(ctx.db);
+      expect(afterRefund.rows[0]).toEqual({ order_status: "REFUNDED", balance_vnd: "100000" });
+    } finally {
+      await rm(outside, { force: true });
+      await rm(link, { force: true });
+    }
   });
 
   it("rejects oversized replaced files before sending", async () => {
@@ -295,7 +398,7 @@ describe("file delivery jobs", () => {
     expect(sender.calls).toHaveLength(0);
   });
 
-  it("recovers an expired processing lease and advances the claim generation", async () => {
+  it("parks an expired processing lease as uncertain without sending", async () => {
     const seeded = await seedPaidDigitalOrder();
     const queued = await queueFileDelivery({ db: ctx.db, orderId: seeded.orderId });
     expect(queued.ok).toBe(true);
@@ -311,15 +414,26 @@ describe("file delivery jobs", () => {
       job: { status: "PROCESSING", claimGeneration: 1 },
     });
     if (!refreshed.ok) return;
-    const sender = recordingSender({ fileId: "expired_lease_file_id_1234567890" });
+    const sender = recordingSender({ fileId: "expired_lease_unused_file_id_1234567890" });
 
-    const sent = await processFileDelivery({
-      db: ctx.db,
-      job: refreshed.job,
-      storageRoots: [storageRoot],
-      sender,
+    await expect(
+      processFileDelivery({ db: ctx.db, job: refreshed.job, storageRoots: [storageRoot], sender }),
+    ).resolves.toEqual({ ok: false, code: "SEND_UNCERTAIN" });
+    expect(sender.calls).toHaveLength(0);
+
+    const state = await sql<{
+      status: string;
+      last_error: string | null;
+      processing_expires_at: Date | null;
+    }>`
+      select status, last_error, processing_expires_at
+      from file_delivery_job
+      where order_id = ${seeded.orderId}
+    `.execute(ctx.db);
+    expect(state.rows[0]).toMatchObject({
+      status: "FAILED",
+      last_error: "SEND_UNCERTAIN",
+      processing_expires_at: null,
     });
-    expect(sent).toMatchObject({ ok: true, job: { status: "SENT", claimGeneration: 2 } });
-    expect(sender.calls).toHaveLength(1);
   });
 });

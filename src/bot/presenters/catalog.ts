@@ -1,4 +1,5 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
+import { CUSTOMER_BUTTONS } from "./customer-buttons.js";
 import type {
   CatalogCategoryRow,
   CatalogVariantRow,
@@ -7,9 +8,8 @@ import type {
   StorefrontProductSummary,
 } from "../../modules/catalog/repository.js";
 import type { StockOutcomeCode } from "../../modules/commerce/buy-now.js";
-import { isSupportedCatalogRoute } from "../../modules/catalog/domain.js";
+import { isRestockLocalRoute, isSupportedCatalogRoute } from "../../modules/catalog/domain.js";
 import { ADMIN_CONTACT_URL, SHOP_NAME } from "../../modules/catalog/shop-profile.js";
-import { WARRANTY_BLOCK_LINES } from "./warranty.js";
 
 /**
  * Authoritative product-card presenters + Vietnamese state/error copy (FR-001–FR-003,
@@ -25,9 +25,9 @@ export const CATALOG_COPY = {
   browse: "🛍 Danh sách sản phẩm",
   searchAgain: "🔎 Tìm lại",
   orders: "📦 Đơn hàng",
-  support: "💬 Hỗ trợ",
-  back: "Quay lại",
-  mainMenu: "🏠 Trang chủ",
+  support: CUSTOMER_BUTTONS.support,
+  back: CUSTOMER_BUTTONS.back,
+  mainMenu: CUSTOMER_BUTTONS.home,
   buyNow: "Mua ngay",
   emptyCatalog: "Hiện chưa có sản phẩm nào đang bán.",
   emptyCategory: "Hiện chưa có sản phẩm trong mục này.",
@@ -255,27 +255,23 @@ export function presentProductDetail(
     `⚡ Giao hàng: ${deliveryModes.join(" / ") || "Tự động"}`,
     `⏱ Dự kiến: ${detail.delivery_eta_vi || "vài giây sau khi thanh toán"}`,
   ];
-
-  if (detail.description_vi) {
-    lines.push("", "📝 Mô tả", detail.description_vi);
-  }
-  if (detail.what_customer_receives_vi) {
+  if (detail.description_vi?.trim()) lines.push("", "📝 Mô tả", detail.description_vi.trim());
+  if (detail.what_customer_receives_vi?.trim()) {
     lines.push("", "📦 Bạn nhận được", ...bulletLines(detail.what_customer_receives_vi));
   }
-  if (detail.usage_instructions_vi) {
-    lines.push("", "📘 Hướng dẫn", ...bulletLines(detail.usage_instructions_vi));
+  if (detail.usage_instructions_vi?.trim()) {
+    lines.push("", "📘 Hướng dẫn", detail.usage_instructions_vi.trim());
   }
-  // Goal §5/§62: a warranty-enabled variant gets the canonical block and a way to read the
-  // structured policy; the free-text field stays as an extra note when the shop filled it in.
+
+  // Keep product detail concise: owner-authored warranty copy wins; otherwise expose only
+  // the structured period when a variant has an enabled, positive warranty.
   const warrantyVariant = detail.variants.find(
     (variant) => variant.warranty_enabled === true && variant.warranty_days > 0,
   );
-  if (warrantyVariant) {
-    lines.push("", ...WARRANTY_BLOCK_LINES);
-    if (detail.warranty_vi) lines.push("", detail.warranty_vi);
-  } else if (detail.warranty_vi) {
-    lines.push("", "🛡 Bảo hành", detail.warranty_vi);
-  }
+  const warrantyText =
+    detail.warranty_vi?.trim() ||
+    (warrantyVariant ? `${warrantyVariant.warranty_days} ngày` : null);
+  if (warrantyText) lines.push("", `🛡 Bảo hành: ${warrantyText}`);
 
   lines.push("", "Chọn gói phù hợp:");
   const buttons: InlineButton[][] = [];
@@ -298,24 +294,40 @@ export function presentProductDetail(
         fulfillmentType: variant.fulfillment_type,
       });
     if (canBuy && buyNow) {
-      buttons.push([{ text: `${variant.name_vi} · ${price}`, callbackData: buyNow }]);
-      continue;
-    }
-    if (!variant.is_ready) {
       buttons.push([
         {
-          text: `🔔 ${variant.name_vi} · Báo khi có hàng`,
-          callbackData: `rst:sub:${variant.id}`,
+          text: variantActionLabel(
+            variant.name_vi,
+            ` · ${price}`,
+            "",
+            durationLabel(variant.duration_code),
+          ),
+          callbackData: buyNow,
         },
       ]);
-      if (variant.preorder_enabled) {
-        buttons.push([
-          {
-            text: `💰 ${variant.name_vi} · Đặt cọc giữ suất`,
-            callbackData: `preorder:consent:${variant.id}`,
-          },
-        ]);
-      }
+      continue;
+    }
+    if (
+      !variant.is_ready &&
+      isRestockLocalRoute({
+        stockPolicy: variant.stock_policy,
+        fulfillmentType: variant.fulfillment_type,
+      })
+    ) {
+      const isPreorder = variant.preorder_enabled === true;
+      buttons.push([
+        {
+          text: variantActionLabel(
+            variant.name_vi,
+            isPreorder ? " · Đặt cọc giữ suất" : " · Báo khi có hàng",
+            isPreorder ? "💰 " : "🔔 ",
+            durationLabel(variant.duration_code),
+          ),
+          callbackData: isPreorder
+            ? `preorder:consent:${variant.id}`
+            : `rst:sub:${variant.id}`,
+        },
+      ]);
     }
   }
   buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }, adminContactButton()]);
@@ -327,6 +339,39 @@ export function presentProductDetail(
     homeButton("shop:home"),
   ]);
   return { text: lines.join("\n"), buttons };
+}
+
+function truncateButtonPart(value: string, maxLength: number): string {
+  if (maxLength <= 0) return "";
+  if (value.length <= maxLength) return value;
+  if (maxLength === 1) return "…";
+  return `${value.slice(0, maxLength - 1).trimEnd()}…`;
+}
+
+function variantActionLabel(
+  name: string,
+  suffix: string,
+  prefix: string,
+  duration: string | null,
+): string {
+  const normalizedName = name.toLowerCase();
+  const normalizedDuration = duration?.toLowerCase();
+  let durationPart =
+    normalizedDuration && !normalizedName.includes(normalizedDuration) ? ` · ${duration}` : "";
+  let maxNameLength = 64 - prefix.length - durationPart.length - suffix.length;
+  let displayName = truncateButtonPart(name, maxNameLength);
+
+  if (
+    duration &&
+    normalizedName.includes(normalizedDuration ?? "") &&
+    !displayName.toLowerCase().includes(normalizedDuration ?? "")
+  ) {
+    durationPart = ` · ${duration}`;
+    maxNameLength = 64 - prefix.length - durationPart.length - suffix.length;
+    displayName = truncateButtonPart(name, maxNameLength);
+  }
+
+  return `${prefix}${displayName}${durationPart}${suffix}`;
 }
 
 /** Paginated sellable variant cards. */
@@ -439,19 +484,26 @@ export function presentVariantDetail(
   ) {
     buttons.push([{ text: `🛒 ${CATALOG_COPY.buyNow}`, callbackData: buyNowCallbackData }]);
   }
-  if (!variant.is_ready) {
+  if (
+    !variant.is_ready &&
+    isRestockLocalRoute({
+      stockPolicy: variant.stock_policy,
+      fulfillmentType: variant.fulfillment_type,
+    })
+  ) {
     const preorder =
       preorderCallbackData ??
       (variant.preorder_enabled ? `preorder:consent:${variant.id}` : undefined);
     if (preorder) buttons.push([{ text: "💰 Đặt cọc giữ suất", callbackData: preorder }]);
-    buttons.push([
-      { text: CATALOG_COPY.restockSubscribe, callbackData: restockSubscribeCallbackData },
-    ]);
+    else
+      buttons.push([
+        { text: CATALOG_COPY.restockSubscribe, callbackData: restockSubscribeCallbackData },
+      ]);
   }
   buttons.push([{ text: CATALOG_COPY.support, callbackData: "supp:open" }, adminContactButton()]);
   if (variant.category_id) {
     buttons.push([
-      { text: `⬅️ ${CATALOG_COPY.back}`, callbackData: `cat:view:${variant.category_id}` },
+      { text: CATALOG_COPY.back, callbackData: `cat:view:${variant.category_id}` },
       homeButton("shop:home"),
     ]);
   } else {
@@ -535,10 +587,39 @@ export function presentSearchResults(
  * contention timeout). Copy is truthful (no payment-success wording). Only
  * working recovery actions are offered.
  */
-export function presentStockOutcome(code: StockOutcomeCode): PresentedMessage {
+export function presentStockOutcome(
+  code: StockOutcomeCode,
+  liveVariant?: CatalogVariantRow,
+): PresentedMessage {
+  let recoveryCallbackData: string | undefined;
+  if (
+    liveVariant &&
+    !liveVariant.is_ready &&
+    isRestockLocalRoute({
+      stockPolicy: liveVariant.stock_policy,
+      fulfillmentType: liveVariant.fulfillment_type,
+    })
+  ) {
+    recoveryCallbackData = liveVariant.preorder_enabled
+      ? `preorder:consent:${liveVariant.id}`
+      : `rst:sub:${liveVariant.id}`;
+  }
+  const recoveryButtons = recoveryCallbackData
+    ? [
+        [
+          {
+            text: liveVariant?.preorder_enabled
+              ? "💰 Đặt cọc giữ suất"
+              : CATALOG_COPY.restockSubscribe,
+            callbackData: recoveryCallbackData,
+          },
+        ],
+      ]
+    : [];
   return {
     text: STOCK_OUTCOME_COPY[code],
     buttons: [
+      ...recoveryButtons,
       [{ text: CATALOG_COPY.viewAlternatives, callbackData: "cat:list" }],
       [homeButton("menu:main")],
     ],

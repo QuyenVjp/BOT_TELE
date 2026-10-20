@@ -77,6 +77,7 @@ const VIEW_LABELS: Record<WarrantyQueueView, string> = {
 export interface WarrantyQueueRow {
   claimNumber: string;
   claimId: string;
+  version: number;
   customerLabel: string;
   productName: string;
   amountVnd: bigint | null;
@@ -139,6 +140,7 @@ export function presentAdminWarrantyQueue(input: {
 
 export interface AdminClaimView {
   id: string;
+  version: number;
   claimNumber: string;
   status: string;
   statusLabel: string;
@@ -180,26 +182,44 @@ export function presentAdminWarrantyClaim(claim: AdminClaimView): PresentedMessa
   const actions: InlineButton[][] = [];
   if (claim.canVerify) {
     actions.push([
-      { text: "✅ Xác nhận lỗi", callbackData: `admin:warranty:verify:${claim.id}` },
-      { text: "❓ Yêu cầu thêm thông tin", callbackData: `admin:warranty:info:${claim.id}` },
+      {
+        text: "✅ Xác nhận lỗi",
+        callbackData: `admin:warranty:verify:${claim.id}:${claim.version}`,
+      },
+      {
+        text: "❓ Yêu cầu thêm thông tin",
+        callbackData: `admin:warranty:info:${claim.id}:${claim.version}`,
+      },
     ]);
     actions.push([
-      { text: "❌ Từ chối bảo hành", callbackData: `admin:warranty:reject:${claim.id}` },
+      {
+        text: "❌ Từ chối bảo hành",
+        callbackData: `admin:warranty:reject:${claim.id}:${claim.version}`,
+      },
     ]);
   }
   if (claim.canReplace) {
     actions.push([
-      { text: "🔄 Duyệt đổi tài khoản", callbackData: `admin:warranty:replace:${claim.id}` },
+      {
+        text: "🔄 Duyệt đổi tài khoản",
+        callbackData: `admin:warranty:replace:${claim.id}:${claim.version}`,
+      },
     ]);
   }
   if (claim.canRefund) {
     actions.push([
-      { text: "💸 Duyệt hoàn tiền", callbackData: `admin:warranty:refund:${claim.id}` },
+      {
+        text: "💸 Duyệt hoàn tiền",
+        callbackData: `admin:warranty:refund:${claim.id}:${claim.version}`,
+      },
     ]);
   }
   if (claim.status === "REFUND_DUE") {
     actions.push([
-      { text: "💸 Xử lý hoàn tiền", callbackData: `admin:warranty:payout:${claim.id}` },
+      {
+        text: "💸 Xử lý hoàn tiền",
+        callbackData: `admin:warranty:payout:${claim.id}:${claim.version}`,
+      },
     ]);
   }
   return {
@@ -254,6 +274,7 @@ export function presentAdminWarrantyClaim(claim: AdminClaimView): PresentedMessa
 /** Goal §25: the refund confirmation, with the calculation spelled out. */
 export function presentAdminRefundConfirm(input: {
   claimId: string;
+  expectedVersion: number;
   claimNumber: string;
   paidAmountVnd: bigint;
   warrantyDays: number;
@@ -281,11 +302,14 @@ export function presentAdminRefundConfirm(input: {
       [
         {
           text: `✅ Duyệt ${vnd(input.recommendedVnd)}`,
-          callbackData: `admin:warranty:refund-confirm:${input.claimId}`,
+          callbackData: `admin:warranty:refund-confirm:${input.claimId}:${input.expectedVersion}`,
         },
       ],
       [
-        { text: "✏️ Điều chỉnh", callbackData: `admin:warranty:refund-adjust:${input.claimId}` },
+        {
+          text: "✏️ Điều chỉnh",
+          callbackData: `admin:warranty:refund-adjust:${input.claimId}:${input.expectedVersion}`,
+        },
         { text: "⬅️ Quay lại", callbackData: `admin:warranty:claim:${input.claimId}` },
       ],
     ],
@@ -294,6 +318,7 @@ export function presentAdminRefundConfirm(input: {
 
 export function presentAdminRefundAdjustPrompt(input: {
   claimId: string;
+  expectedVersion: number;
   recommendedVnd: bigint;
 }): PresentedMessage {
   return {
@@ -307,13 +332,21 @@ export function presentAdminRefundAdjustPrompt(input: {
       "",
       "Số tiền đề xuất và số tiền bạn duyệt đều được ghi nhật ký.",
     ].join("\n"),
-    buttons: [[{ text: "⬅️ Quay lại", callbackData: `admin:warranty:refund:${input.claimId}` }]],
+    buttons: [
+      [
+        {
+          text: "⬅️ Quay lại",
+          callbackData: `admin:warranty:refund:${input.claimId}:${input.expectedVersion}`,
+        },
+      ],
+    ],
   };
 }
 
 /** Goal §32: the manual payout screen. The system never transfers. */
 export function presentAdminRefundPayout(input: {
   claimId: string;
+  expectedVersion: number;
   claimNumber: string;
   customerLabel: string;
   productName: string;
@@ -361,7 +394,12 @@ export function presentAdminRefundPayout(input: {
               },
             ],
           ]),
-      [{ text: "✅ Tôi đã chuyển tiền", callbackData: `admin:warranty:paid:${input.claimId}` }],
+      [
+        {
+          text: "✅ Tôi đã chuyển tiền",
+          callbackData: `admin:warranty:paid:${input.claimId}:${input.expectedVersion}`,
+        },
+      ],
       [{ text: "⬅️ Quay lại", callbackData: `admin:warranty:claim:${input.claimId}` }],
     ],
   };
@@ -370,6 +408,7 @@ export function presentAdminRefundPayout(input: {
 /** Goal §33: confirm only after the transfer really happened. */
 export function presentAdminRefundPaidConfirm(input: {
   claimId: string;
+  expectedVersion: number;
   claimNumber: string;
   amountVnd: bigint;
 }): PresentedMessage {
@@ -386,10 +425,15 @@ export function presentAdminRefundPaidConfirm(input: {
       [
         {
           text: "✅ Xác nhận đã hoàn",
-          callbackData: `admin:warranty:paid-confirm:${input.claimId}`,
+          callbackData: `admin:warranty:paid-confirm:${input.claimId}:${input.expectedVersion}`,
         },
       ],
-      [{ text: "❌ Chưa", callbackData: `admin:warranty:payout:${input.claimId}` }],
+      [
+        {
+          text: "❌ Chưa",
+          callbackData: `admin:warranty:payout:${input.claimId}:${input.expectedVersion}`,
+        },
+      ],
     ],
   };
 }
@@ -416,7 +460,7 @@ export function presentAdminRefundQueue(rows: WarrantyQueueRow[]): PresentedMess
       ...rows.map((row) => [
         {
           text: `💸 Xử lý ${row.claimNumber}`,
-          callbackData: `admin:warranty:payout:${row.claimId}`,
+          callbackData: `admin:warranty:payout:${row.claimId}:${row.version}`,
         },
       ]),
       [
@@ -438,6 +482,7 @@ export const WARRANTY_REJECT_REASONS = [
 export function presentAdminWarrantyRejectReason(input: {
   claimId: string;
   claimNumber: string;
+  expectedVersion: number;
 }): PresentedMessage {
   return {
     text: [
@@ -447,10 +492,10 @@ export function presentAdminWarrantyRejectReason(input: {
       "Chọn lý do — khách sẽ đọc đúng câu này.",
     ].join("\n"),
     buttons: [
-      ...WARRANTY_REJECT_REASONS.map((reason) => [
+      ...WARRANTY_REJECT_REASONS.map((reason, index) => [
         {
           text: reason,
-          callbackData: `admin:warranty:reject-confirm:${input.claimId}:${encodeURIComponent(reason)}`,
+          callbackData: `admin:warranty:reject-confirm:${input.claimId}:${input.expectedVersion}:${index}`,
         },
       ]),
       [{ text: "⬅️ Quay lại", callbackData: `admin:warranty:claim:${input.claimId}` }],

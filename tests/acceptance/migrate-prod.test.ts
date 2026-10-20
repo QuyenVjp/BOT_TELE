@@ -175,6 +175,81 @@ describe("compiled production migration entrypoint (T173)", () => {
       await started.stop();
     }
   }, 180_000);
+  it("isolates ambiguous legacy Sheets challenges while upgrading generation fencing", async () => {
+    if (!hasDocker) return;
+    const started = await startPostgres();
+    const before104Dir = await createMigrationDirThrough(103);
+    const migrationsDir = resolve(repoRoot, "src", "infrastructure", "db", "migrations");
+    const legacyRef = "vault:legacy-same-ref";
+    try {
+      await sql`drop schema public cascade`.execute(started.handle.db);
+      await sql`create schema public`.execute(started.handle.db);
+      await runMigrations(started.handle.db, before104Dir);
+      await sql`
+        insert into category (id, name_vi, slug, is_active, sort_order)
+        values ('generation-category', 'Generation', 'generation-category', true, 1)
+      `.execute(started.handle.db);
+      await sql`
+        insert into product (id, category_id, name_vi, slug, is_active, sort_order)
+        values ('generation-product', 'generation-category', 'Generation product',
+          'generation-product', true, 1)
+      `.execute(started.handle.db);
+      await sql`
+        insert into product_variant
+          (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
+           stock_policy, fulfillment_type, inventory_fields, is_active, sort_order)
+        values
+          ('generation-variant', 'generation-product', 'GENERATION-SKU', 'Generation account',
+           100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', 'STOCK_ACCOUNT',
+           '[{"name":"email","label":"Email","required":true,"secret":false,"customerVisible":true},
+             {"name":"password","label":"Password","required":true,"secret":true,"customerVisible":false}]'::jsonb,
+           true, 1)
+      `.execute(started.handle.db);
+      await sql`
+        insert into admin_inventory_import
+          (admin_telegram_user_id, status, input_vault_ref, preview_ready,
+           preview_invalid, preview_duplicates, preview_variants, selected_variant_id, expires_at)
+        values
+          ('987654321', 'READY', ${legacyRef}, 1, 0, 0, '["generation-variant"]'::jsonb,
+           'generation-variant', now() + interval '15 minutes')
+      `.execute(started.handle.db);
+      await sql`
+        insert into google_sheets_inventory_intake_challenge
+          (id, challenge_hash, spreadsheet_id, owner_email, owner_subject,
+           admin_telegram_user_id, variant_id, input_vault_ref, preview_ready,
+           preview_invalid, preview_duplicates, status, expires_at)
+        values
+          ('legacy-generation-challenge-a', 'legacy-generation-hash-a', 'generation-sheet',
+           'owner@example.test', 'legacy-owner', '987654321', 'generation-variant',
+           ${legacyRef}, 1, 0, 0, 'PREVIEWED', now() + interval '15 minutes'),
+          ('legacy-generation-challenge-b', 'legacy-generation-hash-b', 'generation-sheet',
+           'owner@example.test', 'legacy-owner', '987654321', 'generation-variant',
+           ${legacyRef}, 1, 0, 0, 'PROCESSING', now() + interval '15 minutes')
+      `.execute(started.handle.db);
+
+      await runMigrations(started.handle.db, migrationsDir);
+      const session = await sql<{ generation: string; input_vault_ref: string }>`
+        select generation, input_vault_ref
+        from admin_inventory_import
+        where admin_telegram_user_id = '987654321'
+      `.execute(started.handle.db);
+      const challenges = await sql<{ generation: string; status: string }>`
+        select generation, status
+        from google_sheets_inventory_intake_challenge
+        order by id
+      `.execute(started.handle.db);
+      expect(session.rows[0]?.input_vault_ref).toBe(legacyRef);
+      expect(challenges.rows).toHaveLength(2);
+      expect(challenges.rows.every((row) => row.generation !== session.rows[0]?.generation)).toBe(
+        true,
+      );
+      expect(new Set(challenges.rows.map((row) => row.generation)).size).toBe(2);
+      expect(challenges.rows.map((row) => row.status)).toEqual(["PREVIEWED", "PROCESSING"]);
+    } finally {
+      await rm(before104Dir, { recursive: true, force: true });
+      await started.stop();
+    }
+  }, 180_000);
 });
 
 async function createBaselineMigrationDir(): Promise<string> {
@@ -186,6 +261,17 @@ async function createBaselineMigrationDir(): Promise<string> {
     const resolved = files.find((candidate) => candidate.startsWith(prefix));
     if (!resolved) throw new Error(`missing baseline migration ${prefix}`);
     await cp(resolve(source, resolved), resolve(dir, resolved));
+  }
+  return dir;
+}
+async function createMigrationDirThrough(maxMigration: number): Promise<string> {
+  const dir = await mkdtemp(resolve(tmpdir(), "telegram-shop-migrations-"));
+  const source = resolve(repoRoot, "src", "infrastructure", "db", "migrations");
+  const files = await readdir(source);
+  for (const filename of files) {
+    const match = /^(\d+)/u.exec(filename);
+    if (!match || Number(match[1]) > maxMigration) continue;
+    await cp(resolve(source, filename), resolve(dir, filename));
   }
   return dir;
 }

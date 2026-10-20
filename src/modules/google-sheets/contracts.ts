@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const GOOGLE_SHEETS_SCHEMA_VERSION = 3;
+export const GOOGLE_SHEETS_SCHEMA_VERSION = 4;
 export const SHEETS_API_SCOPE = "https://www.googleapis.com/auth/spreadsheets" as const;
 
 export const GOOGLE_SHEETS_TABS = [
@@ -108,6 +108,7 @@ export const SHEET_HEADERS: Record<GoogleSheetsTab, readonly string[]> = {
     "supplier_order_status",
     "credential_vault_ref",
     "updated_at",
+    "supplier_sku_id",
   ],
   Requests: [
     "request_id",
@@ -364,24 +365,42 @@ export function parseSheetRequest(input: unknown): ParsedSheetRequest {
 }
 
 export function rowKey(tab: GoogleSheetsTab, row: Record<string, unknown>): string {
-  const key =
-    tab === "Inventory"
-      ? row.asset_id
-      : tab === "Orders"
-        ? row.order_id
-        : tab === "Payments"
-          ? row.payment_intent_id
-          : tab === "Fulfillment"
-            ? row.order_id
-            : tab === "Suppliers"
-              ? row.supplier_id
-              : tab === "Requests"
-                ? row.request_id
-                : tab === "Audit"
-                  ? row.audit_id
-                  : tab === "Warranty_Support"
-                    ? row.record_id
-                    : row.metric_key;
+  let key: unknown;
+  switch (tab) {
+    case "Inventory":
+      key = row.asset_id;
+      break;
+    case "Orders":
+    case "Fulfillment":
+      key = row.order_id;
+      break;
+    case "Payments":
+      key = row.payment_intent_id;
+      break;
+    case "Suppliers": {
+      const supplierSkuId = row.supplier_sku_id;
+      const supplierId = row.supplier_id;
+      key =
+        typeof supplierSkuId === "string" && supplierSkuId.trim()
+          ? `sku:${supplierSkuId.trim()}`
+          : typeof supplierId === "string" && supplierId.trim()
+            ? `supplier:${supplierId.trim()}`
+            : undefined;
+      break;
+    }
+    case "Requests":
+      key = row.request_id;
+      break;
+    case "Audit":
+      key = row.audit_id;
+      break;
+    case "Warranty_Support":
+      key = row.record_id;
+      break;
+    default:
+      key = row.metric_key;
+      break;
+  }
   if (typeof key !== "string" || key.length === 0) {
     throw new GoogleSheetsContractError("INVALID_SHEET_REQUEST", `missing stable key for ${tab}`);
   }

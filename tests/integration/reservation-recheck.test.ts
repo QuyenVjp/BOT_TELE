@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import {
   dockerAvailable,
   startPostgresContainer,
@@ -92,6 +93,7 @@ describe.skipIf(!hasDocker)("SKIP LOCKED recheck on lock-holder rollback (T156)"
         bank_transaction, payment_intent, order_transition, "order",
         product_variant, product, category, customer cascade
     `.execute(ctx.db);
+    await setStoreModeForTest(ctx.db, "OPEN", "test");
   });
 
   it("succeeds when the concurrent lock-holder rolls back (no false OOS)", async () => {

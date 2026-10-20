@@ -580,7 +580,9 @@ function classifyAction(
     if (
       action === "SUPPORT_MENU" ||
       action === "SUPPORT_REASON" ||
-      action === "SUPPORT_TICKET_VIEW"
+      action === "SUPPORT_TICKET_VIEW" ||
+      action === "SUPPORT_TICKET_LIST" ||
+      action === "SUPPORT_TICKET_CLOSE"
     )
       return "SUPPORT";
     if (action === "ADMIN_COMMAND") return "ADMIN";

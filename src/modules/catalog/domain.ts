@@ -55,6 +55,26 @@ export function requiresLocalReservation(
   return policy === "LOCAL_ONLY" || policy === "LOCAL_THEN_SUPPLIER";
 }
 
+export const RESTOCK_LOCAL_FULFILLMENT_TYPES = [
+  "STOCK_ACCOUNT",
+  "STOCK_CODE",
+  "DIGITAL_FILE",
+  "QUANTITY_STOCK",
+] as const satisfies readonly FulfillmentType[];
+
+/** Restock subscriptions are only meaningful for finite local inventory routes. */
+export function isRestockLocalRoute(input: {
+  stockPolicy: unknown;
+  fulfillmentType: unknown;
+}): boolean {
+  return (
+    requiresLocalReservation(input.stockPolicy) &&
+    RESTOCK_LOCAL_FULFILLMENT_TYPES.includes(
+      input.fulfillmentType as (typeof RESTOCK_LOCAL_FULFILLMENT_TYPES)[number],
+    )
+  );
+}
+
 export interface Category {
   id: CategoryId;
   nameVi: string;

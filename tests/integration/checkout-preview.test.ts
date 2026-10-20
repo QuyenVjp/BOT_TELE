@@ -7,6 +7,7 @@ import {
 } from "../../src/bot/callback-codec.js";
 import { createCheckoutCallbacks } from "../../src/bot/callbacks/checkout.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 
 /**
  * Checkout confirmation (goal §32).
@@ -169,6 +170,7 @@ beforeEach(async () => {
   await sql`truncate table outbox_event, payment_allocation, discrepancy, bank_transaction, payment_intent, order_transition, digital_asset, "order", product_variant, product, category, customer cascade`.execute(
     ctx.db,
   );
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 describe("checkout confirmation screen", () => {
@@ -250,6 +252,41 @@ describe("checkout confirmation screen", () => {
     expect(paid.buttons.flat().some((b) => b.copyText)).toBe(true);
     expect(await orderCount()).toBe(1);
     expect(await intentCount()).toBe(1);
+  });
+  it("rejects a VietQR callback when the confirmed price has changed", async () => {
+    const catalog = await seedCatalog();
+    const { preview, previewToken, adapter } = build(catalog, null);
+
+    const message = await preview(previewToken());
+    const qr = message.buttons.flat().find((button) => button.text === "🏦 VietQR");
+    expect(qr).toBeTruthy();
+
+    await sql`update product_variant set price_vnd = 249000 where id = ${catalog.variantId}`.execute(
+      ctx.db,
+    );
+
+    const response = await adapter.buyNowFromCallback({
+      callbackData: qr!.callbackData,
+      telegramUserId: TELEGRAM_USER_ID,
+      correlationId: "t-qr-price-changed",
+    });
+    const reopen = response.buttons.flat().find((button) => {
+      const verified = tokenCodec().verify(button.callbackData, {
+        telegramUserId: TELEGRAM_USER_ID,
+      });
+      return (
+        verified.ok &&
+        verified.value.action === "SHOP_PRODUCT" &&
+        verified.value.resourceId === catalog.productId
+      );
+    });
+    expect(reopen).toBeDefined();
+    expect(tokenCodec().verify(reopen!.callbackData, { telegramUserId: "999" }).ok).toBe(false);
+    expect(response.buttons.flat()).toContainEqual(
+      expect.objectContaining({ callbackData: "sup:open" }),
+    );
+    expect(await orderCount()).toBe(0);
+    expect(await intentCount()).toBe(0);
   });
 
   it("rejects a token minted for another customer", async () => {

@@ -23,7 +23,7 @@ export interface StartedPg {
   stop(): Promise<void>;
 }
 
-export async function startPostgres(): Promise<StartedPg> {
+export async function startPostgres(migrationsDir?: string): Promise<StartedPg> {
   const container: StartedTestContainer = await new GenericContainer(PG_IMAGE)
     .withEnvironment({
       POSTGRES_USER: PG_USER,
@@ -41,7 +41,7 @@ export async function startPostgres(): Promise<StartedPg> {
 
   const handle = createDb({ connectionString });
   try {
-    await runMigrations(handle.db);
+    await runMigrations(handle.db, migrationsDir);
   } catch (error) {
     // A container that started but failed its readiness/migration contract is
     // a real test failure. Clean up the started resources, then rethrow rather

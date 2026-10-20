@@ -15,7 +15,7 @@ import { searchCatalog } from "../../modules/catalog/search.js";
 import { resolveCatalogAudience, type CatalogIdentity } from "../../modules/catalog/visibility.js";
 import type { CatalogCache } from "../../modules/catalog/cache.js";
 import type { SearchParser } from "../../modules/catalog/search-parser-port.js";
-import type { BuyNowCallbackCodec, CallbackTokenCodec } from "../callback-codec.js";
+import type { CallbackTokenCodec } from "../callback-codec.js";
 import { isId } from "../../shared/ids/index.js";
 import {
   presentCategoryList,
@@ -43,13 +43,8 @@ export interface CatalogCallbackDeps {
   cache?: CatalogCache;
   /** Default page size for variant lists. */
   pageSize?: number;
-  callbackCodec: BuyNowCallbackCodec;
-  /**
-   * Unified token codec. When present the Buy Now button issues a CHECKOUT_PREVIEW token so
-   * the customer confirms the order before any financial intent exists (goal §32); absent, it
-   * falls back to the legacy sealed Buy Now token.
-   */
-  tokenCodec?: CallbackTokenCodec;
+  /** Unified actor-bound token codec used for CHECKOUT_PREVIEW Buy Now buttons. */
+  tokenCodec: CallbackTokenCodec;
   productLinkSecret?: string;
   /** Goal §28: opens the one-shot permission the search prompt needs before it accepts text. */
   searchPrompt?: {
@@ -87,18 +82,18 @@ export interface CatalogCallbacks {
     }): Promise<PresentedMessage>;
     issueTypes(input: {
       telegramUserId: string;
-      variantId: string;
+      orderId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
     preview(input: {
       telegramUserId: string;
-      variantId: string;
+      orderId: string;
       issueType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
     report(input: {
       telegramUserId: string;
-      variantId: string;
+      orderId: string;
       issueType: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
@@ -153,17 +148,10 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       return undefined;
     }
     try {
-      if (deps.tokenCodec) {
-        return deps.tokenCodec.issue({
-          action: "CHECKOUT_PREVIEW",
-          telegramUserId,
-          resourceId: variant.id,
-        });
-      }
-      return deps.callbackCodec.issue({
+      return deps.tokenCodec.issue({
+        action: "CHECKOUT_PREVIEW",
         telegramUserId,
-        variantId: variant.id,
-        expectedPriceVnd,
+        resourceId: variant.id,
       });
     } catch {
       return undefined;
@@ -210,7 +198,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       if (!page) {
         return {
           text: CATALOG_COPY.emptyCategory,
-          buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]],
+          buttons: [[{ text: CATALOG_COPY.mainMenu, callbackData: "shop:home" }]],
         };
       }
       return presentCategoryPage(page);
@@ -288,7 +276,7 @@ export function createCatalogCallbacks(deps: CatalogCallbackDeps): CatalogCallba
       if (!detail) {
         return {
           text: "Sản phẩm không khả dụng hoặc chưa mở bán.",
-          buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]],
+          buttons: [[{ text: CATALOG_COPY.mainMenu, callbackData: "shop:home" }]],
         };
       }
       const buyNowByVariantId: Record<string, string | undefined> = {};

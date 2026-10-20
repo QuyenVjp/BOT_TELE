@@ -12,7 +12,7 @@ export interface SheetValueRange {
 }
 
 export interface SheetsSpreadsheet {
-  sheets: readonly { sheetId: number; title: string }[];
+  sheets: readonly { sheetId: number; title: string; rowCount?: number }[];
   developerMetadata: readonly { metadataKey: string; metadataValue: string | null }[];
 }
 
@@ -154,6 +154,138 @@ export function buildBatchUpdateValuesPayload(data: readonly SheetValueRange[]):
 } {
   return { valueInputOption: "RAW", data };
 }
+export const SHEETS_VALUES_BATCH_MAX_BYTES = 1_500_000;
+
+interface ParsedA1Range {
+  prefix: string;
+  startColumn: string;
+  startRow: number;
+  endColumn: string;
+  endRow: number;
+}
+
+function parseA1Range(range: string): ParsedA1Range {
+  const match = /^(.+!)([A-Z]+)(\d+):([A-Z]+)(\d+)$/u.exec(range);
+  const prefix = match?.[1];
+  const startColumn = match?.[2];
+  const startRow = Number(match?.[3]);
+  const endColumn = match?.[4];
+  const endRow = Number(match?.[5]);
+  if (
+    !prefix ||
+    !startColumn ||
+    !endColumn ||
+    !Number.isSafeInteger(startRow) ||
+    !Number.isSafeInteger(endRow) ||
+    startRow < 1 ||
+    endRow < startRow
+  ) {
+    throw new GoogleSheetsError("INVALID_REQUEST", false, 400);
+  }
+  return { prefix, startColumn, startRow, endColumn, endRow };
+}
+
+function rowsRange(
+  entry: SheetValueRange,
+  parsed: ParsedA1Range,
+  start: number,
+  end: number,
+): SheetValueRange {
+  const firstRow = parsed.startRow + start;
+  const lastRow = firstRow + (end - start) - 1;
+  return {
+    range: `${parsed.prefix}${parsed.startColumn}${firstRow}:${parsed.endColumn}${lastRow}`,
+    values: entry.values.slice(start, end),
+  };
+}
+
+function rowRangeByteLength(
+  parsed: ParsedA1Range,
+  start: number,
+  end: number,
+  rowByteSums: readonly number[],
+): number {
+  const firstRow = parsed.startRow + start;
+  const lastRow = firstRow + (end - start) - 1;
+  const range = `${parsed.prefix}${parsed.startColumn}${firstRow}:${parsed.endColumn}${lastRow}`;
+  const rowBytes = rowByteSums[end]! - rowByteSums[start]! + Math.max(0, end - start - 1);
+  return (
+    Buffer.byteLength(`{"range":${JSON.stringify(range)},"values":[`, "utf8") +
+    rowBytes +
+    Buffer.byteLength("]}", "utf8")
+  );
+}
+
+const VALUES_PAYLOAD_PREFIX_BYTES = Buffer.byteLength('{"valueInputOption":"RAW","data":[', "utf8");
+const VALUES_PAYLOAD_SUFFIX_BYTES = Buffer.byteLength('],"includeValuesInResponse":false}', "utf8");
+
+export function chunkSheetValueRanges(
+  data: readonly SheetValueRange[],
+  maxBytes = SHEETS_VALUES_BATCH_MAX_BYTES,
+): readonly (readonly SheetValueRange[])[] {
+  if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
+    throw new GoogleSheetsError("INVALID_REQUEST", false, 400);
+  }
+  const chunks: SheetValueRange[][] = [];
+  let current: SheetValueRange[] = [];
+  let currentDataBytes = 0;
+  const flush = (): void => {
+    if (current.length > 0) {
+      chunks.push(current);
+      current = [];
+      currentDataBytes = 0;
+    }
+  };
+  for (const entry of data) {
+    if (entry.values.length === 0) continue;
+    const parsed = parseA1Range(entry.range);
+    if (entry.values.length > parsed.endRow - parsed.startRow + 1) {
+      throw new GoogleSheetsError("INVALID_REQUEST", false, 400);
+    }
+    const rowByteSums: number[] = [0];
+    for (let index = 0; index < entry.values.length; index += 1) {
+      const row = entry.values[index]!;
+      const serializedRow = JSON.stringify(row) ?? "";
+      rowByteSums.push(rowByteSums[index]! + Buffer.byteLength(serializedRow, "utf8"));
+    }
+    let start = 0;
+    while (start < entry.values.length) {
+      let end = start + 1;
+      while (end < entry.values.length) {
+        const nextEnd = end + 1;
+        const nextBytes = rowRangeByteLength(parsed, start, nextEnd, rowByteSums);
+        const nextPayloadBytes =
+          VALUES_PAYLOAD_PREFIX_BYTES +
+          VALUES_PAYLOAD_SUFFIX_BYTES +
+          currentDataBytes +
+          (current.length > 0 ? 1 : 0) +
+          nextBytes;
+        if (nextPayloadBytes > maxBytes) break;
+        end = nextEnd;
+      }
+      const candidateBytes = rowRangeByteLength(parsed, start, end, rowByteSums);
+      const candidatePayloadBytes =
+        VALUES_PAYLOAD_PREFIX_BYTES +
+        VALUES_PAYLOAD_SUFFIX_BYTES +
+        currentDataBytes +
+        (current.length > 0 ? 1 : 0) +
+        candidateBytes;
+      if (candidatePayloadBytes > maxBytes) {
+        flush();
+        if (VALUES_PAYLOAD_PREFIX_BYTES + VALUES_PAYLOAD_SUFFIX_BYTES + candidateBytes > maxBytes) {
+          throw new GoogleSheetsError("INVALID_REQUEST", false, 400);
+        }
+        continue;
+      }
+      const candidate = rowsRange(entry, parsed, start, end);
+      currentDataBytes += (current.length > 0 ? 1 : 0) + candidateBytes;
+      current.push(candidate);
+      start = end;
+    }
+  }
+  flush();
+  return chunks;
+}
 
 function asRows(values: readonly (readonly SheetValue[])[] | undefined): readonly SheetValue[][] {
   return (values ?? []).map((row) => [...row]);
@@ -216,7 +348,7 @@ export async function createGoogleSheetsClient(
           {
             spreadsheetId,
             fields:
-              "sheets(properties(sheetId,title)),developerMetadata(metadataKey,metadataValue)",
+              "sheets(properties(sheetId,title,gridProperties(rowCount))),developerMetadata(metadataKey,metadataValue)",
           },
           requestOptions,
         ),
@@ -224,9 +356,16 @@ export async function createGoogleSheetsClient(
       return {
         sheets: (response.data.sheets ?? []).flatMap((sheet) => {
           const properties = sheet.properties;
-          return typeof properties?.sheetId === "number" && properties.title
-            ? [{ sheetId: properties.sheetId, title: properties.title }]
-            : [];
+          if (typeof properties?.sheetId !== "number" || !properties.title) return [];
+          return [
+            {
+              sheetId: properties.sheetId,
+              title: properties.title,
+              ...(typeof properties.gridProperties?.rowCount === "number"
+                ? { rowCount: properties.gridProperties.rowCount }
+                : {}),
+            },
+          ];
         }),
         developerMetadata: (response.data.developerMetadata ?? []).flatMap((entry) =>
           entry.metadataKey
@@ -257,23 +396,25 @@ export async function createGoogleSheetsClient(
     },
 
     async batchUpdateValues({ spreadsheetId, data }) {
-      if (data.length === 0) return;
-      await retry(() =>
-        sheets.spreadsheets.values.batchUpdate(
-          {
-            spreadsheetId,
-            requestBody: {
-              valueInputOption: "RAW",
-              data: data.map((entry) => ({
-                range: entry.range,
-                values: entry.values.map((row) => [...row]),
-              })),
-              includeValuesInResponse: false,
+      const chunks = chunkSheetValueRanges(data);
+      for (const chunk of chunks) {
+        await retry(() =>
+          sheets.spreadsheets.values.batchUpdate(
+            {
+              spreadsheetId,
+              requestBody: {
+                valueInputOption: "RAW",
+                data: chunk.map((entry) => ({
+                  range: entry.range,
+                  values: entry.values.map((row) => [...row]),
+                })),
+                includeValuesInResponse: false,
+              },
             },
-          },
-          requestOptions,
-        ),
-      );
+            requestOptions,
+          ),
+        );
+      }
     },
 
     async batchUpdate({ spreadsheetId, requests }) {

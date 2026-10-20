@@ -1,7 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
-import { listOrderHistory, getOrderDetailForCustomer } from "../../src/modules/commerce/history.js";
+import {
+  getOrderTimelineForCustomer,
+  listOrderHistory,
+  getOrderDetailForCustomer,
+} from "../../src/modules/commerce/history.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
@@ -63,6 +67,20 @@ async function seedOrder(
       100000, 'P1M', 'CREDENTIAL', ${status}, now() - (${createdOffsetSec} || ' seconds')::interval)
   `.execute(ctx.db);
   return orderId;
+}
+
+async function seedTransition(
+  orderId: string,
+  id: string,
+  status: string,
+  occurredAt: string,
+): Promise<void> {
+  await sql`
+    insert into order_transition
+      (id, order_id, from_status, to_status, reason_code, actor_type, correlation_id, occurred_at)
+    values
+      (${id}, ${orderId}, 'DRAFT', ${status}, 'TEST', 'system', ${"corr-" + id}, ${occurredAt}::timestamptz)
+  `.execute(ctx.db);
 }
 
 beforeEach(async () => {
@@ -147,4 +165,40 @@ describe("order history BOLA + pagination (FR-018 / SR-003)", () => {
     const page = await listOrderHistory(ctx.db, { customerId: alice, limit: 10 });
     expect(page.items[0]?.status).toBe("PAYMENT_NEEDS_REVIEW");
   });
+  it("returns only owned persisted transitions in occurred/id order", async () => {
+    const alice = await seedCustomer();
+    const bob = await seedCustomer();
+    const variant = await seedVariant();
+    const aliceOrder = await seedOrder(alice, variant, "COMPLETED");
+    const bobOrder = await seedOrder(bob, variant, "COMPLETED");
+    const orderWithoutTransitions = await seedOrder(alice, variant, "PENDING_PAYMENT");
+    const occurredAt = "2026-01-15T12:34:56.789Z";
+
+    await seedTransition(aliceOrder, "transition-b", "FUTURE_STATUS", occurredAt);
+    await seedTransition(aliceOrder, "transition-a", "PENDING_PAYMENT", occurredAt);
+    await seedTransition(bobOrder, "transition-z", "PAID", occurredAt);
+
+    const timeline = await getOrderTimelineForCustomer(ctx.db, {
+      orderId: aliceOrder,
+      customerId: alice,
+    });
+
+    expect(timeline).toEqual([
+      { status: "PENDING_PAYMENT", occurredAt },
+      { status: "FUTURE_STATUS", occurredAt },
+    ]);
+    expect(Object.keys(timeline[0] ?? {}).sort()).toEqual(["occurredAt", "status"]);
+
+    // A foreign order and an order with no transition are both empty.
+    await expect(
+      getOrderTimelineForCustomer(ctx.db, { orderId: bobOrder, customerId: alice }),
+    ).resolves.toEqual([]);
+    await expect(
+      getOrderTimelineForCustomer(ctx.db, {
+        orderId: orderWithoutTransitions,
+        customerId: alice,
+      }),
+    ).resolves.toEqual([]);
+  });
+
 });

@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { listSellableVariants, getVariantById } from "../../src/modules/catalog/repository.js";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import {
   applyPaymentEvidence,
   presentPaymentForOrder,
@@ -37,6 +38,7 @@ const ACCOUNT_NAME = "SHOP DIGITAL MVP";
 
 beforeAll(async () => {
   ctx = await startPostgresContainer();
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 }, 180_000);
 
 afterAll(async () => {

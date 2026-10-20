@@ -379,4 +379,51 @@ describe("file delivery handler integration", () => {
       fileId: "cached_handler_file_id_1234567890",
     });
   });
+
+  it("maps uncertain file delivery to terminal review and does not resend on replay", async () => {
+    const f = await seedPaidFileOrder();
+    const calls: Array<Parameters<TelegramDocumentSender["sendDocument"]>[0]> = [];
+    const sender: TelegramDocumentSender = {
+      async sendDocument(input) {
+        calls.push(input);
+        throw new Error("simulated remote acceptance");
+      },
+    };
+    const handler = createFulfillmentOutboxHandler({
+      db: ctx.db,
+      vault: createInMemoryVault(),
+      supplier: null,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+      fileDelivery: { storageRoots: [storageRoot], sender },
+    });
+    const event = {
+      id: newId(),
+      aggregateType: "Order" as const,
+      aggregateId: f.orderId,
+      aggregateVersion: 2,
+      eventType: "OrderPaid" as const,
+      payloadRedacted: { orderId: f.orderId, correlationId: "file-uncertain" },
+      attemptCount: 1,
+      claimedBy: "handler-test",
+      generation: 1,
+    };
+
+    await expect(handler(event)).resolves.toEqual({
+      kind: "TERMINAL_REVIEW",
+      errorCode: "SEND_UNCERTAIN",
+    });
+    await expect(handler(event)).resolves.toEqual({
+      kind: "TERMINAL_REVIEW",
+      errorCode: "SEND_UNCERTAIN",
+    });
+    expect(calls).toHaveLength(1);
+
+    const state = await sql<{ status: string; last_error: string | null }>`
+      select status, last_error
+      from file_delivery_job
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(state.rows[0]).toEqual({ status: "FAILED", last_error: "SEND_UNCERTAIN" });
+  });
 });

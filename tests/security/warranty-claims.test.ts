@@ -101,13 +101,20 @@ describe("warranty claims", () => {
     return { customerId, orderId, variantId, assetId, completedAt };
   }
 
-  const admin = (claimId: string) => ({
-    db: ctx.handle.db,
-    actor: rootActor,
-    config: rootConfig,
-    claimId,
-    correlationId: "warranty-test",
-  });
+  const admin = async (claimId: string) => {
+    const rows = await sql<{ version: number }>`
+      select version from warranty_claim where id = ${claimId}
+    `.execute(ctx.handle.db);
+    if (!rows.rows[0]) throw new Error("claim not found");
+    return {
+      db: ctx.handle.db,
+      actor: rootActor,
+      config: rootConfig,
+      claimId,
+      expectedVersion: rows.rows[0].version,
+      correlationId: "warranty-test",
+    };
+  };
 
   const walletTotal = async (customerId: string) => {
     const rows = await sql<{ balance: string | null }>`
@@ -190,11 +197,11 @@ describe("warranty claims", () => {
     if (!opened.ok) throw new Error("claim not opened");
 
     await verifyClaimDefect({
-      ...admin(opened.claimId),
+      ...(await admin(opened.claimId)),
       now: new Date(reportedAt.getTime() + 25 * DAY),
     });
     const approved = await approveClaimRefund({
-      ...admin(opened.claimId),
+      ...(await admin(opened.claimId)),
       now: new Date(reportedAt.getTime() + 25 * DAY),
     });
     expect(approved).toMatchObject({ ok: true, status: "REFUND_DUE" });
@@ -239,6 +246,85 @@ describe("warranty claims", () => {
     expect(expired).toMatchObject({ ok: false, code: "WARRANTY_EXPIRED" });
   });
 
+  it("serializes concurrent no-asset submissions into one active claim", async () => {
+    const fixture = await seed();
+    const params = {
+      db: ctx.handle.db,
+      customerId: fixture.customerId,
+      orderId: fixture.orderId,
+      issueType: "OTHER" as const,
+      correlationId: "concurrent-no-asset",
+      now: new Date(fixture.completedAt.getTime() + DAY),
+    };
+
+    const [first, second] = await Promise.all([
+      openWarrantyClaim(params),
+      openWarrantyClaim(params),
+    ]);
+    expect(first.ok && second.ok).toBe(true);
+    if (!first.ok || !second.ok) return;
+    expect(second.claimId).toBe(first.claimId);
+    expect([first.idempotent, second.idempotent].sort()).toEqual([false, true]);
+
+    const active = await sql<{ n: string }>`
+      select count(*)::text as n
+      from warranty_claim
+      where order_id = ${fixture.orderId}
+        and original_asset_id is null
+        and status not in ('REJECTED', 'RESOLVED', 'CANCELLED', 'REFUND_PAID')
+    `.execute(ctx.handle.db);
+    expect(active.rows[0]!.n).toBe("1");
+  });
+
+  it("refuses to open a claim for an order that is not completed", async () => {
+    const fixture = await seed();
+    await sql`update "order" set status = 'PROCESSING' where id = ${fixture.orderId}`.execute(
+      ctx.handle.db,
+    );
+
+    const result = await openWarrantyClaim({
+      db: ctx.handle.db,
+      customerId: fixture.customerId,
+      orderId: fixture.orderId,
+      assetId: fixture.assetId,
+      issueType: "OTHER",
+      correlationId: "not-completed",
+      now: new Date(fixture.completedAt.getTime() + DAY),
+    });
+    expect(result).toMatchObject({ ok: false, code: "NOT_FULFILLED" });
+
+    const claims = await sql<{ n: string }>`
+      select count(*)::text as n from warranty_claim where order_id = ${fixture.orderId}
+    `.execute(ctx.handle.db);
+    expect(claims.rows[0]!.n).toBe("0");
+  });
+  it("rejects a stale admin expectedVersion without changing the claim", async () => {
+    const fixture = await seed();
+    const opened = await openWarrantyClaim({
+      db: ctx.handle.db,
+      customerId: fixture.customerId,
+      orderId: fixture.orderId,
+      assetId: fixture.assetId,
+      issueType: "ACCOUNT_LOCKED",
+      correlationId: "stale-admin-version",
+      now: new Date(fixture.completedAt.getTime() + DAY),
+    });
+    if (!opened.ok) throw new Error("claim not opened");
+
+    const stale = await admin(opened.claimId);
+    expect(await verifyClaimDefect(stale)).toMatchObject({ ok: true, status: "VERIFIED_DEFECT" });
+    expect(await approveClaimRefund(stale)).toMatchObject({ ok: false, code: "STALE_VERSION" });
+
+    const claim = await sql<{ status: string; version: number }>`
+      select status, version from warranty_claim where id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    expect(claim.rows[0]).toMatchObject({ status: "VERIFIED_DEFECT", version: 2 });
+    const obligation = await sql<{ n: string }>`
+      select count(*)::text as n from shop_refund_obligation where claim_id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    expect(obligation.rows[0]!.n).toBe("0");
+  });
+
   it("approving a refund creates exactly one obligation and moves no money", async () => {
     const fixture = await seed();
     const opened = await openWarrantyClaim({
@@ -253,9 +339,9 @@ describe("warranty claims", () => {
     if (!opened.ok) throw new Error("claim not opened");
     const balanceBefore = await walletTotal(fixture.customerId);
 
-    await verifyClaimDefect(admin(opened.claimId));
-    await approveClaimRefund(admin(opened.claimId));
-    const replay = await approveClaimRefund(admin(opened.claimId));
+    await verifyClaimDefect(await admin(opened.claimId));
+    await approveClaimRefund(await admin(opened.claimId));
+    const replay = await approveClaimRefund(await admin(opened.claimId));
 
     const obligations = await sql<{ n: string }>`
       select count(*)::text as n from shop_refund_obligation where claim_id = ${opened.claimId}
@@ -289,15 +375,18 @@ describe("warranty claims", () => {
     if (!opened.ok) throw new Error("claim not opened");
 
     // Not yet due: marking paid before approval is refused.
-    expect(await markRefundPaid(admin(opened.claimId))).toMatchObject({
+    expect(await markRefundPaid(await admin(opened.claimId))).toMatchObject({
       ok: false,
       code: "ILLEGAL_STATE",
     });
 
-    await verifyClaimDefect(admin(opened.claimId));
-    await approveClaimRefund(admin(opened.claimId));
-    const paid = await markRefundPaid({ ...admin(opened.claimId), payoutReference: "FT-TEST-1" });
-    const replay = await markRefundPaid(admin(opened.claimId));
+    await verifyClaimDefect(await admin(opened.claimId));
+    await approveClaimRefund(await admin(opened.claimId));
+    const paid = await markRefundPaid({
+      ...(await admin(opened.claimId)),
+      payoutReference: "FT-TEST-1",
+    });
+    const replay = await markRefundPaid(await admin(opened.claimId));
     expect(paid).toMatchObject({ ok: true, status: "REFUND_PAID" });
     expect(replay).toMatchObject({ ok: true, idempotent: true });
 
@@ -305,6 +394,44 @@ describe("warranty claims", () => {
       select status, count(*)::text as n from shop_refund_obligation where claim_id = ${opened.claimId} group by status
     `.execute(ctx.handle.db);
     expect(obligations.rows[0]).toMatchObject({ status: "PAID", n: "1" });
+  });
+
+  it("refuses to mark REFUND_DUE paid when its obligation is not open", async () => {
+    const fixture = await seed();
+    const opened = await openWarrantyClaim({
+      db: ctx.handle.db,
+      customerId: fixture.customerId,
+      orderId: fixture.orderId,
+      assetId: fixture.assetId,
+      issueType: "LOST_BENEFITS",
+      correlationId: "non-open-obligation",
+      now: new Date(fixture.completedAt.getTime() + 18 * DAY),
+    });
+    if (!opened.ok) throw new Error("claim not opened");
+
+    await verifyClaimDefect(await admin(opened.claimId));
+    await approveClaimRefund(await admin(opened.claimId));
+    const obligation = await sql<{ id: string }>`
+      select id from shop_refund_obligation where claim_id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    await sql`
+      update shop_refund_obligation set status = 'FULFILLED'
+      where id = ${obligation.rows[0]!.id}
+    `.execute(ctx.handle.db);
+
+    const result = await markRefundPaid(await admin(opened.claimId));
+    expect(result).toMatchObject({ ok: false, code: "ILLEGAL_STATE" });
+
+    const claim = await sql<{ status: string }>`
+      select status from warranty_claim where id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    expect(claim.rows[0]!.status).toBe("REFUND_DUE");
+    const events = await sql<{ n: string }>`
+      select count(*)::text as n
+      from warranty_claim_event
+      where claim_id = ${opened.claimId} and kind = 'REFUND_PAID'
+    `.execute(ctx.handle.db);
+    expect(events.rows[0]!.n).toBe("0");
   });
 
   it("adjusts the approved amount only with a reason, and audits both figures", async () => {
@@ -319,17 +446,17 @@ describe("warranty claims", () => {
       now: new Date(fixture.completedAt.getTime() + 18 * DAY),
     });
     if (!opened.ok) throw new Error("claim not opened");
-    await verifyClaimDefect(admin(opened.claimId));
+    await verifyClaimDefect(await admin(opened.claimId));
 
-    expect(await approveClaimRefund({ ...admin(opened.claimId), amountVnd: 50000n })).toMatchObject(
-      {
-        ok: false,
-        code: "INVALID_REASON",
-      },
-    );
+    expect(
+      await approveClaimRefund({ ...(await admin(opened.claimId)), amountVnd: 50000n }),
+    ).toMatchObject({
+      ok: false,
+      code: "INVALID_REASON",
+    });
 
     const approved = await approveClaimRefund({
-      ...admin(opened.claimId),
+      ...(await admin(opened.claimId)),
       amountVnd: 50000n,
       overrideReason: "Goodwill top-up",
     });
@@ -358,10 +485,10 @@ describe("warranty claims", () => {
       now: new Date(fixture.completedAt.getTime() + 5 * DAY),
     });
     if (!opened.ok) throw new Error("claim not opened");
-    await verifyClaimDefect(admin(opened.claimId));
+    await verifyClaimDefect(await admin(opened.claimId));
 
     const replaced = await approveClaimReplacement({
-      ...admin(opened.claimId),
+      ...(await admin(opened.claimId)),
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });
@@ -379,7 +506,7 @@ describe("warranty claims", () => {
     `.execute(ctx.handle.db);
     expect(claimed.rows[0]!.n).toBe("1");
     const replay = await approveClaimReplacement({
-      ...admin(opened.claimId),
+      ...(await admin(opened.claimId)),
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });
@@ -403,12 +530,15 @@ describe("warranty claims", () => {
     });
     if (!opened.ok) throw new Error("claim not opened");
 
-    expect(await rejectClaim({ ...admin(opened.claimId), reason: "" })).toMatchObject({
+    expect(await rejectClaim({ ...(await admin(opened.claimId)), reason: "" })).toMatchObject({
       ok: false,
       code: "INVALID_REASON",
     });
     expect(
-      await rejectClaim({ ...admin(opened.claimId), reason: "Khách đổi mật khẩu rồi quên" }),
+      await rejectClaim({
+        ...(await admin(opened.claimId)),
+        reason: "Khách đổi mật khẩu rồi quên",
+      }),
     ).toMatchObject({
       ok: true,
       status: "REJECTED",
@@ -460,10 +590,10 @@ describe("warranty claims", () => {
     // proration off refunds the paid amount rather than the remaining-time share
     expect(row.rows[0]!.calculated_refund_vnd).toBe("100000");
 
-    await verifyClaimDefect(admin(opened.claimId));
+    await verifyClaimDefect(await admin(opened.claimId));
     expect(
       await approveClaimReplacement({
-        ...admin(opened.claimId),
+        ...(await admin(opened.claimId)),
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       }),
@@ -505,8 +635,8 @@ describe("warranty claims", () => {
     `.execute(ctx.handle.db);
     expect(snapshot.rows[0]!.refund_allowed).toBe(false);
 
-    await verifyClaimDefect(admin(opened.claimId));
-    expect(await approveClaimRefund(admin(opened.claimId))).toMatchObject({
+    await verifyClaimDefect(await admin(opened.claimId));
+    expect(await approveClaimRefund(await admin(opened.claimId))).toMatchObject({
       ok: false,
       code: "NOT_ALLOWED_BY_POLICY",
     });
@@ -547,11 +677,8 @@ describe("warranty claims", () => {
     });
     if (!opened.ok) throw new Error("claim not opened");
     const stranger = {
-      db: ctx.handle.db,
+      ...(await admin(opened.claimId)),
       actor: { numericUserId: 999, chatType: "private" as const },
-      config: rootConfig,
-      claimId: opened.claimId,
-      correlationId: "t",
     };
     expect(await verifyClaimDefect(stranger)).toMatchObject({ ok: false, code: "NOT_ROOT_ADMIN" });
     expect(await approveClaimRefund(stranger)).toMatchObject({ ok: false, code: "NOT_ROOT_ADMIN" });

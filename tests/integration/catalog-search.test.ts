@@ -160,6 +160,17 @@ describe("deterministic search (FR-004)", () => {
     expect(byAlias.items.length).toBe(2);
   });
 
+  it("matches a variant by its own Vietnamese name", async () => {
+    await seed();
+    await sql`update product_variant set name_vi = 'Gói Tháng Đặc Biệt' where sku = 'CG-1'`.execute(
+      ctx.db,
+    );
+
+    const byVariantName = await search({ query: "ĐẶC" });
+    expect(byVariantName.items.map((v) => v.sku)).toEqual(["CG-1"]);
+    expect(byVariantName.items.some((v) => v.sku === "CG-2")).toBe(false);
+  });
+
   it("applies a bounded price range filter", async () => {
     await seed();
     const midRange = await search({ minPriceVnd: 120000, maxPriceVnd: 180000 });

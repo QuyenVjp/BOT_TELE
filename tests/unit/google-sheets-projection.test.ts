@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   buildCanonicalSheetRows,
+  buildGridExpansionRequests,
   buildProjectionWritePlan,
   buildWorkbookStructureRequests,
   operationalLink,
@@ -8,6 +9,7 @@ import {
 import {
   SHEET_COLUMN_OWNERSHIP,
   SHEET_HEADERS,
+  rowKey,
   sheetColumnRole,
 } from "../../src/modules/google-sheets/contracts.js";
 
@@ -143,6 +145,115 @@ describe("Google Sheets projection invariants", () => {
     );
     expect(restored.writes[0]?.values[1]?.[0]).toBe("event-a");
   });
+  it("uses raw supplier SKU ids and keeps multiple SKUs under one supplier distinct", () => {
+    const supplierRow = (supplier_sku_id: string) => ({
+      supplier_id: "supplier-1",
+      supplier_name: "Supplier",
+      status: "ACTIVE",
+      external_sku: supplier_sku_id,
+      cost_vnd: "100",
+      region: "VN",
+      supplier_order_id: "",
+      supplier_order_status: "",
+      credential_vault_ref: "vault:supplier",
+      updated_at: "2026-01-01T00:00:00.000Z",
+      supplier_sku_id,
+    });
+    const plan = buildProjectionWritePlan(
+      "Suppliers",
+      [supplierRow("sku-1"), supplierRow("sku-2")],
+      [SHEET_HEADERS.Suppliers],
+    );
+    const skuColumn = SHEET_HEADERS.Suppliers.indexOf("supplier_sku_id");
+    expect(plan.writes[0]?.values.slice(1).map((row) => row[skuColumn])).toEqual([
+      "sku-1",
+      "sku-2",
+    ]);
+    expect(plan.orphanCount).toBe(0);
+  });
+
+  it("uses a disjoint supplier-id fallback when a supplier has no SKU", () => {
+    expect(rowKey("Suppliers", { supplier_id: "supplier-1", supplier_sku_id: "sku-1" })).toBe(
+      "sku:sku-1",
+    );
+    expect(rowKey("Suppliers", { supplier_id: "supplier-1", supplier_sku_id: null })).toBe(
+      "supplier:supplier-1",
+    );
+    expect(
+      rowKey("Suppliers", { supplier_id: "supplier-1", supplier_sku_id: "supplier-1" }),
+    ).not.toBe(rowKey("Suppliers", { supplier_id: "supplier-1", supplier_sku_id: null }));
+  });
+
+  it("retains every audit event beyond the former 1,000-row cap", () => {
+    const auditRows = Array.from({ length: 1_001 }, (_, index) => ({
+      audit_id: `event-${index}`,
+      occurred_at: "2026-01-01T00:00:00.000Z",
+      actor_type: "SYSTEM",
+      actor_ref: "",
+      action: "TEST",
+      target_type: "DigitalAsset",
+      target_ref: "asset-1",
+      reason: "",
+      metadata: "{}",
+    }));
+    const plan = buildProjectionWritePlan("Audit", auditRows, [SHEET_HEADERS.Audit]);
+    expect(plan.writes[0]?.values).toHaveLength(1_002);
+  });
+
+  it("inserts the Suppliers v4 column at the former managed boundary", () => {
+    const requests = buildWorkbookStructureRequests(
+      [{ sheetId: 42, title: "Suppliers" }],
+      [],
+      true,
+      { migrateSuppliersV3: true },
+    );
+    expect(requests.find((request) => request.insertDimension)?.insertDimension).toEqual({
+      range: {
+        sheetId: 42,
+        dimension: "COLUMNS",
+        startIndex: 10,
+        endIndex: 11,
+      },
+      inheritFromBefore: false,
+    });
+    const plan = buildProjectionWritePlan(
+      "Suppliers",
+      [{ supplier_id: "supplier-1", supplier_sku_id: null }],
+      [SHEET_HEADERS.Suppliers, ["supplier-1", "", "", "", "", "", "", "", "", "", "", "=A2"]],
+    );
+    expect(plan.writes[0]?.range).toBe("Suppliers!A1:K2");
+    expect(plan.writes.map((write) => write.range).join(",")).not.toContain("L");
+  });
+
+  it("expands only undersized managed grids", () => {
+    expect(
+      buildGridExpansionRequests(
+        [
+          { sheetId: 10, title: "Audit", rowCount: 2 },
+          { sheetId: 11, title: "Suppliers", rowCount: 10 },
+        ],
+        { Audit: 5, Suppliers: 10 },
+      ),
+    ).toEqual([
+      {
+        updateSheetProperties: {
+          properties: { sheetId: 10, gridProperties: { rowCount: 5 } },
+          fields: "gridProperties.rowCount",
+        },
+      },
+    ]);
+  });
+
+  it("fails closed before values writes when grid capacity metadata is missing", () => {
+    const attemptedWrites: string[] = [];
+    expect(() => {
+      const requests = buildGridExpansionRequests([{ sheetId: 10, title: "Audit" }], {
+        Audit: 5,
+      });
+      if (requests.length === 0) attemptedWrites.push("values");
+    }).toThrow("rowCount metadata");
+    expect(attemptedWrites).toEqual([]);
+  });
 
   it("classifies human, system, and formula/view columns structurally", () => {
     expect(
@@ -202,5 +313,14 @@ describe("Google Sheets projection invariants", () => {
     const url = operationalLink("https://ops.example.test/", "asset", "asset-1");
     expect(url).toBe("https://ops.example.test/health?ops=asset%3Aasset-1");
     expect(url).not.toContain("token");
+  });
+
+  it("initializes an empty managed sheet with its header row", () => {
+    const plan = buildProjectionWritePlan("Inventory", [], []);
+
+    expect(plan.writes).toHaveLength(1);
+    expect(plan.writes[0]?.range).toMatch(/^Inventory!A1:/);
+    expect(plan.writes[0]?.values).toEqual([SHEET_HEADERS.Inventory]);
+    expect(plan.orphanCount).toBe(0);
   });
 });

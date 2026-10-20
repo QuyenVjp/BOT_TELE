@@ -25,7 +25,14 @@ import {
   stageInventoryImportInput,
   startInventoryImportSession,
 } from "../../src/modules/digital-goods/inventory-import-session.js";
-import { importDigitalInventory } from "../../src/modules/digital-goods/inventory-import.js";
+import {
+  importDigitalInventory,
+  previewDigitalInventory,
+} from "../../src/modules/digital-goods/inventory-import.js";
+import {
+  createAdminCallbackState,
+  resolveAdminCallbackState,
+} from "../../src/modules/admin/customer-operations.js";
 import { listVariantInventoryHistory } from "../../src/modules/catalog/quantity-stock.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
@@ -74,18 +81,19 @@ beforeEach(async () => {
 describe("admin product creation and selected-variant inventory import", () => {
   it("persists the product wizard config, creates the variant, and imports secrets through a bound session", async () => {
     const categoryId = newId();
-    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Streaming', 'streaming', true, 1)`.execute(
-      ctx.db,
-    );
+    await sql`
+      insert into category (id, name_vi, slug, is_active, sort_order)
+      values (${categoryId}, '🤖 AI', 'ai', true, 1)
+    `.execute(ctx.db);
 
     const workflow = createDurableProductDraftWorkflow(createProductDraftRepository(ctx.db));
     await workflow.start(String(ROOT_ID));
     for (const value of [
-      "Netflix",
+      "ChatGPT",
       "NF_PREM",
       categoryId,
       "STOCK_ACCOUNT",
-      "Tài khoản Netflix Premium",
+      "Tài khoản ChatGPT Premium",
       "Premium|120000",
       "ok",
       "PUBLIC",
@@ -123,8 +131,25 @@ describe("admin product creation and selected-variant inventory import", () => {
       correlationId: "admin-product-inventory:create",
     });
 
+    const evidenceId = newId();
+    await sql`
+      insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+      values (${evidenceId}, ${created.variantId}, 'OWNER_ATTESTATION', ${"TEST-REF-" + evidenceId}, 'restock fixture', 'test')
+    `.execute(ctx.db);
+    await sql`
+      update product_variant v
+      set resale_evidence_id = ${evidenceId},
+          publication_evidence_id = ${evidenceId},
+          publication_product_version = p.version,
+          publication_variant_version = v.version,
+          published_at = now(),
+          published_by = 'test'
+      from product p
+      where p.id = v.product_id and v.id = ${created.variantId}
+    `.execute(ctx.db);
+
     expect(created).toMatchObject({
-      name: "Netflix",
+      name: "ChatGPT",
       sku: "NF_PREM",
       fulfillmentType: "STOCK_ACCOUNT",
       lowStockThreshold: 2,
@@ -183,7 +208,11 @@ describe("admin product creation and selected-variant inventory import", () => {
       // leaves a required field empty and the import refuses it, so the fixture fills all three.
       rawInput: "user1@example.invalid:user1:pass1\nuser2@example.invalid:user2:pass2",
     });
-    expect(staged).toMatchObject({ ok: true, preview: { ready: 2, invalid: 0, duplicates: 0 } });
+    expect(staged).toMatchObject({
+      ok: true,
+      inputVaultRef: expect.any(String),
+      preview: { ready: 2, invalid: 0, duplicates: 0 },
+    });
     if (!staged.ok) return;
     expect(staged.preview.lines.map((line) => line.variantId)).toEqual([
       created.variantId,
@@ -200,7 +229,13 @@ describe("admin product creation and selected-variant inventory import", () => {
       insert into channel_identity (id, customer_id, channel, channel_user_id)
       values (${newId()}, ${subscribedCustomerId}, 'TELEGRAM', '111111'), (${newId()}, ${unsubscribedCustomerId}, 'TELEGRAM', '222222')
     `.execute(ctx.db);
-    await subscribeRestock(ctx.db, subscribedCustomerId, created.variantId);
+    await expect(
+      subscribeRestock(ctx.db, subscribedCustomerId, created.variantId),
+    ).resolves.toMatchObject({
+      customerId: subscribedCustomerId,
+      variantId: created.variantId,
+      active: true,
+    });
     await sql`
       insert into notification_preference(customer_id, shop_updates, purchase_activity)
       values (${subscribedCustomerId}, false, false), (${unsubscribedCustomerId}, false, false)
@@ -519,7 +554,7 @@ describe("admin product creation and selected-variant inventory import", () => {
     ).resolves.toMatchObject({
       rows: [
         {
-          product_name: "Netflix",
+          product_name: "ChatGPT",
           variant_name: "Extra Plus",
           price_vnd: "109000",
           duration_code: "YEARLY",
@@ -833,7 +868,11 @@ describe("admin product creation and selected-variant inventory import", () => {
       document: { fileId: "file-1", filename: "codes.txt", mimeType: "text/plain", fileSize: 9 },
       downloader: { downloadText: async () => "CODE-ONE\nCODE-TWO" },
     });
-    expect(staged).toMatchObject({ ok: true, preview: { ready: 2, invalid: 0, duplicates: 0 } });
+    expect(staged).toMatchObject({
+      ok: true,
+      inputVaultRef: expect.any(String),
+      preview: { ready: 2, invalid: 0, duplicates: 0 },
+    });
     if (!staged.ok) return;
     expect(staged.preview.lines.map((line) => line.variantId)).toEqual([variantId, variantId]);
     await expect(
@@ -907,6 +946,349 @@ describe("admin product creation and selected-variant inventory import", () => {
     ).resolves.toMatchObject({ ok: false, code: "UNSUPPORTED_DOCUMENT" });
   });
 
+  it("rejects secret-shaped safe notes before Vault or asset adoption", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Safe note', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Safe note product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy)
+      values (${variantId}, ${productId}, 'SAFE_NOTE_MAIN', 'Main', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY')
+    `.execute(ctx.db);
+
+    const originalWrite = vault.write;
+    let writes = 0;
+    vault.write = async (material, options) => {
+      writes += 1;
+      return originalWrite(material, options);
+    };
+
+    await expect(
+      importDigitalInventory({
+        actor: rootActor,
+        config: rootConfig,
+        vault,
+        db: ctx.db,
+        input: `${variantId},${newId()}-credential`,
+        reason: "safe note secret-shaped regression",
+        correlationId: "admin-product-inventory:safe-note-secret-shaped",
+        safeNote: "access_token: fixture",
+      }),
+    ).resolves.toEqual({ ok: false, code: "INVALID_INPUT" });
+    expect(writes).toBe(0);
+    await expect(
+      sql<{ assets: string; metadata: string }>`
+        select
+          (select count(*)::text from digital_asset where variant_id = ${variantId}) as assets,
+          (select count(*)::text
+           from google_sheets_asset_metadata m
+           join digital_asset a on a.id = m.asset_id
+           where a.variant_id = ${variantId}) as metadata
+      `.execute(ctx.db),
+    ).resolves.toMatchObject({ rows: [{ assets: "0", metadata: "0" }] });
+  });
+
+  it("rejects over-limit safe notes before Vault or asset adoption", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Safe note length', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Safe note length product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy)
+      values (${variantId}, ${productId}, 'SAFE_NOTE_LENGTH_MAIN', 'Main', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY')
+    `.execute(ctx.db);
+
+    const originalWrite = vault.write;
+    let writes = 0;
+    vault.write = async (material, options) => {
+      writes += 1;
+      return originalWrite(material, options);
+    };
+
+    await expect(
+      importDigitalInventory({
+        actor: rootActor,
+        config: rootConfig,
+        vault,
+        db: ctx.db,
+        input: `${variantId},${newId()}-credential`,
+        reason: "safe note length regression",
+        correlationId: "admin-product-inventory:safe-note-length",
+        safeNote: "n".repeat(501),
+      }),
+    ).resolves.toEqual({ ok: false, code: "INVALID_INPUT" });
+    expect(writes).toBe(0);
+    await expect(
+      sql<{ assets: string; metadata: string }>`
+        select
+          (select count(*)::text from digital_asset where variant_id = ${variantId}) as assets,
+          (select count(*)::text
+           from google_sheets_asset_metadata m
+           join digital_asset a on a.id = m.asset_id
+           where a.variant_id = ${variantId}) as metadata
+      `.execute(ctx.db),
+    ).resolves.toMatchObject({ rows: [{ assets: "0", metadata: "0" }] });
+  });
+
+  it("classifies same-batch repeats as duplicates and imports one asset per fingerprint", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Batch', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Batch Product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy)
+      values (${variantId}, ${productId}, 'BATCH_MAIN', 'Main', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY')
+    `.execute(ctx.db);
+
+    const input = `${variantId},same-secret\n${variantId},same-secret\n${variantId},new-secret`;
+    const preview = await previewDigitalInventory({
+      actor: rootActor,
+      config: rootConfig,
+      db: ctx.db,
+      correlationId: "admin-product-inventory:batch-preview",
+      input,
+    });
+    expect(preview).toMatchObject({ ready: 2, invalid: 0, duplicates: 1 });
+    if (!("lines" in preview)) return;
+    expect(preview.lines.map((line) => line.code)).toEqual(["READY", "DUPLICATE", "READY"]);
+    const originalWrite = vault.write;
+    let writes = 0;
+    vault.write = async (material, options) => {
+      writes += 1;
+      return originalWrite(material, options);
+    };
+
+    await expect(
+      importDigitalInventory({
+        actor: rootActor,
+        config: rootConfig,
+        vault,
+        db: ctx.db,
+        input,
+        reason: "same-batch duplicate regression",
+        correlationId: "admin-product-inventory:batch-import",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      summary: { imported: 2, duplicates: 1, invalid: 0 },
+    });
+    expect(writes).toBe(2);
+
+    await expect(
+      sql<{ count: string }>`
+        select count(*)::text from digital_asset
+        where variant_id = ${variantId} and status = 'AVAILABLE'
+      `.execute(ctx.db),
+    ).resolves.toMatchObject({ rows: [{ count: "2" }] });
+  });
+
+  it("skips terminal-asset fingerprints in a mixed new and duplicate batch", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+    const terminalRows = [
+      { inventoryText: "[REDACTED:Generic Password Field]", status: "REVOKED" },
+      { inventoryText: "[REDACTED:Generic Password Field]", status: "COMPROMISED" },
+      { inventoryText: "[REDACTED:Generic Password Field]", status: "DELIVERED" },
+    ] as const;
+
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Terminal', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Terminal Product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy)
+      values (${variantId}, ${productId}, 'TERMINAL_MAIN', 'Main', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY')
+    `.execute(ctx.db);
+
+    const terminalRefs = await Promise.all(
+      terminalRows.map(async ({ inventoryText }) => {
+        const fingerprint = createHash("sha256").update(inventoryText, "utf8").digest("hex");
+        return {
+          fingerprint,
+          ref: await vault.write(JSON.stringify({ inventoryText }), {
+            namespace: "asset",
+            idempotencyKey: fingerprint,
+          }),
+        };
+      }),
+    );
+    for (const [index, row] of terminalRows.entries()) {
+      await sql`
+        insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+        values (
+          ${newId()},
+          ${variantId},
+          'LOCAL',
+          ${terminalRefs[index]!.ref},
+          ${terminalRefs[index]!.fingerprint},
+          ${row.status}
+        )
+      `.execute(ctx.db);
+    }
+
+    const input = [
+      `${variantId},new-secret`,
+      ...terminalRows.map(({ inventoryText }) => `${variantId},${inventoryText}`),
+    ].join("\n");
+    const preview = await previewDigitalInventory({
+      actor: rootActor,
+      config: rootConfig,
+      db: ctx.db,
+      correlationId: "admin-product-inventory:terminal-preview",
+      input,
+    });
+    expect(preview).toMatchObject({ ready: 1, invalid: 0, duplicates: 3 });
+    if (!("lines" in preview)) return;
+    expect(preview.lines.map((line) => line.code)).toEqual([
+      "READY",
+      "DUPLICATE",
+      "DUPLICATE",
+      "DUPLICATE",
+    ]);
+
+    await expect(
+      importDigitalInventory({
+        actor: rootActor,
+        config: rootConfig,
+        vault,
+        db: ctx.db,
+        input,
+        reason: "terminal duplicate regression",
+        correlationId: "admin-product-inventory:terminal-import",
+      }),
+    ).resolves.toMatchObject({
+      ok: true,
+      summary: { imported: 1, duplicates: 3, invalid: 0 },
+    });
+    const assets = await sql<{ fingerprint_hash: string; status: string }>`
+      select fingerprint_hash, status
+      from digital_asset
+      where variant_id = ${variantId}
+      order by fingerprint_hash
+    `.execute(ctx.db);
+    expect(assets.rows).toHaveLength(4);
+    expect(assets.rows).toEqual(
+      expect.arrayContaining([
+        { fingerprint_hash: terminalRefs[0]!.fingerprint, status: "REVOKED" },
+        { fingerprint_hash: terminalRefs[1]!.fingerprint, status: "COMPROMISED" },
+        { fingerprint_hash: terminalRefs[2]!.fingerprint, status: "DELIVERED" },
+        {
+          fingerprint_hash: createHash("sha256").update("new-secret", "utf8").digest("hex"),
+          status: "AVAILABLE",
+        },
+      ]),
+    );
+  });
+
+  it("keeps an idempotent Vault ref revealable when concurrent imports race at adoption", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+    const originalWrite = vault.write;
+    let writeCount = 0;
+    let releaseWrites!: () => void;
+    const bothWritesStarted = new Promise<void>((resolve) => {
+      releaseWrites = resolve;
+    });
+    vault.write = async (material, options) => {
+      writeCount += 1;
+      if (writeCount === 2) releaseWrites();
+      await bothWritesStarted;
+      return originalWrite(material, options);
+    };
+
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Racing', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Concurrent Product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy)
+      values (${variantId}, ${productId}, 'CONCURRENT_MAIN', 'Main', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY')
+    `.execute(ctx.db);
+
+    const fingerprint = createHash("sha256").update("shared-secret", "utf8").digest("hex");
+    const imports = await Promise.all([
+      importDigitalInventory({
+        actor: rootActor,
+        config: rootConfig,
+        vault,
+        db: ctx.db,
+        input: `${variantId},shared-secret`,
+        reason: "concurrent import race",
+        correlationId: "admin-product-inventory:concurrent-a",
+      }),
+      importDigitalInventory({
+        actor: rootActor,
+        config: rootConfig,
+        vault,
+        db: ctx.db,
+        input: `${variantId},shared-secret`,
+        reason: "concurrent import race",
+        correlationId: "admin-product-inventory:concurrent-b",
+      }),
+    ]);
+
+    expect(imports.map((result) => result.ok)).toEqual([true, true]);
+    const summaries = imports
+      .map((result) => (result.ok ? result.summary : null))
+      .sort((left, right) => (left?.imported ?? -1) - (right?.imported ?? -1));
+    expect(summaries).toEqual([
+      { imported: 0, duplicates: 1, invalid: 0 },
+      { imported: 1, duplicates: 0, invalid: 0 },
+    ]);
+
+    const assets = await sql<{
+      vault_ref: string;
+      fingerprint_hash: string;
+      status: string;
+    }>`
+      select vault_ref, fingerprint_hash, status
+      from digital_asset
+      where variant_id = ${variantId}
+    `.execute(ctx.db);
+    expect(assets.rows).toEqual([
+      {
+        vault_ref: `vault:memory:asset:${fingerprint}`,
+        fingerprint_hash: fingerprint,
+        status: "AVAILABLE",
+      },
+    ]);
+    await expect(vault.reveal(assets.rows[0]!.vault_ref)).resolves.toBe(
+      JSON.stringify({
+        schemaVersion: "inventory-fields.v1",
+        values: [{ name: "credential", value: "shared-secret" }],
+      }),
+    );
+  });
+
   it("records per-variant import audit counts for multi-variant imports", async () => {
     const categoryId = newId();
     const productId = newId();
@@ -962,5 +1344,83 @@ describe("admin product creation and selected-variant inventory import", () => {
         correlationId: "admin-product-inventory:second-history",
       }),
     ).toMatchObject({ ok: true, rows: [{ detail: "mới 2, trùng 0, lỗi 0" }] });
+  });
+  it("rejects a stale preview state and accepts only the current staged input", async () => {
+    const categoryId = newId();
+    const productId = newId();
+    const variantId = newId();
+    const vault = createInMemoryVault();
+    await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'Bound', ${categoryId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Bound Product', ${productId.slice(-8)}, true, 1)`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy)
+      values (${variantId}, ${productId}, 'BOUND_MAIN', 'Main', 100000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY')
+    `.execute(ctx.db);
+    await startInventoryImportSession(ctx.db, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:bound-start",
+      variantId,
+    });
+
+    const first = await stageInventoryImportInput(ctx.db, vault, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:bound-first",
+      rawInput: `${variantId},first-secret`,
+    });
+    expect(first).toMatchObject({ ok: true });
+    if (!first.ok) return;
+    const staleStateId = await createAdminCallbackState(ctx.db, {
+      adminTelegramUserId: String(ROOT_ID),
+      kind: "ADMIN_INVENTORY_IMPORT_CONFIRM",
+      payload: { inputVaultRef: first.inputVaultRef },
+    });
+
+    const second = await stageInventoryImportInput(ctx.db, vault, {
+      actor: rootActor,
+      config: rootConfig,
+      correlationId: "admin-product-inventory:bound-second",
+      rawInput: `${variantId},second-secret`,
+    });
+    expect(second).toMatchObject({ ok: true });
+    if (!second.ok) return;
+    const currentStateId = await createAdminCallbackState(ctx.db, {
+      adminTelegramUserId: String(ROOT_ID),
+      kind: "ADMIN_INVENTORY_IMPORT_CONFIRM",
+      payload: { inputVaultRef: second.inputVaultRef },
+    });
+
+    const staleState = await resolveAdminCallbackState(ctx.db, {
+      adminTelegramUserId: String(ROOT_ID),
+      stateId: staleStateId,
+    });
+    const currentState = await resolveAdminCallbackState(ctx.db, {
+      adminTelegramUserId: String(ROOT_ID),
+      stateId: currentStateId,
+    });
+    expect(staleState?.payload.inputVaultRef).toBe(first.inputVaultRef);
+    expect(currentState?.payload.inputVaultRef).toBe(second.inputVaultRef);
+
+    await expect(
+      confirmInventoryImportSession(ctx.db, vault, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:bound-stale-confirm",
+        expectedInputVaultRef: String(staleState?.payload.inputVaultRef),
+      }),
+    ).resolves.toMatchObject({ ok: false, code: "NOT_READY" });
+    await expect(
+      confirmInventoryImportSession(ctx.db, vault, {
+        actor: rootActor,
+        config: rootConfig,
+        correlationId: "admin-product-inventory:bound-current-confirm",
+        expectedInputVaultRef: String(currentState?.payload.inputVaultRef),
+      }),
+    ).resolves.toMatchObject({ ok: true });
   });
 });

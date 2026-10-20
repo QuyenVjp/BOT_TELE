@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import {
   presentPaymentForOrder,
   applyPaymentEvidence,
@@ -125,6 +126,7 @@ beforeEach(async () => {
       bank_transaction, payment_intent, order_transition, outbox_event, "order",
       product_variant, product, category, customer cascade
   `.execute(ctx.db);
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 describe("US3 fulfillment journey (paid → delivery)", () => {

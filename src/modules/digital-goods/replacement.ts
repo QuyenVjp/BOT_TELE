@@ -119,6 +119,34 @@ export async function openReplacementCase(
     if (!asset) {
       return { ok: false, code: "NO_ASSET", message: "Đơn hàng chưa có tài khoản để thay thế." };
     }
+    if (input.requestRefund === true) {
+      const deliveryEvidence = await sql<{ one: number }>`
+        select 1 as one
+        where exists (
+          select 1
+          from file_delivery_job
+          where order_id = ${order.id}
+            and (
+              status in ('PROCESSING', 'SENT')
+              or (
+                status = 'FAILED'
+                and coalesce(last_error, '') not in (
+                  'INVALID_STORAGE_REFERENCE',
+                  'FILE_HASH_MISMATCH',
+                  'FILE_SIZE_MISMATCH'
+                )
+              )
+            )
+        )
+      `.execute(trx);
+      if (deliveryEvidence.rows[0]) {
+        return {
+          ok: false,
+          code: "NOT_ELIGIBLE",
+          message: "Đơn hàng đã có bằng chứng giao hàng, không thể mở yêu cầu hoàn tiền.",
+        };
+      }
+    }
 
     // Warranty: order.warrantyDays from the immutable snapshot; 0 means no window
     // (still allow a case for COMPROMISED / INVALID_CREDENTIAL policy reasons, but

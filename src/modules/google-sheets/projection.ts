@@ -111,6 +111,7 @@ interface SupplierProjection {
   supplier_order_status: string;
   credential_vault_ref: string;
   updated_at: string;
+  supplier_sku_id: string | null;
 }
 
 interface RequestProjection {
@@ -234,6 +235,18 @@ function blankManagedRow(tab: GoogleSheetsTab): SheetValue[] {
 }
 
 function stableKeyAt(tab: GoogleSheetsTab, row: readonly SheetValue[] | undefined): string | null {
+  if (tab === "Suppliers") {
+    const supplierSkuIndex = SHEET_HEADERS.Suppliers.indexOf("supplier_sku_id");
+    const supplierIdIndex = SHEET_HEADERS.Suppliers.indexOf("supplier_id");
+    const supplierSkuId = row?.[supplierSkuIndex];
+    if (typeof supplierSkuId === "string" && supplierSkuId.trim()) {
+      return `sku:${supplierSkuId.trim()}`;
+    }
+    const supplierId = row?.[supplierIdIndex];
+    return typeof supplierId === "string" && supplierId.trim()
+      ? `supplier:${supplierId.trim()}`
+      : null;
+  }
   const value = row?.[SHEET_HEADERS[tab].indexOf(rowKeyHeader(tab))];
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
@@ -373,6 +386,7 @@ export function buildProjectionWritePlan<T extends object>(
 interface StructuralOptions {
   ownerEmail?: string;
   serviceAccountEmail?: string;
+  migrateSuppliersV3?: boolean;
 }
 
 function columnRangesForRole(
@@ -396,7 +410,7 @@ function columnRangesForRole(
 }
 
 function structuralRequests(
-  sheets: readonly { sheetId: number; title: string }[],
+  sheets: readonly { sheetId: number; title: string; rowCount?: number }[],
   tabsToCreate: readonly GoogleSheetsTab[],
   includeMarker = false,
   options?: StructuralOptions,
@@ -408,6 +422,19 @@ function structuralRequests(
     if (!(GOOGLE_SHEETS_TABS as readonly string[]).includes(sheet.title)) continue;
     const tab = sheet.title as GoogleSheetsTab;
     const columnCount = managedColumnCount(tab);
+    if (tab === "Suppliers" && options?.migrateSuppliersV3) {
+      requests.push({
+        insertDimension: {
+          range: {
+            sheetId: sheet.sheetId,
+            dimension: "COLUMNS",
+            startIndex: columnCount - 1,
+            endIndex: columnCount,
+          },
+          inheritFromBefore: false,
+        },
+      });
+    }
     const systemEditors = options?.serviceAccountEmail ? [options.serviceAccountEmail] : [];
     const ownerEditors = [
       ...new Set(
@@ -656,6 +683,7 @@ async function readSnapshot(db: Db, config: SheetsProjectionConfig, now: Date): 
   const suppliers = await sql<SupplierProjection>`
     select s.id as supplier_id, s.name as supplier_name, s.status,
            ss.external_sku, ss.cost_vnd::text, coalesce(ss.region, '') as region,
+           ss.id as supplier_sku_id,
            coalesce(so.id, '') as supplier_order_id, coalesce(so.status, '') as supplier_order_status,
            s.credential_vault_ref, coalesce(so.last_queried_at, ss.last_verified_at, s.created_at) as updated_at
       from supplier s
@@ -695,7 +723,6 @@ async function readSnapshot(db: Db, config: SheetsProjectionConfig, now: Date): 
            action, target_type, target_id as target_ref, reason, metadata_redacted::text as metadata
       from audit_event
      order by occurred_at desc, id desc
-     limit 1000
   `
     .execute(db)
     .then((result) =>
@@ -774,7 +801,7 @@ async function readSnapshot(db: Db, config: SheetsProjectionConfig, now: Date): 
   const outbox = await sql<{ id: string }>`
     select id from outbox_event
      where (${syncState?.last_outbox_event_id ?? null}::text is null or id > ${syncState?.last_outbox_event_id ?? null})
-     order by id desc limit 1
+     order by occurred_at desc, id desc limit 1
   `.execute(db);
 
   const asOf = now.toISOString();
@@ -866,6 +893,33 @@ function existingValuesByTab(
   return map;
 }
 
+export function buildGridExpansionRequests(
+  sheets: readonly { sheetId: number; title: string; rowCount?: number }[],
+  desiredRowCounts: Readonly<Partial<Record<GoogleSheetsTab, number>>>,
+): sheets_v4.Schema$Request[] {
+  const requests: sheets_v4.Schema$Request[] = [];
+  for (const tab of GOOGLE_SHEETS_TABS) {
+    const desiredRowCount = desiredRowCounts[tab];
+    if (desiredRowCount === undefined) continue;
+    const sheet = sheets.find((candidate) => candidate.title === tab);
+    if (!sheet) throw new Error(`Google Sheets workbook is missing managed tab ${tab}`);
+    if (sheet.rowCount === undefined) {
+      throw new Error(`Google Sheets workbook is missing rowCount metadata for ${tab}`);
+    }
+    if (sheet.rowCount >= desiredRowCount) continue;
+    requests.push({
+      updateSheetProperties: {
+        properties: {
+          sheetId: sheet.sheetId,
+          gridProperties: { rowCount: desiredRowCount },
+        },
+        fields: "gridProperties.rowCount",
+      },
+    });
+  }
+  return requests;
+}
+
 export async function ensureGoogleSheetsWorkbook(input: {
   api: GoogleSheetsApi;
   config: SheetsProjectionConfig;
@@ -881,6 +935,8 @@ export async function ensureGoogleSheetsWorkbook(input: {
     throw new Error("Google Sheets workbook schema is newer than this worker");
   }
   const schemaReady = observedSchemaVersions.includes(GOOGLE_SHEETS_SCHEMA_VERSION);
+  const migrateSuppliersV3 =
+    !schemaReady && observedSchemaVersions.includes(GOOGLE_SHEETS_SCHEMA_VERSION - 1);
   if (missing.length > 0) {
     await input.api.batchUpdate({
       spreadsheetId: input.config.spreadsheetId,
@@ -891,6 +947,7 @@ export async function ensureGoogleSheetsWorkbook(input: {
   if (missing.length > 0 || !schemaReady) {
     const structural = structuralRequests(workbook.sheets, [], !schemaReady, {
       ownerEmail: input.config.ownerId,
+      migrateSuppliersV3: migrateSuppliersV3 && !missing.includes("Suppliers"),
       ...(input.config.serviceAccountEmail
         ? { serviceAccountEmail: input.config.serviceAccountEmail }
         : {}),
@@ -928,6 +985,7 @@ export async function reconcileGoogleSheetsOnce(
   const existing = existingValuesByTab(current);
   const rows = rowsForSnapshot(snapshot);
   const writes: SheetValueRange[] = [];
+  const desiredRowCounts: Partial<Record<GoogleSheetsTab, number>> = {};
   let rowsWritten = 0;
   let orphanCount = 0;
   for (const tab of GOOGLE_SHEETS_TABS) {
@@ -935,8 +993,17 @@ export async function reconcileGoogleSheetsOnce(
     const present = existing.get(tab) ?? [];
     const plan = buildProjectionWritePlan(tab, desired, present);
     writes.push(...plan.writes);
+    desiredRowCounts[tab] = desired.length + 1;
     rowsWritten += desired.length;
     orphanCount += plan.orphanCount;
+  }
+  const workbook = await input.api.getSpreadsheet({ spreadsheetId: input.config.spreadsheetId });
+  const gridExpansion = buildGridExpansionRequests(workbook.sheets, desiredRowCounts);
+  if (gridExpansion.length > 0) {
+    await input.api.batchUpdate({
+      spreadsheetId: input.config.spreadsheetId,
+      requests: gridExpansion,
+    });
   }
   await input.api.batchUpdateValues({ spreadsheetId: input.config.spreadsheetId, data: writes });
   await sql`
@@ -961,7 +1028,7 @@ function rowKeyHeader(tab: GoogleSheetsTab): string {
     case "Payments":
       return "payment_intent_id";
     case "Suppliers":
-      return "supplier_id";
+      return "supplier_sku_id";
     case "Requests":
       return "request_id";
     case "Audit":

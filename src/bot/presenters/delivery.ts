@@ -1,4 +1,5 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
+import { CUSTOMER_BUTTONS } from "./customer-buttons.js";
 import type { InlineButton, PresentedMessage } from "./catalog.js";
 
 declare module "./catalog.js" {
@@ -35,9 +36,9 @@ export const DELIVERY_COPY = {
   reviewTitle: "🔎 Đơn hàng cần kiểm tra",
   reviewBody:
     "Giao hàng đang được đối soát. Vui lòng chờ hoặc liên hệ hỗ trợ với mã tham chiếu. Không gửi mật khẩu hay ảnh chụp màn hình chứa thông tin đăng nhập.",
-  support: "💬 Hỗ trợ",
-  mainMenu: "Menu chính",
-  viewOrder: "📦 Xem đơn",
+  support: CUSTOMER_BUTTONS.support,
+  mainMenu: CUSTOMER_BUTTONS.home,
+  viewOrder: CUSTOMER_BUTTONS.viewOrder,
   deleteAfterSave: "🗑 Đã lưu, xóa tin nhắn",
 } as const;
 
@@ -110,10 +111,10 @@ export function presentDeliveryCompleted(
     protectContent: true,
     buttons: [
       [{ text: DELIVERY_COPY.deleteAfterSave, callbackData: "delivery:delete" }],
-      [{ text: "🧾 Xem đơn", callbackData: `ord:view:${orderNumber}` }],
+      [{ text: CUSTOMER_BUTTONS.viewOrder, callbackData: `ord:view:${orderNumber}` }],
       [
-        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
-        { text: "💬 Hỗ trợ", callbackData: `sup:open:${orderNumber}` },
+        { text: CUSTOMER_BUTTONS.warranty, callbackData: "cust:warranty" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: `sup:open:${orderNumber}` },
       ],
     ],
   };
@@ -158,15 +159,15 @@ export function presentDeliveryReveal(input: {
     buttons: [
       [
         {
-          text: "🧾 Đơn hàng",
+          text: CUSTOMER_BUTTONS.viewOrder,
           callbackData: input.orderNumber ? `ord:view:${input.orderNumber}` : "ord:list",
         },
       ],
       [{ text: DELIVERY_COPY.deleteAfterSave, callbackData: "delivery:delete" }],
       [
-        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+        { text: CUSTOMER_BUTTONS.warranty, callbackData: "cust:warranty" },
         {
-          text: "💬 Hỗ trợ",
+          text: CUSTOMER_BUTTONS.support,
           callbackData: input.orderNumber ? `sup:open:${input.orderNumber}` : "sup:open",
         },
       ],

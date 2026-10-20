@@ -4,6 +4,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import { allocateRestockToPreorders } from "./preorder.js";
+import { voidLiveIntentsForPreorder } from "../payments/repository.js";
 
 const CANCELLABLE = [
   "CREATED",
@@ -94,6 +95,8 @@ export async function shopCancelPreorder(
       };
     }
     if (!isCancellable(row.status)) return { ok: false, code: "NOT_CANCELLABLE" };
+    // A transfer received after cancellation must become a discrepancy, never settle this hold.
+    await voidLiveIntentsForPreorder(trx, row.id, "FAILED");
 
     const amountVnd = collectedAmountVnd(row);
     const nextStatus = amountVnd > 0 ? "REFUND_DUE" : "SHOP_CANCELLED";

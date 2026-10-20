@@ -251,4 +251,18 @@ describe("catalog repository (FR-002)", () => {
     const missing = await getVariantById(ctx.db, newId());
     expect(missing).toBeNull();
   });
+
+  it("returns the preorder flag for an out-of-stock direct variant lookup", async () => {
+    const ids = await seed();
+    await sql`
+      update product_variant
+         set preorder_enabled = true
+       where id = ${ids.zeroQuantityVariantId}
+    `.execute(ctx.db);
+
+    const variant = await getVariantById(ctx.db, ids.zeroQuantityVariantId);
+
+    expect(variant?.is_ready).toBe(false);
+    expect(variant?.preorder_enabled).toBe(true);
+  });
 });

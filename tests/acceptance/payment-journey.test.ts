@@ -10,6 +10,7 @@ import {
 } from "../../src/infrastructure/inbox/sepay.js";
 import type { Vault } from "../../src/infrastructure/vault/port.js";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import {
   applyPaymentEvidence,
   presentPaymentForOrder,
@@ -107,6 +108,7 @@ beforeEach(async () => {
   await sql`truncate table webhook_inbox, outbox_event, payment_allocation, discrepancy, bank_transaction, payment_intent, order_transition, digital_asset, "order", product_variant, product, category, customer cascade`.execute(
     ctx.db,
   );
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 describe("US2 payment journey (Buy Now → VietQR → SePay settle)", () => {

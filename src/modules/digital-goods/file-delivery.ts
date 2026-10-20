@@ -68,10 +68,11 @@ export type ProcessFileDeliveryResult =
       code:
         | "JOB_NOT_FOUND"
         | "STALE_JOB"
+        | "ORDER_NOT_PAID"
         | "INVALID_STORAGE_REFERENCE"
         | "FILE_HASH_MISMATCH"
         | "FILE_SIZE_MISMATCH"
-        | "SEND_FAILED";
+        | "SEND_UNCERTAIN";
     };
 
 type JobRow = {
@@ -88,6 +89,7 @@ type JobRow = {
   attempt_count: number;
   claim_generation: number;
   processing_expires_at: Date | string | null;
+  last_error: string | null;
 };
 
 type ArtifactRow = {
@@ -183,7 +185,7 @@ async function readJob(exec: Executor, orderId: string): Promise<FileDeliveryJob
   const result = await sql<JobRow>`
     select order_id, customer_id, variant_id, artifact_id, artifact_version, artifact_sha256,
            telegram_chat_id, status, telegram_file_id, telegram_file_unique_id, attempt_count,
-           claim_generation, processing_expires_at
+           claim_generation, processing_expires_at, last_error
     from file_delivery_job
     where order_id = ${orderId}
     limit 1
@@ -262,11 +264,11 @@ export async function processFileDelivery(
   input: ProcessFileDeliveryInput,
 ): Promise<ProcessFileDeliveryResult> {
   const claimed = await withTransaction(input.db, async (trx) => {
-    await findOrderByIdForUpdate(trx, input.job.orderId);
+    const order = await findOrderByIdForUpdate(trx, input.job.orderId);
     const job = await sql<JobRow & ArtifactRow>`
       select j.order_id, j.customer_id, j.variant_id, j.artifact_id, j.artifact_version, j.artifact_sha256,
              j.telegram_chat_id, j.status, j.telegram_file_id, j.telegram_file_unique_id, j.attempt_count,
-             j.claim_generation, j.processing_expires_at,
+             j.claim_generation, j.processing_expires_at, j.last_error,
              a.id as artifact_id, a.variant_id as artifact_variant_id, a.version as artifact_version, a.filename, a.mime_type,
              a.size_bytes::text as size_bytes, a.sha256, a.storage_reference, a.telegram_file_id as artifact_telegram_file_id
       from file_delivery_job j
@@ -276,7 +278,28 @@ export async function processFileDelivery(
     `.execute(trx);
     const current = job.rows[0];
     if (!current) return null;
-    if (current.status === "SENT") return { row: current, generation: current.claim_generation };
+    if (current.status === "SENT") {
+      return order?.status === "COMPLETED"
+        ? { row: current, generation: current.claim_generation }
+        : ("ORDER_NOT_PAID" as const);
+    }
+    if (
+      current.status === "FAILED" &&
+      (current.last_error === "SEND_UNCERTAIN" || current.last_error === "SEND_FAILED")
+    ) {
+      if (current.last_error === "SEND_FAILED") {
+        await sql`
+          update file_delivery_job
+          set last_error = 'SEND_UNCERTAIN', updated_at = now()
+          where order_id = ${input.job.orderId}
+            and status = 'FAILED'
+            and claim_generation = ${current.claim_generation}
+        `.execute(trx);
+      }
+      return "SEND_UNCERTAIN" as const;
+    }
+    if (!order || (order.status !== "PAID" && order.status !== "PROCESSING"))
+      return "ORDER_NOT_PAID" as const;
     if (
       current.artifact_id !== input.job.artifactId ||
       current.artifact_version !== input.job.artifactVersion ||
@@ -286,19 +309,35 @@ export async function processFileDelivery(
     const leaseExpiresAt = current.processing_expires_at
       ? new Date(current.processing_expires_at).getTime()
       : 0;
-    if (current.status === "PROCESSING" && leaseExpiresAt > Date.now()) return "STALE_JOB" as const;
+    // An expired lease cannot distinguish pre-send work from a remotely accepted send.
+    // Park it instead of reclaiming it for another Telegram call.
+    if (current.status === "PROCESSING") {
+      if (leaseExpiresAt > Date.now()) return "STALE_JOB" as const;
+      await sql`
+        update file_delivery_job
+        set status = 'FAILED', last_error = 'SEND_UNCERTAIN', processing_expires_at = null, updated_at = now()
+        where order_id = ${input.job.orderId}
+          and status = 'PROCESSING'
+          and claim_generation = ${current.claim_generation}
+      `.execute(trx);
+      return "SEND_UNCERTAIN" as const;
+    }
     const nextGeneration = current.claim_generation + 1;
     await sql`
       update file_delivery_job
       set status = 'PROCESSING', claim_generation = ${nextGeneration}, attempt_count = attempt_count + 1,
           processing_expires_at = now() + (${LEASE_SECONDS} || ' seconds')::interval, last_error = null, updated_at = now()
-      where order_id = ${input.job.orderId} and claim_generation = ${current.claim_generation}
+      where order_id = ${input.job.orderId}
+        and claim_generation = ${current.claim_generation}
+        and status = ${current.status}
     `.execute(trx);
     return { row: current, generation: nextGeneration };
   });
 
   if (claimed === null) return { ok: false, code: "JOB_NOT_FOUND" };
   if (claimed === "STALE_JOB") return { ok: false, code: "STALE_JOB" };
+  if (claimed === "ORDER_NOT_PAID") return { ok: false, code: "ORDER_NOT_PAID" };
+  if (claimed === "SEND_UNCERTAIN") return { ok: false, code: "SEND_UNCERTAIN" };
   if (claimed.row.status === "SENT")
     return {
       ok: true,
@@ -330,6 +369,61 @@ export async function processFileDelivery(
     source = { kind: "bytes", bytes: verified.bytes };
   }
 
+  const sendReady = await withTransaction(input.db, async (trx) => {
+    const order = await findOrderByIdForUpdate(trx, claimed.row.order_id);
+    const job = await sql<{
+      artifact_id: string;
+      artifact_version: number;
+      artifact_sha256: string;
+      status: FileDeliveryStatus;
+      claim_generation: number;
+      processing_expires_at: Date | string | null;
+    }>`
+      select j.artifact_id, j.artifact_version, j.artifact_sha256,
+             j.status, j.claim_generation, j.processing_expires_at
+      from file_delivery_job j
+      where j.order_id = ${claimed.row.order_id}
+      limit 1
+      for update of j
+    `.execute(trx);
+    const current = job.rows[0];
+    if (!current) return "JOB_NOT_FOUND" as const;
+    if (!order || (order.status !== "PAID" && order.status !== "PROCESSING"))
+      return "ORDER_NOT_PAID" as const;
+    if (
+      current.status !== "PROCESSING" ||
+      current.claim_generation !== claimed.generation ||
+      current.artifact_id !== claimed.row.artifact_id ||
+      current.artifact_version !== claimed.row.artifact_version ||
+      current.artifact_sha256 !== claimed.row.artifact_sha256
+    )
+      return "STALE_JOB" as const;
+    const leaseExpiresAt = current.processing_expires_at
+      ? new Date(current.processing_expires_at).getTime()
+      : 0;
+    if (leaseExpiresAt <= Date.now()) {
+      await sql`
+        update file_delivery_job
+        set status = 'FAILED', last_error = 'SEND_UNCERTAIN', processing_expires_at = null, updated_at = now()
+        where order_id = ${claimed.row.order_id}
+          and status = 'PROCESSING'
+          and claim_generation = ${claimed.generation}
+      `.execute(trx);
+      return "SEND_UNCERTAIN" as const;
+    }
+    if (order.status === "PAID") {
+      await transitionOrder(trx, order, "PROCESSING", "FILE_DELIVERY_STARTED", "file-delivery", {
+        type: "SYSTEM",
+        id: "file-delivery",
+      });
+    }
+    return "READY" as const;
+  });
+  if (sendReady === "JOB_NOT_FOUND") return { ok: false, code: "JOB_NOT_FOUND" };
+  if (sendReady === "STALE_JOB") return { ok: false, code: "STALE_JOB" };
+  if (sendReady === "ORDER_NOT_PAID") return { ok: false, code: "ORDER_NOT_PAID" };
+  if (sendReady === "SEND_UNCERTAIN") return { ok: false, code: "SEND_UNCERTAIN" };
+
   let sent: { fileId: string; fileUniqueId: string | null };
   try {
     sent = await input.sender.sendDocument({
@@ -339,17 +433,12 @@ export async function processFileDelivery(
       caption: "Tệp số cho đơn hàng của bạn.",
       source,
     });
-  } catch (error) {
-    await markProcessingFailed(
-      input.db,
-      input.job.orderId,
-      claimed.generation,
-      error instanceof Error ? error.name : "SEND_FAILED",
-    );
-    return { ok: false, code: "SEND_FAILED" };
+  } catch {
+    await markProcessingFailed(input.db, input.job.orderId, claimed.generation, "SEND_UNCERTAIN");
+    return { ok: false, code: "SEND_UNCERTAIN" };
   }
 
-  const updated = await withTransaction(input.db, async (trx) => {
+  const finalized = await withTransaction(input.db, async (trx) => {
     const order = await findOrderByIdForUpdate(trx, claimed.row.order_id);
     const fenced = await sql<JobRow>`
       update file_delivery_job
@@ -366,7 +455,7 @@ export async function processFileDelivery(
                 claim_generation, processing_expires_at
     `.execute(trx);
     const sentJob = fenced.rows[0];
-    if (!sentJob) return null;
+    if (!sentJob) return "STALE_JOB" as const;
     await sql`
       update variant_file_artifact
       set telegram_file_id = coalesce(telegram_file_id, ${sent.fileId}),
@@ -376,7 +465,9 @@ export async function processFileDelivery(
         and version = ${claimed.row.artifact_version}
         and sha256 = ${claimed.row.artifact_sha256}
     `.execute(trx);
-    if (order?.status === "PAID") {
+    if (!order || (order.status !== "PAID" && order.status !== "PROCESSING"))
+      return "ORDER_NOT_PAID" as const;
+    if (order.status === "PAID") {
       const processing = await transitionOrder(
         trx,
         order,
@@ -389,7 +480,7 @@ export async function processFileDelivery(
         type: "SYSTEM",
         id: "file-delivery",
       });
-    } else if (order?.status === "PROCESSING") {
+    } else {
       await transitionOrder(trx, order, "COMPLETED", "FILE_DELIVERY_SENT", "file-delivery", {
         type: "SYSTEM",
         id: "file-delivery",
@@ -397,6 +488,7 @@ export async function processFileDelivery(
     }
     return mapJob(sentJob);
   });
-  if (!updated) return { ok: false, code: "STALE_JOB" };
-  return { ok: true, job: updated, reusedTelegramFileId: source.kind === "telegram_file_id" };
+  if (finalized === "STALE_JOB") return { ok: false, code: "STALE_JOB" };
+  if (finalized === "ORDER_NOT_PAID") return { ok: false, code: "ORDER_NOT_PAID" };
+  return { ok: true, job: finalized, reusedTelegramFileId: source.kind === "telegram_file_id" };
 }

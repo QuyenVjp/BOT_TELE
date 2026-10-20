@@ -45,7 +45,7 @@ function errorMessage(text: string): PresentedMessage {
  */
 async function orderWarrantyState(
   db: Db,
-  order: { id: string; variantId: string },
+  order: { id: string },
 ): Promise<OrderWarrantyState | undefined> {
   const rows = await sql<{
     warranty_days: number;
@@ -56,7 +56,7 @@ async function orderWarrantyState(
            coalesce(v.warranty_enabled, false) as warranty_enabled
     from "order" o
     join product_variant v on v.id = o.variant_id
-    where o.id = ${order.id}
+    where o.id = ${order.id} and o.status = 'COMPLETED'
     limit 1
   `.execute(db);
   const row = rows.rows[0];
@@ -73,7 +73,7 @@ async function orderWarrantyState(
     usedDays: Math.min(used, days),
     remainingDays: Math.max(0, days - used),
     expired: !isWithinWarranty(terms, now),
-    variantId: order.variantId,
+    orderId: order.id,
   };
 }
 

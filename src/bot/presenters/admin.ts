@@ -18,7 +18,7 @@ import type {
   AdminOrderListPage,
   AdminOrderStatusFilter,
 } from "../../modules/admin/order-operations.js";
-import { canTicketTransition, type SupportTicketStatus } from "../../modules/support/domain.js";
+import { canTicketTransition, supportTicketStatusCode, type SupportTicketStatus } from "../../modules/support/domain.js";
 import type { AdminSupportTicketRow } from "../../modules/support/service.js";
 import type {
   AdminDiscrepancyDetail,
@@ -1185,7 +1185,7 @@ export function presentAdminSupportTicket(ticket: AdminSupportTicketRow): Presen
     .map((to): InlineButton[] => [
       {
         text: SUPPORT_STATUS_LABELS[to],
-        callbackData: `admin:support:status:${ticket.id}:${to}`,
+        callbackData: `admin:support:status:${ticket.id}:${supportTicketStatusCode(to)}:${ticket.version.toString(36)}`,
       },
     ]);
   buttons.push(adminNav("admin:support:tickets"));
@@ -1456,28 +1456,65 @@ export interface AdminDashboardSummary {
   pendingPayment: number;
   paymentReview: number;
   fulfillmentFailures: number;
+  manualOpenTasks?: number;
+  notificationSendUncertain?: number;
+  warrantyNew?: number;
+  refundDue?: number;
+  supportOpenTickets?: number;
 }
 
 export function presentAdminDashboard(data: AdminDashboardSummary): PresentedMessage {
+  const manualOpenTasks = data.manualOpenTasks ?? 0;
+  const notificationSendUncertain = data.notificationSendUncertain ?? 0;
+  const warrantyNew = data.warrantyNew ?? 0;
+  const refundDue = data.refundDue ?? 0;
+  const supportOpenTickets = data.supportOpenTickets ?? 0;
   return {
     text: [
       ADMIN_COPY.overview,
-      `📦 Sản phẩm đang bán: ${data.activeProducts}`,
+      "",
+      "📌 Việc cần xử lý",
+      `⏳ Chờ thanh toán: ${data.pendingPayment}`,
+      `⚠️ Cần xem thanh toán: ${data.paymentReview}`,
+      `🚨 Lỗi giao hàng: ${data.fulfillmentFailures}`,
       `❌ Hết hàng: ${data.outOfStock}`,
       `⚠️ Sắp hết: ${data.lowStock}`,
+      "",
+      "📋 Hàng đợi vận hành",
+      `🛠 Tác vụ thủ công đang mở: ${manualOpenTasks}`,
+      `📨 Thông báo cần đối soát: ${notificationSendUncertain}`,
+      `🛡 Bảo hành mới: ${warrantyNew}`,
+      `💰 Hoàn tiền chờ chi: ${refundDue}`,
+      `💬 Hỗ trợ đang mở: ${supportOpenTickets}`,
+      "",
+      `📦 Sản phẩm đang bán: ${data.activeProducts}`,
       `📚 Kho khả dụng: ${data.availableInventory}`,
       `🧾 Đơn hôm nay: ${data.ordersToday}`,
       `✅ Đã thanh toán hôm nay: ${data.paidToday}`,
       `💰 Doanh thu hôm nay: ${data.revenueTodayVnd.toLocaleString("vi-VN")} ₫`,
-      `⏳ Chờ thanh toán: ${data.pendingPayment}`,
-      `⚠️ Cần xem thanh toán: ${data.paymentReview}`,
-      `🚨 Lỗi giao hàng: ${data.fulfillmentFailures}`,
     ].join("\n"),
     buttons: [
       [
-        { text: ADMIN_COPY.products, callbackData: "admin:products" },
-        { text: ADMIN_COPY.inventory, callbackData: "admin:inventory" },
+        { text: "🧾 Cần giao hàng", callbackData: "admin:orders:filter:fulfillment_review" },
+        { text: "🛠 Xử lý thủ công", callbackData: "admin:manual" },
       ],
+      [
+        { text: "🛡 Bảo hành mới", callbackData: "admin:warranty" },
+        { text: "💰 Hàng chờ chi", callbackData: "admin:warranty:refunds" },
+      ],
+      [
+        { text: "💬 Ticket hỗ trợ", callbackData: "admin:support:tickets" },
+        { text: "📨 Đối soát thông báo", callbackData: "admin:health" },
+      ],
+      [
+        { text: "🧾 Đơn hàng", callbackData: "admin:orders" },
+        { text: "💳 Thanh toán", callbackData: "admin:payments" },
+      ],
+      [
+        { text: "💬 Hỗ trợ", callbackData: "admin:support" },
+        { text: "📦 Kho hàng", callbackData: "admin:inventory" },
+      ],
+      [{ text: "🩺 Hệ thống", callbackData: "admin:health" }],
       [{ text: ADMIN_COPY.home, callbackData: "admin:menu" }],
     ],
   };
@@ -1512,7 +1549,7 @@ export interface AdminInventoryVariantSummary {
   name: string;
   sku: string;
   fulfillmentType: FulfillmentType;
-  available: number;
+  available: number | null;
   reserved: number;
   delivered: number;
   error: number;
@@ -1524,7 +1561,8 @@ export interface AdminInventoryVariantSummary {
   active?: boolean;
 }
 
-function stockBadge(input: { available: number; lowStockThreshold: number | null }): string {
+function stockBadge(input: { available: number | null; lowStockThreshold: number | null }): string {
+  if (input.available === null) return "không theo dõi";
   if (input.available <= 0) return "hết hàng";
   return input.lowStockThreshold !== null &&
     input.lowStockThreshold > 0 &&
@@ -1623,16 +1661,33 @@ export function presentAdminInventory(
   };
 }
 
+function inventoryActionTitle(action: "import" | "template" | "paste"): string {
+  switch (action) {
+    case "template":
+      return "📥 Chọn sản phẩm để tải mẫu CSV";
+    case "paste":
+      return "📋 Chọn sản phẩm để dán dữ liệu";
+    case "import":
+      return "➕ Chọn sản phẩm để nhập kho";
+  }
+}
+
+function inventoryActionBackCallback(action: "import" | "template" | "paste"): string {
+  switch (action) {
+    case "template":
+      return "admin:inventory:template_select";
+    case "paste":
+      return "admin:inventory:paste_select";
+    case "import":
+      return "admin:inventory:add";
+  }
+}
+
 export function presentAdminInventoryProductPicker(
   products: Array<{ id: string; name: string }>,
   action: "import" | "template" | "paste",
 ): PresentedMessage {
-  const title =
-    action === "template"
-      ? "📥 Chọn sản phẩm để tải mẫu CSV"
-      : action === "paste"
-        ? "📋 Chọn sản phẩm để dán dữ liệu"
-        : "➕ Chọn sản phẩm để nhập kho";
+  const title = inventoryActionTitle(action);
   return {
     text: [title, "", "Vui lòng chọn sản phẩm bên dưới:"].join("\n"),
     buttons: [
@@ -1658,12 +1713,7 @@ export function presentAdminInventoryVariantPicker(
   }>,
   action: "import" | "template" | "paste",
 ): PresentedMessage {
-  const title =
-    action === "template"
-      ? "📥 Chọn biến thể để tải mẫu CSV"
-      : action === "paste"
-        ? "📋 Chọn biến thể để dán dữ liệu"
-        : "➕ Chọn biến thể để nhập kho";
+  const title = inventoryActionTitle(action);
   return {
     text: [title, "", `Sản phẩm: ${product.name}`, "Vui lòng chọn biến thể:"].join("\n"),
     buttons: [
@@ -1679,7 +1729,7 @@ export function presentAdminInventoryVariantPicker(
       [
         {
           text: "↩️ Chọn sản phẩm khác",
-          callbackData: `admin:inventory:${action === "template" ? "template_select" : action === "paste" ? "paste_select" : "add"}`,
+          callbackData: inventoryActionBackCallback(action),
         },
         { text: "🏠 Quản trị", callbackData: "admin:menu" },
       ],
@@ -1805,7 +1855,7 @@ export function presentAdminInventoryProduct(input: {
         : "Biến thể:",
       ...visibleVariants.map(
         (variant) =>
-          `• ${variant.name}${variant.active === false ? " · nháp/chưa mở bán" : ""} — ${variant.sku} — ${FULFILLMENT_TYPE_LABELS[variant.fulfillmentType]} — khả dụng ${variant.available} · giữ ${variant.reserved} · giao ${variant.delivered} · lỗi ${variant.error}${variant.lowStockThreshold === null ? "" : ` — ngưỡng ${variant.lowStockThreshold}`}`,
+          `• ${variant.name}${variant.active === false ? " · nháp/chưa mở bán" : ""} — ${variant.sku} — ${FULFILLMENT_TYPE_LABELS[variant.fulfillmentType]} — khả dụng ${variant.available ?? "không theo dõi"} · giữ ${variant.reserved} · giao ${variant.delivered} · lỗi ${variant.error}${variant.lowStockThreshold === null ? "" : ` — ngưỡng ${variant.lowStockThreshold}`}`,
       ),
     ].join("\n"),
     buttons: [
@@ -1828,7 +1878,7 @@ export function presentAdminInventoryVariant(input: {
   name: string;
   sku: string;
   fulfillmentType: FulfillmentType;
-  available: number;
+  available: number | null;
   reserved?: number;
   delivered?: number;
   error?: number;
@@ -1848,7 +1898,7 @@ export function presentAdminInventoryVariant(input: {
       `SKU: ${input.sku}`,
       `Loại: ${FULFILLMENT_TYPE_LABELS[input.fulfillmentType]}`,
       `Trạng thái: ${input.active === false ? "nháp/chưa mở bán" : "đang quản lý"}`,
-      `Khả dụng: ${input.available}`,
+      `Khả dụng: ${input.available ?? "không theo dõi"}`,
       `Đang giữ: ${input.reserved ?? 0}`,
       `Đã giao: ${input.delivered ?? 0}`,
       `Lỗi/khóa: ${input.error ?? 0}`,
@@ -2200,6 +2250,7 @@ export function presentInventoryImportTemplate(input: {
 }
 
 export interface InventoryImportPreview {
+  stateId: string;
   ready: number;
   invalid: number;
   duplicates: number;
@@ -2218,7 +2269,7 @@ export function presentInventoryImportPreview(preview: InventoryImportPreview): 
       "Thông tin đăng nhập không được hiển thị.",
     ].join("\n"),
     buttons: [
-      [{ text: "✅ Xác nhận nhập", callbackData: "admin:inventory:confirm" }],
+      [{ text: "✅ Xác nhận nhập", callbackData: `admin:inventory:confirm:${preview.stateId}` }],
       [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
       [{ text: ADMIN_COPY.adminMenu, callbackData: "admin:menu" }],
     ],

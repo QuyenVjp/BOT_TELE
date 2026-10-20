@@ -68,7 +68,16 @@ describe.skipIf(!hasDocker)("Telegram HTTP -> durable inbox -> domain command (T
         cancel: vi.fn(),
       },
       history: { list: vi.fn(), detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      support: {
+        reasonMenu: vi.fn(),
+        open: vi.fn(),
+        beginDescription: vi.fn(),
+        submitDescription: vi.fn(),
+        cancelDescription: vi.fn(),
+        list: vi.fn(),
+        view: vi.fn(),
+        close: vi.fn(),
+      },
       responder: { send },
     });
     const app = await createApp({

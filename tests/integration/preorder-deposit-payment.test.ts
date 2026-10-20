@@ -3,15 +3,19 @@ import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import {
   createPreorderReservation,
+  listCustomerPreorders,
+  loadPreorderVariantConfig,
   releaseExpiredPreorderHolds,
 } from "../../src/modules/commerce/preorder.js";
+import { shopCancelPreorder } from "../../src/modules/commerce/shop-cancel.js";
 import {
   applyPaymentEvidence,
   presentPreorderPayment,
 } from "../../src/modules/payments/service.js";
+import { presentPreorderPaymentScreen } from "../../src/bot/presenters/payment.js";
 import { classifyPaymentCode } from "../../src/modules/payments/payment-code.js";
 import { isKnownOutboxEventType } from "../../src/infrastructure/outbox/dispatch-policy.js";
-import { presentPreorderPaymentScreen } from "../../src/bot/presenters/payment.js";
+import { presentCustomerPreorders } from "../../src/bot/presenters/customer.js";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
@@ -49,13 +53,17 @@ beforeEach(async () => {
   await sql`truncate table outbox_event, payment_allocation, discrepancy, bank_transaction,
     payment_intent, preorder_reservation, digital_asset, product_variant, product, category,
     customer_profile_snapshot, customer cascade`.execute(ctx.db);
+  await sql`update store_control set status = 'OPEN' where id = 'main'`.execute(ctx.db);
 });
 
-async function seedPreorderVariant(): Promise<{ customerId: string; variantId: string }> {
+async function seedPreorderVariant(
+  options: { archived?: boolean; published?: boolean } = {},
+): Promise<{ customerId: string; variantId: string }> {
   const customerId = newId();
   const categoryId = newId();
   const productId = newId();
   const variantId = newId();
+  const evidenceId = "RES-" + variantId;
 
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi-VN')`.execute(
     ctx.db,
@@ -71,12 +79,14 @@ async function seedPreorderVariant(): Promise<{ customerId: string; variantId: s
       true
     )
   `.execute(ctx.db);
-  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', 'ai', true, 1)`.execute(
+  await sql`insert into category (id, name_vi, slug, is_active, sort_order) values (${categoryId}, 'AI', ${"ai-" + categoryId}, true, 1)`.execute(
     ctx.db,
   );
-  await sql`insert into product (id, category_id, name_vi, slug, is_active, sort_order) values (${productId}, ${categoryId}, 'Kiro Pro', 'kiro-pro', true, 1)`.execute(
-    ctx.db,
-  );
+  await sql`
+    insert into product (
+      id, category_id, name_vi, slug, is_active, sort_order, is_test, is_archived
+    ) values (${productId}, ${categoryId}, 'Kiro Pro', ${"kiro-pro-" + productId}, true, 1, false, ${options.archived ?? false})
+  `.execute(ctx.db);
   await sql`
     insert into product_variant (
       id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
@@ -85,22 +95,46 @@ async function seedPreorderVariant(): Promise<{ customerId: string; variantId: s
       min_deposit_vnd, hold_duration_hours, balance_due_hours
     ) values (
       ${variantId}, ${productId}, ${"SKU-" + variantId}, 'Gift Code 20$', ${PRICE_VND}, 'P1M',
-      'CREDENTIAL', 30, 'LOCAL_ONLY', true, 1, 'STOCK_ACCOUNT', 'RES-1', true, 'FIXED',
+      'CREDENTIAL', 30, 'LOCAL_ONLY', true, 1, 'STOCK_ACCOUNT', ${evidenceId}, true, 'FIXED',
       ${DEPOSIT_VND}, ${DEPOSIT_VND}, 24, 24
     )
   `.execute(ctx.db);
+  await sql`
+    insert into resale_evidence (id, variant_id, source, reference, summary, created_by)
+    values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION', 'TEST-REF-PREORDER', 'fixture publication evidence', 'test')
+  `.execute(ctx.db);
+  if (options.published ?? true) {
+    await sql`
+      update product_variant
+         set publication_evidence_id = ${evidenceId},
+             publication_product_version = 1,
+             publication_variant_version = 1,
+             published_at = now(),
+             published_by = 'test'
+       where id = ${variantId}
+    `.execute(ctx.db);
+  }
 
   return { customerId, variantId };
 }
 
-async function reserveDeposit(): Promise<{
+type UnsupportedLegacyFulfillmentType = "MANUAL_FULFILLMENT" | "UNLIMITED_SERVICE";
+
+type ReservedDeposit = {
   customerId: string;
+  variantId: string;
   reservationId: string;
   transferContent: string;
   intentId: string;
-}> {
+};
+
+async function reserveDeposit(): Promise<ReservedDeposit> {
   const { customerId, variantId } = await seedPreorderVariant();
-  const created = await createPreorderReservation(ctx.db, { customerId, variantId });
+  const created = await createPreorderReservation(ctx.db, {
+    customerId,
+    variantId,
+    audience: "public",
+  });
   if (!created.ok) throw new Error(`reservation seed failed: ${created.code}`);
 
   const presented = await presentPreorderPayment(ctx.db, {
@@ -114,10 +148,23 @@ async function reserveDeposit(): Promise<{
 
   return {
     customerId,
+    variantId,
     reservationId: created.reservationId,
     transferContent: presented.presentation.transferContent,
     intentId: presented.intentId,
   };
+}
+
+async function reserveUnsupportedLegacyPreorder(
+  fulfillmentType: UnsupportedLegacyFulfillmentType,
+): Promise<ReservedDeposit> {
+  const fixture = await reserveDeposit();
+  await sql`
+    update product_variant
+       set fulfillment_type = ${fulfillmentType}
+     where id = ${fixture.variantId}
+  `.execute(ctx.db);
+  return fixture;
 }
 
 function depositEvidence(f: { transferContent: string }): PaymentEvidence {
@@ -143,9 +190,11 @@ async function readReservation(id: string) {
     order_id: string | null;
     version: number;
     forfeited_at: Date | null;
+    hold_until: Date | null;
+    balance_due_until: Date | null;
   }>`
     select status, deposit_payment_intent_id, balance_payment_intent_id, order_id, version,
-           forfeited_at
+           forfeited_at, hold_until, balance_due_until
     from preorder_reservation where id = ${id}
   `.execute(ctx.db);
   return res.rows[0]!;
@@ -166,6 +215,44 @@ async function countRows(table: string, where = sql`true`): Promise<number> {
 }
 
 describe("preorder deposit settlement", () => {
+  it("rejects customer preorder config and reservation for unpublished or archived variants while allowing a current-public variant", async () => {
+    const publicFixture = await seedPreorderVariant();
+    const unpublishedFixture = await seedPreorderVariant({ published: false });
+    const archivedFixture = await seedPreorderVariant({ archived: true });
+
+    const publicConfig = await loadPreorderVariantConfig(ctx.db, publicFixture.variantId, "public");
+    expect(publicConfig).toMatchObject({
+      id: publicFixture.variantId,
+      preorderEnabled: true,
+    });
+    expect(
+      await loadPreorderVariantConfig(ctx.db, unpublishedFixture.variantId, "public"),
+    ).toBeNull();
+    expect(await loadPreorderVariantConfig(ctx.db, archivedFixture.variantId, "public")).toBeNull();
+
+    const publicReservation = await createPreorderReservation(ctx.db, {
+      customerId: publicFixture.customerId,
+      variantId: publicFixture.variantId,
+      audience: "public",
+    });
+    expect(publicReservation.ok).toBe(true);
+
+    const unpublishedReservation = await createPreorderReservation(ctx.db, {
+      customerId: unpublishedFixture.customerId,
+      variantId: unpublishedFixture.variantId,
+      audience: "public",
+    });
+    expect(unpublishedReservation).toEqual({ ok: false, code: "NOT_FOUND" });
+
+    const archivedReservation = await createPreorderReservation(ctx.db, {
+      customerId: archivedFixture.customerId,
+      variantId: archivedFixture.variantId,
+      audience: "public",
+    });
+    expect(archivedReservation).toEqual({ ok: false, code: "NOT_FOUND" });
+    expect(await countRows("preorder_reservation")).toBe(1);
+  });
+
   it("stamps the deposit intent while the hold is unpaid, and confirms it only when money arrives", async () => {
     const f = await reserveDeposit();
 
@@ -185,6 +272,28 @@ describe("preorder deposit settlement", () => {
     expect(paid.deposit_payment_intent_id).toBe(f.intentId);
     expect((await readIntent(f.intentId)).status).toBe("SUCCEEDED");
     expect((await readIntent(f.intentId)).preorder_id).toBe(f.reservationId);
+  });
+
+  it("closes the live deposit intent when the shop cancels, so a late transfer cannot settle", async () => {
+    const f = await reserveDeposit();
+    const cancelled = await shopCancelPreorder(ctx.db, {
+      preorderId: f.reservationId,
+      actorTelegramUserId: "1",
+      reason: "Hết nguồn cung.",
+      correlationId: "cancel-preorder-with-live-intent",
+    });
+
+    expect(cancelled).toMatchObject({ ok: true, status: "SHOP_CANCELLED" });
+    expect((await readIntent(f.intentId)).status).toBe("FAILED");
+
+    const lateTransfer = await applyPaymentEvidence(
+      ctx.db,
+      verifiedSePayEvidence(depositEvidence(f)),
+    );
+    expect(lateTransfer).toMatchObject({ ok: true, kind: "DISCREPANCY", type: "UNMATCHED" });
+    expect((await readReservation(f.reservationId)).status).toBe("SHOP_CANCELLED");
+    expect(await countRows("payment_allocation", sql`status = 'SETTLED'`)).toBe(0);
+    expect(await countRows("outbox_event", sql`event_type = 'PaymentSettled'`)).toBe(0);
   });
 
   it("hands out the deposit QR instead of a success claim, and reuses the same code on refresh", async () => {
@@ -221,6 +330,55 @@ describe("preorder deposit settlement", () => {
     expect(callbacks).toContain("cust:preorders");
     expect((await readReservation(f.reservationId)).status).toBe("WAITING_DEPOSIT");
   });
+
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "fails closed when reopening a deposit QR after the variant changes to %s",
+    async (fulfillmentType) => {
+      const f = await reserveUnsupportedLegacyPreorder(fulfillmentType);
+
+      const reopened = await presentPreorderPayment(ctx.db, {
+        ...MERCHANT_INPUT,
+        reservationId: f.reservationId,
+        customerId: f.customerId,
+        leg: "DEPOSIT",
+        correlationId: "test-preorder-unsupported-refresh",
+      });
+
+      expect(reopened).toEqual({ ok: false, error: "NOT_FOUND" });
+      expect((await readReservation(f.reservationId)).status).toBe("WAITING_DEPOSIT");
+      expect((await readReservation(f.reservationId)).deposit_payment_intent_id).toBe(f.intentId);
+      expect(await countRows("payment_intent")).toBe(1);
+    },
+  );
+
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "routes a verified transfer for a legacy %s preorder to review without settling",
+    async (fulfillmentType) => {
+      const f = await reserveUnsupportedLegacyPreorder(fulfillmentType);
+
+      const result = await applyPaymentEvidence(ctx.db, verifiedSePayEvidence(depositEvidence(f)));
+
+      expect(result).toMatchObject({ ok: true, kind: "DISCREPANCY", type: "UNMATCHED" });
+      expect((await readReservation(f.reservationId)).status).toBe("WAITING_DEPOSIT");
+      expect((await readIntent(f.intentId)).status).toBe("NEEDS_REVIEW");
+      expect(await countRows("payment_allocation", sql`status = 'SETTLED'`)).toBe(0);
+      expect(await countRows("outbox_event", sql`event_type = 'PaymentSettled'`)).toBe(0);
+      expect(await countRows("discrepancy", sql`type = 'UNMATCHED'`)).toBe(1);
+    },
+  );
+
+  it.each(["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE"] as const)(
+    "directs a legacy %s preorder list entry to support instead of payment",
+    async (fulfillmentType) => {
+      const f = await reserveUnsupportedLegacyPreorder(fulfillmentType);
+      const message = presentCustomerPreorders(await listCustomerPreorders(ctx.db, f.customerId));
+      const callbacks = message.buttons.flat().map((button) => button.callbackData);
+
+      expect(message.text).toContain("Kiro Pro");
+      expect(callbacks).not.toContain(`preorder:pay:${f.reservationId}`);
+      expect(callbacks.some((callback) => callback.startsWith("supp:open"))).toBe(true);
+    },
+  );
 
   it("ignores a replayed deposit transfer: no double confirm, no second allocation", async () => {
     const f = await reserveDeposit();
@@ -296,6 +454,79 @@ describe("preorder deposit settlement", () => {
     `.execute(ctx.db);
     expect(order.rows[0]?.status).toBe("PAID");
   });
+
+  it.each([
+    ["exactly at", 0],
+    ["one second after", 1],
+  ] as const)(
+    "rejects a verified BALANCE transfer %s the persisted preorder deadlines",
+    async (_timing, offsetSeconds) => {
+      const { customerId, variantId } = await seedPreorderVariant();
+      const reservationId = newId();
+      const assetId = newId();
+      const balanceVnd = PRICE_VND - DEPOSIT_VND;
+
+      await sql`
+        insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+        values (${assetId}, ${variantId}, 'MANUAL', ${"vault://" + assetId},
+          ${"fp-" + assetId}, 'RESERVED')
+      `.execute(ctx.db);
+      await sql`
+        insert into preorder_reservation (
+          id, variant_id, customer_id, status, deposit_amount_vnd, balance_amount_vnd,
+          total_price_vnd, terms_version, accepted_terms_snapshot, deposit_paid_at,
+          allocated_at, allocated_asset_id, hold_until, balance_due_until
+        ) values (
+          ${reservationId}, ${variantId}, ${customerId}, 'ALLOCATED', ${DEPOSIT_VND},
+          ${balanceVnd}, ${PRICE_VND}, 1, 'v1', now() - interval '1 hour', now(),
+          ${assetId}, date_trunc('second', now()) + interval '1 hour',
+          date_trunc('second', now()) + interval '1 hour'
+        )
+      `.execute(ctx.db);
+
+      const persisted = await readReservation(reservationId);
+      expect(persisted.hold_until).not.toBeNull();
+      expect(persisted.balance_due_until).not.toBeNull();
+      const deadlineMs = persisted.balance_due_until!.getTime();
+      expect(deadlineMs).toBe(persisted.hold_until!.getTime());
+
+      const presented = await presentPreorderPayment(ctx.db, {
+        ...MERCHANT_INPUT,
+        reservationId,
+        customerId,
+        leg: "BALANCE",
+        correlationId: "test-preorder-balance-deadline",
+      });
+      if (!presented.ok) throw new Error(`balance presentation failed: ${presented.error}`);
+
+      const transactedAt = new Date(deadlineMs + offsetSeconds * 1000);
+      const result = await applyPaymentEvidence(
+        ctx.db,
+        verifiedSePayEvidence({
+          ...depositEvidence({ transferContent: presented.presentation.transferContent }),
+          amountVnd: balanceVnd,
+          transactedAt,
+          correlationId: "test-preorder-balance-deadline",
+        }),
+        transactedAt,
+      );
+
+      expect(result).toMatchObject({ ok: true, kind: "DISCREPANCY", type: "UNMATCHED" });
+      expect((await readReservation(reservationId)).status).toBe("ALLOCATED");
+      expect((await readReservation(reservationId)).order_id).toBeNull();
+      expect((await readIntent(presented.intentId)).status).toBe("NEEDS_REVIEW");
+      expect(await countRows("payment_allocation", sql`status = 'SETTLED'`)).toBe(0);
+      expect(await countRows("discrepancy", sql`type = 'UNMATCHED'`)).toBe(1);
+      expect(await countRows("outbox_event", sql`event_type = 'PaymentSettled'`)).toBe(0);
+
+      const paidOrders = await sql<{ count: string }>`
+        select count(*)::text as count
+        from "order"
+        where status in ('PAID', 'COMPLETED')
+      `.execute(ctx.db);
+      expect(paidOrders.rows[0]?.count).toBe("0");
+    },
+  );
 
   it("forfeits only the reservation whose hold deadline has passed", async () => {
     const { customerId, variantId } = await seedPreorderVariant();

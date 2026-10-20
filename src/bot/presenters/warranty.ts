@@ -8,14 +8,8 @@
  *  * money that has not moved is never described as moved.
  */
 import type { PresentedMessage } from "./catalog.js";
+import { CUSTOMER_BUTTONS } from "./customer-buttons.js";
 import { ISSUE_TYPE_LABELS, type WarrantyIssueType } from "../../modules/warranty/claims.js";
-
-/** Canonical warranty block for a product screen (goal §5/§62). */
-export const WARRANTY_BLOCK_LINES = [
-  "🛡 Bảo hành",
-  "Bảo hành theo thời gian sử dụng.",
-  "Nếu tài khoản bị khóa hoặc mất gói do lỗi thuộc phạm vi bảo hành, shop hoàn phần tiền tương ứng với số ngày chưa sử dụng.",
-];
 
 const vnd = (value: bigint) => `${value.toLocaleString("vi-VN")} ₫`;
 
@@ -31,7 +25,6 @@ export function presentWarrantyPolicy(input: {
   coverageVi: string | null;
   exclusionsVi: string | null;
   examplePriceVnd: bigint | null;
-  variantId: string;
   /** Where "Quay lại" goes: the product screen the customer came from. */
   productId: string;
 }): PresentedMessage {
@@ -62,10 +55,10 @@ export function presentWarrantyPolicy(input: {
   return {
     text: lines.join("\n"),
     buttons: [
-      [{ text: "🛡 Báo lỗi / Bảo hành", callbackData: `warranty:report:${input.variantId}` }],
+      [{ text: "⚠️ Chọn đơn để báo lỗi", callbackData: "cust:warranty" }],
       [
-        { text: "⬅️ Quay lại", callbackData: `shop:product:${input.productId}` },
-        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        { text: CUSTOMER_BUTTONS.back, callbackData: `shop:product:${input.productId}` },
+        { text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" },
       ],
     ],
   };
@@ -74,7 +67,7 @@ export function presentWarrantyPolicy(input: {
 /** Goal §7: the warranty state of a fulfilled order. */
 export function presentWarrantyOrderBlock(input: {
   orderNumber: string;
-  variantId: string;
+  orderId: string;
   warrantyEnd: string;
   usedDays: number;
   remainingDays: number;
@@ -92,8 +85,8 @@ export function presentWarrantyOrderBlock(input: {
       ].join("\n"),
       buttons: [
         [
-          { text: "💬 Liên hệ hỗ trợ", callbackData: "sup:open" },
-          { text: "🏠 Trang chủ", callbackData: "shop:home" },
+          { text: CUSTOMER_BUTTONS.support, callbackData: "sup:open" },
+          { text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" },
         ],
       ],
     };
@@ -110,10 +103,10 @@ export function presentWarrantyOrderBlock(input: {
       "Nếu tài khoản bị khóa hoặc mất gói do lỗi thuộc phạm vi bảo hành, shop hoàn phần tiền tương ứng với số ngày chưa sử dụng.",
     ].join("\n"),
     buttons: [
-      [{ text: "🛡 Báo lỗi / Bảo hành", callbackData: `warranty:report:${input.variantId}` }],
+      [{ text: CUSTOMER_BUTTONS.reportIssue, callbackData: `warranty:report:${input.orderId}` }],
       [
-        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
-        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "sup:open" },
+        { text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" },
       ],
     ],
   };
@@ -122,8 +115,8 @@ export function presentWarrantyOrderBlock(input: {
 /** Goal §8: human issue types — the customer never sees or needs an asset id. */
 export function presentWarrantyIssueTypes(input: {
   orderNumber: string;
-  /** Carried into every choice: the preview resolves the order through it. */
-  variantId: string;
+  /** Carried into every choice: the preview resolves the exact order through it. */
+  orderId: string;
 }): PresentedMessage {
   const types = Object.keys(ISSUE_TYPE_LABELS) as WarrantyIssueType[];
   return {
@@ -139,7 +132,7 @@ export function presentWarrantyIssueTypes(input: {
       ...types.map((type) => [
         {
           text: ISSUE_TYPE_LABELS[type],
-          callbackData: `warranty:type:${type}:${input.variantId}`,
+          callbackData: `warranty:type:${type}:${input.orderId}`,
         },
       ]),
       [{ text: "❌ Huỷ", callbackData: "ord:list" }],
@@ -156,8 +149,8 @@ export function presentWarrantyReportPreview(input: {
   warrantyEnd: string;
   remainingDays: number;
   estimatedRefundVnd: bigint;
-  /** Carried into the submit callback, so the claim is opened for the order the preview showed. */
-  variantId: string;
+  /** Carried into the submit callback, so the claim is opened for the exact order shown. */
+  orderId: string;
 }): PresentedMessage {
   return {
     text: [
@@ -180,10 +173,10 @@ export function presentWarrantyReportPreview(input: {
       [
         {
           text: "✅ Gửi yêu cầu",
-          callbackData: `warranty:submit:${input.variantId}:${input.issueType}`,
+          callbackData: `warranty:submit:${input.orderId}:${input.issueType}`,
         },
       ],
-      [{ text: "✏️ Sửa nội dung", callbackData: `warranty:report:${input.variantId}` }],
+      [{ text: "✏️ Sửa nội dung", callbackData: `warranty:report:${input.orderId}` }],
       [{ text: "❌ Huỷ", callbackData: "shop:home" }],
     ],
   };
@@ -207,8 +200,8 @@ export function presentWarrantyClaimSubmitted(input: {
     buttons: [
       [{ text: "🧾 Xem yêu cầu", callbackData: `warranty:claim:${input.claimNumber}` }],
       [
-        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
-        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "sup:open" },
+        { text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" },
       ],
     ],
   };
@@ -225,12 +218,34 @@ const TIMELINE_COPY: Record<string, string> = {
   REJECTED: "Yêu cầu chưa đủ điều kiện bảo hành",
 };
 
+export type WarrantyRefundEvidence =
+  | { state: "DUE"; amountVnd: bigint; paidAt: null }
+  | { state: "PAID"; amountVnd: bigint; paidAt: string };
+
+function matchesRefundEvidence(
+  status: string,
+  evidence: WarrantyRefundEvidence | null | undefined,
+): evidence is WarrantyRefundEvidence {
+  if (
+    !evidence ||
+    typeof evidence !== "object" ||
+    typeof evidence.amountVnd !== "bigint" ||
+    evidence.amountVnd < 0n
+  )
+    return false;
+  if (status === "REFUND_DUE") return evidence.state === "DUE" && evidence.paidAt === null;
+  if (status !== "REFUND_PAID" || evidence.state !== "PAID" || typeof evidence.paidAt !== "string")
+    return false;
+  return Number.isFinite(new Date(evidence.paidAt).getTime());
+}
+
 export function presentWarrantyClaim(input: {
   claimNumber: string;
   productName: string;
   status: string;
   estimatedRefundVnd: bigint;
   approvedRefundVnd: bigint | null;
+  refundEvidence?: WarrantyRefundEvidence | null;
   remainingDays: number;
   timeline: Array<{ kind: string; safeNote: string | null; createdAt: string }>;
 }): PresentedMessage {
@@ -242,21 +257,53 @@ export function presentWarrantyClaim(input: {
       hour: "2-digit",
       minute: "2-digit",
     });
-  const amount = input.approvedRefundVnd ?? input.estimatedRefundVnd;
+  const financialState = input.status === "REFUND_DUE" || input.status === "REFUND_PAID";
+  const timelineLines = input.timeline
+    .filter(
+      (event) => !financialState || (event.kind !== "REFUND_DUE" && event.kind !== "REFUND_PAID"),
+    )
+    .map(
+      (event) =>
+        `• ${when(event.createdAt)} — ${TIMELINE_COPY[event.kind] ?? "Cập nhật"}${
+          financialState || !event.safeNote ? "" : `: ${event.safeNote}`
+        }`,
+    );
+  const refundEvidence = input.refundEvidence;
+  const evidenceMatches = matchesRefundEvidence(input.status, refundEvidence);
+  const financialCopy =
+    input.status === "REFUND_DUE" && evidenceMatches && refundEvidence.state === "DUE"
+      ? [
+          "Hoàn tiền đang chờ shop chuyển khoản",
+          `Số tiền chờ hoàn: ${vnd(refundEvidence.amountVnd)}`,
+        ]
+      : input.status === "REFUND_PAID" && evidenceMatches && refundEvidence.state === "PAID"
+        ? [
+            "Shop ghi nhận đã chuyển khoản",
+            `Số tiền đã ghi nhận hoàn: ${vnd(refundEvidence.amountVnd)}`,
+          ]
+        : ["Cần hỗ trợ xác minh khoản hoàn tiền"];
+  const timelineBlock = financialState
+    ? timelineLines.length
+      ? ["", "Diễn biến:", ...timelineLines]
+      : []
+    : ["", "Diễn biến:", ...timelineLines];
+  const lines = [
+    `🛡 Yêu cầu ${input.claimNumber}`,
+    "",
+    `Sản phẩm: ${input.productName}`,
+    `Còn bảo hành: ${input.remainingDays} ngày`,
+    ...(financialState
+      ? ["", ...financialCopy]
+      : [
+          "",
+          `Số tiền: ${vnd(input.approvedRefundVnd ?? input.estimatedRefundVnd)}${
+            input.approvedRefundVnd === null ? " (dự kiến)" : ""
+          }`,
+        ]),
+    ...timelineBlock,
+  ];
   return {
-    text: [
-      `🛡 Yêu cầu ${input.claimNumber}`,
-      "",
-      `Sản phẩm: ${input.productName}`,
-      `Còn bảo hành: ${input.remainingDays} ngày`,
-      `Số tiền: ${vnd(amount)}${input.approvedRefundVnd === null ? " (dự kiến)" : ""}`,
-      "",
-      "Diễn biến:",
-      ...input.timeline.map(
-        (event) =>
-          `• ${when(event.createdAt)} — ${TIMELINE_COPY[event.kind] ?? "Cập nhật"}${event.safeNote ? `: ${event.safeNote}` : ""}`,
-      ),
-    ].join("\n"),
+    text: lines.join("\n"),
     buttons: [
       [
         {
@@ -265,8 +312,8 @@ export function presentWarrantyClaim(input: {
         },
       ],
       [
-        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
-        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "sup:open" },
+        { text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" },
       ],
     ],
   };
@@ -284,8 +331,8 @@ export function presentWarrantyExpired(input: { warrantyEnd: string }): Presente
     ].join("\n"),
     buttons: [
       [
-        { text: "💬 Liên hệ hỗ trợ", callbackData: "sup:open" },
-        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "sup:open" },
+        { text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" },
       ],
     ],
   };
@@ -300,8 +347,8 @@ export function presentWarrantyNotCovered(): PresentedMessage {
     ].join("\n"),
     buttons: [
       [
-        { text: "💬 Hỗ trợ", callbackData: "sup:open" },
-        { text: "🏠 Trang chủ", callbackData: "shop:home" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "sup:open" },
+        { text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" },
       ],
     ],
   };

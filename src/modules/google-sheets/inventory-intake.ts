@@ -9,13 +9,14 @@ import type { RootAdminConfig, RootActor } from "../identity/root-admin.js";
 import {
   cancelInventoryImportSession,
   confirmInventoryImportSession,
+  deleteInventoryImportVaultRef,
   getInventoryImportSession,
   stageInventoryImportInput,
   startInventoryImportSession,
 } from "../digital-goods/inventory-import-session.js";
 import type { InventoryPreviewResult } from "../digital-goods/inventory-import.js";
-import { deleteAssetVaultRef } from "../digital-goods/vault-orphan.js";
 import { INVENTORY_FIELDS_SCHEMA } from "../catalog/fulfillment-type.js";
+import { assertSafeSheetValue } from "./contracts.js";
 import { newId } from "../../shared/ids/index.js";
 
 export const GOOGLE_SHEETS_INVENTORY_INTAKE_PATH = "/ops/google-sheets/inventory-intake";
@@ -33,15 +34,24 @@ export interface GoogleSheetsInventoryIntakeDeps {
 const spreadsheetSchema = z.object({
   spreadsheetId: z.string().trim().min(1).max(256),
 });
-const previewSchema = spreadsheetSchema.extend({
-  variantId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-  input: z
-    .string()
-    .min(1)
-    .max(64 * 1024),
-  costPriceVnd: z.number().int().nonnegative().max(1_000_000_000).optional(),
-  safeNote: z.string().trim().max(240).optional(),
-});
+const previewSchema = spreadsheetSchema
+  .extend({
+    variantId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
+    input: z
+      .string()
+      .min(1)
+      .max(64 * 1024),
+    costPriceVnd: z.number().int().nonnegative().max(1_000_000_000).optional(),
+    safeNote: z.string().trim().max(240).optional(),
+  })
+  .superRefine((value, context) => {
+    if (value.safeNote === undefined) return;
+    try {
+      assertSafeSheetValue(value.safeNote, "safeNote");
+    } catch {
+      context.addIssue({ code: "custom", path: ["safeNote"], message: "Invalid input" });
+    }
+  });
 const confirmSchema = spreadsheetSchema.extend({
   challenge: z.string().regex(/^[A-Za-z0-9_-]{32,256}$/),
 });
@@ -53,6 +63,7 @@ interface ChallengeRow {
   owner_email: string;
   owner_subject: string;
   admin_telegram_user_id: string;
+  generation: string;
   variant_id: string;
   input_vault_ref: string | null;
   preview_ready: number;
@@ -159,6 +170,14 @@ async function cancelActiveSession(
   actor: RootActor,
   correlationId: string,
 ): Promise<"READY" | "BUSY"> {
+  const processingChallenge = await sql`
+    select 1
+    from google_sheets_inventory_intake_challenge
+    where admin_telegram_user_id = ${String(actor.numericUserId)}
+      and status = 'PROCESSING'
+    limit 1
+  `.execute(deps.db);
+  if (processingChallenge.rows.length > 0) return "BUSY";
   const existing = await sql<{ status: string }>`
     select status
     from admin_inventory_import
@@ -168,8 +187,12 @@ async function cancelActiveSession(
   `.execute(deps.db);
   if (existing.rows[0]?.status === "PROCESSING") return "BUSY";
 
-  const openChallenges = await sql<{ id: string; input_vault_ref: string | null }>`
-    select id, input_vault_ref
+  const openChallenges = await sql<{
+    id: string;
+    generation: string;
+    input_vault_ref: string | null;
+  }>`
+    select id, generation, input_vault_ref
     from google_sheets_inventory_intake_challenge
     where admin_telegram_user_id = ${String(actor.numericUserId)}
       and status = 'PREVIEWED'
@@ -179,32 +202,97 @@ async function cancelActiveSession(
     // Invalidate before attempting Vault cleanup so a crash cannot replay an old
     // challenge against a newly staged session. The opaque ref remains recoverable
     // through the orphan path if the provider delete fails.
-    await sql`
+    const expired = await sql<{ id: string }>`
       update google_sheets_inventory_intake_challenge
       set status = 'EXPIRED'
       where id = ${challenge.id} and status = 'PREVIEWED'
+      returning id
     `.execute(deps.db);
+    if (expired.rows.length === 0) continue;
     if (challenge.input_vault_ref) {
-      await deleteAssetVaultRef(deps.db, deps.vault, challenge.input_vault_ref, {
+      await deleteInventoryImportVaultRef(deps.db, deps.vault, challenge.input_vault_ref, {
         correlationId,
         reason: "Google Sheets inventory preview superseded",
       });
       await sql`
         update google_sheets_inventory_intake_challenge
         set input_vault_ref = null
-        where id = ${challenge.id} and status = 'EXPIRED'
+        where id = ${challenge.id}
+          and generation = ${challenge.generation}
+          and status = 'EXPIRED'
+          and input_vault_ref = ${challenge.input_vault_ref}
       `.execute(deps.db);
     }
   }
 
   if (existing.rows[0]) {
-    await cancelInventoryImportSession(deps.db, deps.vault, {
+    const cancelled = await cancelInventoryImportSession(deps.db, deps.vault, {
       actor,
       config: deps.rootConfig,
       correlationId,
     });
+    if (!cancelled.ok && cancelled.code === "BUSY") return "BUSY";
   }
   return "READY";
+}
+async function loadSessionBinding(
+  db: Db,
+  adminTelegramUserId: string,
+): Promise<{ generation: string; status: string; inputVaultRef: string | null } | null> {
+  const result = await sql<{
+    generation: string;
+    status: string;
+    input_vault_ref: string | null;
+  }>`
+    select generation, status, input_vault_ref
+    from admin_inventory_import
+    where admin_telegram_user_id = ${adminTelegramUserId}
+    limit 1
+  `.execute(db);
+  const row = result.rows[0];
+  return row
+    ? { generation: row.generation, status: row.status, inputVaultRef: row.input_vault_ref }
+    : null;
+}
+
+async function expireChallengeAndCleanup(
+  deps: GoogleSheetsInventoryIntakeDeps,
+  row: Pick<ChallengeRow, "id" | "generation" | "input_vault_ref">,
+  correlationId: string,
+  reason: string,
+): Promise<void> {
+  await sql`
+    update google_sheets_inventory_intake_challenge
+    set status = 'EXPIRED'
+    where id = ${row.id} and status in ('PREVIEWED', 'PROCESSING')
+  `.execute(deps.db);
+  if (!row.input_vault_ref) return;
+  const actor = actorFor(deps.rootConfig);
+  const session = await loadSessionBinding(deps.db, String(actor.numericUserId));
+  let cleanup = true;
+  if (session?.generation === row.generation && session.inputVaultRef === row.input_vault_ref) {
+    const cancelled = await cancelInventoryImportSession(deps.db, deps.vault, {
+      actor,
+      config: deps.rootConfig,
+      correlationId,
+      expectedGeneration: row.generation,
+      expectedInputVaultRef: row.input_vault_ref,
+    });
+    if (!cancelled.ok && cancelled.code === "BUSY") cleanup = false;
+  }
+  if (!cleanup) return;
+  await deleteInventoryImportVaultRef(deps.db, deps.vault, row.input_vault_ref, {
+    correlationId,
+    reason,
+  });
+  await sql`
+    update google_sheets_inventory_intake_challenge
+    set input_vault_ref = null
+    where id = ${row.id}
+      and generation = ${row.generation}
+      and status = 'EXPIRED'
+      and input_vault_ref = ${row.input_vault_ref}
+  `.execute(deps.db);
 }
 
 export async function expireGoogleSheetsInventoryChallenges(input: {
@@ -213,8 +301,12 @@ export async function expireGoogleSheetsInventoryChallenges(input: {
   rootConfig: RootAdminConfig;
 }): Promise<number> {
   const expired = await input.db.transaction().execute(async (trx) => {
-    const result = await sql<{ id: string; input_vault_ref: string | null }>`
-      select id, input_vault_ref
+    const result = await sql<{
+      id: string;
+      generation: string;
+      input_vault_ref: string | null;
+    }>`
+      select id, generation, input_vault_ref
       from google_sheets_inventory_intake_challenge
       where (status = 'PREVIEWED' and expires_at <= now())
          or (status = 'EXPIRED' and input_vault_ref is not null)
@@ -233,22 +325,30 @@ export async function expireGoogleSheetsInventoryChallenges(input: {
   for (const row of expired) {
     if (!row.input_vault_ref) continue;
     const actor = actorFor(input.rootConfig);
-    const session = await getInventoryImportSession(input.db, String(actor.numericUserId));
-    if (session?.inputVaultRef === row.input_vault_ref) {
-      await cancelInventoryImportSession(input.db, input.vault, {
+    const session = await loadSessionBinding(input.db, String(actor.numericUserId));
+    let cleanup = true;
+    if (session?.generation === row.generation && session.inputVaultRef === row.input_vault_ref) {
+      const cancelled = await cancelInventoryImportSession(input.db, input.vault, {
         actor,
         config: input.rootConfig,
         correlationId: `google-sheets-inventory-expired:${row.id}`,
+        expectedGeneration: row.generation,
+        expectedInputVaultRef: row.input_vault_ref,
       });
+      if (!cancelled.ok && cancelled.code === "BUSY") cleanup = false;
     }
-    await deleteAssetVaultRef(input.db, input.vault, row.input_vault_ref, {
+    if (!cleanup) continue;
+    await deleteInventoryImportVaultRef(input.db, input.vault, row.input_vault_ref, {
       correlationId: `google-sheets-inventory-expired:${row.id}`,
       reason: "Google Sheets inventory challenge cleanup",
     });
     await sql`
       update google_sheets_inventory_intake_challenge
       set input_vault_ref = null
-      where id = ${row.id} and status = 'EXPIRED'
+      where id = ${row.id}
+        and generation = ${row.generation}
+        and status = 'EXPIRED'
+        and input_vault_ref = ${row.input_vault_ref}
     `.execute(input.db);
   }
   return expired.length;
@@ -288,6 +388,8 @@ export async function registerGoogleSheetsInventoryIntake(
 
     const actor = actorFor(deps.rootConfig);
     const correlationId = correlation("google-sheets-inventory-preview");
+    let stagedInputVaultRef: string | null = null;
+    let stagedGeneration: string | null = null;
     try {
       // One active import session is shared with the Telegram fallback. Remove its opaque
       // staged ref before replacing it; plaintext never enters this process's durable state.
@@ -306,52 +408,86 @@ export async function registerGoogleSheetsInventoryIntake(
         config: deps.rootConfig,
         correlationId,
         variantId: parsed.data.variantId,
+        expectedGeneration: started.session.generation,
         rawInput: parsed.data.input,
       });
       if (!staged.ok) {
-        await cancelInventoryImportSession(deps.db, deps.vault, {
-          actor,
-          config: deps.rootConfig,
-          correlationId,
-        });
         return reply.code(errorStatus(staged.code)).send(staged);
       }
+      stagedInputVaultRef = staged.inputVaultRef;
+      stagedGeneration = staged.generation;
       if (staged.preview.ready === 0 || staged.preview.invalid > 0) {
-        await cancelInventoryImportSession(deps.db, deps.vault, {
-          actor,
-          config: deps.rootConfig,
-          correlationId,
-        });
+        const current = await loadSessionBinding(deps.db, String(actor.numericUserId));
+        if (
+          current?.status === "READY" &&
+          current.generation === stagedGeneration &&
+          current.inputVaultRef === stagedInputVaultRef &&
+          stagedInputVaultRef
+        ) {
+          await cancelInventoryImportSession(deps.db, deps.vault, {
+            actor,
+            config: deps.rootConfig,
+            correlationId,
+            expectedGeneration: stagedGeneration,
+            expectedInputVaultRef: stagedInputVaultRef,
+          });
+        }
         return reply.code(422).send({
           ok: false,
           code: staged.preview.ready === 0 ? "NO_NEW_STOCK" : "INVALID_PREVIEW",
           preview: safePreview(staged.preview),
         });
       }
-      const session = await getInventoryImportSession(deps.db, String(actor.numericUserId));
-      if (!session?.inputVaultRef) throw new Error("inventory preview did not bind a Vault ref");
+      const inputVaultRef = staged.inputVaultRef;
+      if (!inputVaultRef || !stagedGeneration)
+        throw new Error("inventory preview did not bind a Vault ref");
       const challenge = randomBytes(32).toString("base64url");
       const challengeId = newId();
-      await sql`
+      const inserted = await sql<{ id: string }>`
         insert into google_sheets_inventory_intake_challenge
           (id, challenge_hash, spreadsheet_id, owner_email, owner_subject,
-           admin_telegram_user_id, variant_id, input_vault_ref, preview_ready, preview_invalid,
-           preview_duplicates, cost_price_vnd, safe_note, status, expires_at)
-        values
-          (${challengeId}, ${hashChallenge(challenge)}, ${deps.spreadsheetId}, ${owner.email},
-           ${owner.subject}, ${String(actor.numericUserId)}, ${parsed.data.variantId},
-           ${session.inputVaultRef}, ${staged.preview.ready}, ${staged.preview.invalid}, ${staged.preview.duplicates},
-           ${parsed.data.costPriceVnd ?? null}, ${parsed.data.safeNote ?? null}, 'PREVIEWED',
-           ${new Date(Date.now() + CHALLENGE_TTL_MS).toISOString()})
+           admin_telegram_user_id, generation, variant_id, input_vault_ref, preview_ready,
+           preview_invalid, preview_duplicates, cost_price_vnd, safe_note, status, expires_at)
+        select
+          ${challengeId}, ${hashChallenge(challenge)}, ${deps.spreadsheetId}, ${owner.email},
+          ${owner.subject}, ${String(actor.numericUserId)}, generation, ${parsed.data.variantId},
+          input_vault_ref, ${staged.preview.ready}, ${staged.preview.invalid},
+          ${staged.preview.duplicates}, ${parsed.data.costPriceVnd ?? null},
+          ${parsed.data.safeNote ?? null}, 'PREVIEWED',
+          ${new Date(Date.now() + CHALLENGE_TTL_MS).toISOString()}
+        from admin_inventory_import
+        where admin_telegram_user_id = ${String(actor.numericUserId)}
+          and generation = ${stagedGeneration}
+          and status = 'READY'
+          and input_vault_ref = ${inputVaultRef}
+        returning id
       `.execute(deps.db);
+      if (!inserted.rows[0]) {
+        await deleteInventoryImportVaultRef(deps.db, deps.vault, inputVaultRef, {
+          correlationId,
+          reason: "Google Sheets inventory challenge bind superseded",
+        });
+        return reply.code(409).send({ ok: false, code: "EXPIRED" });
+      }
       return reply.send({ ok: true, challenge, preview: safePreview(staged.preview) });
     } catch {
       try {
-        await cancelInventoryImportSession(deps.db, deps.vault, {
-          actor,
-          config: deps.rootConfig,
-          correlationId,
-        });
+        if (stagedInputVaultRef && stagedGeneration) {
+          const current = await loadSessionBinding(deps.db, String(actor.numericUserId));
+          if (
+            current?.status === "READY" &&
+            current.generation === stagedGeneration &&
+            current.inputVaultRef === stagedInputVaultRef
+          ) {
+            await cancelInventoryImportSession(deps.db, deps.vault, {
+              actor,
+              config: deps.rootConfig,
+              correlationId,
+              expectedGeneration: stagedGeneration,
+              expectedInputVaultRef: stagedInputVaultRef,
+            });
+          }
+        }
       } catch {
         // The session/orphan path records opaque compensation state; keep the HTTP error generic.
       }
@@ -365,12 +501,14 @@ export async function registerGoogleSheetsInventoryIntake(
     const owner = await verifyRequest(request, deps, parsed.data.spreadsheetId);
     if (!owner.ok) return reply.code(errorStatus(owner.code)).send(owner);
 
+    const actor = actorFor(deps.rootConfig);
     const challengeHash = hashChallenge(parsed.data.challenge);
     const transition = await deps.db.transaction().execute(async (trx) => {
       const result = await sql<ChallengeRow>`
         select id, challenge_hash, spreadsheet_id, owner_email, owner_subject,
-          admin_telegram_user_id, variant_id, input_vault_ref, preview_ready, preview_invalid,
-          preview_duplicates, cost_price_vnd, safe_note, status, expires_at, consumed_at
+          admin_telegram_user_id, generation, variant_id, input_vault_ref, preview_ready,
+          preview_invalid, preview_duplicates, cost_price_vnd, safe_note, status, expires_at,
+          consumed_at
         from google_sheets_inventory_intake_challenge
         where challenge_hash = ${challengeHash}
         for update
@@ -380,13 +518,15 @@ export async function registerGoogleSheetsInventoryIntake(
       if (
         row.spreadsheet_id !== parsed.data.spreadsheetId ||
         row.owner_email !== owner.email ||
-        row.owner_subject !== owner.subject
+        row.owner_subject !== owner.subject ||
+        row.admin_telegram_user_id !== String(actor.numericUserId)
       ) {
         return { kind: "UNAUTHORIZED" as const };
       }
       if (row.status === "CONSUMED") return { kind: "CONSUMED" as const, row };
       if (row.status === "EXPIRED") return { kind: "EXPIRED" as const, row };
-      if (row.status === "PROCESSING") return { kind: "PROCESSING" as const, row };
+      if (row.status === "PROCESSING")
+        return { kind: "PROCESSING" as const, row, recovery: true as const };
       if (new Date(row.expires_at).getTime() <= Date.now()) {
         await sql`
           update google_sheets_inventory_intake_challenge
@@ -400,79 +540,20 @@ export async function registerGoogleSheetsInventoryIntake(
         set status = 'PROCESSING'
         where id = ${row.id} and status = 'PREVIEWED'
       `.execute(trx);
-      return { kind: "PROCESSING" as const, row };
+      return { kind: "PROCESSING" as const, row, recovery: false as const };
     });
 
     if (transition.kind === "NOT_FOUND" || transition.kind === "UNAUTHORIZED") {
       return reply.code(401).send({ ok: false, code: "UNAUTHORIZED" });
     }
-    const actor = actorFor(deps.rootConfig);
     if (transition.kind === "EXPIRED") {
-      if (transition.row.input_vault_ref) {
-        const currentSession = await getInventoryImportSession(
-          deps.db,
-          String(actor.numericUserId),
-        );
-        if (currentSession?.inputVaultRef === transition.row.input_vault_ref) {
-          await cancelInventoryImportSession(deps.db, deps.vault, {
-            actor,
-            config: deps.rootConfig,
-            correlationId: `google-sheets-inventory-expired:${transition.row.id}`,
-          });
-        }
-        await deleteAssetVaultRef(deps.db, deps.vault, transition.row.input_vault_ref, {
-          correlationId: `google-sheets-inventory-expired:${transition.row.id}`,
-          reason: "Google Sheets intake challenge expired",
-        });
-        await sql`
-          update google_sheets_inventory_intake_challenge
-          set input_vault_ref = null
-          where id = ${transition.row.id}
-        `.execute(deps.db);
-      }
-      return reply.code(409).send({ ok: false, code: "EXPIRED" });
-    }
-    if (transition.kind === "PROCESSING") {
-      const processingSession = await getInventoryImportSession(
-        deps.db,
-        String(actor.numericUserId),
+      await expireChallengeAndCleanup(
+        deps,
+        transition.row,
+        `google-sheets-inventory-expired:${transition.row.id}`,
+        "Google Sheets intake challenge expired",
       );
-      if (
-        processingSession?.status === "COMMITTED" &&
-        processingSession.selectedVariantId === transition.row.variant_id
-      ) {
-        if (transition.row.input_vault_ref) {
-          await deleteAssetVaultRef(deps.db, deps.vault, transition.row.input_vault_ref, {
-            correlationId: `google-sheets-inventory-reconcile:${transition.row.id}`,
-            reason: "Google Sheets inventory commit reconciliation",
-          });
-        }
-        await sql`
-          update google_sheets_inventory_intake_challenge
-          set status = 'CONSUMED', input_vault_ref = null, consumed_at = now()
-          where id = ${transition.row.id} and status = 'PROCESSING'
-        `.execute(deps.db);
-        return reply.send({
-          ok: true,
-          reused: true,
-          summary: {
-            imported: 0,
-            duplicates: transition.row.preview_duplicates,
-            invalid: transition.row.preview_invalid,
-          },
-        });
-      }
-      if (
-        processingSession?.status !== "READY" ||
-        processingSession.inputVaultRef !== transition.row.input_vault_ref
-      ) {
-        return reply.code(409).send({ ok: false, code: "BUSY" });
-      }
-      await sql`
-        update google_sheets_inventory_intake_challenge
-        set status = 'PREVIEWED'
-        where id = ${transition.row.id} and status = 'PROCESSING'
-      `.execute(deps.db);
+      return reply.code(409).send({ ok: false, code: "EXPIRED" });
     }
     if (transition.kind === "CONSUMED") {
       return reply.send({
@@ -487,25 +568,31 @@ export async function registerGoogleSheetsInventoryIntake(
     }
 
     const { row } = transition;
-    const currentSession = await getInventoryImportSession(deps.db, String(actor.numericUserId));
-    if (!currentSession || currentSession.inputVaultRef !== row.input_vault_ref) {
-      await sql`
-        update google_sheets_inventory_intake_challenge
-        set status = 'EXPIRED'
-        where id = ${row.id} and status = 'PROCESSING'
-      `.execute(deps.db);
-      if (row.input_vault_ref) {
-        await deleteAssetVaultRef(deps.db, deps.vault, row.input_vault_ref, {
-          correlationId: `google-sheets-inventory-mismatch:${row.id}`,
-          reason: "Google Sheets inventory session changed before confirmation",
-        });
-      }
-      await sql`
-        update google_sheets_inventory_intake_challenge
-        set input_vault_ref = null
-        where id = ${row.id} and status = 'EXPIRED'
-      `.execute(deps.db);
+    const processingRecovery = transition.recovery;
+    if (!row.input_vault_ref) {
+      await expireChallengeAndCleanup(
+        deps,
+        row,
+        `google-sheets-inventory-mismatch:${row.id}`,
+        "Google Sheets inventory challenge has no staged input",
+      );
       return reply.code(409).send({ ok: false, code: "EXPIRED" });
+    }
+    if (!processingRecovery) {
+      const currentSession = await getInventoryImportSession(deps.db, String(actor.numericUserId));
+      if (
+        !currentSession ||
+        currentSession.generation !== row.generation ||
+        currentSession.inputVaultRef !== row.input_vault_ref
+      ) {
+        await expireChallengeAndCleanup(
+          deps,
+          row,
+          `google-sheets-inventory-mismatch:${row.id}`,
+          "Google Sheets inventory session changed before confirmation",
+        );
+        return reply.code(409).send({ ok: false, code: "EXPIRED" });
+      }
     }
     const correlationId = `google-sheets-inventory-confirm:${row.id}`;
     try {
@@ -513,7 +600,10 @@ export async function registerGoogleSheetsInventoryIntake(
         actor,
         config: deps.rootConfig,
         correlationId,
-        ...(row.input_vault_ref ? { expectedInputVaultRef: row.input_vault_ref } : {}),
+        expectedGeneration: row.generation,
+        expectedInputVaultRef: row.input_vault_ref,
+        expectedChallengeId: row.id,
+        allowExpiredProcessingRecovery: processingRecovery,
         assetMetadata: {
           sourceType: "GOOGLE_SHEETS",
           ...(row.cost_price_vnd !== null ? { costPriceVnd: Number(row.cost_price_vnd) } : {}),
@@ -521,25 +611,66 @@ export async function registerGoogleSheetsInventoryIntake(
         },
       });
       if (!confirmed.ok) {
+        if (confirmed.code === "BUSY") {
+          return reply.code(409).send({ ok: false, code: "BUSY" });
+        }
+        if (confirmed.code === "EXPIRED") {
+          return reply.code(409).send({ ok: false, code: "EXPIRED" });
+        }
+        const failedSession = await getInventoryImportSession(deps.db, String(actor.numericUserId));
+        if (
+          !failedSession ||
+          failedSession.generation !== row.generation ||
+          failedSession.inputVaultRef !== row.input_vault_ref
+        ) {
+          await expireChallengeAndCleanup(
+            deps,
+            row,
+            `google-sheets-inventory-mismatch:${row.id}`,
+            "Google Sheets inventory session changed during confirmation",
+          );
+          return reply.code(409).send({ ok: false, code: "EXPIRED" });
+        }
         await sql`
           update google_sheets_inventory_intake_challenge
           set status = 'PREVIEWED'
-          where id = ${row.id} and status = 'PROCESSING'
+          where id = ${row.id}
+            and generation = ${row.generation}
+            and status = 'PROCESSING'
+            and input_vault_ref = ${row.input_vault_ref}
         `.execute(deps.db);
         return reply.code(errorStatus(confirmed.code)).send(confirmed);
+      }
+      if (!processingRecovery) {
+        const committedSession = await getInventoryImportSession(
+          deps.db,
+          String(actor.numericUserId),
+        );
+        if (
+          !committedSession ||
+          committedSession.status !== "COMMITTED" ||
+          committedSession.generation !== row.generation ||
+          committedSession.inputVaultRef !== row.input_vault_ref
+        ) {
+          await expireChallengeAndCleanup(
+            deps,
+            row,
+            `google-sheets-inventory-mismatch:${row.id}`,
+            "Google Sheets inventory session changed after confirmation",
+          );
+          return reply.code(409).send({ ok: false, code: "EXPIRED" });
+        }
       }
       await sql`
         update google_sheets_inventory_intake_challenge
         set status = 'CONSUMED', input_vault_ref = null, consumed_at = now()
-        where id = ${row.id} and status = 'PROCESSING'
+        where id = ${row.id}
+          and generation = ${row.generation}
+          and status = 'PROCESSING'
+          and input_vault_ref = ${row.input_vault_ref}
       `.execute(deps.db);
       return reply.send({ ok: true, reused: confirmed.reused, summary: confirmed.summary });
     } catch {
-      await sql`
-        update google_sheets_inventory_intake_challenge
-        set status = 'PREVIEWED'
-        where id = ${row.id} and status = 'PROCESSING'
-      `.execute(deps.db);
       return reply.code(500).send({ ok: false, code: "INTAKE_UNAVAILABLE" });
     }
   });

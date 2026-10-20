@@ -103,7 +103,7 @@ function decodeCursor(raw: string): Cursor | null {
 /**
  * Search sellable variants with bounded, allowlisted filters. Text search folds
  * the query and matches (folded) product name, category name, parent (brand
- * family) name, tags, or any product alias. Every other filter only narrows the sellable set. Keyset-paginated on
+ * family) name, variant name, tags, or any product alias. Every other filter only narrows the sellable set. Keyset-paginated on
  * (sort_order, id) for a stable, gap-free cursor.
  */
 export async function searchCatalog(
@@ -128,6 +128,8 @@ export async function searchCatalog(
           or to_tsvector('simple', translate(lower(c.name_vi), ${FOLD_FROM}, ${FOLD_TO}))
             @@ to_tsquery('simple', ${prefixTsQuery})
           or to_tsvector('simple', translate(lower(coalesce(parent.name_vi, '')), ${FOLD_FROM}, ${FOLD_TO}))
+            @@ to_tsquery('simple', ${prefixTsQuery})
+          or to_tsvector('simple', translate(lower(v.name_vi), ${FOLD_FROM}, ${FOLD_TO}))
             @@ to_tsquery('simple', ${prefixTsQuery})
           or exists (
             select 1 from product_alias a

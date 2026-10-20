@@ -88,6 +88,7 @@ describe("owner support ticket queue", () => {
     expect(rows[0]?.safeSummary).toBe("Chưa nhận được tài khoản.");
     expect(rows[0]?.orderNumber).toBeTruthy();
     expect(rows[0]?.dueAt).toBeTruthy();
+    expect(rows[0]?.version).toBe(1);
   });
 
   it("drops a ticket from the queue once it is closed", async () => {
@@ -96,6 +97,7 @@ describe("owner support ticket queue", () => {
       db: ctx.db,
       ticketId,
       toStatus: "RESOLVED",
+      expectedVersion: 1,
       actorId: "admin-1",
       correlationId: "admin-support-resolve",
     });
@@ -103,6 +105,7 @@ describe("owner support ticket queue", () => {
       db: ctx.db,
       ticketId,
       toStatus: "CLOSED",
+      expectedVersion: 2,
       actorId: "admin-1",
       correlationId: "admin-support-close",
     });
@@ -119,6 +122,7 @@ describe("owner status move", () => {
       db: ctx.db,
       ticketId,
       toStatus: "WAITING_SHOP",
+      expectedVersion: 1,
       actorId: "admin-1",
       correlationId: "admin-support-shop",
     });
@@ -146,6 +150,41 @@ describe("owner status move", () => {
 
     const detail = await getAdminTicket(ctx.db, ticketId);
     expect(detail?.status).toBe("WAITING_SHOP");
+    expect(detail?.version).toBe(2);
+  });
+
+  it("rejects a stale status callback after another owner action changes the ticket", async () => {
+    const { ticketId } = await openTicket();
+    await setTicketStatus({
+      db: ctx.db,
+      ticketId,
+      toStatus: "WAITING_SHOP",
+      expectedVersion: 1,
+      actorId: "admin-1",
+      correlationId: "admin-support-first",
+    });
+
+    const staleInput = {
+      db: ctx.db,
+      ticketId,
+      toStatus: "RESOLVED",
+      expectedVersion: 1,
+      actorId: "admin-1",
+      correlationId: "admin-support-stale",
+    };
+    const result = await setTicketStatus(staleInput);
+
+    expect(result).toEqual({ ok: false, code: "STALE_VERSION" });
+    const row = await sql<{ status: string; version: number }>`
+      select status, version from support_ticket where id = ${ticketId}
+    `.execute(ctx.db);
+    expect(row.rows[0]).toEqual({ status: "WAITING_SHOP", version: 2 });
+    const audit = await sql<{ count: string }>`
+      select count(*)::text as count
+      from audit_event
+      where target_type = 'SupportTicket' and target_id = ${ticketId}
+    `.execute(ctx.db);
+    expect(audit.rows[0]?.count).toBe("1");
   });
 
   it("refuses a transition the state machine forbids and leaves the row alone", async () => {
@@ -153,6 +192,7 @@ describe("owner status move", () => {
     await setTicketStatus({
       db: ctx.db,
       ticketId,
+      expectedVersion: 1,
       toStatus: "RESOLVED",
       actorId: "admin-1",
       correlationId: "admin-support-resolve",
@@ -161,6 +201,7 @@ describe("owner status move", () => {
     const result = await setTicketStatus({
       db: ctx.db,
       ticketId,
+      expectedVersion: 2,
       toStatus: "MANUAL_REVIEW",
       actorId: "admin-1",
       correlationId: "admin-support-illegal",
@@ -181,6 +222,7 @@ describe("owner status move", () => {
       db: ctx.db,
       ticketId,
       toStatus: "REFUNDED",
+      expectedVersion: 1,
       actorId: "admin-1",
       correlationId: "admin-support-bogus",
     });
@@ -193,6 +235,7 @@ describe("owner status move", () => {
       db: ctx.db,
       ticketId: newId(),
       toStatus: "WAITING_SHOP",
+      expectedVersion: 1,
       actorId: "admin-1",
       correlationId: "admin-support-missing",
     });

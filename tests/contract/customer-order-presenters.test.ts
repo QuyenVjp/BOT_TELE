@@ -17,6 +17,7 @@ import {
 } from "../../src/bot/presenters/warranty.js";
 import { presentTicketList } from "../../src/bot/presenters/support.js";
 import { presentPreorderConsent } from "../../src/modules/commerce/preorder.js";
+import type { CustomerPaymentEvidence } from "../../src/modules/commerce/history.js";
 import type { Order, OrderStatus } from "../../src/modules/commerce/order.js";
 
 /** Vi-VN money inserts a non-breaking space before ₫; normalise for comparisons. */
@@ -24,7 +25,9 @@ function plain(text: string): string {
   return text.replace(/[\u00a0\u202f]/g, " ");
 }
 
-function makeOrder(overrides: Partial<Order> = {}): Order {
+type PresenterOrder = Order & { paymentEvidence: CustomerPaymentEvidence };
+
+function makeOrder(overrides: Partial<PresenterOrder> = {}): PresenterOrder {
   return {
     id: "01HZZZZZZZZZZZZZZZZZZZZZZZ",
     orderNumber: "ORD-2026-0001",
@@ -45,8 +48,9 @@ function makeOrder(overrides: Partial<Order> = {}): Order {
     warrantyDays: 30,
     supplierPolicySnapshot: "LOCAL_ONLY",
     fulfillmentType: "STOCK_ACCOUNT",
+    paymentEvidence: "SEPAY_SETTLED",
     ...overrides,
-  } as Order;
+  };
 }
 
 describe("customer order screens", () => {
@@ -58,10 +62,22 @@ describe("customer order screens", () => {
           orderNumber: "ORD-2026-0002",
           customerId: "cust-1",
           status: "PENDING_PAYMENT",
+          paymentEvidence: "UNVERIFIED",
           productNameVi: "Claude Pro",
           variantNameVi: "1 tháng",
           priceVnd: "280000",
           createdAt: "2026-07-16T04:00:00.000Z",
+        },
+        {
+          id: "o2",
+          orderNumber: "ORD-2026-0003",
+          customerId: "cust-1",
+          status: "PAID",
+          paymentEvidence: "SEPAY_SETTLED",
+          productNameVi: "ChatGPT Plus",
+          variantNameVi: "1 tháng",
+          priceVnd: "300000",
+          createdAt: "2026-07-17T04:00:00.000Z",
         },
       ],
       nextCursor: "cursor-2",
@@ -70,10 +86,15 @@ describe("customer order screens", () => {
     expect(plain(message.text)).toContain(
       "• ORD-2026-0002 — Claude Pro · 280.000 ₫ · ⏳ Chờ thanh toán",
     );
-    expect(message.buttons.flat().map((b) => b.callbackData)).toEqual([
-      "ord:view:ORD-2026-0002",
-      "ord:list:cursor-2",
-      "menu:main",
+    expect(message.buttons).toEqual([
+      [
+        { text: "ORD-2026-0002", callbackData: "ord:view:ORD-2026-0002" },
+        { text: "ORD-2026-0003", callbackData: "ord:view:ORD-2026-0003" },
+      ],
+      [
+        { text: "Xem thêm", callbackData: "ord:list:cursor-2" },
+        { text: "🏠 Trang chủ", callbackData: "menu:main" },
+      ],
     ]);
 
     const lastPage = presentOrderHistory({
@@ -82,6 +103,29 @@ describe("customer order screens", () => {
     });
     expect(lastPage.text).toContain("Bạn chưa có đơn hàng nào.");
   });
+  it("fails closed for a PAID list row without settled payment evidence", () => {
+    const message = presentOrderHistory({
+      items: [
+        {
+          id: "o-unverified",
+          orderNumber: "ORD-2026-0004",
+          customerId: "cust-1",
+          status: "PAID",
+          paymentEvidence: "UNVERIFIED",
+          productNameVi: "ChatGPT Plus",
+          variantNameVi: "1 tháng",
+          priceVnd: "300000",
+          createdAt: "2026-07-18T04:00:00.000Z",
+        },
+      ],
+      nextCursor: null,
+    });
+    expect(plain(message.text)).toContain(
+      "• ORD-2026-0004 — ChatGPT Plus · 300.000 ₫ · ⚠️ Cần hỗ trợ",
+    );
+    expect(message.text).not.toContain("✅ Đã thanh toán");
+  });
+
   it("renders the order snapshot, payment state, policy line and only context actions", () => {
     const message = plain(presentOrderDetail(makeOrder()).text);
     expect(message).toContain("🧾 Chi tiết đơn hàng");
@@ -100,8 +144,38 @@ describe("customer order screens", () => {
       ],
     ]);
   });
+  it("fails closed for a PAID detail without settled payment evidence", () => {
+    const message = plain(
+      presentOrderDetail(makeOrder({ status: "PAID", paymentEvidence: "UNVERIFIED" })).text,
+    );
+    expect(message).toContain("Thanh toán: ⚠️ Cần hỗ trợ");
+    expect(message).toContain("Trạng thái: ⚠️ Cần hỗ trợ");
+    expect(message).toContain("Giao hàng / Bảo hành: Liên hệ hỗ trợ để kiểm tra");
+    expect(message).not.toContain("✅ Đã thanh toán");
+  });
 
-  it("maps every known status and never leaks an unknown internal enum", () => {
+  it("shows distinct pending and completed refund payment labels", () => {
+    const pending = plain(presentOrderDetail(makeOrder({ status: "REFUND_PENDING" })).text);
+    expect(pending).toContain("Thanh toán: ⏳ Đang chờ hoàn tiền");
+    expect(pending).toContain("Trạng thái: ⏳ Đang xử lý yêu cầu hoàn tiền");
+    expect(pending).not.toContain("Đã hoàn tiền");
+
+    const missingEvidence = plain(
+      presentOrderDetail(makeOrder({ status: "REFUNDED", paymentEvidence: "SEPAY_SETTLED" })).text,
+    );
+    expect(missingEvidence).toContain(`Thanh toán: ${ORDER_STATUS_FALLBACK}`);
+    expect(missingEvidence).toContain(`Trạng thái: ${ORDER_STATUS_FALLBACK}`);
+    expect(missingEvidence).not.toContain("Đã hoàn tiền");
+
+    const backed = plain(
+      presentOrderDetail(makeOrder({ status: "REFUNDED", paymentEvidence: "WALLET_REFUNDED" }))
+        .text,
+    );
+    expect(backed).toContain("Thanh toán: 💸 Đã hoàn tiền");
+    expect(backed).toContain("Trạng thái: ✅ Đã hoàn vào ví");
+  });
+
+  it("maps ordinary order states and never leaks an unknown internal enum", () => {
     expect(ORDER_STATUS_LABEL.PENDING_PAYMENT).toBe("⏳ Chờ thanh toán");
     expect(ORDER_STATUS_LABEL.PAID).toBe("✅ Đã thanh toán");
     expect(ORDER_STATUS_LABEL.PROCESSING).toBe("📦 Đang giao");
@@ -115,8 +189,6 @@ describe("customer order screens", () => {
       "REJECTED",
       "PAYMENT_NEEDS_REVIEW",
       "FULFILLMENT_NEEDS_REVIEW",
-      "REFUND_PENDING",
-      "REFUNDED",
       "SOMETHING_NEW",
     ] as OrderStatus[]) {
       const text = presentOrderDetail(makeOrder({ status, paidAt: null })).text;
@@ -149,8 +221,8 @@ describe("customer order screens", () => {
     expect(text).not.toContain("150.000");
     expect(message.buttons).toEqual([
       [
-        { text: "🧾 Đơn hàng", callbackData: "ord:list" },
-        { text: "📌 Đặt cọc", callbackData: "cust:preorders" },
+        { text: "🧾 Xem đơn", callbackData: "ord:list" },
+        { text: "💰 Đặt cọc của tôi", callbackData: "cust:preorders" },
       ],
       [
         { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
@@ -171,10 +243,12 @@ describe("customer order screens", () => {
     expect(message.text.split("\n")[0]).toBe("🛡 Bảo hành");
     expect(message.text).toContain("Chọn đơn hàng bạn cần bảo hành:");
     expect(message.text).toContain("• ORD-2026-0001 — ChatGPT Plus");
-    expect(message.buttons.flat().map((b) => b.callbackData)).toEqual([
-      "sup:open:ORD-2026-0001",
-      "sup:open:ORD-2026-0002",
-      "supp:open",
+    expect(message.buttons).toEqual([
+      [
+        { text: "ORD-2026-0001", callbackData: "sup:open:ORD-2026-0001" },
+        { text: "ORD-2026-0002", callbackData: "sup:open:ORD-2026-0002" },
+      ],
+      [{ text: "💬 Hỗ trợ", callbackData: "supp:open" }],
     ]);
 
     const empty = presentCustomerWarrantyHome([]);
@@ -206,14 +280,13 @@ describe("customer order screens", () => {
 });
 
 describe("customer warranty policy, report preview, and claim layout", () => {
-  it("renders warranty policy with full-width report action and paired back/home navigation", () => {
+  it("renders warranty policy with exact-order entry and paired back/home navigation", () => {
     const message = presentWarrantyPolicy({
       productName: "ChatGPT Plus",
       warrantyDays: 30,
       coverageVi: "Lỗi tài khoản bị khóa trong thời gian bảo hành.",
       exclusionsVi: "Tự ý đổi mật khẩu.",
       examplePriceVnd: 250000n,
-      variantId: "var-1",
       productId: "prod-1",
     });
 
@@ -221,7 +294,7 @@ describe("customer warranty policy, report preview, and claim layout", () => {
     expect(message.text).toContain("ChatGPT Plus");
     expect(message.text).toContain("30 ngày");
     expect(message.buttons).toEqual([
-      [{ text: "🛡 Báo lỗi / Bảo hành", callbackData: "warranty:report:var-1" }],
+      [{ text: "⚠️ Chọn đơn để báo lỗi", callbackData: "cust:warranty" }],
       [
         { text: "⬅️ Quay lại", callbackData: "shop:product:prod-1" },
         { text: "🏠 Trang chủ", callbackData: "shop:home" },
@@ -238,14 +311,19 @@ describe("customer warranty policy, report preview, and claim layout", () => {
       warrantyEnd: "2026-08-16T04:00:00.000Z",
       remainingDays: 28,
       estimatedRefundVnd: 233333n,
-      variantId: "var-1",
+      orderId: "01J00000000000000000000001",
     });
 
     expect(message.text).toContain("Xác nhận yêu cầu bảo hành");
     expect(message.text).toContain("ORD-2026-0001");
     expect(message.buttons).toEqual([
-      [{ text: "✅ Gửi yêu cầu", callbackData: "warranty:submit:var-1:ACCOUNT_LOCKED" }],
-      [{ text: "✏️ Sửa nội dung", callbackData: "warranty:report:var-1" }],
+      [
+        {
+          text: "✅ Gửi yêu cầu",
+          callbackData: "warranty:submit:01J00000000000000000000001:ACCOUNT_LOCKED",
+        },
+      ],
+      [{ text: "✏️ Sửa nội dung", callbackData: "warranty:report:01J00000000000000000000001" }],
       [{ text: "❌ Huỷ", callbackData: "shop:home" }],
     ]);
   });
@@ -269,6 +347,53 @@ describe("customer warranty policy, report preview, and claim layout", () => {
         { text: "🏠 Trang chủ", callbackData: "shop:home" },
       ],
     ]);
+  });
+  it("uses refund obligations rather than claim snapshots or timelines for due/paid copy", () => {
+    const due = presentWarrantyClaim({
+      claimNumber: "CLM-2026-0001",
+      productName: "ChatGPT Plus",
+      status: "REFUND_DUE",
+      estimatedRefundVnd: 233333n,
+      approvedRefundVnd: 999999n,
+      refundEvidence: { state: "DUE", amountVnd: 40000n, paidAt: null },
+      remainingDays: 28,
+      timeline: [{ kind: "REFUND_DUE", safeNote: null, createdAt: "2026-07-18T04:00:00.000Z" }],
+    });
+    expect(due.text).toContain("Hoàn tiền đang chờ shop chuyển khoản");
+    expect(due.text).toContain("Số tiền chờ hoàn: 40.000");
+    expect(due.text).not.toContain("999.999");
+
+    const paid = presentWarrantyClaim({
+      claimNumber: "CLM-2026-0001",
+      productName: "ChatGPT Plus",
+      status: "REFUND_PAID",
+      estimatedRefundVnd: 233333n,
+      approvedRefundVnd: 999999n,
+      refundEvidence: {
+        state: "PAID",
+        amountVnd: 40000n,
+        paidAt: "2026-07-18T04:00:00.000Z",
+      },
+      remainingDays: 28,
+      timeline: [{ kind: "REFUND_PAID", safeNote: null, createdAt: "2026-07-18T04:00:00.000Z" }],
+    });
+    expect(paid.text).toContain("Shop ghi nhận đã chuyển khoản");
+    expect(paid.text).toContain("Số tiền đã ghi nhận hoàn: 40.000");
+    expect(paid.text).not.toContain("999.999");
+
+    const unsupported = presentWarrantyClaim({
+      claimNumber: "CLM-2026-0001",
+      productName: "ChatGPT Plus",
+      status: "REFUND_PAID",
+      estimatedRefundVnd: 233333n,
+      approvedRefundVnd: 999999n,
+      refundEvidence: null,
+      remainingDays: 28,
+      timeline: [{ kind: "REFUND_PAID", safeNote: null, createdAt: "2026-07-18T04:00:00.000Z" }],
+    });
+    expect(unsupported.text).toContain("Cần hỗ trợ xác minh khoản hoàn tiền");
+    expect(unsupported.text).not.toContain("999.999");
+    expect(unsupported.text).not.toContain("Shop ghi nhận đã chuyển khoản");
   });
 });
 
@@ -314,7 +439,7 @@ describe("customer support ticket list layout", () => {
         { text: "2222bbbb", callbackData: "sup:view:ticket-2222bbbb" },
       ],
       [{ text: "3333cccc", callbackData: "sup:view:ticket-3333cccc" }],
-      [{ text: "Menu chính", callbackData: "menu:main" }],
+      [{ text: "🏠 Trang chủ", callbackData: "menu:main" }],
     ]);
   });
 });

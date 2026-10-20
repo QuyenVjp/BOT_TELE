@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createWalletPurchaseService } from "../../src/modules/wallet/purchase.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import { createWalletLedgerService } from "../../src/modules/wallet/ledger.js";
 import {
   dockerAvailable,
@@ -24,6 +25,7 @@ beforeEach(async () => {
   await sql`truncate table wallet_ledger, wallet_account, payment_intent, "order", product_variant, product, category, customer cascade`.execute(
     ctx.db,
   );
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 async function seedPaidCandidate(): Promise<{

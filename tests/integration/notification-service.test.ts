@@ -129,6 +129,39 @@ async function seedStockVariant(input: {
   return variantId;
 }
 
+async function publishRestockFixture(
+  variantId: string,
+  categorySlug: "ai" | "coding",
+): Promise<void> {
+  const evidenceId = newId();
+  await sql`
+    update category
+       set slug = ${categorySlug}
+     where id = (
+       select p.category_id
+       from product_variant v
+       join product p on p.id = v.product_id
+       where v.id = ${variantId}
+     )
+  `.execute(ctx.db);
+  await sql`
+    insert into resale_evidence
+      (id, variant_id, source, reference, summary, created_by, registration_request_id)
+    values (${evidenceId}, ${variantId}, 'OWNER_ATTESTATION',
+      ${`test-public-${variantId}`}, 'test fixture evidence', 'test', ${evidenceId})
+  `.execute(ctx.db);
+  await sql`
+    update product_variant
+       set resale_evidence_id = ${evidenceId},
+           publication_evidence_id = ${evidenceId},
+           publication_product_version = 1,
+           publication_variant_version = version,
+           published_at = now(),
+           published_by = 'test'
+     where id = ${variantId}
+  `.execute(ctx.db);
+}
+
 describe("notification service", () => {
   it("defaults missing customer notification preference to opt-out", async () => {
     const customerId = await seedCustomer("111111");
@@ -845,22 +878,19 @@ describe("notification service", () => {
   });
 
   it("turns positive stock deltas into detailed restock deliveries for actual subscribers", async () => {
-    const variantId = await seedVariant();
+    const variantId = await seedStockVariant({ available: 0 });
+    await publishRestockFixture(variantId, "ai");
     const subscribed = await seedCustomer("111111");
     const notSubscribed = await seedCustomer("222222");
-    await subscribeRestock(ctx.db, subscribed, variantId);
+    expect(await subscribeRestock(ctx.db, subscribed, variantId)).not.toBeNull();
+    await sql`
+      insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+      values (${newId()}, ${variantId}, 'LOCAL', ${`vault:${newId()}`}, ${newId()}, 'AVAILABLE')
+    `.execute(ctx.db);
     await sql`
       insert into notification_preference(customer_id, shop_updates, purchase_activity)
       values (${subscribed}, false, false), (${notSubscribed}, true, false)
     `.execute(ctx.db);
-    await enqueueOutboxEvent(ctx.db, {
-      id: newId(),
-      aggregateType: "DigitalAsset",
-      aggregateId: newId(),
-      aggregateVersion: 1,
-      eventType: "StockDelta",
-      payloadRedacted: { variantId, delta: 3, stockAfter: 3 },
-    });
 
     const drain = await drainOutboxOnce(ctx.db, {
       batchSize: 5,
@@ -891,8 +921,8 @@ describe("notification service", () => {
           "Sản phẩm bạn theo dõi đã có hàng lại.",
           "Sản phẩm: Product",
           "Gói: Variant",
-          "Mới thêm: 3",
-          "Tồn kho hiện tại: 3",
+          "Mới thêm: 1",
+          "Tồn kho hiện tại: 1",
           "Giá hiện tại: 100.000 ₫",
         ].join("\n"),
       },
@@ -953,11 +983,13 @@ describe("notification service", () => {
     const vault = createInMemoryVault();
     const variantId = await seedStockVariant({ available: 0 });
     const otherVariantId = await seedStockVariant({ available: 0 });
+    await publishRestockFixture(variantId, "ai");
+    await publishRestockFixture(otherVariantId, "coding");
     const subscribed = await seedCustomer("111111");
     const otherSubscriber = await seedCustomer("222222");
     const shopOnly = await seedCustomer("333333");
-    await subscribeRestock(ctx.db, subscribed, variantId);
-    await subscribeRestock(ctx.db, otherSubscriber, otherVariantId);
+    expect(await subscribeRestock(ctx.db, subscribed, variantId)).not.toBeNull();
+    expect(await subscribeRestock(ctx.db, otherSubscriber, otherVariantId)).not.toBeNull();
     await sql`
       insert into notification_preference(customer_id, shop_updates, purchase_activity)
       values (${subscribed}, false, false), (${otherSubscriber}, false, false), (${shopOnly}, true, false)
@@ -1292,5 +1324,23 @@ describe("notification service", () => {
       select content from notification_campaign where id = ${`warranty-refund-paid:${claimId}`}
     `.execute(ctx.db);
     expect(paidCampaign.rows[0]!.content).toContain("Shop đã xác nhận chuyển khoản");
+    const replacement = await handleNotificationOutboxEvent(ctx.db, {
+      id: newId(),
+      aggregateType: "WarrantyClaim",
+      aggregateId: claimId,
+      aggregateVersion: 1,
+      eventType: "WarrantyReplacementApproved",
+      payloadRedacted: { claimId, customerId, bundleId: newId() },
+      attemptCount: 0,
+      claimedBy: "test",
+      generation: 1,
+    });
+    expect(replacement).toMatchObject({ kind: "PUBLISHED" });
+    const replacementCampaign = await sql<{ content: string }>`
+      select content from notification_campaign where id = ${`warranty-replacement:${claimId}`}
+    `.execute(ctx.db);
+    expect(replacementCampaign.rows[0]!.content).toContain("đang chuẩn bị");
+    expect(replacementCampaign.rows[0]!.content).not.toContain("đã gửi thông tin");
+    expect(replacementCampaign.rows[0]!.content).not.toContain("đã giao");
   });
 });

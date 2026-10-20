@@ -35,6 +35,7 @@ import {
   presentAdminPreorders,
 } from "../../src/bot/presenters/admin.js";
 import { isStoreOpen } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 
 describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", () => {
   let ctx: PgTestContext;
@@ -89,6 +90,19 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
     await sql`
       insert into product (id, category_id, name_vi, slug, is_active, sort_order, is_test, is_archived)
       values (${canaryProdId}, ${categoryId}, 'Canary Fixture 250K', 'canary-fixture-250k', true, 2, true, false)
+    `.execute(ctx.db);
+    const canaryVarId = newId();
+    await sql`
+      insert into product_variant (
+        id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
+        warranty_days, stock_policy, is_active, sort_order, fulfillment_type,
+        preorder_enabled, deposit_mode, deposit_amount_vnd,
+        min_deposit_vnd, hold_duration_hours, balance_due_hours
+      ) values (
+        ${canaryVarId}, ${canaryProdId}, 'CANARY-PREORDER-1M', 'Canary 1 Tháng', 250000, 'P1M',
+        'CREDENTIAL', 30, 'LOCAL_ONLY', true, 1, 'STOCK_ACCOUNT',
+        true, 'FIXED', 50000, 50000, 24, 24
+      )
     `.execute(ctx.db);
   }, 180_000);
 
@@ -242,7 +256,7 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         ],
         "template",
       );
-      expect(varPicker.text).toContain("Chọn biến thể để tải mẫu CSV");
+      expect(varPicker.text).toContain("Sản phẩm: ChatGPT Plus");
       expect(varPicker.buttons[0]?.[0]?.callbackData).toBe("admin:inventory:template:var-1");
 
       // Test Lab isolates Canary products
@@ -295,17 +309,24 @@ describe("Commerce UX + Inventory + Preorder + Notification Sprint Acceptance", 
         values (${customerId}, 'ACTIVE', 'vi-VN')
       `.execute(ctx.db);
 
-      // Find variant with preorder enabled
+      await setStoreModeForTest(ctx.db, "TEST", "test");
       const varRow = await sql<{ id: string }>`
-        select id from product_variant where preorder_enabled = true limit 1
+        select v.id
+          from product_variant v
+          join product p on p.id = v.product_id
+         where v.preorder_enabled = true
+           and p.is_test = true
+         limit 1
       `.execute(ctx.db);
       expect(varRow.rows[0]).toBeDefined();
       const variantId = varRow.rows[0]!.id;
 
-      // 2. Check preorder reservation creation
+      // 2. Check preorder reservation creation against test-only inventory.
       const res = await createPreorderReservation(ctx.db, {
         customerId,
         variantId,
+        audience: "test",
+        isRootAdmin: true,
       });
 
       expect(res.ok).toBe(true);

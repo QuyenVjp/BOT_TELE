@@ -725,7 +725,7 @@ describe("customer payment auxiliary screens layout and copy", () => {
       [{ text: PAYMENT_COPY.refresh, callbackData: "preorder:pay:res-123", style: "success" }],
       [{ text: PAYMENT_COPY.mainMenu, callbackData: "menu:main" }],
       [
-        { text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" },
+        { text: "💰 Đặt cọc của tôi", callbackData: "cust:preorders" },
         { text: PAYMENT_COPY.support, callbackData: "supp:open" },
       ],
     ]);

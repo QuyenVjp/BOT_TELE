@@ -13,6 +13,14 @@ export async function deleteAssetVaultRef(
   ref: VaultRef,
   input: { correlationId: string; reason: string },
 ): Promise<void> {
+  const referenced = await sql`
+    select 1
+    from digital_asset
+    where vault_ref = ${ref}
+    limit 1
+  `.execute(db);
+  if (referenced.rows.length > 0) return;
+
   try {
     await vault.delete(ref);
     return;

@@ -19,6 +19,7 @@ import {
   findDeliveredAssetHistoryForOrderForOwner,
 } from "../../src/modules/digital-goods/repository.js";
 import { cancelUnpaidOrder } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import { getOrderDetailForCustomer } from "../../src/modules/commerce/history.js";
 import { createSupportService } from "../../src/modules/support/service.js";
 import { openReplacementCase } from "../../src/modules/digital-goods/replacement.js";
@@ -347,6 +348,7 @@ describe.skipIf(!hasDocker)("cross-customer isolation at the service boundary", 
     const alice = await seedCustomerOrder("A");
     const bob = await seedCustomerOrder("B");
 
+    await setStoreModeForTest(ctx.db, "OPEN", "test");
     const result = await createWalletPurchaseService(ctx.db).purchase({
       customerId: alice.customerId,
       orderId: bob.orderId,

@@ -1,5 +1,6 @@
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
 import {
+  compactInlineRows,
   formatCategoryLabel,
   type InlineButton,
   type PresentedMessage,
@@ -19,6 +20,7 @@ import {
   coerceAdminContactUrl,
   coerceCommunityUrl,
 } from "../../modules/catalog/shop-profile.js";
+import { CUSTOMER_BUTTONS } from "./customer-buttons.js";
 
 export const CUSTOMER_COPY = {
   homeTitle: `🛒 ${SHOP_NAME}`,
@@ -168,8 +170,8 @@ export function presentCustomerWarranty(summary?: string): PresentedMessage {
     ].join("\n"),
     buttons: [
       [
-        { text: "💬 Nhắn tin hỗ trợ", callbackData: "supp:open" },
-        { text: "🛒 Về trang chủ", callbackData: "shop:home" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "supp:open" },
+        { text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" },
       ],
     ],
   };
@@ -198,7 +200,7 @@ export function presentCustomerNotificationPreferences(prefs: {
           callbackData: `cust:notify:social:${prefs.socialProof ? "off" : "on"}`,
         },
       ],
-      [{ text: CUSTOMER_COPY.back, callbackData: "shop:home" }],
+      [{ text: CUSTOMER_BUTTONS.back, callbackData: "shop:home" }],
     ],
   };
 }
@@ -231,14 +233,38 @@ export function presentCustomerPreorders(
 ): PresentedMessage {
   const lines = ["💰 Đặt cọc của tôi", ""];
   const buttons: InlineButton[][] = [];
+  const now = Date.now();
   if (preorders.length === 0) {
     lines.push("Bạn chưa có suất đặt cọc nào.");
   }
   for (const preorder of preorders) {
+    const total = formatVnd(makeVnd(BigInt(preorder.totalVnd)));
+    const isBalanceStatus = preorder.status === "ALLOCATED" || preorder.status === "BALANCE_DUE";
+    const balanceDuePassed =
+      isBalanceStatus &&
+      preorder.balanceDueUntil !== null &&
+      preorder.balanceDueUntil.getTime() <= now;
+    const holdPassed =
+      isBalanceStatus && preorder.holdUntil !== null && preorder.holdUntil.getTime() <= now;
+    const deadlinePassed = balanceDuePassed || holdPassed;
+
     lines.push(`• ${preorder.productName} · ${preorder.variantName}`);
-    lines.push(`   ${PREORDER_STATUS_LINE[preorder.status]}`);
+    if (preorder.status === "REFUND_DUE" && preorder.refundAmountVnd === null) {
+      lines.push("   Cần hỗ trợ xác minh khoản hoàn tiền");
+    } else {
+      lines.push(`   ${PREORDER_STATUS_LINE[preorder.status]}`);
+      if (preorder.status === "REFUND_DUE") {
+        lines.push(`   Số tiền chờ hoàn: ${formatVnd(makeVnd(BigInt(preorder.refundAmountVnd!)))}`);
+      }
+    }
+    lines.push(`   Tổng giá trị: ${total}`);
+    if (preorder.status === "WAITING_DEPOSIT") {
+      lines.push(`   Tiền cọc cần thanh toán: ${formatVnd(makeVnd(BigInt(preorder.depositVnd)))}`);
+      lines.push(`   Còn lại khi có hàng: ${formatVnd(makeVnd(BigInt(preorder.balanceVnd)))}`);
+    }
     if (preorder.status === "DEPOSIT_PAID") {
       lines.push(`   Đã cọc: ${formatVnd(makeVnd(BigInt(preorder.depositVnd)))}`);
+      lines.push(`   Còn lại khi có hàng: ${formatVnd(makeVnd(BigInt(preorder.balanceVnd)))}`);
       const position = preorder.queuePosition;
       lines.push(
         position !== null && position > 0
@@ -246,18 +272,28 @@ export function presentCustomerPreorders(
           : "   Đang xếp vào hàng chờ",
       );
     }
-    const balanceDueLabel =
-      preorder.balanceDueUntil !== null
-        ? formatExpiryVietnam(preorder.balanceDueUntil.toISOString())
-        : null;
-    if (preorder.status === "ALLOCATED" || preorder.status === "BALANCE_DUE") {
+    if (isBalanceStatus) {
+      lines.push(`   Đã cọc: ${formatVnd(makeVnd(BigInt(preorder.depositVnd)))}`);
       lines.push(`   Còn phải trả: ${formatVnd(makeVnd(BigInt(preorder.balanceVnd)))}`);
-      if (balanceDueLabel) lines.push(`   Hạn thanh toán: ${balanceDueLabel}`);
+      if (preorder.balanceDueUntil !== null) {
+        lines.push(
+          `   Hạn thanh toán phần còn lại: ${formatExpiryVietnam(preorder.balanceDueUntil.toISOString())}`,
+        );
+      }
+      if (preorder.holdUntil !== null) {
+        lines.push(`   Hạn giữ hàng đến: ${formatExpiryVietnam(preorder.holdUntil.toISOString())}`);
+      }
+      if (deadlinePassed) {
+        lines.push(
+          "   ⏰ Đã quá hạn thanh toán hoặc giữ hàng — mở danh sách đặt cọc để xem trạng thái hiện tại.",
+        );
+      }
     }
-    if (preorder.status === "WAITING_DEPOSIT") {
-      lines.push(`   Tiền cọc: ${formatVnd(makeVnd(BigInt(preorder.depositVnd)))}`);
+    if (preorder.status === "FULLY_PAID" || preorder.status === "FULFILLED") {
+      lines.push(`   Đã thanh toán đủ: ${total}`);
     }
-    const leg = preorderPayableLeg(preorder.status);
+    const leg =
+      preorder.isRestockLocalRoute && !deadlinePassed ? preorderPayableLeg(preorder.status) : null;
     if (leg) {
       const amount = leg === "DEPOSIT" ? preorder.depositVnd : preorder.balanceVnd;
       buttons.push([
@@ -274,7 +310,7 @@ export function presentCustomerPreorders(
   }
   buttons.push([
     { text: CUSTOMER_COPY.browse, callbackData: "shop:home" },
-    { text: CUSTOMER_COPY.support, callbackData: "supp:open" },
+    { text: CUSTOMER_BUTTONS.support, callbackData: "supp:open" },
   ]);
   return { text: lines.join("\n").trimEnd(), buttons };
 }
@@ -301,15 +337,15 @@ export function presentCustomerAccount(input: {
     ].join("\n"),
     buttons: [
       [
-        { text: "🧾 Đơn hàng", callbackData: "ord:list" },
-        { text: "📌 Đặt cọc", callbackData: "cust:preorders" },
+        { text: CUSTOMER_BUTTONS.viewOrder, callbackData: "ord:list" },
+        { text: CUSTOMER_BUTTONS.preorders, callbackData: "cust:preorders" },
       ],
       [
-        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
-        { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+        { text: CUSTOMER_BUTTONS.warranty, callbackData: "cust:warranty" },
+        { text: CUSTOMER_BUTTONS.support, callbackData: "supp:open" },
       ],
       [{ text: "🔔 Thông báo", callbackData: "cust:notify" }],
-      [{ text: "🏠 Trang chủ", callbackData: "shop:home" }],
+      [{ text: CUSTOMER_BUTTONS.home, callbackData: "shop:home" }],
     ],
   };
 }
@@ -330,15 +366,17 @@ export function presentCustomerWarrantyHome(
     lines.push("Chọn đơn hàng bạn cần bảo hành:");
     for (const order of orders) {
       lines.push(`• ${order.orderNumber} — ${order.productNameVi}`);
-      buttons.push([
-        {
-          text: `${order.orderNumber} · ${order.productNameVi}`,
-          callbackData: `sup:open:${order.orderNumber}`,
-        },
-      ]);
     }
+    buttons.push(
+      ...compactInlineRows(
+        orders.map((order) => ({
+          text: order.orderNumber,
+          callbackData: `sup:open:${order.orderNumber}`,
+        })),
+      ),
+    );
   }
-  buttons.push([{ text: "💬 Hỗ trợ", callbackData: "supp:open" }]);
+  buttons.push([{ text: CUSTOMER_BUTTONS.support, callbackData: "supp:open" }]);
   return { text: lines.join("\n"), buttons };
 }
 
@@ -361,12 +399,12 @@ export function presentPurchaseThankYou(input: {
     ].join("\n"),
     buttons: [
       [
-        { text: "🧾 Xem đơn", callbackData: `ord:view:${input.orderNumber}` },
-        { text: "🛡 Bảo hành", callbackData: "cust:warranty" },
+        { text: CUSTOMER_BUTTONS.viewOrder, callbackData: `ord:view:${input.orderNumber}` },
+        { text: CUSTOMER_BUTTONS.warranty, callbackData: "cust:warranty" },
       ],
       [
         { text: "🛒 Mua thêm", callbackData: "shop:home" },
-        { text: "💬 Hỗ trợ", callbackData: `sup:open:${input.orderNumber}` },
+        { text: CUSTOMER_BUTTONS.support, callbackData: `sup:open:${input.orderNumber}` },
       ],
     ],
   };

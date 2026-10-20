@@ -139,6 +139,7 @@ function setup() {
     buttons: [[{ text: "activate", callbackData: "admin:inventory:file-confirm:state-1" }]],
   });
   const importFileConfirm = vi.fn().mockResolvedValue({ text: "file activated", buttons: [] });
+  const importConfirm = vi.fn().mockResolvedValue({ text: "imported", buttons: [] });
   const importTemplate = vi.fn().mockResolvedValue({ text: "csv template", buttons: [] });
   const quantityAdjustPreview = vi.fn().mockResolvedValue({ text: "qty preview", buttons: [] });
   const quantityAdjustConfirm = vi.fn().mockResolvedValue({ text: "qty done", buttons: [] });
@@ -159,6 +160,9 @@ function setup() {
   const visibilityAction = vi.fn().mockResolvedValue({ text: "visibility step", buttons: [] });
   const supportReasonMenu = vi.fn().mockReturnValue({ text: "support menu", buttons: [] });
   const adminSupport = vi.fn().mockResolvedValue({ text: "support queue", buttons: [] });
+  const adminSupportTicketStatus = vi
+    .fn()
+    .mockResolvedValue({ text: "ticket status updated", buttons: [] });
   const adminSupportApprove = vi
     .fn()
     .mockResolvedValue({ text: "replacement challenge", buttons: [] });
@@ -204,7 +208,13 @@ function setup() {
       cancel: vi.fn(),
     },
     history: { list: vi.fn(), detail: vi.fn() },
-    support: { reasonMenu: supportReasonMenu, open: vi.fn(), list: vi.fn() },
+    support: {
+      reasonMenu: supportReasonMenu,
+      open: vi.fn(),
+      list: vi.fn(),
+      view: vi.fn(),
+      close: vi.fn(),
+    },
     walletTopup,
     walletTopupText,
     walletPay,
@@ -257,11 +267,12 @@ function setup() {
       manualComplete: adminManualComplete,
       support: adminSupport,
       supportApprove: adminSupportApprove,
+      supportTicketStatus: adminSupportTicketStatus,
       categories: vi.fn().mockResolvedValue({ text: "categories", buttons: [] }),
       preorders: vi.fn().mockResolvedValue({ text: "preorders", buttons: [] }),
       testLab: vi.fn().mockResolvedValue({ text: "test lab", buttons: [] }),
       importPreview: vi.fn(),
-      importConfirm: vi.fn(),
+      importConfirm,
       importCancel: vi.fn(),
       importDocument,
       importFileConfirm,
@@ -355,8 +366,10 @@ function setup() {
     adminManualComplete,
     adminSupport,
     adminSupportApprove,
+    adminSupportTicketStatus,
     importDocument,
     importFileConfirm,
+    importConfirm,
     quantityAdjustPreview,
     quantityAdjustConfirm,
     quantityAdjustText,
@@ -851,6 +864,28 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  it("parses version-bound admin support status callbacks", async () => {
+    const { dispatcher, adminSupportTicketStatus } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "support-status-version",
+      action: "ADMIN",
+      callbackData: "admin:support:status:TICKET-1:r:7",
+    });
+
+    expect(adminSupportTicketStatus).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      ticketId: "TICKET-1",
+      toStatus: "RESOLVED",
+      expectedVersion: 7,
+      correlationId: "telegram:support-status-version",
+    });
+  });
+
   it("routes independent product variant create and edit callbacks", async () => {
     const {
       dispatcher,
@@ -1260,7 +1295,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
         cancel: vi.fn(),
       },
       history: { list: vi.fn(), detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn(), view: vi.fn(), close: vi.fn() },
       responder: { send: base.send },
       admin: {
         handleToken: vi.fn(),
@@ -1312,7 +1347,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
         cancel: vi.fn(),
       },
       history: { list: vi.fn(), detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn(), view: vi.fn(), close: vi.fn() },
       responder: { send: base.send },
       admin: {
         handleToken: vi.fn(),
@@ -1364,7 +1399,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
         cancel: vi.fn(),
       },
       history: { list: vi.fn(), detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn(), view: vi.fn(), close: vi.fn() },
       responder: { send: base.send },
     });
 
@@ -1383,7 +1418,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const base = setup();
     const importText = vi.fn().mockResolvedValue({
       text: "import preview",
-      buttons: [[{ text: "confirm", callbackData: "admin:inventory:confirm" }]],
+      buttons: [[{ text: "confirm", callbackData: "admin:inventory:confirm:state-1" }]],
     });
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
@@ -1405,7 +1440,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
         cancel: vi.fn(),
       },
       history: { list: vi.fn(), detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn(), view: vi.fn(), close: vi.fn() },
       admin: {
         handleToken: vi.fn().mockResolvedValue({ text: "token", buttons: [] }),
         mainMenu: base.adminMainMenu,
@@ -1447,7 +1482,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     const base = setup();
     const importText = vi.fn().mockResolvedValue({
       text: "import preview from marker",
-      buttons: [[{ text: "confirm", callbackData: "admin:inventory:confirm" }]],
+      buttons: [[{ text: "confirm", callbackData: "admin:inventory:confirm:state-1" }]],
     });
     const dispatcher = createTelegramDomainDispatcher({
       codec: base.codec,
@@ -1469,7 +1504,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
         cancel: vi.fn(),
       },
       history: { list: vi.fn(), detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn(), view: vi.fn(), close: vi.fn() },
       admin: {
         handleToken: vi.fn(),
         mainMenu: base.adminMainMenu,
@@ -1526,7 +1561,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
         cancel: vi.fn(),
       },
       history: { list: historyList, detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn(), view: vi.fn(), close: vi.fn() },
       admin: { handleToken: vi.fn() },
       responder: { send: base.send },
     });
@@ -1581,7 +1616,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
         cancel: vi.fn(),
       },
       history: { list: vi.fn(), detail: vi.fn() },
-      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn() },
+      support: { reasonMenu: vi.fn(), open: vi.fn(), list: vi.fn(), view: vi.fn(), close: vi.fn() },
       admin: { handleToken: vi.fn() },
       responder: { send: base.send, answerInlineQuery },
     });
@@ -1658,6 +1693,46 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ message: { text: "file activated", buttons: [] } }),
     );
+  });
+  it("routes inventory confirmation callbacks through bound state ids", async () => {
+    const { dispatcher, importConfirm, send } = setup();
+    importConfirm.mockResolvedValue({ text: "imported", buttons: [] });
+    const callbackData = "admin:inventory:confirm:state-1";
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "import-confirm-1",
+      action: "ADMIN",
+      callbackData,
+    });
+
+    expect(callbackData.length).toBeLessThanOrEqual(64);
+    expect(importConfirm).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      chatType: "private",
+      stateId: "state-1",
+      correlationId: "telegram:import-confirm-1",
+    });
+    expect(send).toHaveBeenCalledWith(
+      expect.objectContaining({ message: { text: "imported", buttons: [] } }),
+    );
+  });
+
+  it("does not route the legacy generic inventory confirmation callback", async () => {
+    const { dispatcher, importConfirm } = setup();
+
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "import-confirm-legacy",
+      action: "ADMIN",
+      callbackData: "admin:inventory:confirm",
+    });
+
+    expect(importConfirm).not.toHaveBeenCalled();
   });
 
   it("lets /cancel win over active workflow text", async () => {
@@ -2217,7 +2292,10 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       callbackData: "preorder:consent:var-123",
     });
 
-    expect(preorderConsent).toHaveBeenCalledWith("var-123");
+    expect(preorderConsent).toHaveBeenCalledWith({
+      telegramUserId: USER,
+      variantId: "var-123",
+    });
     expect(send).toHaveBeenCalledWith(
       expect.objectContaining({ message: { text: "preorder consent", buttons: [] } }),
     );

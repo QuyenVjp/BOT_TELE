@@ -1,7 +1,38 @@
 import { sql } from "kysely";
 import type { Executor } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
+import { VARIANT_READY_SQL } from "./repository.js";
+import { catalogVisibilitySql } from "./visibility.js";
+import { PUBLIC_BRAND_CATEGORY_SLUGS, PUBLIC_ROOT_CATEGORY_SLUGS } from "./taxonomy.js";
+import { RESTOCK_LOCAL_FULFILLMENT_TYPES } from "./domain.js";
 
+const PUBLIC_CATEGORY_SLUG_SQL = sql.join(
+  [...PUBLIC_ROOT_CATEGORY_SLUGS, ...PUBLIC_BRAND_CATEGORY_SLUGS].map((slug) => sql`${slug}`),
+  sql`, `,
+);
+const RESTOCK_FULFILLMENT_TYPE_SQL = sql.join(
+  RESTOCK_LOCAL_FULFILLMENT_TYPES.map((type) => sql`${type}`),
+  sql`, `,
+);
+
+/**
+ * Current customer-facing restock eligibility. Callers must join product as `p`, variant as `v`,
+ * category as `c`, and quantity stock as `q`; the ready predicate covers each local stock type.
+ */
+export function restockVariantEligibilitySql(variantId?: string) {
+  return sql`
+    ${variantId === undefined ? sql`` : sql`v.id = ${variantId} and`}
+    c.is_active
+    and v.is_active
+    and p.is_active
+    ${catalogVisibilitySql("public")}
+    and c.slug in (${PUBLIC_CATEGORY_SLUG_SQL})
+    and v.stock_policy in ('LOCAL_ONLY', 'LOCAL_THEN_SUPPLIER')
+    and v.fulfillment_type in (${RESTOCK_FULFILLMENT_TYPE_SQL})
+    and not coalesce(v.preorder_enabled, false)
+    and not (${VARIANT_READY_SQL})
+  `;
+}
 export interface RestockSubscription {
   id: string;
   customerId: string;
@@ -27,18 +58,26 @@ function map(row: Row): RestockSubscription {
   };
 }
 
-/** Idempotent subscribe: unique DB key makes concurrent double taps one row. */
+/** Idempotent subscribe: only currently public, local, out-of-stock variants may create a row. */
 export async function subscribeRestock(
   exec: Executor,
   customerId: string,
   variantId: string,
-): Promise<RestockSubscription> {
+): Promise<RestockSubscription | null> {
   const id = newId();
-  const result = await sql<Row>`insert into restock_subscription (id, customer_id, variant_id)
-    values (${id}, ${customerId}, ${variantId})
+  const result = await sql<Row>`
+    insert into restock_subscription (id, customer_id, variant_id)
+    select ${id}, ${customerId}, v.id
+    from product_variant v
+    join product p on p.id = v.product_id
+    join category c on c.id = p.category_id
+    left join variant_quantity_stock q on q.variant_id = v.id
+    where ${restockVariantEligibilitySql(variantId)}
     on conflict (customer_id, variant_id) do update set active = true, updated_at = now()
-    returning id, customer_id, variant_id, active, notified_generation`.execute(exec);
-  return map(result.rows[0]!);
+    returning id, customer_id, variant_id, active, notified_generation
+  `.execute(exec);
+  const row = result.rows[0];
+  return row ? map(row) : null;
 }
 
 export async function unsubscribeRestock(

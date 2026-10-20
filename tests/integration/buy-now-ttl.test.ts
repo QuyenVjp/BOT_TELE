@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -19,6 +20,7 @@ beforeEach(async () => {
     truncate table digital_asset, order_transition, "order", product_variant, product, category,
       customer cascade
   `.execute(ctx.db);
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 async function seed() {

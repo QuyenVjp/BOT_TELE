@@ -1,15 +1,17 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
-import { createBuyNowCallbackCodec } from "../../src/bot/callback-codec.js";
+import {
+  createBuyNowCallbackCodec,
+  createCallbackTokenCodec,
+} from "../../src/bot/callback-codec.js";
 import {
   createCheckoutCallbacks,
   type CheckoutCallbackDeps,
 } from "../../src/bot/callbacks/checkout.js";
 import { applyPaymentEvidence } from "../../src/modules/payments/service.js";
-import { reconcileForPaymentCheck } from "../../src/modules/payments/check-now.js";
-import type { SePayReconciliationPort } from "../../src/modules/payments/reconciliation.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
 
 /**
@@ -47,7 +49,7 @@ async function seedCatalog(options: { fulfillmentType?: string } = {}): Promise<
   const evidenceId = newId();
   const price = 199000;
   const account = "0123456789";
-  const slug = categoryId.slice(-8);
+  const slug = "ai";
 
   await sql`insert into customer (id, status, locale) values (${customerId}, 'ACTIVE', 'vi')`.execute(
     ctx.db,
@@ -60,7 +62,7 @@ async function seedCatalog(options: { fulfillmentType?: string } = {}): Promise<
   );
   await sql`
     insert into product_variant (id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type, stock_policy, resale_evidence_id, fulfillment_type)
-    values (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', ${price}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', ${evidenceId}, ${options.fulfillmentType ?? null})
+    values (${variantId}, ${productId}, ${"SKU-" + variantId}, 'V', ${price}, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', ${evidenceId}, ${options.fulfillmentType ?? "STOCK_ACCOUNT"})
   `.execute(ctx.db);
   // Test-only resale evidence + version-bound publication snapshot (fresh fixture versions).
   await sql`
@@ -101,6 +103,12 @@ function callbacks(catalog: Catalog, extraDeps: Partial<CheckoutCallbackDeps> = 
     ttlSeconds: 900,
     clockSkewSeconds: 5,
   });
+  const tokenCodec = createCallbackTokenCodec({
+    key: CALLBACK_KEY,
+    keyVersion: 1,
+    ttlSeconds: 900,
+    clockSkewSeconds: 5,
+  });
   const adapter = createCheckoutCallbacks({
     db: ctx.db,
     merchant: {
@@ -111,22 +119,34 @@ function callbacks(catalog: Catalog, extraDeps: Partial<CheckoutCallbackDeps> = 
       bankName: "MB Bank",
     },
     callbackCodec,
+    tokenCodec,
     resolveCustomerId: async (telegramUserId) =>
       telegramUserId === TELEGRAM_USER_ID ? catalog.customerId : null,
     ...extraDeps,
   });
   return {
     ...adapter,
-    buyFromSignedCallback: (correlationId: string) =>
-      adapter.buyNowFromCallback({
-        callbackData: callbackCodec.issue({
+    buyFromSignedCallback: async (correlationId: string) => {
+      const preview = await adapter.previewFromCallback({
+        callbackData: tokenCodec.issue({
+          action: "CHECKOUT_PREVIEW",
           telegramUserId: TELEGRAM_USER_ID,
-          variantId: catalog.variantId,
-          expectedPriceVnd: catalog.price,
+          resourceId: catalog.variantId,
         }),
         telegramUserId: TELEGRAM_USER_ID,
+        correlationId: `${correlationId}-preview`,
+      });
+      const callbackData = preview.buttons
+        .flat()
+        .find((button) => button.text === "🏦 VietQR")?.callbackData;
+      if (!callbackData)
+        throw new Error(`checkout preview did not issue VietQR callback: ${preview.text}`);
+      return adapter.buyNowFromCallback({
+        callbackData,
+        telegramUserId: TELEGRAM_USER_ID,
         correlationId,
-      }),
+      });
+    },
   };
 }
 
@@ -136,6 +156,7 @@ beforeEach(async () => {
   await sql`truncate table sepay_reconciliation_cursor, outbox_event, payment_allocation, discrepancy, bank_transaction, payment_intent, order_transition, digital_asset, "order", product_variant, product, category, customer cascade`.execute(
     ctx.db,
   );
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 describe("checkout callbacks (T056)", () => {
@@ -290,9 +311,15 @@ describe("checkout callbacks (T056)", () => {
     );
   });
 
-  it("stale Buy Now callback asks the customer to reopen the product", async () => {
+  it("stale checkout preview asks the customer to reopen the product", async () => {
     const cat = await seedCatalog();
     const callbackCodec = createBuyNowCallbackCodec({
+      key: CALLBACK_KEY,
+      keyVersion: 1,
+      ttlSeconds: 900,
+      clockSkewSeconds: 5,
+    });
+    const tokenCodec = createCallbackTokenCodec({
       key: CALLBACK_KEY,
       keyVersion: 1,
       ttlSeconds: 1,
@@ -308,21 +335,22 @@ describe("checkout callbacks (T056)", () => {
         bankName: "MB Bank",
       },
       callbackCodec,
+      tokenCodec,
       resolveCustomerId: async (telegramUserId) =>
         telegramUserId === TELEGRAM_USER_ID ? cat.customerId : null,
     });
-    const stale = callbackCodec.issue({
+    const stale = tokenCodec.issue({
+      action: "CHECKOUT_PREVIEW",
       telegramUserId: TELEGRAM_USER_ID,
-      variantId: cat.variantId,
-      expectedPriceVnd: cat.price,
+      resourceId: cat.variantId,
       now: new Date(Date.now() - 60_000),
     });
-    const res = await adapter.buyNowFromCallback({
+    const res = await adapter.previewFromCallback({
       callbackData: stale,
       telegramUserId: TELEGRAM_USER_ID,
       correlationId: "corr-stale",
     });
-    expect(res.text.toLowerCase()).toMatch(/hết hạn|mở lại sản phẩm/);
+    expect(res.text).toContain("Phiên này đã cũ");
   });
 
   it("needs-review refresh shows the order number, not the internal id", async () => {
@@ -345,11 +373,9 @@ describe("checkout callbacks (T056)", () => {
 });
 
 /**
- * The two things the presentation layer promises beyond a static card: the product's
- * own customization, and a "Kiểm tra thanh toán" button that really asks the provider
- * once (bounded) instead of only re-reading our own projection.
+ * Presentation-layer customization must never change payment truth.
  */
-describe("checkout presentation customization and payment check", () => {
+describe("checkout presentation customization", () => {
   async function setOverride(variantId: string, value: string): Promise<void> {
     await sql`update product_variant set presentation_profile = ${value}::jsonb where id = ${variantId}`.execute(
       ctx.db,
@@ -366,14 +392,15 @@ describe("checkout presentation customization and payment check", () => {
   });
 
   it("falls back to the safe default when the stored override is malformed or unsafe", async () => {
-    for (const bad of [
+    const cat = await seedCatalog();
+    const cb = callbacks(cat);
+    const badOverrides = [
       JSON.stringify({ headline: "<script>alert(1)</script>" }),
       JSON.stringify({ headline: "https://evil.example" }),
-    ]) {
-      const cat = await seedCatalog();
+    ];
+    for (const [index, bad] of badOverrides.entries()) {
       await setOverride(cat.variantId, bad);
-      const cb = callbacks(cat);
-      const res = await cb.buyFromSignedCallback("corr-bad");
+      const res = await cb.buyFromSignedCallback(`corr-bad-${index}`);
       expect(res.text).toContain(`💳 Thanh toán đơn #${cb.lastOrderNumber()}`);
       expect(res.text).not.toContain("evil.example");
       expect(res.text).not.toContain("<script>");
@@ -413,121 +440,7 @@ describe("checkout presentation customization and payment check", () => {
     expect(res.text).toContain("× 3");
   });
 
-  it("refreshes from the provider once, then dedupes on cooldown", async () => {
-    const cat = await seedCatalog();
-    let providerCalls = 0;
-    const port: SePayReconciliationPort = {
-      async listTransactions() {
-        providerCalls += 1;
-        return [];
-      },
-    };
-    const cb = callbacks(cat, {
-      reconcileForCheck: () => reconcileForPaymentCheck(ctx.db, { port }),
-    });
-    await cb.buyFromSignedCallback("corr-check");
-    const orderNumber = cb.lastOrderNumber()!;
-
-    const first = await cb.refresh(orderNumber, cat.customerId);
-    expect(first.text).toContain("Chưa nhận được thanh toán");
-    expect(providerCalls).toBe(1);
-
-    // Impatient second tap: served from the cooldown, no second provider call.
-    const second = await cb.refresh(orderNumber, cat.customerId);
-    expect(second.text).toContain("Chưa nhận được thanh toán");
-    expect(providerCalls).toBe(1);
-
-    // Five concurrent taps still cannot fan out into provider calls.
-    await Promise.all(Array.from({ length: 5 }, () => cb.refresh(orderNumber, cat.customerId)));
-    expect(providerCalls).toBe(1);
-  });
-
-  it("still settles exactly once when the check finds the matching transfer", async () => {
-    const cat = await seedCatalog();
-    let providerCalls = 0;
-    const evidence = () =>
-      verifiedSePayEvidence({
-        provider: "sepay",
-        providerTransactionId: "SEPAY-" + newId(),
-        direction: "IN",
-        merchantAccountId: cat.account,
-        amountVnd: cat.price,
-        content: content!,
-        reference: "FT-CHECK",
-        transactedAt: new Date(),
-        rawHash: "hash-check",
-        correlationId: "corr-check-settle",
-      });
-    const port: SePayReconciliationPort = {
-      async listTransactions() {
-        providerCalls += 1;
-        return [evidence()];
-      },
-    };
-    const cb = callbacks(cat, {
-      reconcileForCheck: () => reconcileForPaymentCheck(ctx.db, { port }),
-    });
-    await cb.buyFromSignedCallback("corr-check-settle");
-    const orderNumber = cb.lastOrderNumber()!;
-    const content = cb.lastTransferContent()!;
-
-    const res = await cb.refresh(orderNumber, cat.customerId);
-    expect(providerCalls).toBe(1);
-    expect(res.text.toLowerCase()).toContain("đã thanh toán");
-
-    const allocations = await sql<{ n: number }>`
-      select count(*)::int as n from payment_allocation
-    `.execute(ctx.db);
-    expect(allocations.rows[0]?.n).toBe(1);
-  });
-
-  it("reopen and settled orders never spend a provider call", async () => {
-    const cat = await seedCatalog();
-    let providerCalls = 0;
-    const port: SePayReconciliationPort = {
-      async listTransactions() {
-        providerCalls += 1;
-        return [];
-      },
-    };
-    const cb = callbacks(cat, {
-      reconcileForCheck: () => reconcileForPaymentCheck(ctx.db, { port }),
-    });
-    await cb.buyFromSignedCallback("corr-nav");
-    const orderNumber = cb.lastOrderNumber()!;
-
-    // Reopen is navigation, not a check.
-    await cb.reopen(orderNumber, cat.customerId);
-    expect(providerCalls).toBe(0);
-
-    await sql`update "order" set status = 'COMPLETED' where order_number = ${orderNumber}`.execute(
-      ctx.db,
-    );
-    await cb.refresh(orderNumber, cat.customerId);
-    expect(providerCalls).toBe(0);
-  });
-
-  it("a wrong customer cannot trigger a check for someone else's order", async () => {
-    const cat = await seedCatalog();
-    let providerCalls = 0;
-    const port: SePayReconciliationPort = {
-      async listTransactions() {
-        providerCalls += 1;
-        return [];
-      },
-    };
-    const cb = callbacks(cat, {
-      reconcileForCheck: () => reconcileForPaymentCheck(ctx.db, { port }),
-    });
-    await cb.buyFromSignedCallback("corr-owner");
-    const orderNumber = cb.lastOrderNumber()!;
-
-    const res = await cb.refresh(orderNumber, "someone-else");
-    expect(res.text).toContain("Không tìm thấy đơn hàng");
-    expect(providerCalls).toBe(0);
-  });
-
-  it("refresh still works when no payment check is wired", async () => {
+  it("refresh reads the internal payment projection", async () => {
     const cat = await seedCatalog();
     const cb = callbacks(cat);
     await cb.buyFromSignedCallback("corr-none");

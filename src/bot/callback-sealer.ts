@@ -31,8 +31,24 @@ export async function sealPresentedMessageCallbacks(
         sealedRow.push(button);
         continue;
       }
-      // Warranty navigation is plain, like the admin routes: no money moves, no secret travels, and
-      // every handler re-authorizes against the actor's own order or claim.
+      // The report action is the exact-order warranty entry point. Seal its order id so the
+      // callback cannot be replayed by another Telegram account.
+      if (button.callbackData.startsWith("warranty:report:")) {
+        const orderId = button.callbackData.slice("warranty:report:".length);
+        if (isId(orderId)) {
+          sealedRow.push({
+            ...button,
+            callbackData: deps.codec.issue({
+              action: "WARRANTY_REPORT",
+              resourceId: orderId,
+              telegramUserId: deps.telegramUserId,
+            }),
+          });
+        } else {
+          sealedRow.push(button);
+        }
+        continue;
+      }
       if (button.callbackData.startsWith("warranty:")) {
         sealedRow.push(button);
         continue;
@@ -82,7 +98,9 @@ async function parseLegacyCallback(
     "cat:list": "CATEGORY_LIST",
     "cat:search": "SEARCH_PROMPT",
     "ord:list": "ORDER_LIST",
+    "sup:list": "SUPPORT_TICKET_LIST",
     "sup:open": "SUPPORT_MENU",
+    "rst:list": "RESTOCK_LIST",
     "supp:open": "SUPPORT_MENU",
     "shop:home": "SHOP_HOME",
     "shop:open": "SHOP_OPEN",
@@ -105,6 +123,7 @@ async function parseLegacyCallback(
   for (const [prefix, action] of [
     ["var:view:", "VARIANT_VIEW"],
     ["sup:view:", "SUPPORT_TICKET_VIEW"],
+    ["sup:close:", "SUPPORT_TICKET_CLOSE"],
     ["rst:sub:", "RESTOCK_SUBSCRIBE"],
     ["restock:sub:", "RESTOCK_SUBSCRIBE"],
     ["rst:unsub:", "RESTOCK_UNSUBSCRIBE"],
@@ -115,6 +134,12 @@ async function parseLegacyCallback(
   ] as const) {
     if (value.startsWith(prefix)) {
       const resourceId = value.slice(prefix.length);
+      if (
+        (action === "SUPPORT_TICKET_VIEW" || action === "SUPPORT_TICKET_CLOSE") &&
+        !isId(resourceId)
+      ) {
+        return null;
+      }
       return /^[0-9A-Z]{26}$/.test(resourceId) ? { action, resourceId } : null;
     }
   }

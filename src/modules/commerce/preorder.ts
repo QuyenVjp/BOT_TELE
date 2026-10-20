@@ -8,6 +8,14 @@ import { insertOrder, transitionOrder } from "./repository.js";
 import { voidLiveIntentsForPreorder } from "../payments/repository.js";
 import type { OrderSnapshot } from "./order.js";
 import { canPurchase } from "./store-mode.js";
+import { VARIANT_READY_SQL } from "../catalog/repository.js";
+import { isRestockLocalRoute, RESTOCK_LOCAL_FULFILLMENT_TYPES } from "../catalog/domain.js";
+import { catalogVisibilitySql, type CatalogAudience } from "../catalog/visibility.js";
+
+const LOCAL_FINITE_FULFILLMENT_TYPE_SQL = sql.join(
+  RESTOCK_LOCAL_FULFILLMENT_TYPES.map((type) => sql`${type}`),
+  sql`, `,
+);
 
 export type PreorderStatus =
   | "CREATED"
@@ -71,7 +79,20 @@ export interface PreorderVariantConfig {
 export async function loadPreorderVariantConfig(
   exec: Executor,
   variantId: string,
+  audience?: CatalogAudience,
 ): Promise<PreorderVariantConfig | null> {
+  const customerEligibility =
+    audience === undefined
+      ? sql``
+      : sql`
+          and c.is_active
+          and v.price_vnd > 0
+          ${catalogVisibilitySql(audience)}
+          and coalesce(v.preorder_enabled, false)
+          and v.stock_policy in ('LOCAL_ONLY', 'LOCAL_THEN_SUPPLIER')
+          and v.fulfillment_type in (${LOCAL_FINITE_FULFILLMENT_TYPE_SQL})
+          and not (${VARIANT_READY_SQL})
+        `;
   const result = await sql<{
     id: string;
     product_id: string;
@@ -109,9 +130,12 @@ export async function loadPreorderVariantConfig(
       coalesce(v.forfeit_policy_version, 1) as forfeit_policy_version
     from product_variant v
     join product p on p.id = v.product_id
+    left join category c on c.id = p.category_id
+    left join variant_quantity_stock q on q.variant_id = v.id
     where v.id = ${variantId}
       and v.is_active
       and p.is_active
+      ${customerEligibility}
   `.execute(exec);
 
   const row = result.rows[0];
@@ -210,6 +234,7 @@ export async function createPreorderReservation(
   input: {
     customerId: string;
     variantId: string;
+    audience: CatalogAudience;
     telegramUserId?: string;
     isRootAdmin?: boolean;
   },
@@ -232,7 +257,7 @@ export async function createPreorderReservation(
         | "ALREADY_PREORDERED";
     }
 > {
-  const config = await loadPreorderVariantConfig(db, input.variantId);
+  const config = await loadPreorderVariantConfig(db, input.variantId, input.audience);
   if (!config) return { ok: false, code: "NOT_FOUND" };
   const gate = await canPurchase(db, {
     telegramUserId: input.telegramUserId ?? "",
@@ -303,6 +328,7 @@ export interface PreorderSettlementTarget {
   balanceVnd: number;
   holdUntil: Date | null;
   balanceDueUntil: Date | null;
+  isRestockLocalRoute: boolean;
 }
 
 /**
@@ -330,17 +356,19 @@ export async function lockPreorderForSettlement(
     balance_amount_vnd: string;
     hold_until: Date | string | null;
     balance_due_until: Date | string | null;
+    stock_policy: string | null;
+    fulfillment_type: string | null;
   }>`
     select pr.id, pr.status, p.name_vi as product_name, v.name_vi as variant_name,
            pr.deposit_amount_vnd::text, pr.balance_amount_vnd::text,
-           pr.hold_until, pr.balance_due_until
+           pr.hold_until, pr.balance_due_until, v.stock_policy, v.fulfillment_type
     from preorder_reservation pr
     join product_variant v on v.id = pr.variant_id
     join product p on p.id = v.product_id
     where pr.id = ${reservationId}
       and (${ownerCustomerId ?? null}::text is null
            or pr.customer_id = ${ownerCustomerId ?? null})
-    for update of pr
+    for update of pr, v
   `.execute(exec);
   const row = res.rows[0];
   if (!row) return null;
@@ -353,6 +381,10 @@ export async function lockPreorderForSettlement(
     balanceVnd: Number(row.balance_amount_vnd),
     holdUntil: row.hold_until === null ? null : new Date(row.hold_until),
     balanceDueUntil: row.balance_due_until === null ? null : new Date(row.balance_due_until),
+    isRestockLocalRoute: isRestockLocalRoute({
+      stockPolicy: row.stock_policy,
+      fulfillmentType: row.fulfillment_type,
+    }),
   };
 }
 
@@ -441,7 +473,9 @@ export async function confirmPreorderDepositInTransaction(
           'preorderId', ${row.id}::text,
           'customerId', ${row.customer_id}::text,
           'variantId', ${row.variant_id}::text,
-          'depositVnd', ${row.deposit_amount_vnd}::bigint
+          'depositVnd', ${row.deposit_amount_vnd}::bigint,
+          'totalVnd', ${row.total_price_vnd}::bigint,
+          'balanceVnd', ${row.balance_amount_vnd}::bigint
         )
       )
     `.execute(exec);
@@ -664,7 +698,10 @@ export async function allocateRestockToPreorders(
     `.execute(exec);
 
     // Mark preorder allocated
-    await sql`
+    const allocated = await sql<{
+      hold_until: Date | string;
+      balance_due_until: Date | string;
+    }>`
       update preorder_reservation
       set status = 'ALLOCATED',
           allocated_asset_id = ${asset.id},
@@ -674,7 +711,14 @@ export async function allocateRestockToPreorders(
           updated_at = now(),
           version = version + 1
       where id = ${preorder.id}
+      returning hold_until, balance_due_until
     `.execute(exec);
+    const persistedDeadlines = allocated.rows[0];
+    if (!persistedDeadlines) {
+      throw new Error("preorder allocation update did not return persisted deadlines");
+    }
+    const holdUntil = new Date(persistedDeadlines.hold_until).toISOString();
+    const balanceDueUntil = new Date(persistedDeadlines.balance_due_until).toISOString();
 
     // A deposit that already covers the full price owes no balance leg, so the
     // purchase completes here: order + PAID + OrderPaid (fulfillment picks the
@@ -701,8 +745,10 @@ export async function allocateRestockToPreorders(
           'customerId', ${preorder.customer_id}::text,
           'variantId', ${variantId}::text,
           'holdHours', ${holdHours}::int,
+          'holdUntil', ${holdUntil}::text,
           'balanceVnd', ${preorder.balance_amount_vnd}::bigint,
-          'balanceDueHours', ${balanceHours}::int
+          'balanceDueHours', ${balanceHours}::int,
+          'balanceDueUntil', ${balanceDueUntil}::text
         )
       )
     `.execute(exec);
@@ -815,12 +861,15 @@ export interface CustomerPreorderSummary {
   productName: string;
   variantName: string;
   status: PreorderStatus;
+  totalVnd: number;
   depositVnd: number;
   balanceVnd: number;
   queuePosition: number | null;
   balanceDueUntil: Date | null;
   holdUntil: Date | null;
   orderId: string | null;
+  refundAmountVnd: number | null;
+  isRestockLocalRoute: boolean;
 }
 
 /**
@@ -837,38 +886,56 @@ export async function listCustomerPreorders(
     status: PreorderStatus;
     product_name: string;
     variant_name: string;
+    total_price_vnd: string;
     deposit_amount_vnd: string;
     balance_amount_vnd: string;
     balance_due_until: Date | string | null;
     hold_until: Date | string | null;
     order_id: string | null;
+    refund_amount_vnd: string | null;
     queue_position: number;
+    stock_policy: string | null;
+    fulfillment_type: string | null;
   }>`
     select pr.id, pr.status, p.name_vi as product_name, v.name_vi as variant_name,
-           pr.deposit_amount_vnd::text, pr.balance_amount_vnd::text,
+           pr.total_price_vnd::text, pr.deposit_amount_vnd::text, pr.balance_amount_vnd::text,
            pr.balance_due_until, pr.hold_until, pr.order_id,
+           r.amount_vnd::text as refund_amount_vnd,
+           v.stock_policy, v.fulfillment_type,
            (select count(*)::int from preorder_reservation q
              where q.variant_id = pr.variant_id
                and q.status = 'DEPOSIT_PAID'
-               and q.deposit_paid_at <= pr.deposit_paid_at) as queue_position
+               and (
+                 q.deposit_paid_at < pr.deposit_paid_at
+                 or (q.deposit_paid_at = pr.deposit_paid_at and q.id <= pr.id)
+               )) as queue_position
     from preorder_reservation pr
     join product_variant v on v.id = pr.variant_id
     join product p on p.id = v.product_id
+    left join shop_refund_obligation r
+      on r.preorder_id = pr.id
+     and r.customer_id = pr.customer_id
+     and r.status = 'OPEN'
     where pr.customer_id = ${customerId}
     order by pr.created_at desc, pr.id desc
     limit ${limit}
   `.execute(exec);
-
   return rows.rows.map((row) => ({
     id: row.id,
     productName: row.product_name,
     variantName: row.variant_name,
     status: row.status,
+    totalVnd: Number(row.total_price_vnd),
     depositVnd: Number(row.deposit_amount_vnd),
     balanceVnd: Number(row.balance_amount_vnd),
     queuePosition: row.queue_position,
     balanceDueUntil: row.balance_due_until === null ? null : new Date(row.balance_due_until),
     holdUntil: row.hold_until === null ? null : new Date(row.hold_until),
+    isRestockLocalRoute: isRestockLocalRoute({
+      stockPolicy: row.stock_policy,
+      fulfillmentType: row.fulfillment_type,
+    }),
     orderId: row.order_id,
+    refundAmountVnd: row.refund_amount_vnd === null ? null : Number(row.refund_amount_vnd),
   }));
 }

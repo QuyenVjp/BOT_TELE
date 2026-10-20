@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   GOOGLE_SHEETS_REQUEST_ACTIONS,
+  GOOGLE_SHEETS_SCHEMA_VERSION,
   GOOGLE_SHEETS_TABS,
   SHEET_HEADERS,
   assertSafeSheetValue,
@@ -10,6 +11,7 @@ import {
   SHEETS_API_SCOPE,
   backoffDelayMs,
   buildBatchUpdateValuesPayload,
+  chunkSheetValueRanges,
   classifySheetsError,
   withSheetsRetry,
 } from "../../src/infrastructure/google-sheets/client.js";
@@ -36,6 +38,8 @@ describe("Google Sheets contracts", () => {
     expect(SHEET_HEADERS.Inventory).toContain("vault_ref");
     expect(SHEET_HEADERS.Inventory).not.toContain("secret_value");
     expect(SHEET_HEADERS.Inventory).not.toContain("password");
+    expect(GOOGLE_SHEETS_SCHEMA_VERSION).toBe(4);
+    expect(SHEET_HEADERS.Suppliers).toContain("supplier_sku_id");
   });
 
   it("rejects secret-like values before they reach a spreadsheet payload", () => {
@@ -164,10 +168,54 @@ describe("Google Sheets client helpers", () => {
       ],
     });
   });
+  it("splits values by row while preserving A1 offsets", () => {
+    const cell = "x".repeat(150);
+    const source = {
+      range: "Audit!A10:B12",
+      values: [
+        [cell, "one"],
+        [cell, "two"],
+        [cell, "three"],
+      ],
+    };
+    const oneRowBytes = new TextEncoder().encode(
+      JSON.stringify(
+        buildBatchUpdateValuesPayload([
+          { ...source, range: "Audit!A10:B10", values: [source.values[0]!] },
+        ]),
+      ),
+    ).byteLength;
+    const chunks = chunkSheetValueRanges([source], oneRowBytes + 64);
+    expect(chunks.flatMap((chunk) => chunk).map((entry) => entry.range)).toEqual([
+      "Audit!A10:B10",
+      "Audit!A11:B11",
+      "Audit!A12:B12",
+    ]);
+    for (const chunk of chunks) {
+      expect(
+        new TextEncoder().encode(JSON.stringify(buildBatchUpdateValuesPayload(chunk))).byteLength,
+      ).toBeLessThanOrEqual(oneRowBytes + 64);
+    }
+  });
+
+  it("rejects an oversized row before producing any values batch", () => {
+    expect(() =>
+      chunkSheetValueRanges([{ range: "Audit!A10:A10", values: [["x".repeat(500)]] }], 200),
+    ).toThrow("Google Sheets request failed (INVALID_REQUEST)");
+  });
 
   it("classifies quota, upstream, and network failures without exposing raw errors", () => {
     expect(classifySheetsError({ response: { status: 429 } }).code).toBe("RATE_LIMITED");
+    expect(classifySheetsError({ response: { status: 500 } })).toMatchObject({
+      code: "UPSTREAM_5XX",
+      retryable: true,
+      status: 500,
+    });
     expect(classifySheetsError({ response: { status: 503 } }).retryable).toBe(true);
+    expect(classifySheetsError({ code: "ETIMEDOUT" })).toMatchObject({
+      code: "NETWORK",
+      retryable: true,
+    });
     expect(classifySheetsError(new TypeError("fetch failed")).code).toBe("NETWORK");
     expect(classifySheetsError({ response: { status: 403 } }).code).toBe("PERMISSION_DENIED");
   });

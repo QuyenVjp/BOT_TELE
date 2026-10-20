@@ -18,6 +18,7 @@ import {
   isValidFileArtifactRegistrationMetadata,
   type FileArtifactMetadata,
 } from "./file-artifacts.js";
+import { emitStockDelta } from "../notification/service.js";
 
 export const TELEGRAM_FILE_IMPORT_MAX_BYTES = 20_000_000n;
 const TTL_SECONDS = 900;
@@ -502,6 +503,15 @@ export async function confirmFileArtifactImportSession(
     `.execute(trx)
     ).rows[0];
     if (!row) return { ok: false as const, code: "NOT_READY" as const };
+    const hadActiveArtifact =
+      (
+        await sql<{ one: number }>`
+        select 1 as one
+        from variant_file_artifact
+        where variant_id = ${row.variant_id} and is_active
+        limit 1
+      `.execute(trx)
+      ).rows.length > 0;
     await sql`update variant_file_artifact set is_active=false where variant_id=${row.variant_id} and id <> ${row.id} and is_active`.execute(
       trx,
     );
@@ -525,6 +535,15 @@ export async function confirmFileArtifactImportSession(
         sha256: artifact.sha256,
       },
     });
+    if (!hadActiveArtifact) {
+      await emitStockDelta(trx, {
+        variantId: row.variant_id,
+        aggregateVersion: artifact.version,
+        delta: 1,
+        stockAfter: 1,
+        correlationId: input.correlationId,
+      });
+    }
     await sql`update admin_file_artifact_import set status='COMMITTED', updated_at=now() where id=${input.sessionId}`.execute(
       trx,
     );

@@ -75,6 +75,44 @@ async function seedCompletedOrder(opts?: { warrantyDays?: number }): Promise<Fix
 
   return { orderId, customerId, assetId, variantId };
 }
+async function seedPaidOrderWithReservedAsset(): Promise<Fixture> {
+  const fixture = await seedCompletedOrder();
+  const reservedAssetId = newId();
+  await sql`update "order" set status = 'PAID' where id = ${fixture.orderId}`.execute(ctx.db);
+  await sql`
+    insert into digital_asset
+      (id, variant_id, source_type, vault_ref, fingerprint_hash, status, reserved_order_id,
+       reserved_until)
+    values
+      (${reservedAssetId}, ${fixture.variantId}, 'LOCAL', ${"vault:" + reservedAssetId},
+       ${"fp-" + reservedAssetId}, 'RESERVED', ${fixture.orderId}, now() + interval '15 minutes')
+  `.execute(ctx.db);
+  return fixture;
+}
+
+async function addFileDeliveryEvidence(
+  fixture: Fixture,
+  status: "QUEUED" | "PROCESSING" | "SENT" | "FAILED",
+  lastError: string | null = null,
+): Promise<void> {
+  const artifactId = newId();
+  const artifactSha256 = "a".repeat(64);
+  await sql`
+    insert into variant_file_artifact
+      (id, variant_id, version, filename, mime_type, size_bytes, sha256, storage_reference)
+    values
+      (${artifactId}, ${fixture.variantId}, 1, 'replacement.bin', 'application/octet-stream', 1,
+       ${artifactSha256}, ${"vault:" + artifactId})
+  `.execute(ctx.db);
+  await sql`
+    insert into file_delivery_job
+      (order_id, customer_id, variant_id, artifact_id, artifact_version, artifact_sha256,
+       telegram_chat_id, status, last_error)
+    values
+      (${fixture.orderId}, ${fixture.customerId}, ${fixture.variantId}, ${artifactId}, 1,
+       ${artifactSha256}, 'chat', ${status}, ${lastError})
+  `.execute(ctx.db);
+}
 
 beforeEach(async () => {
   await sql`
@@ -336,6 +374,74 @@ describe("replacement / refund-request (T078 / FR-020)", () => {
     `.execute(ctx.db);
     expect(Number(transitions.rows[0]?.count)).toBe(1);
   });
+
+  it.each([
+    { status: "PROCESSING" as const, lastError: null },
+    { status: "SENT" as const, lastError: null },
+    { status: "FAILED" as const, lastError: "SEND_FAILED" },
+    { status: "FAILED" as const, lastError: null },
+  ])(
+    "refuses ambiguous file delivery evidence ($status/$lastError) before opening a refund case",
+    async ({ status, lastError }) => {
+      const f = await seedPaidOrderWithReservedAsset();
+      await addFileDeliveryEvidence(f, status, lastError);
+
+      const result = await openReplacementCase(ctx.db, {
+        orderId: f.orderId,
+        customerId: f.customerId,
+        reasonCode: "CUSTOMER_REQUEST",
+        requestRefund: true,
+        correlationId: "rep-file-evidence-blocked",
+      });
+      expect(result).toMatchObject({ ok: false, code: "NOT_ELIGIBLE" });
+
+      const proof = await sql<{ case_count: string; order_status: string; transitions: string }>`
+        select
+          (select count(*)::text from replacement_case where order_id = ${f.orderId}) as case_count,
+          (select status from "order" where id = ${f.orderId}) as order_status,
+          (select count(*)::text from order_transition
+             where order_id = ${f.orderId} and to_status = 'REFUND_PENDING') as transitions
+      `.execute(ctx.db);
+      expect(proof.rows[0]).toEqual({
+        case_count: "0",
+        order_status: "PAID",
+        transitions: "0",
+      });
+    },
+  );
+
+  it.each([
+    { status: "QUEUED" as const, lastError: null },
+    { status: "FAILED" as const, lastError: "FILE_HASH_MISMATCH" },
+  ])(
+    "allows $status/$lastError file delivery state to open a refund case",
+    async ({ status, lastError }) => {
+      const f = await seedPaidOrderWithReservedAsset();
+      await addFileDeliveryEvidence(f, status, lastError);
+
+      const result = await openReplacementCase(ctx.db, {
+        orderId: f.orderId,
+        customerId: f.customerId,
+        reasonCode: "CUSTOMER_REQUEST",
+        requestRefund: true,
+        correlationId: "rep-file-evidence-allowed",
+      });
+      expect(result).toMatchObject({ ok: true, status: "REFUND_REQUESTED" });
+
+      const proof = await sql<{ case_count: string; order_status: string; transitions: string }>`
+        select
+          (select count(*)::text from replacement_case where order_id = ${f.orderId}) as case_count,
+          (select status from "order" where id = ${f.orderId}) as order_status,
+          (select count(*)::text from order_transition
+             where order_id = ${f.orderId} and to_status = 'REFUND_PENDING') as transitions
+      `.execute(ctx.db);
+      expect(proof.rows[0]).toEqual({
+        case_count: "1",
+        order_status: "REFUND_PENDING",
+        transitions: "1",
+      });
+    },
+  );
 
   it("refuses a non-owner and a past-warranty customer request", async () => {
     const f = await seedCompletedOrder({ warrantyDays: 1 });

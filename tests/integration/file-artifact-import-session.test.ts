@@ -157,6 +157,24 @@ describe("file artifact import session", () => {
     expect(confirmed.ok).toBe(true);
     if (!confirmed.ok) return;
     expect(confirmed.artifact.isActive).toBe(true);
+    const stockEvents = await sql<{
+      aggregate_version: number;
+      payload_redacted: { variantId: string; delta: number; stockAfter: number };
+    }>`
+      select aggregate_version, payload_redacted
+      from outbox_event
+      where event_type = 'StockDelta' and aggregate_id = ${confirmed.artifact.variantId}
+    `.execute(ctx.db);
+    expect(stockEvents.rows).toEqual([
+      {
+        aggregate_version: confirmed.artifact.version,
+        payload_redacted: expect.objectContaining({
+          variantId: confirmed.artifact.variantId,
+          delta: 1,
+          stockAfter: 1,
+        }),
+      },
+    ]);
 
     const queued = await queueFileDelivery({ db: ctx.db, orderId });
     expect(queued).toMatchObject({

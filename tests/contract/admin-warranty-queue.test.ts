@@ -19,6 +19,7 @@ const COUNTS: Record<WarrantyQueueView, number> = {
 const row = (overrides: Partial<WarrantyQueueRow> = {}): WarrantyQueueRow => ({
   claimId: "claim-1",
   claimNumber: "BH-AAAAAA",
+  version: 1,
   customerLabel: "Khách 1234",
   productName: "Sản phẩm",
   amountVnd: 2000n,

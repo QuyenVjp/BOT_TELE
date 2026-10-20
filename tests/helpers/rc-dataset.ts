@@ -251,14 +251,16 @@ export async function seedRcDataset(db: Kysely<Database>): Promise<RcDatasetSumm
     `.execute(trx);
 
     await sql`
-      insert into notification_delivery (id, campaign_id, customer_id, chat_id, status, attempts, next_attempt_at, sent_at)
+      insert into notification_delivery (id, campaign_id, customer_id, chat_id, status, attempts, next_attempt_at, message_id, sent_at)
       select '01DLV0' || lpad(gs::text, 20, '0'),
         case when gs <= 5000 then ${CAMPAIGN_IDS[0]} else ${CAMPAIGN_IDS[1]} end,
         '01CST0' || lpad((((gs - 1) % ${COUNTS.customers}) + 1)::text, 20, '0'),
         (9000000000::bigint + (((gs - 1) % ${COUNTS.customers}) + 1))::text,
         case when gs % 10 = 0 then 'SENT' else 'PENDING' end,
         case when gs % 10 = 0 then 1 else 0 end,
-        now(), case when gs % 10 = 0 then now() else null end
+        now(),
+        case when gs % 10 = 0 then gs::text else null end,
+        case when gs % 10 = 0 then now() else null end
       from generate_series(1, ${COUNTS.notificationDeliveries}) gs
     `.execute(trx);
 

@@ -8,6 +8,7 @@ import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { guardRootAction } from "../../bot/middleware/root-admin.js";
 import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfillment-type.js";
+import { assertSafeSheetValue } from "../google-sheets/contracts.js";
 import { deleteAssetVaultRef } from "./vault-orphan.js";
 
 export const MAX_IMPORT_BYTES = 64 * 1024;
@@ -180,6 +181,17 @@ async function loadVariantInventoryConfigs(
   );
 }
 
+async function loadExistingFingerprints(db: Db, rows: ParsedLine[]): Promise<Set<string>> {
+  const fingerprints = [...new Set(rows.map((row) => row.fingerprint).filter(Boolean))];
+  if (fingerprints.length === 0) return new Set();
+  const existing = await sql<{ fingerprint_hash: string }>`
+    select fingerprint_hash
+    from digital_asset
+    where fingerprint_hash in (${sql.join(fingerprints)})
+  `.execute(db);
+  return new Set(existing.rows.map((row) => row.fingerprint_hash));
+}
+
 function parseCsvRecords(raw: string): string[][] | null {
   const records: string[][] = [];
   let record: string[] = [];
@@ -297,17 +309,10 @@ export async function previewDigitalInventory(
     input.db,
     rows.map((row) => row.variantId),
   );
-  const fingerprints = rows.map((row) => row.fingerprint);
-  const existing = fingerprints.length
-    ? await sql<{
-        fingerprint_hash: string;
-      }>`select fingerprint_hash from digital_asset where fingerprint_hash in (${sql.join(fingerprints)})`.execute(
-        input.db,
-      )
-    : { rows: [] };
-  const knownFingerprints = new Set(existing.rows.map((row) => row.fingerprint_hash));
+  const knownFingerprints = await loadExistingFingerprints(input.db, rows);
   const lines = parsed.parsed.map((row, index) => {
     const classification = classifyLine(row, knownFingerprints, variantConfigs);
+    if (classification === "READY" && row) knownFingerprints.add(row.fingerprint);
     return {
       line: index + 1,
       variantId: row?.variantId ?? null,
@@ -341,6 +346,14 @@ export async function importDigitalInventory(
     targetId: "manual",
   });
   if (!gate.ok) return { ok: false, code: gate.reason };
+  const safeNote = input.safeNote?.trim() ?? "";
+  if (safeNote.length > 500) return { ok: false, code: "INVALID_INPUT" };
+  try {
+    assertSafeSheetValue(safeNote, "safeNote");
+  } catch {
+    return { ok: false, code: "INVALID_INPUT" };
+  }
+
   const parsed = parseLines(input.input);
   if (!parsed) return { ok: false, code: "INVALID_INPUT" };
   const rows = parsed.parsed.filter((row): row is ParsedLine => Boolean(row));
@@ -348,6 +361,7 @@ export async function importDigitalInventory(
     input.db,
     rows.map((row) => row.variantId),
   );
+  const knownFingerprints = await loadExistingFingerprints(input.db, rows);
   const summary: InventoryImportResult = { imported: 0, duplicates: 0, invalid: 0 };
   const perVariant = new Map<string, VariantInventoryImportResult>();
   for (const row of parsed.parsed) {
@@ -371,6 +385,13 @@ export async function importDigitalInventory(
       countVariantImport(perVariant, row.variantId, "invalid");
       continue;
     }
+    if (knownFingerprints.has(row.fingerprint)) {
+      summary.duplicates += 1;
+      countVariantImport(perVariant, row.variantId, "duplicates");
+      continue;
+    }
+    knownFingerprints.add(row.fingerprint);
+
     const storedSecret = parseCredentialValues(row, config.inventoryFields);
     const ref = await input.vault.write(JSON.stringify(storedSecret), {
       namespace: "asset",
@@ -379,7 +400,6 @@ export async function importDigitalInventory(
     try {
       const maskedLogin = maskedLoginForSecret(storedSecret);
       const sourceType = input.sourceType?.trim() || "LOCAL";
-      const safeNote = input.safeNote?.trim() ?? "";
       const assetId = newId();
       await withTransaction(input.db, async (trx) => {
         await sql`select set_config('app.announce_stock', ${input.announceStock === true ? "true" : "false"}, true)`.execute(

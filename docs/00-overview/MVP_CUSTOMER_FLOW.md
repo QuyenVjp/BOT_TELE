@@ -321,7 +321,7 @@ AI không được phép:
 | Tình huống                    | Khách thấy                             | Hành vi hệ thống                                  |
 | ----------------------------- | -------------------------------------- | ------------------------------------------------- |
 | Hết hàng trước khi mua        | `Sản phẩm vừa hết hàng`                | Không tạo payment; gợi ý quay lại catalog         |
-| Giá thay đổi                  | Hiện giá cũ và mới, yêu cầu xác nhận   | Không dùng callback amount cũ                     |
+| Giá thay đổi                  | Mở lại sản phẩm để xem giá mới         | Không tạo Order/payment; từ chối callback giá cũ  |
 | QR tạo lỗi                    | `Chưa thể tạo QR, đơn vẫn được giữ`    | Retry có backoff; không tạo order trùng           |
 | SePay chưa báo tiền           | `Chưa thấy giao dịch, vui lòng chờ`    | Đọc local state; reconciliation theo lịch         |
 | Thanh toán thiếu/thừa/trễ     | `Giao dịch cần đối chiếu`              | Tạo discrepancy/ticket; không giao tự động        |

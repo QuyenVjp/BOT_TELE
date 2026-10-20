@@ -1,17 +1,21 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Buffer } from "node:buffer";
 import { sql } from "kysely";
-import { createBuyNowCallbackCodec } from "../../src/bot/callback-codec.js";
+import {
+  createBuyNowCallbackCodec,
+  createCallbackTokenCodec,
+} from "../../src/bot/callback-codec.js";
 import { createCatalogCallbacks } from "../../src/bot/callbacks/catalog.js";
 import { createCheckoutCallbacks } from "../../src/bot/callbacks/checkout.js";
 import { dispatchTelegramBuyNow } from "../../src/bot/callbacks/telegram-dispatch.js";
 import { createDb, type DbHandle } from "../../src/infrastructure/db/client.js";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
-import { presentPaymentForOrder } from "../../src/modules/payments/service.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import { generateOrderPaymentCode } from "../../src/modules/payments/payment-code.js";
 import { createSearchParser } from "../../src/modules/catalog/search-parser-adapter.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import { presentPaymentForOrder } from "../../src/modules/payments/service.js";
 
 const CALLBACK_KEY = "test-only-buy-now-callback-key-material-v1";
 const TELEGRAM_USER_ID = "1234567890123456789";
@@ -35,6 +39,7 @@ beforeEach(async () => {
     truncate table outbox_event, payment_intent, order_transition, digital_asset, "order",
       product_variant, product, category, customer cascade
   `.execute(ctx.db);
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 interface Seed {
@@ -116,6 +121,12 @@ function checkout(db: DbHandle["db"], customerId: string) {
       ttlSeconds: 900,
       clockSkewSeconds: 5,
     }),
+    tokenCodec: createCallbackTokenCodec({
+      key: CALLBACK_KEY,
+      keyVersion: 1,
+      ttlSeconds: 900,
+      clockSkewSeconds: 5,
+    }),
     resolveCustomerId: async (telegramUserId) =>
       telegramUserId === TELEGRAM_USER_ID ? customerId : null,
   });
@@ -140,28 +151,35 @@ async function counts() {
 describe("Buy Now idempotency and callback safety (T158/T159/T160)", () => {
   it("collapses two simultaneous same-nonce calls across two database handles", async () => {
     const s = await seed();
-    const codec = createBuyNowCallbackCodec({
+    const tokenCodec = createCallbackTokenCodec({
       key: CALLBACK_KEY,
       keyVersion: 1,
       ttlSeconds: 900,
       clockSkewSeconds: 5,
     });
-    const token = codec.issue({
-      telegramUserId: TELEGRAM_USER_ID,
-      variantId: s.variantId,
-      expectedPriceVnd: s.price,
-      nonce: new Uint8Array(8).fill(3),
-    });
     const checkoutA = checkout(ctx.db, s.customerId);
     const checkoutB = checkout(second.db, s.customerId);
+    const preview = await checkoutA.previewFromCallback({
+      callbackData: tokenCodec.issue({
+        action: "CHECKOUT_PREVIEW",
+        telegramUserId: TELEGRAM_USER_ID,
+        resourceId: s.variantId,
+      }),
+      telegramUserId: TELEGRAM_USER_ID,
+      correlationId: "double-preview",
+    });
+    const token = preview.buttons
+      .flat()
+      .find((button) => button.text === "🏦 VietQR")?.callbackData;
+    expect(token).toBeTruthy();
     const [a, b] = await Promise.all([
       checkoutA.buyNowFromCallback({
-        callbackData: token,
+        callbackData: token!,
         telegramUserId: TELEGRAM_USER_ID,
         correlationId: "double-a",
       }),
       checkoutB.buyNowFromCallback({
-        callbackData: token,
+        callbackData: token!,
         telegramUserId: TELEGRAM_USER_ID,
         correlationId: "double-b",
       }),
@@ -328,16 +346,46 @@ describe("Buy Now idempotency and callback safety (T158/T159/T160)", () => {
       ttlSeconds: 900,
       clockSkewSeconds: 5,
     });
+    const tokenCodec = createCallbackTokenCodec({
+      key: CALLBACK_KEY,
+      keyVersion: 1,
+      ttlSeconds: 900,
+      clockSkewSeconds: 5,
+    });
     const catalog = createCatalogCallbacks({
       db: ctx.db,
       parser: createSearchParser({ driver: "deterministic", timeoutMs: 100 }),
-      callbackCodec,
+      tokenCodec,
     });
     const detail = await catalog.variantDetail(s.variantId, DISPATCH_TELEGRAM_USER_ID);
-    const callbackData = detail.buttons
+    const previewToken = detail.buttons
       .flat()
-      .find((button) => button.callbackData.startsWith("buy:"))?.callbackData;
-    expect(callbackData).toBeTruthy();
+      .find((button) => button.callbackData.startsWith("cb:"))?.callbackData;
+    expect(previewToken).toBeTruthy();
+
+    const checkoutCallbacks = createCheckoutCallbacks({
+      db: ctx.db,
+      merchant: {
+        merchantAccountId: "0123456789",
+        beneficiaryAccountNumber: "9876543210",
+        bankBin: "970422",
+        accountName: "SHOP DIGITAL MVP",
+        bankName: "MB Bank",
+      },
+      callbackCodec,
+      tokenCodec,
+      resolveCustomerId: async (telegramUserId) =>
+        telegramUserId === DISPATCH_TELEGRAM_USER_ID ? s.customerId : null,
+    });
+    const preview = await checkoutCallbacks.previewFromCallback({
+      callbackData: previewToken!,
+      telegramUserId: DISPATCH_TELEGRAM_USER_ID,
+      correlationId: "catalog-preview",
+    });
+    const qrCallbackData = preview.buttons
+      .flat()
+      .find((button) => button.text === "🏦 VietQR")?.callbackData;
+    expect(qrCallbackData).toBeTruthy();
 
     const dispatched = await dispatchTelegramBuyNow(
       {
@@ -345,22 +393,10 @@ describe("Buy Now idempotency and callback safety (T158/T159/T160)", () => {
         callback_query: {
           id: "callback-query-42",
           from: { id: Number(DISPATCH_TELEGRAM_USER_ID) },
-          data: callbackData!,
+          data: qrCallbackData!,
         },
       },
-      createCheckoutCallbacks({
-        db: ctx.db,
-        merchant: {
-          merchantAccountId: "0123456789",
-          beneficiaryAccountNumber: "9876543210",
-          bankBin: "970422",
-          accountName: "SHOP DIGITAL MVP",
-          bankName: "MB Bank",
-        },
-        callbackCodec,
-        resolveCustomerId: async (telegramUserId) =>
-          telegramUserId === DISPATCH_TELEGRAM_USER_ID ? s.customerId : null,
-      }),
+      checkoutCallbacks,
     );
     expect(dispatched.handled).toBe(true);
     if (dispatched.handled) expect(dispatched.message.text).toContain("199.000");

@@ -14,6 +14,7 @@ import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
 import { guardRootAction } from "../../bot/middleware/root-admin.js";
 import { INVENTORY_FIELDS_SCHEMA, type InventoryField } from "../catalog/fulfillment-type.js";
 import { deleteAssetVaultRef, recordAssetVaultOrphan } from "./vault-orphan.js";
+import { newId } from "../../shared/ids/index.js";
 
 export const INVENTORY_IMPORT_TTL_SECONDS = 15 * 60;
 
@@ -22,6 +23,7 @@ export type InventoryImportStatus =
 
 export interface InventoryImportSession {
   adminTelegramUserId: string;
+  generation: string;
   status: InventoryImportStatus;
   inputVaultRef: string | null;
   previewReady: number;
@@ -48,6 +50,11 @@ export interface InventoryImportSessionInput {
   assetMetadata?: InventoryImportAssetMetadata;
   /** Optional opaque ref binding for non-Telegram confirmation callers. */
   expectedInputVaultRef?: string;
+  /** Optional session-generation binding for non-Telegram confirmation callers. */
+  expectedGeneration?: string;
+  /** Internal exact Sheets challenge owner for safe staged-ref cleanup. */
+  expectedChallengeId?: string;
+  allowExpiredProcessingRecovery?: boolean;
 }
 
 export interface InventoryImportTemplate {
@@ -61,6 +68,7 @@ export interface InventoryImportTemplate {
 
 interface SessionRow {
   admin_telegram_user_id: string;
+  generation: string;
   status: InventoryImportStatus;
   input_vault_ref: string | null;
   preview_ready: number;
@@ -108,6 +116,7 @@ function parsePreviewVariants(value: unknown): string[] {
 function mapSession(row: SessionRow): InventoryImportSession {
   return {
     adminTelegramUserId: row.admin_telegram_user_id,
+    generation: row.generation,
     status: row.status,
     inputVaultRef: row.input_vault_ref,
     previewReady: row.preview_ready,
@@ -126,7 +135,7 @@ async function loadSession(
   adminTelegramUserId: string,
 ): Promise<InventoryImportSession | null> {
   const result = await sql<SessionRow>`
-    select admin_telegram_user_id, status, input_vault_ref, preview_ready,
+    select admin_telegram_user_id, generation, status, input_vault_ref, preview_ready,
       preview_invalid, preview_duplicates, preview_variants, selected_variant_id, expires_at,
       imported_at, cancelled_at
     from admin_inventory_import
@@ -140,6 +149,236 @@ async function clearSession(exec: Executor, adminTelegramUserId: string): Promis
   await sql`delete from admin_inventory_import where admin_telegram_user_id = ${adminTelegramUserId}`.execute(
     exec,
   );
+}
+
+async function withBlockingSessionLock<T>(
+  db: Db,
+  adminTelegramUserId: string,
+  fn: (exec: Db) => Promise<T>,
+): Promise<T> {
+  const lockKey = `inventory-import-session:${adminTelegramUserId}`;
+  return db.connection().execute(async (connection) => {
+    await sql`
+      select pg_advisory_lock(hashtextextended(${lockKey}, 0))
+    `.execute(connection);
+    try {
+      return await fn(connection);
+    } finally {
+      await sql`
+        select pg_advisory_unlock(hashtextextended(${lockKey}, 0))
+      `.execute(connection);
+    }
+  });
+}
+
+async function withTrySessionLock<T>(
+  db: Db,
+  adminTelegramUserId: string,
+  fn: (exec: Db) => Promise<T>,
+): Promise<T | null> {
+  const lockKey = `inventory-import-session:${adminTelegramUserId}`;
+  return db.connection().execute(async (connection) => {
+    const result = await sql<{ acquired: boolean }>`
+      select pg_try_advisory_lock(hashtextextended(${lockKey}, 0)) as acquired
+    `.execute(connection);
+    if (result.rows[0]?.acquired !== true) return null;
+    try {
+      return await fn(connection);
+    } finally {
+      await sql`
+        select pg_advisory_unlock(hashtextextended(${lockKey}, 0))
+      `.execute(connection);
+    }
+  });
+}
+
+async function withBlockingRefLock<T>(
+  exec: Db,
+  inputVaultRef: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const lockKey = `inventory-import-input:${inputVaultRef}`;
+  await sql`
+    select pg_advisory_lock(hashtextextended(${lockKey}, 0))
+  `.execute(exec);
+  try {
+    return await fn();
+  } finally {
+    await sql`
+      select pg_advisory_unlock(hashtextextended(${lockKey}, 0))
+    `.execute(exec);
+  }
+}
+interface InventoryImportVaultOwner {
+  session?: { adminTelegramUserId: string; generation: string };
+  challenge?: { id: string; generation: string };
+}
+
+async function deleteInventoryImportVaultRefLocked(
+  exec: Db,
+  vault: Vault,
+  inputVaultRef: string,
+  input: { correlationId: string; reason: string },
+  owner?: InventoryImportVaultOwner,
+): Promise<void> {
+  const sessions = await sql<{
+    admin_telegram_user_id: string;
+    generation: string;
+  }>`
+    select admin_telegram_user_id, generation
+    from admin_inventory_import
+    where input_vault_ref = ${inputVaultRef}
+      and status in ('READY', 'PROCESSING')
+  `.execute(exec);
+  const sessionOwner = owner?.session;
+  if (
+    sessions.rows.some(
+      (row) =>
+        !sessionOwner ||
+        sessionOwner.adminTelegramUserId !== row.admin_telegram_user_id ||
+        sessionOwner.generation !== row.generation,
+    )
+  )
+    return;
+
+  const challenges = await sql<{ id: string; generation: string }>`
+    select id, generation
+    from google_sheets_inventory_intake_challenge
+    where input_vault_ref = ${inputVaultRef}
+      and status in ('PREVIEWED', 'PROCESSING')
+  `.execute(exec);
+  const challengeOwner = owner?.challenge;
+  if (
+    challenges.rows.some(
+      (row) =>
+        !challengeOwner ||
+        challengeOwner.id !== row.id ||
+        challengeOwner.generation !== row.generation,
+    )
+  )
+    return;
+
+  await deleteAssetVaultRef(exec, vault, inputVaultRef, input);
+}
+
+export async function deleteInventoryImportVaultRef(
+  db: Db,
+  vault: Vault,
+  inputVaultRef: string,
+  input: { correlationId: string; reason: string },
+  owner?: InventoryImportVaultOwner,
+): Promise<void> {
+  await withBlockingRefLock(db, inputVaultRef, () =>
+    deleteInventoryImportVaultRefLocked(db, vault, inputVaultRef, input, owner),
+  );
+}
+async function hasLiveInventoryImportRefOwner(
+  exec: Executor,
+  inputVaultRef: string,
+): Promise<boolean> {
+  const result = await sql<{ owned: boolean }>`
+    select exists (
+      select 1
+      from admin_inventory_import
+      where input_vault_ref = ${inputVaultRef}
+        and status in ('READY', 'PROCESSING')
+      union all
+      select 1
+      from google_sheets_inventory_intake_challenge
+      where input_vault_ref = ${inputVaultRef}
+        and status in ('PREVIEWED', 'PROCESSING')
+    ) as owned
+  `.execute(exec);
+  return result.rows[0]?.owned === true;
+}
+
+async function recordAssetVaultOrphanIfUnowned(
+  db: Db,
+  inputVaultRef: string,
+  input: { correlationId: string; reason: string },
+): Promise<void> {
+  await withBlockingRefLock(db, inputVaultRef, async () => {
+    if (await hasLiveInventoryImportRefOwner(db, inputVaultRef)) return;
+    await recordAssetVaultOrphan(db, inputVaultRef, input);
+  });
+}
+
+async function hasProcessingSheetsChallenge(
+  exec: Executor,
+  adminTelegramUserId: string,
+): Promise<boolean> {
+  const result = await sql`
+    select 1
+    from google_sheets_inventory_intake_challenge
+    where admin_telegram_user_id = ${adminTelegramUserId}
+      and status = 'PROCESSING'
+    limit 1
+  `.execute(exec);
+  return result.rows.length > 0;
+}
+
+async function withTryRefLock<T>(
+  exec: Db,
+  inputVaultRef: string,
+  fn: () => Promise<T>,
+): Promise<T | null> {
+  const lockKey = `inventory-import-input:${inputVaultRef}`;
+  const result = await sql<{ acquired: boolean }>`
+    select pg_try_advisory_lock(hashtextextended(${lockKey}, 0)) as acquired
+  `.execute(exec);
+  if (result.rows[0]?.acquired !== true) return null;
+  try {
+    return await fn();
+  } finally {
+    await sql`
+      select pg_advisory_unlock(hashtextextended(${lockKey}, 0))
+    `.execute(exec);
+  }
+}
+
+function parseImportAuditSummary(value: unknown): InventoryImportResult | null {
+  const parsed =
+    typeof value === "string"
+      ? (() => {
+          try {
+            return JSON.parse(value) as unknown;
+          } catch {
+            return null;
+          }
+        })()
+      : value;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+  const metadata = parsed as Record<string, unknown>;
+  const imported = metadata.imported;
+  const duplicates = metadata.duplicates;
+  const invalid = metadata.invalid;
+  if (
+    typeof imported !== "number" ||
+    !Number.isSafeInteger(imported) ||
+    imported < 0 ||
+    typeof duplicates !== "number" ||
+    !Number.isSafeInteger(duplicates) ||
+    duplicates < 0 ||
+    typeof invalid !== "number" ||
+    !Number.isSafeInteger(invalid) ||
+    invalid < 0
+  )
+    return null;
+  return { imported, duplicates, invalid };
+}
+
+async function priorImportAudit(
+  exec: Executor,
+  correlationId: string,
+): Promise<InventoryImportResult | null> {
+  const result = await sql<{ metadata_redacted: unknown }>`
+    select metadata_redacted
+    from audit_event
+    where action = 'inventory.import' and correlation_id = ${correlationId}
+    order by occurred_at asc, id asc
+    limit 1
+  `.execute(exec);
+  return result.rows[0] ? parseImportAuditSummary(result.rows[0].metadata_redacted) : null;
 }
 function csvCell(value: string): string {
   return /[",\n\r]/u.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
@@ -574,7 +813,7 @@ export async function startInventoryImportSession(
   now = Date.now(),
 ): Promise<
   | { ok: true; session: InventoryImportSession }
-  | { ok: false; code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" }
+  | { ok: false; code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "BUSY" }
 > {
   if (input.variantId !== undefined && !/^[A-Za-z0-9_-]{1,128}$/.test(input.variantId))
     return { ok: false, code: "NOT_ROOT_ADMIN" };
@@ -591,6 +830,7 @@ export async function startInventoryImportSession(
     return { ok: false, code: "NOT_ROOT_ADMIN" };
   const session: InventoryImportSession = {
     adminTelegramUserId: String(input.actor.numericUserId),
+    generation: newId(),
     status: "WAITING_INPUT",
     inputVaultRef: null,
     previewReady: 0,
@@ -600,25 +840,37 @@ export async function startInventoryImportSession(
     selectedVariantId: input.variantId ?? null,
     expiresAt: ttlExpiry(now).getTime(),
   };
-  await sql`
-    insert into admin_inventory_import
-      (admin_telegram_user_id, status, input_vault_ref, preview_ready, preview_invalid,
-       preview_duplicates, preview_variants, selected_variant_id, expires_at, updated_at)
-    values (${session.adminTelegramUserId}, ${session.status}, null, 0, 0, 0, ${JSON.stringify(session.previewVariants)}::jsonb,
-      ${session.selectedVariantId}, ${new Date(session.expiresAt).toISOString()}, now())
-    on conflict (admin_telegram_user_id) do update set
-      status = excluded.status,
-      input_vault_ref = null,
-      preview_ready = 0,
-      preview_invalid = 0,
-      preview_duplicates = 0,
-      preview_variants = ${JSON.stringify(session.previewVariants)}::jsonb,
-      selected_variant_id = excluded.selected_variant_id,
-      expires_at = excluded.expires_at,
-      imported_at = null,
-      cancelled_at = null,
-      updated_at = now()
-  `.execute(db);
+  const started = await withBlockingSessionLock(db, session.adminTelegramUserId, async (exec) => {
+    const existing = await loadSession(exec, session.adminTelegramUserId);
+    if (
+      existing?.status === "PROCESSING" ||
+      (await hasProcessingSheetsChallenge(exec, session.adminTelegramUserId)) ||
+      (existing?.status === "READY" && existing.inputVaultRef !== null)
+    )
+      return false;
+    await sql`
+      insert into admin_inventory_import
+        (admin_telegram_user_id, generation, status, input_vault_ref, preview_ready, preview_invalid,
+         preview_duplicates, preview_variants, selected_variant_id, expires_at, updated_at)
+      values (${session.adminTelegramUserId}, ${session.generation}, ${session.status}, null, 0, 0, 0, ${JSON.stringify(session.previewVariants)}::jsonb,
+        ${session.selectedVariantId}, ${new Date(session.expiresAt).toISOString()}, now())
+      on conflict (admin_telegram_user_id) do update set
+        generation = excluded.generation,
+        status = excluded.status,
+        input_vault_ref = null,
+        preview_ready = 0,
+        preview_invalid = 0,
+        preview_duplicates = 0,
+        preview_variants = ${JSON.stringify(session.previewVariants)}::jsonb,
+        selected_variant_id = excluded.selected_variant_id,
+        expires_at = excluded.expires_at,
+        imported_at = null,
+        cancelled_at = null,
+        updated_at = now()
+    `.execute(exec);
+    return true;
+  });
+  if (!started) return { ok: false, code: "BUSY" };
   return { ok: true, session };
 }
 
@@ -629,7 +881,7 @@ export async function cancelInventoryImportSession(
   now = Date.now(),
 ): Promise<
   | { ok: true; cancelled: boolean }
-  | { ok: false; code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "NOT_FOUND" }
+  | { ok: false; code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "NOT_FOUND" | "BUSY" }
 > {
   const gate = await guardRootAction(db, {
     actor: input.actor,
@@ -640,34 +892,60 @@ export async function cancelInventoryImportSession(
     targetId: "manual",
   });
   if (!gate.ok) return { ok: false, code: gate.reason };
-  const session = await loadSession(db, String(input.actor.numericUserId));
-  if (!session) return { ok: false, code: "NOT_FOUND" };
-  if (session.inputVaultRef) {
-    await deleteAssetVaultRef(db, vault, session.inputVaultRef, {
-      correlationId: input.correlationId,
-      reason: "inventory import cancellation",
-    });
-  }
-  await clearSession(db, String(input.actor.numericUserId));
-  await sql`
-    insert into admin_inventory_import
-      (admin_telegram_user_id, status, input_vault_ref, preview_ready, preview_invalid,
-       preview_duplicates, preview_variants, expires_at, cancelled_at, updated_at)
-    values (${String(input.actor.numericUserId)}, 'CANCELLED', null, 0, 0, 0, '[]'::jsonb,
-      ${new Date(now).toISOString()}, ${new Date(now).toISOString()}, now())
-    on conflict (admin_telegram_user_id) do update set
-      status = 'CANCELLED',
-      input_vault_ref = null,
-      preview_ready = 0,
-      preview_invalid = 0,
-      preview_duplicates = 0,
-      preview_variants = '[]'::jsonb,
-      expires_at = excluded.expires_at,
-      imported_at = null,
-      cancelled_at = excluded.cancelled_at,
-      updated_at = now()
-  `.execute(db);
-  return { ok: true, cancelled: true };
+  const adminTelegramUserId = String(input.actor.numericUserId);
+  return withBlockingSessionLock(db, adminTelegramUserId, async (exec) => {
+    const session = await loadSession(exec, adminTelegramUserId);
+    if (!session) return { ok: false as const, code: "NOT_FOUND" as const };
+    if (
+      session.status === "PROCESSING" ||
+      (await hasProcessingSheetsChallenge(exec, adminTelegramUserId))
+    )
+      return { ok: false as const, code: "BUSY" as const };
+    if (input.expectedInputVaultRef !== undefined || input.expectedGeneration !== undefined) {
+      if (
+        session.status !== "READY" ||
+        (input.expectedInputVaultRef !== undefined &&
+          session.inputVaultRef !== input.expectedInputVaultRef) ||
+        (input.expectedGeneration !== undefined && session.generation !== input.expectedGeneration)
+      )
+        return { ok: true as const, cancelled: false as const };
+    }
+    if (session.inputVaultRef) {
+      await withBlockingRefLock(exec, session.inputVaultRef, () =>
+        deleteInventoryImportVaultRefLocked(
+          exec,
+          vault,
+          session.inputVaultRef!,
+          {
+            correlationId: input.correlationId,
+            reason: "inventory import cancellation",
+          },
+          { session: { adminTelegramUserId, generation: session.generation } },
+        ),
+      );
+    }
+    await clearSession(exec, adminTelegramUserId);
+    await sql`
+      insert into admin_inventory_import
+        (admin_telegram_user_id, generation, status, input_vault_ref, preview_ready, preview_invalid,
+         preview_duplicates, preview_variants, expires_at, cancelled_at, updated_at)
+      values (${adminTelegramUserId}, ${session.generation}, 'CANCELLED', null, 0, 0, 0, '[]'::jsonb,
+        ${new Date(now).toISOString()}, ${new Date(now).toISOString()}, now())
+      on conflict (admin_telegram_user_id) do update set
+        generation = excluded.generation,
+        status = 'CANCELLED',
+        input_vault_ref = null,
+        preview_ready = 0,
+        preview_invalid = 0,
+        preview_duplicates = 0,
+        preview_variants = '[]'::jsonb,
+        expires_at = excluded.expires_at,
+        imported_at = null,
+        cancelled_at = excluded.cancelled_at,
+        updated_at = now()
+    `.execute(exec);
+    return { ok: true as const, cancelled: true as const };
+  });
 }
 
 export async function stageInventoryImportInput(
@@ -676,15 +954,20 @@ export async function stageInventoryImportInput(
   input: InventoryImportSessionInput & { rawInput: string },
   now = Date.now(),
 ): Promise<
-  | { ok: true; preview: InventoryPreviewResult }
+  | { ok: true; preview: InventoryPreviewResult; inputVaultRef: string; generation: string }
   | {
       ok: false;
       code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "INVALID_INPUT" | "NOT_FOUND" | "EXPIRED";
     }
 > {
-  const session = await loadSession(db, String(input.actor.numericUserId));
+  const adminTelegramUserId = String(input.actor.numericUserId);
+  const session = await loadSession(db, adminTelegramUserId);
   if (!session) return { ok: false, code: "NOT_FOUND" };
+  if (input.expectedGeneration !== undefined && session.generation !== input.expectedGeneration)
+    return { ok: false, code: "NOT_FOUND" };
   const selectedVariantId = selectedVariantFrom(session);
+  if (session.status !== "WAITING_INPUT" && session.status !== "READY")
+    return { ok: false, code: "NOT_FOUND" };
   if (
     input.variantId !== undefined &&
     (session.status !== "WAITING_INPUT" || selectedVariantId !== input.variantId)
@@ -700,14 +983,34 @@ export async function stageInventoryImportInput(
   });
   if (!gate.ok) return { ok: false, code: gate.reason };
   if (session.expiresAt <= now) {
-    if (session.inputVaultRef) {
-      await deleteAssetVaultRef(db, vault, session.inputVaultRef, {
-        correlationId: input.correlationId,
-        reason: "inventory import expired preview",
-      });
-    }
-    await clearSession(db, String(input.actor.numericUserId));
-    return { ok: false, code: "EXPIRED" };
+    return withBlockingSessionLock(db, adminTelegramUserId, async (exec) => {
+      const current = await loadSession(exec, adminTelegramUserId);
+      if (
+        !current ||
+        current.generation !== session.generation ||
+        current.status !== session.status ||
+        current.inputVaultRef !== session.inputVaultRef ||
+        current.selectedVariantId !== session.selectedVariantId ||
+        current.expiresAt > now
+      )
+        return { ok: false as const, code: "NOT_FOUND" as const };
+      if (current.inputVaultRef) {
+        await withBlockingRefLock(exec, current.inputVaultRef, () =>
+          deleteInventoryImportVaultRefLocked(
+            exec,
+            vault,
+            current.inputVaultRef!,
+            {
+              correlationId: input.correlationId,
+              reason: "inventory import expired preview",
+            },
+            { session: { adminTelegramUserId, generation: current.generation } },
+          ),
+        );
+      }
+      await clearSession(exec, adminTelegramUserId);
+      return { ok: false as const, code: "EXPIRED" as const };
+    });
   }
   const selectedVariantFields = selectedVariantId
     ? await inventoryFieldsForSecretImportVariant(db, selectedVariantId)
@@ -725,41 +1028,69 @@ export async function stageInventoryImportInput(
     input: normalizedInput,
   });
   if (!("ready" in preview)) return preview;
-  const rawHash = sha256(normalizedInput);
+  const rawHash = sha256(`${session.adminTelegramUserId}:${session.generation}:${normalizedInput}`);
   const vaultRef = await vault.write(normalizedInput, {
     namespace: "asset",
     idempotencyKey: rawHash,
   });
   const existingRef = session.inputVaultRef;
   try {
-    await sql`
-      update admin_inventory_import
-      set status = 'READY',
-          input_vault_ref = ${vaultRef},
-          preview_ready = ${preview.ready},
-          preview_invalid = ${preview.invalid},
-          preview_duplicates = ${preview.duplicates},
-          preview_variants = ${JSON.stringify(preview.lines.map((line) => line.variantId).filter((variantId): variantId is string => Boolean(variantId)))}::jsonb,
-          expires_at = ${ttlExpiry(now).toISOString()},
-          imported_at = null,
-          cancelled_at = null,
-          updated_at = now()
-      where admin_telegram_user_id = ${String(input.actor.numericUserId)}
-    `.execute(db);
+    const bound = await withBlockingSessionLock(db, adminTelegramUserId, async (exec) =>
+      withBlockingRefLock(exec, vaultRef, async () => {
+        const result = await sql<{ admin_telegram_user_id: string }>`
+          update admin_inventory_import
+          set status = 'READY',
+              input_vault_ref = ${vaultRef},
+              preview_ready = ${preview.ready},
+              preview_invalid = ${preview.invalid},
+              preview_duplicates = ${preview.duplicates},
+              preview_variants = ${JSON.stringify(preview.lines.map((line) => line.variantId).filter((variantId): variantId is string => Boolean(variantId)))}::jsonb,
+              expires_at = ${ttlExpiry(now).toISOString()},
+              imported_at = null,
+              cancelled_at = null,
+              updated_at = now()
+          where admin_telegram_user_id = ${adminTelegramUserId}
+            and generation = ${session.generation}
+            and status = ${session.status}
+            and input_vault_ref is not distinct from ${session.inputVaultRef}
+            and selected_variant_id is not distinct from ${session.selectedVariantId}
+          returning admin_telegram_user_id
+        `.execute(exec);
+        if (result.rows.length === 0) return false;
+        if (existingRef && existingRef !== vaultRef) {
+          await withBlockingRefLock(exec, existingRef, () =>
+            deleteInventoryImportVaultRefLocked(
+              exec,
+              vault,
+              existingRef,
+              {
+                correlationId: input.correlationId,
+                reason: "inventory import superseded preview",
+              },
+              { session: { adminTelegramUserId, generation: session.generation } },
+            ),
+          );
+        }
+        return true;
+      }),
+    );
+    if (!bound) {
+      if (existingRef !== vaultRef) {
+        await recordAssetVaultOrphanIfUnowned(db, vaultRef, {
+          correlationId: input.correlationId,
+          reason: "inventory import session superseded before bind",
+        });
+      }
+      return { ok: false, code: "NOT_FOUND" };
+    }
   } catch (error) {
-    await recordAssetVaultOrphan(db, vaultRef, {
+    await recordAssetVaultOrphanIfUnowned(db, vaultRef, {
       correlationId: input.correlationId,
       reason: "inventory import session bind failed",
     });
     throw error;
   }
-  if (existingRef && existingRef !== vaultRef) {
-    await deleteAssetVaultRef(db, vault, existingRef, {
-      correlationId: input.correlationId,
-      reason: "inventory import superseded preview",
-    });
-  }
-  return { ok: true, preview };
+  return { ok: true, preview, inputVaultRef: vaultRef, generation: session.generation };
 }
 export async function stageInventoryImportDocument(
   db: Db,
@@ -770,7 +1101,7 @@ export async function stageInventoryImportDocument(
   },
   now = Date.now(),
 ): Promise<
-  | { ok: true; preview: InventoryPreviewResult }
+  | { ok: true; preview: InventoryPreviewResult; inputVaultRef: string; generation: string }
   | {
       ok: false;
       code:
@@ -788,6 +1119,17 @@ export async function stageInventoryImportDocument(
   const rawInput = await input.downloader.downloadText(input.document.fileId);
   return stageInventoryImportInput(db, vault, { ...input, rawInput }, now);
 }
+
+type ConfirmSessionOutcome =
+  | { kind: "AUTH"; code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" }
+  | { kind: "BUSY" }
+  | { kind: "NOT_FOUND" }
+  | { kind: "MISMATCH" }
+  | { kind: "NOT_READY" }
+  | { kind: "EXPIRED"; session: InventoryImportSession }
+  | { kind: "COMMITTED"; session: InventoryImportSession }
+  | { kind: "FAILED"; code: "INVALID_INPUT" | "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" }
+  | { kind: "OK"; summary: InventoryImportResult; reused: boolean };
 
 export async function confirmInventoryImportSession(
   db: Db,
@@ -808,114 +1150,283 @@ export async function confirmInventoryImportSession(
         | "EXPIRED";
     }
 > {
-  const session = await loadSession(db, String(input.actor.numericUserId));
-  const selectedVariantId = session?.selectedVariantId ?? null;
-  const gate = await guardRootAction(db, {
-    actor: input.actor,
-    config: input.config,
-    correlationId: input.correlationId,
-    action: "inventory.import",
-    targetType: "DigitalAsset",
-    targetId: selectedVariantId ?? "manual",
-  });
-  if (!gate.ok) return { ok: false, code: gate.reason };
-
   const adminTelegramUserId = String(input.actor.numericUserId);
-  const prepared = await withTransaction(db, async (trx) => {
-    const result = await sql<SessionRow>`
-      select admin_telegram_user_id, status, input_vault_ref, preview_ready,
-        preview_invalid, preview_duplicates, preview_variants, expires_at,
-        imported_at, cancelled_at
-      from admin_inventory_import
-      where admin_telegram_user_id = ${adminTelegramUserId}
-      for update
-    `.execute(trx);
-    const row = result.rows[0];
-    if (!row) return null;
-    const session = mapSession(row);
-    if (session.expiresAt <= now) return { expired: true as const, session };
-    if (session.status === "COMMITTED") return { committed: true as const, session };
-    if (session.status === "PROCESSING") return { busy: true as const, session };
-    if (
-      input.expectedInputVaultRef !== undefined &&
-      session.inputVaultRef !== input.expectedInputVaultRef
-    ) {
-      return { ready: false as const, session };
-    }
-    if (session.status !== "READY" || !session.inputVaultRef)
-      return { ready: false as const, session };
-    await sql`
-      update admin_inventory_import
-      set status = 'PROCESSING', updated_at = now()
-      where admin_telegram_user_id = ${adminTelegramUserId}
-    `.execute(trx);
-    return { ready: true as const, session };
-  });
-
-  if (!prepared) return { ok: false, code: "NOT_FOUND" };
-  if ("expired" in prepared) {
-    if (prepared.session.inputVaultRef) {
-      await deleteAssetVaultRef(db, vault, prepared.session.inputVaultRef, {
+  const recoveryRequested =
+    input.allowExpiredProcessingRecovery === true &&
+    input.expectedGeneration !== undefined &&
+    input.expectedInputVaultRef !== undefined;
+  const outcome = await withTrySessionLock<ConfirmSessionOutcome>(
+    db,
+    adminTelegramUserId,
+    async (connection) => {
+      const audited = recoveryRequested
+        ? await priorImportAudit(connection, input.correlationId)
+        : null;
+      const session = await loadSession(connection, adminTelegramUserId);
+      const gate = await guardRootAction(connection, {
+        actor: input.actor,
+        config: input.config,
         correlationId: input.correlationId,
-        reason: "inventory import confirmation expired",
+        action: "inventory.import",
+        targetType: "DigitalAsset",
+        targetId: session?.selectedVariantId ?? "manual",
       });
-    }
-    await clearSession(db, adminTelegramUserId);
-    return { ok: false, code: "EXPIRED" };
-  }
-  if ("committed" in prepared) {
+      if (!gate.ok) return { kind: "AUTH" as const, code: gate.reason };
+      if (audited) {
+        const expectedGeneration = input.expectedGeneration;
+        const expectedInputVaultRef = input.expectedInputVaultRef;
+        if (!expectedGeneration || !expectedInputVaultRef) return { kind: "MISMATCH" as const };
+        if (
+          session &&
+          session.generation === expectedGeneration &&
+          session.inputVaultRef === expectedInputVaultRef &&
+          (session.status === "READY" || session.status === "PROCESSING")
+        ) {
+          await sql`
+            update admin_inventory_import
+            set status = 'COMMITTED', imported_at = now(), updated_at = now()
+            where admin_telegram_user_id = ${adminTelegramUserId}
+              and generation = ${expectedGeneration}
+              and status in ('READY', 'PROCESSING')
+              and input_vault_ref = ${expectedInputVaultRef}
+          `.execute(connection);
+        }
+        await withBlockingRefLock(connection, expectedInputVaultRef, () =>
+          deleteInventoryImportVaultRefLocked(
+            connection,
+            vault,
+            expectedInputVaultRef,
+            {
+              correlationId: input.correlationId,
+              reason: "inventory import commit reconciliation",
+            },
+            {
+              session: { adminTelegramUserId, generation: expectedGeneration },
+              ...(input.expectedChallengeId
+                ? {
+                    challenge: {
+                      id: input.expectedChallengeId,
+                      generation: expectedGeneration,
+                    },
+                  }
+                : {}),
+            },
+          ),
+        );
+        return { kind: "OK" as const, reused: true, summary: audited };
+      }
+
+      const prepared = await withTransaction(connection, async (trx) => {
+        const result = await sql<SessionRow>`
+          select admin_telegram_user_id, generation, status, input_vault_ref, preview_ready,
+            preview_invalid, preview_duplicates, preview_variants, selected_variant_id, expires_at,
+            imported_at, cancelled_at
+          from admin_inventory_import
+          where admin_telegram_user_id = ${adminTelegramUserId}
+          for update
+        `.execute(trx);
+        const row = result.rows[0];
+        if (!row) return { kind: "NOT_FOUND" as const };
+        const current = mapSession(row);
+        if (
+          (input.expectedInputVaultRef !== undefined &&
+            current.inputVaultRef !== input.expectedInputVaultRef) ||
+          (input.expectedGeneration !== undefined &&
+            current.generation !== input.expectedGeneration)
+        )
+          return { kind: "MISMATCH" as const };
+        const recoverySession =
+          recoveryRequested &&
+          current.inputVaultRef === input.expectedInputVaultRef &&
+          current.generation === input.expectedGeneration &&
+          (current.status === "READY" || current.status === "PROCESSING");
+        if (current.expiresAt <= now && !recoverySession)
+          return { kind: "EXPIRED" as const, session: current };
+        if (current.status === "COMMITTED") return { kind: "COMMITTED" as const, session: current };
+        if (
+          (current.status !== "READY" && current.status !== "PROCESSING") ||
+          !current.inputVaultRef
+        )
+          return { kind: "NOT_READY" as const };
+        if (current.status === "READY") {
+          await sql`
+            update admin_inventory_import
+            set status = 'PROCESSING', updated_at = now()
+            where admin_telegram_user_id = ${adminTelegramUserId}
+              and generation = ${current.generation}
+              and status = 'READY'
+              and input_vault_ref = ${current.inputVaultRef}
+          `.execute(trx);
+        }
+        return { kind: "CLAIMED" as const, session: current };
+      });
+
+      if (prepared.kind === "NOT_FOUND") return prepared;
+      if (prepared.kind === "MISMATCH") return prepared;
+      if (prepared.kind === "NOT_READY") return prepared;
+      if (prepared.kind === "EXPIRED") {
+        if (prepared.session.status === "WAITING_INPUT" || prepared.session.status === "READY") {
+          if (prepared.session.inputVaultRef) {
+            await withBlockingRefLock(connection, prepared.session.inputVaultRef, () =>
+              deleteInventoryImportVaultRefLocked(
+                connection,
+                vault,
+                prepared.session.inputVaultRef!,
+                {
+                  correlationId: input.correlationId,
+                  reason: "inventory import confirmation expired",
+                },
+                {
+                  session: {
+                    adminTelegramUserId,
+                    generation: prepared.session.generation,
+                  },
+                  ...(input.expectedChallengeId
+                    ? {
+                        challenge: {
+                          id: input.expectedChallengeId,
+                          generation: prepared.session.generation,
+                        },
+                      }
+                    : {}),
+                },
+              ),
+            );
+          }
+          await clearSession(connection, adminTelegramUserId);
+        }
+        return prepared;
+      }
+      if (prepared.kind === "COMMITTED") {
+        const committedAudit = await priorImportAudit(connection, input.correlationId);
+        if (prepared.session.inputVaultRef) {
+          await withBlockingRefLock(connection, prepared.session.inputVaultRef, () =>
+            deleteInventoryImportVaultRefLocked(
+              connection,
+              vault,
+              prepared.session.inputVaultRef!,
+              {
+                correlationId: input.correlationId,
+                reason: "inventory import commit reconciliation",
+              },
+              input.expectedChallengeId
+                ? {
+                    challenge: {
+                      id: input.expectedChallengeId,
+                      generation: prepared.session.generation,
+                    },
+                  }
+                : undefined,
+            ),
+          );
+        }
+        return {
+          kind: "OK" as const,
+          reused: true,
+          summary: committedAudit ?? {
+            imported: 0,
+            duplicates: prepared.session.previewDuplicates,
+            invalid: prepared.session.previewInvalid,
+          },
+        };
+      }
+
+      const inputVaultRef = prepared.session.inputVaultRef;
+      if (!inputVaultRef) return { kind: "NOT_READY" as const };
+      // Keep a stable staged-input lock while the idempotent importer calls Vault and PostgreSQL.
+      // This is a session-level advisory lock, not a long-lived database transaction.
+      const locked = await withTryRefLock(connection, inputVaultRef, async () => {
+        const committedAudit = await priorImportAudit(connection, input.correlationId);
+        let summary: InventoryImportResult;
+        let reused = false;
+        if (committedAudit) {
+          summary = committedAudit;
+          reused = true;
+        } else {
+          const rawInput = await vault.reveal(inputVaultRef);
+          const imported = await importDigitalInventory({
+            actor: input.actor,
+            config: input.config,
+            vault,
+            db: connection,
+            input: rawInput,
+            reason: input.assetMetadata ? "Sheets inventory import" : "Admin inventory import",
+            correlationId: input.correlationId,
+            ...input.assetMetadata,
+          });
+          if (!imported.ok) {
+            await sql`
+              update admin_inventory_import
+              set status = 'READY', updated_at = now()
+              where admin_telegram_user_id = ${adminTelegramUserId}
+                and generation = ${prepared.session.generation}
+                and status = 'PROCESSING'
+                and input_vault_ref = ${inputVaultRef}
+            `.execute(connection);
+            return { kind: "FAILED" as const, code: imported.code };
+          }
+          summary = imported.summary;
+        }
+
+        const committed = await sql<{ admin_telegram_user_id: string }>`
+          update admin_inventory_import
+          set status = 'COMMITTED', imported_at = now(), updated_at = now()
+          where admin_telegram_user_id = ${adminTelegramUserId}
+            and generation = ${prepared.session.generation}
+            and status = 'PROCESSING'
+            and input_vault_ref = ${inputVaultRef}
+          returning admin_telegram_user_id
+        `.execute(connection);
+        if (committed.rows.length === 0) return { kind: "MISMATCH" as const };
+        await deleteInventoryImportVaultRefLocked(
+          connection,
+          vault,
+          inputVaultRef,
+          {
+            correlationId: input.correlationId,
+            reason: "inventory import committed",
+          },
+          {
+            session: {
+              adminTelegramUserId,
+              generation: prepared.session.generation,
+            },
+            ...(input.expectedChallengeId
+              ? {
+                  challenge: {
+                    id: input.expectedChallengeId,
+                    generation: prepared.session.generation,
+                  },
+                }
+              : {}),
+          },
+        );
+        return { kind: "OK" as const, reused, summary };
+      });
+      return locked ?? { kind: "BUSY" as const };
+    },
+  );
+
+  if (!outcome) return { ok: false, code: "BUSY" };
+  if (outcome.kind === "BUSY") return { ok: false, code: "BUSY" };
+  if (outcome.kind === "AUTH") return { ok: false, code: outcome.code };
+  if (outcome.kind === "NOT_FOUND") return { ok: false, code: "NOT_FOUND" };
+  if (outcome.kind === "MISMATCH" || outcome.kind === "NOT_READY")
+    return { ok: false, code: "NOT_READY" };
+  if (outcome.kind === "EXPIRED") return { ok: false, code: "EXPIRED" };
+  if (outcome.kind === "FAILED") return { ok: false, code: outcome.code };
+  if (outcome.kind === "COMMITTED") {
     return {
       ok: true,
       reused: true,
       summary: {
         imported: 0,
-        duplicates: prepared.session.previewDuplicates,
-        invalid: prepared.session.previewInvalid,
+        duplicates: outcome.session.previewDuplicates,
+        invalid: outcome.session.previewInvalid,
       },
     };
   }
-  if ("busy" in prepared) return { ok: false, code: "BUSY" };
-  if (!prepared.session.inputVaultRef) return { ok: false, code: "NOT_READY" };
-  if (!prepared.ready) return { ok: false, code: "NOT_READY" };
-
-  try {
-    const rawInput = await vault.reveal(prepared.session.inputVaultRef);
-    const result = await importDigitalInventory({
-      actor: input.actor,
-      config: input.config,
-      vault,
-      db,
-      input: rawInput,
-      reason: input.assetMetadata ? "Sheets inventory import" : "Admin inventory import",
-      correlationId: input.correlationId,
-      ...input.assetMetadata,
-    });
-    if (!result.ok) {
-      await sql`
-        update admin_inventory_import
-        set status = 'READY', updated_at = now()
-        where admin_telegram_user_id = ${adminTelegramUserId}
-      `.execute(db);
-      return { ok: false, code: result.code };
-    }
-    await sql`
-      update admin_inventory_import
-      set status = 'COMMITTED', input_vault_ref = null, imported_at = now(), updated_at = now()
-      where admin_telegram_user_id = ${adminTelegramUserId}
-    `.execute(db);
-    await deleteAssetVaultRef(db, vault, prepared.session.inputVaultRef, {
-      correlationId: input.correlationId,
-      reason: "inventory import committed",
-    });
-    return { ok: true, reused: false, summary: result.summary };
-  } catch (error) {
-    await sql`
-      update admin_inventory_import
-      set status = 'READY', updated_at = now()
-      where admin_telegram_user_id = ${adminTelegramUserId}
-    `.execute(db);
-    throw error;
-  }
+  return { ok: true, reused: outcome.reused, summary: outcome.summary };
 }
 
 export async function getInventoryImportSession(
@@ -926,7 +1437,17 @@ export async function getInventoryImportSession(
   const session = await loadSession(db, adminTelegramUserId);
   if (!session) return null;
   if (session.expiresAt <= now) {
-    await clearSession(db, adminTelegramUserId);
+    if (session.status === "PROCESSING") return session;
+    const cleared = await sql`
+      delete from admin_inventory_import
+      where admin_telegram_user_id = ${adminTelegramUserId}
+        and generation = ${session.generation}
+        and status = ${session.status}
+        and input_vault_ref is not distinct from ${session.inputVaultRef}
+        and selected_variant_id is not distinct from ${session.selectedVariantId}
+        and expires_at = ${new Date(session.expiresAt).toISOString()}
+    `.execute(db);
+    if (cleared.numAffectedRows !== 1n) return loadSession(db, adminTelegramUserId);
     return null;
   }
   return session;

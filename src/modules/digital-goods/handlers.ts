@@ -140,7 +140,11 @@ export function createFulfillmentOutboxHandler(
           storageRoots: deps.fileDelivery.storageRoots,
           sender: deps.fileDelivery.sender,
         });
-        return delivered.ok ? { kind: "PUBLISHED" } : { kind: "RETRY", errorCode: delivered.code };
+        if (delivered.ok) return { kind: "PUBLISHED" };
+        if (delivered.code === "ORDER_NOT_PAID" || delivered.code === "SEND_UNCERTAIN") {
+          return { kind: "TERMINAL_REVIEW", errorCode: delivered.code };
+        }
+        return { kind: "RETRY", errorCode: delivered.code };
       }
       if (queuedFile.code !== "NOT_DIGITAL_FILE") {
         return queuedFile.code === "ORDER_NOT_FOUND" || queuedFile.code === "ORDER_NOT_PAID"

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import { presentPaymentForOrder } from "../../src/modules/payments/service.js";
 import {
   dockerAvailable,
@@ -115,6 +116,7 @@ describe.skipIf(!hasDocker)("atomic pre-payment reservation (T154)", () => {
         bank_transaction, payment_intent, order_transition, "order",
         product_variant, product, category, customer cascade
     `.execute(ctx.db);
+    await setStoreModeForTest(ctx.db, "OPEN", "test");
   });
 
   const MERCHANT = {

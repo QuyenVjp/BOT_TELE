@@ -382,13 +382,34 @@ describe.skipIf(!hasDocker)("SePay cross-source transaction identity", () => {
     expect(await countSettledAllocations()).toBe(1);
   });
 
-  it("7. reports AMBIGUOUS without merging when several rows share the key", async () => {
+  it("7. reports AMBIGUOUS without merging or settling a pending order", async () => {
     const f = await seedPayableOrder();
     const at = new Date();
     const reference = referenceFor(f);
-    const settled = evidenceFor(transferOf(f, reference, at), nextWebhookId());
-    expect(await applyPaymentEvidence(ctx.db, settled)).toMatchObject({ kind: "SETTLED" });
-    const firstId = await onlyBankTransactionId();
+
+    const firstId = newId();
+    const firstProviderTransactionId = nextWebhookId();
+    await sql`
+      insert into bank_transaction
+        (id, provider, provider_transaction_id, direction, merchant_account_id, amount_vnd,
+         content, reference, transacted_at, raw_hash, signature_status, schema_version,
+         correlation_key)
+      values
+        (${firstId}, 'sepay', ${firstProviderTransactionId}, 'IN', ${f.account}, ${f.amount},
+         ${f.content}, ${reference}, ${at.toISOString()}, ${"hash-" + newId()}, 'VERIFIED', 'sepay.v1',
+         ${bankTransactionCorrelationKey({
+           merchantAccountId: f.account,
+           direction: "IN",
+           amountVnd: f.amount,
+           reference,
+         })})
+    `.execute(ctx.db);
+    await attachBankTransactionAliases(ctx.db, firstId, "sepay", [
+      {
+        aliasType: "webhook_legacy_id",
+        aliasValue: firstProviderTransactionId,
+      },
+    ]);
 
     // A historical duplicate row carrying the same correlation key (the shape a
     // pre-migration database can legitimately hold: the backfill labels it and
@@ -435,16 +456,45 @@ describe.skipIf(!hasDocker)("SePay cross-source transaction identity", () => {
     expect(await countBankTransactions()).toBe(3);
     expect(await countAliases()).toBe(3);
     const review = await sql<{ type: string; reason: string }>`
-      select type, reason from discrepancy order by type
+      select type, reason
+      from discrepancy
+      order by type
     `.execute(ctx.db);
     expect(review.rows).toHaveLength(1);
     expect(review.rows[0]?.type).toBe("AMBIGUOUS_CORRELATION");
     expect(review.rows[0]?.reason).toContain(firstId);
     expect(review.rows[0]?.reason).toContain(historicalId);
-    // The failure mode this replaces: a settled payment reported as UNMATCHED.
+
+    // Ambiguous evidence routes the live order and intent to review, never to
+    // settlement or a customer credit.
     expect(await countDiscrepancies("UNMATCHED")).toBe(0);
-    expect(await countSettledAllocations()).toBe(1);
-    expect(await orderStatus(f.orderId)).toBe("PAID");
+    expect(await countSettledAllocations()).toBe(0);
+    expect(await orderStatus(f.orderId)).toBe("PAYMENT_NEEDS_REVIEW");
+    const order = await sql<{ status: string; paid_at: Date | null }>`
+      select status, paid_at from "order" where id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(order.rows[0]).toEqual({ status: "PAYMENT_NEEDS_REVIEW", paid_at: null });
+    const intent = await sql<{ status: string }>`
+      select status from payment_intent where id = ${f.intentId}
+    `.execute(ctx.db);
+    expect(intent.rows[0]?.status).toBe("NEEDS_REVIEW");
+    const settlementEvents = await sql<{ count: string }>`
+      select count(*)::text as count
+      from outbox_event
+      where aggregate_id in (${f.orderId}, ${f.intentId})
+        and event_type in ('OrderPaid', 'PaymentSettled')
+    `.execute(ctx.db);
+    expect(Number(settlementEvents.rows[0]?.count ?? 0)).toBe(0);
+    const credits = await sql<{ count: string }>`
+      select count(*)::text as count
+      from wallet_ledger
+      where wallet_account_id = (
+        select id from wallet_account
+        where customer_id = (select customer_id from "order" where id = ${f.orderId})
+      )
+        and entry_type = 'CREDIT'
+    `.execute(ctx.db);
+    expect(Number(credits.rows[0]?.count ?? 0)).toBe(0);
   });
 
   it("8. cannot point one alias value at a second canonical row", async () => {

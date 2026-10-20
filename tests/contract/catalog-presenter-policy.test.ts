@@ -104,17 +104,31 @@ describe("catalog presenter stock-policy guard", () => {
     expect(callbacks.some((callback) => callback.startsWith("buy:"))).toBe(false);
   });
 
-  it("offers restock and, when preorder is enabled, a deposit hold without a dead end", () => {
+  it("uses a deposit hold instead of restock for preorder-enabled out-of-stock variants", () => {
     const message = presentVariantDetail({
       ...variant("LOCAL_ONLY", "STOCK_ACCOUNT", false, 0),
       preorder_enabled: true,
     });
     const callbacks = message.buttons.flat().map((button) => button.callbackData);
 
-    expect(callbacks).toContain("rst:sub:variant-LOCAL_ONLY-STOCK_ACCOUNT");
+    expect(callbacks).not.toContain("rst:sub:variant-LOCAL_ONLY-STOCK_ACCOUNT");
     expect(callbacks).toContain("preorder:consent:variant-LOCAL_ONLY-STOCK_ACCOUNT");
     expect(message.text).toContain("🔴 Tình trạng: Hết hàng");
     expect(message.text).not.toContain("Tạm hết hàng");
+  });
+
+  it("offers restock only for unavailable finite local inventory", () => {
+    for (const row of [
+      variant("LOCAL_ONLY", "MANUAL_FULFILLMENT", false, 0),
+      variant("LOCAL_ONLY", "UNLIMITED_SERVICE", false, 0),
+      variant("SUPPLIER_ONLY", "SUPPLIER_API", false, 0),
+    ]) {
+      const callbacks = presentVariantDetail(row)
+        .buttons.flat()
+        .map((button) => button.callbackData);
+
+      expect(callbacks.some((callback) => callback.startsWith("rst:sub:"))).toBe(false);
+    }
   });
 
   it("renders the chosen variant with Mua ngay, support and recovery rows", () => {
@@ -219,6 +233,8 @@ describe("catalog product detail copy", () => {
     for (const heading of ["📝 Mô tả", "📦 Bạn nhận được", "📘 Hướng dẫn", "🛡 Bảo hành"]) {
       expect(message.text).toContain(heading);
     }
+    expect(message.text).toContain("Mô tả chi tiết.");
+    expect(message.text).toContain("Đăng nhập tại claude.ai");
     expect(message.text).toContain("💰 Giá từ: ");
     expect(message.text).toContain("🟡 Tình trạng: Sắp hết hàng");
     expect(message.text).toContain("⚡ Giao hàng: Nhân viên xử lý");
@@ -238,15 +254,24 @@ describe("catalog product detail copy", () => {
     ]);
   });
 
-  it("keeps restock and, when enabled, a deposit hold on an out-of-stock variant", () => {
+  it("uses a deposit hold instead of restock for preorder-enabled out-of-stock variants", () => {
     const soldOut = { ...variant("LOCAL_ONLY", "STOCK_ACCOUNT", false, 0), preorder_enabled: true };
     const message = presentProductDetail(detailView([soldOut]), {});
     const callbacks = message.buttons.flat().map((button) => button.callbackData);
 
     expect(message.text).toContain("🔴 Tình trạng: Hết hàng");
-    expect(callbacks).toContain(`rst:sub:${soldOut.id}`);
+    expect(callbacks).not.toContain(`rst:sub:${soldOut.id}`);
     expect(callbacks).toContain(`preorder:consent:${soldOut.id}`);
     expect(callbacks.some((callback) => callback.startsWith("buy:"))).toBe(false);
+  });
+
+  it("does not offer restock for an out-of-stock variant without a local stock route", () => {
+    const unavailable = variant("LOCAL_ONLY", "MANUAL_FULFILLMENT", false, 0);
+    const callbacks = presentProductDetail(detailView([unavailable]), {})
+      .buttons.flat()
+      .map((button) => button.callbackData);
+
+    expect(callbacks.some((callback) => callback.startsWith("rst:sub:"))).toBe(false);
   });
 
   it("does not offer restock for a ready variant without a supported buy route", () => {

@@ -20,13 +20,17 @@ import {
   reorderCategory,
   ensureDefaultCategories,
   getOrCreateUncategorizedCategory,
-  VARIANT_READY_SQL,
 } from "./modules/catalog/repository.js";
 import { createCatalogCache } from "./modules/catalog/cache.js";
 import { resolveCatalogAudience } from "./modules/catalog/visibility.js";
 
 import { pathToFileURL } from "node:url";
 import { getAdminOverview } from "./modules/admin/overview.js";
+import {
+  listAdminInventory,
+  getAdminInventoryProduct,
+  getAdminInventoryVariant,
+} from "./modules/admin/inventory.js";
 import {
   updateAdminProductContent,
   ADMIN_PRODUCT_CONTENT_FIELDS,
@@ -71,10 +75,11 @@ import {
   presentAdminWarrantyClaim,
   presentAdminWarrantyQueue,
   presentAdminRefundAdjustPrompt,
-  presentAdminWarrantyRejectReason,
+  WARRANTY_REJECT_REASONS,
   type AdminClaimView,
   type WarrantyQueueRow,
   type WarrantyQueueView,
+  presentAdminWarrantyRejectReason,
 } from "./bot/presenters/warranty-admin.js";
 import {
   presentWarrantyClaim,
@@ -84,6 +89,7 @@ import {
   presentWarrantyNotCovered,
   presentWarrantyPolicy,
   presentWarrantyReportPreview,
+  type WarrantyRefundEvidence,
 } from "./bot/presenters/warranty.js";
 import {
   approveClaimRefund,
@@ -125,11 +131,14 @@ import {
   recoverStoredDeliveryNotificationHandoffsBatch,
 } from "./modules/digital-goods/delivery-notification.js";
 import { recoverSePayBatch } from "./modules/payments/recovery.js";
-import { reconcileForPaymentCheck } from "./modules/payments/check-now.js";
 import { setTimeout as delayNotification } from "node:timers/promises";
 import { recoverSupplierOrdersBatch } from "./modules/supplier/recovery.js";
 import type { LatencyMetrics } from "./infrastructure/observability/tracing.js";
-import { subscribeRestock, unsubscribeRestock } from "./modules/catalog/restock.js";
+import {
+  restockVariantEligibilitySql,
+  subscribeRestock,
+  unsubscribeRestock,
+} from "./modules/catalog/restock.js";
 import {
   reserveNotificationSlot,
   pauseNotificationRate,
@@ -798,15 +807,25 @@ export async function restockVariantLabel(db: Db, variantId: string): Promise<st
       select p.name_vi as product_name, v.name_vi as variant_name
       from product_variant v
       join product p on p.id = v.product_id
+      join category c on c.id = p.category_id
       left join variant_quantity_stock q on q.variant_id = v.id
-      where v.id = ${variantId}
-        and v.is_active
-        and p.is_active
-        and not (${VARIANT_READY_SQL})
+      where ${restockVariantEligibilitySql(variantId)}
       limit 1
     `.execute(db)
   ).rows[0];
   return row ? `${row.product_name} — ${row.variant_name}` : null;
+}
+
+export async function subscribeRestockForCustomer(
+  db: Db,
+  customerId: string,
+  variantId: string,
+): Promise<PresentedMessage> {
+  const label = await restockVariantLabel(db, variantId);
+  if (!label) return { text: "Sản phẩm không tồn tại.", buttons: [] };
+  const subscription = await subscribeRestock(db, customerId, variantId);
+  if (!subscription) return { text: "Không thể đăng ký nhận tin lúc này.", buttons: [] };
+  return { text: `Đã đăng ký báo có hàng: ${label}.`, buttons: [] };
 }
 
 function adminWarrantyError(text: string): PresentedMessage {
@@ -828,6 +847,8 @@ function adminClaimErrorText(code: string): string {
       return "Chỉ chủ shop mới xử lý được yêu cầu bảo hành.";
     case "NOT_FOUND":
       return "Không tìm thấy yêu cầu bảo hành.";
+    case "STALE_VERSION":
+      return "Yêu cầu đã thay đổi từ lúc mở màn hình. Hãy mở lại để xem trạng thái mới nhất.";
     case "ILLEGAL_STATE":
       return "Yêu cầu này đang ở trạng thái khác — mở lại để xem bước tiếp theo.";
     case "NOT_ALLOWED_BY_POLICY":
@@ -908,6 +929,7 @@ async function warrantyQueueRows(db: Db, view: WarrantyQueueView): Promise<Warra
         : sql`c.status = any(${sql.val(statuses)}::text[])`;
   const rows = await sql<{
     id: string;
+    version: number;
     claim_number: string;
     status: string;
     customer_id: string;
@@ -915,7 +937,7 @@ async function warrantyQueueRows(db: Db, view: WarrantyQueueView): Promise<Warra
     approved_refund_vnd: string | null;
     calculated_refund_vnd: string;
   }>`
-    select c.id, c.claim_number, c.status, c.customer_id,
+    select c.id, c.version, c.claim_number, c.status, c.customer_id,
            coalesce(c.approved_refund_vnd, c.calculated_refund_vnd)::text as approved_refund_vnd,
            c.calculated_refund_vnd::text as calculated_refund_vnd,
            p.name_vi as product_name
@@ -929,6 +951,7 @@ async function warrantyQueueRows(db: Db, view: WarrantyQueueView): Promise<Warra
   `.execute(db);
   return rows.rows.map((row) => ({
     claimId: row.id,
+    version: row.version,
     claimNumber: row.claim_number,
     customerLabel: `Khách ${row.customer_id.slice(-4).toUpperCase()}`,
     productName: row.product_name,
@@ -941,6 +964,7 @@ async function warrantyQueueRows(db: Db, view: WarrantyQueueView): Promise<Warra
 async function loadAdminWarrantyClaim(db: Db, claimId: string): Promise<AdminClaimView | null> {
   const rows = await sql<{
     id: string;
+    version: number;
     claim_number: string;
     status: string;
     customer_id: string;
@@ -963,7 +987,7 @@ async function loadAdminWarrantyClaim(db: Db, claimId: string): Promise<AdminCla
     refund_account_holder: string | null;
     rejection_reason: string | null;
   }>`
-    select c.id, c.claim_number, c.status, c.customer_id, o.order_number, p.name_vi as product_name,
+    select c.id, c.version, c.claim_number, c.status, c.customer_id, o.order_number, p.name_vi as product_name,
            c.issue_type, c.reported_at, c.warranty_start, c.warranty_end, c.used_days,
            c.remaining_days, c.paid_amount_vnd::text as paid_amount_vnd,
            c.calculated_refund_vnd::text as calculated_refund_vnd,
@@ -984,6 +1008,7 @@ async function loadAdminWarrantyClaim(db: Db, claimId: string): Promise<AdminCla
   const openForDecision = ["SUBMITTED", "TRIAGE", "WAITING_CUSTOMER"].includes(row.status);
   return {
     id: row.id,
+    version: row.version,
     claimNumber: row.claim_number,
     status: row.status,
     statusLabel: WARRANTY_STATUS_LABELS[row.status] ?? row.status,
@@ -1185,14 +1210,13 @@ function isWarrantyIssueType(value: string): value is WarrantyIssueType {
 }
 
 /**
- * The customer's fulfilled order for a variant, its delivered asset, and where the warranty window
- * stands right now. Ownership is part of the query, so a forged callback cannot reach another
- * customer's order.
+ * The customer's fulfilled order, its delivered asset, and where the warranty window stands right
+ * now. Ownership is part of the query, so a forged callback cannot reach another customer's order.
  */
 async function warrantyOrderContext(
   db: Db,
   customerId: string,
-  variantId: string,
+  orderId: string,
 ): Promise<
   | { kind: "none" }
   | { kind: "not_covered" }
@@ -1224,10 +1248,10 @@ async function warrantyOrderContext(
              order by a.updated_at asc, a.id asc limit 1) as asset_id
     from "order" o
     join product_variant v on v.id = o.variant_id
-    where o.customer_id = ${customerId}
-      and o.variant_id = ${variantId}
+    where o.id = ${orderId}
+      and o.customer_id = ${customerId}
+      and o.status = 'COMPLETED'
       and o.completed_at is not null
-    order by o.completed_at desc
     limit 1
   `.execute(db);
   const row = rows.rows[0];
@@ -1265,6 +1289,7 @@ async function warrantyEstimate(
     from "order" o
     join product_variant v on v.id = o.variant_id
     where o.id = ${orderId}
+      and o.status = 'COMPLETED'
     limit 1
   `.execute(db);
   const row = rows.rows[0];
@@ -1284,6 +1309,27 @@ async function warrantyEstimate(
   };
 }
 
+function mapCustomerRefundEvidence(input: {
+  status: string | null;
+  amountVnd: string | null;
+  paidAt: Date | string | null;
+}): WarrantyRefundEvidence | null {
+  if (typeof input.amountVnd !== "string" || !/^\d+$/u.test(input.amountVnd)) return null;
+  let amountVnd: bigint;
+  try {
+    amountVnd = BigInt(input.amountVnd);
+  } catch {
+    return null;
+  }
+  if (input.status === "OPEN" && input.paidAt === null)
+    return { state: "DUE", amountVnd, paidAt: null };
+  if (input.status !== "PAID" || input.paidAt === null) return null;
+  if (typeof input.paidAt !== "string" && !(input.paidAt instanceof Date)) return null;
+  const paidAt = input.paidAt instanceof Date ? input.paidAt : new Date(input.paidAt);
+  if (!Number.isFinite(paidAt.getTime())) return null;
+  return { state: "PAID", amountVnd, paidAt: paidAt.toISOString() };
+}
+
 /** The customer's own claim, by its human reference. */
 async function loadCustomerWarrantyClaim(
   db: Db,
@@ -1297,6 +1343,7 @@ async function loadCustomerWarrantyClaim(
   calculated_refund_vnd: string;
   approved_refund_vnd: string | null;
   product_name: string;
+  refundEvidence: WarrantyRefundEvidence | null;
 } | null> {
   const ref = claimRef.trim().toUpperCase();
   const rows = await sql<{
@@ -1307,19 +1354,45 @@ async function loadCustomerWarrantyClaim(
     calculated_refund_vnd: string;
     approved_refund_vnd: string | null;
     product_name: string;
+    refund_status: string | null;
+    refund_amount_vnd: string | null;
+    refund_paid_at: Date | string | null;
   }>`
     select c.id, c.claim_number, c.status, c.remaining_days,
            c.calculated_refund_vnd::text as calculated_refund_vnd,
            c.approved_refund_vnd::text as approved_refund_vnd,
-           p.name_vi as product_name
+           p.name_vi as product_name,
+           r.status as refund_status,
+           r.amount_vnd::text as refund_amount_vnd,
+           r.paid_at as refund_paid_at
     from warranty_claim c
     join "order" o on o.id = c.order_id
     join product_variant v on v.id = o.variant_id
     join product p on p.id = v.product_id
+    left join shop_refund_obligation r
+      on r.id = c.refund_obligation_id
+     and r.claim_id = c.id
+     and r.order_id = c.order_id
+     and r.customer_id = c.customer_id
     where c.customer_id = ${customerId} and c.claim_number = ${ref}
     limit 1
   `.execute(db);
-  return rows.rows[0] ?? null;
+  const row = rows.rows[0];
+  if (!row) return null;
+  return {
+    id: row.id,
+    claim_number: row.claim_number,
+    status: row.status,
+    remaining_days: row.remaining_days,
+    calculated_refund_vnd: row.calculated_refund_vnd,
+    approved_refund_vnd: row.approved_refund_vnd,
+    product_name: row.product_name,
+    refundEvidence: mapCustomerRefundEvidence({
+      status: row.refund_status,
+      amountVnd: row.refund_amount_vnd,
+      paidAt: row.refund_paid_at,
+    }),
+  };
 }
 
 /**
@@ -1360,7 +1433,11 @@ export async function presentRestockList(db: Db, customerId: string) {
       from restock_subscription rs
       join product_variant v on v.id = rs.variant_id
       join product p on p.id = v.product_id
-      where rs.customer_id = ${customerId} and rs.active
+      join category c on c.id = p.category_id
+      left join variant_quantity_stock q on q.variant_id = v.id
+      where rs.customer_id = ${customerId}
+        and rs.active
+        and ${restockVariantEligibilitySql()}
       order by rs.created_at
     `.execute(db)
   ).rows;
@@ -1368,12 +1445,19 @@ export async function presentRestockList(db: Db, customerId: string) {
     text: rows.length
       ? `🔔 Đang theo dõi:\n${rows.map((r, i) => `${i + 1}. ${r.product_name} — ${r.variant_name}`).join("\n")}`
       : "Bạn chưa theo dõi sản phẩm nào.",
-    buttons: rows.map((r) => [
-      {
-        text: `Hủy ${r.product_name} — ${r.variant_name}`,
-        callbackData: `rst:unsub:${r.variant_id}`,
-      },
-    ]),
+    buttons: rows.length
+      ? rows.map((r) => [
+          {
+            text: `Hủy ${r.product_name} — ${r.variant_name}`,
+            callbackData: `rst:unsub:${r.variant_id}`,
+          },
+        ])
+      : [
+          [
+            { text: "🏠 Cửa hàng", callbackData: "shop:home" },
+            { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+          ],
+        ],
   };
 }
 
@@ -1763,13 +1847,12 @@ async function bootstrap(): Promise<void> {
           coverageVi: row.warranty_coverage_vi,
           exclusionsVi: row.warranty_exclusions_vi,
           examplePriceVnd: BigInt(row.price_vnd),
-          variantId: input.variantId,
         });
       },
       async issueTypes(input) {
         const customerId = resolveCustomerId ? await resolveCustomerId(input.telegramUserId) : null;
         if (!customerId) return safeWarrantyMessage("Không xác minh được khách hàng.");
-        const context = await warrantyOrderContext(dbHandle.db, customerId, input.variantId);
+        const context = await warrantyOrderContext(dbHandle.db, customerId, input.orderId);
         if (context.kind === "none")
           return safeWarrantyMessage("Bạn chưa có đơn đã giao cho sản phẩm này.");
         if (context.kind === "expired")
@@ -1777,7 +1860,7 @@ async function bootstrap(): Promise<void> {
         if (context.kind === "not_covered") return presentWarrantyNotCovered();
         return presentWarrantyIssueTypes({
           orderNumber: context.orderNumber,
-          variantId: input.variantId,
+          orderId: context.orderId,
         });
       },
       /** Goal §41: confirm before submitting, with the estimate clearly conditional. */
@@ -1786,7 +1869,7 @@ async function bootstrap(): Promise<void> {
         if (!customerId) return safeWarrantyMessage("Không xác minh được khách hàng.");
         if (!isWarrantyIssueType(input.issueType))
           return safeWarrantyMessage("Tình trạng bạn chọn không hợp lệ.");
-        const context = await warrantyOrderContext(dbHandle.db, customerId, input.variantId);
+        const context = await warrantyOrderContext(dbHandle.db, customerId, input.orderId);
         if (context.kind === "none")
           return safeWarrantyMessage("Bạn chưa có đơn đã giao cho sản phẩm này.");
         if (context.kind === "expired")
@@ -1802,13 +1885,13 @@ async function bootstrap(): Promise<void> {
           warrantyEnd: context.warrantyEnd,
           remainingDays: estimate.remainingDays,
           estimatedRefundVnd: estimate.refundVnd,
-          variantId: input.variantId,
+          orderId: context.orderId,
         });
       },
       async report(input) {
         const customerId = resolveCustomerId ? await resolveCustomerId(input.telegramUserId) : null;
         if (!customerId) return safeWarrantyMessage("Không xác minh được khách hàng.");
-        const context = await warrantyOrderContext(dbHandle.db, customerId, input.variantId);
+        const context = await warrantyOrderContext(dbHandle.db, customerId, input.orderId);
         if (context.kind === "none")
           return safeWarrantyMessage("Bạn chưa có đơn đã giao cho sản phẩm này.");
         if (context.kind === "expired")
@@ -1849,6 +1932,7 @@ async function bootstrap(): Promise<void> {
           estimatedRefundVnd: BigInt(claim.calculated_refund_vnd),
           approvedRefundVnd:
             claim.approved_refund_vnd === null ? null : BigInt(claim.approved_refund_vnd),
+          refundEvidence: claim.refundEvidence,
           remainingDays: claim.remaining_days,
           timeline: await listClaimTimeline(dbHandle.db, claim.id),
         });
@@ -1876,7 +1960,6 @@ async function bootstrap(): Promise<void> {
       driver: config.SEARCH_PARSER_DRIVER,
       timeoutMs: config.SEARCH_PARSER_TIMEOUT_MS,
     }),
-    callbackCodec: buyNowCodec,
     tokenCodec: callbackCodec,
     cache: catalogCache,
     productLinkSecret: config.BUY_NOW_CALLBACK_HMAC_KEY,
@@ -1917,15 +2000,6 @@ async function bootstrap(): Promise<void> {
       });
       return result.ok ? { ok: true, message: "" } : { ok: false, message: result.message };
     },
-    // "Kiểm tra thanh toán": a bounded, cooldown-guarded, read-only provider check that can
-    // only record evidence the normal matcher accepts. Omitted when SePay is not configured,
-    // so the button degrades to the internal projection read instead of failing.
-    ...(sePayRecoveryPort
-      ? {
-          reconcileForCheck: () =>
-            reconcileForPaymentCheck(dbHandle.db, { port: sePayRecoveryPort }),
-        }
-      : {}),
   });
   const history = createHistoryCallbacks({ db: dbHandle.db });
   const notificationService = { getNotificationPreferences, setNotificationPreferences };
@@ -1939,11 +2013,27 @@ async function bootstrap(): Promise<void> {
     bankName: config.VIETQR_BANK_NAME,
     bankAlias: config.VIETQR_BANK_ALIAS,
   };
+  const preorderAudienceFor = async (telegramUserId: string) => {
+    const isRootAdmin =
+      config.ADMIN_TELEGRAM_USER_ID !== undefined &&
+      String(telegramUserId) === String(config.ADMIN_TELEGRAM_USER_ID);
+    return {
+      isRootAdmin,
+      audience: await resolveCatalogAudience(dbHandle.db, { telegramUserId, isRootAdmin }),
+    };
+  };
   const preorderHomeButtons: PresentedMessage["buttons"] = [
     [
       { text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" },
       { text: "🛒 Về trang chủ", callbackData: "shop:home" },
     ],
+  ];
+  const preorderDeadlineButtons: PresentedMessage["buttons"] = [
+    [
+      { text: "📌 Đặt cọc của tôi", callbackData: "cust:preorders" },
+      { text: "💬 Hỗ trợ", callbackData: "supp:open" },
+    ],
+    [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
   ];
   /**
    * The QR for the leg a reservation currently owes: the deposit while the hold is
@@ -1987,6 +2077,12 @@ async function bootstrap(): Promise<void> {
       correlationId: input.correlationId,
     });
     if (!presented.ok) {
+      if (presented.error === "DEADLINE_PASSED") {
+        return {
+          text: "Hạn thanh toán hoặc thời hạn giữ hàng của suất đặt cọc đã qua. Vui lòng mở “Đặt cọc của tôi” để xem trạng thái hiện tại hoặc liên hệ Hỗ trợ.",
+          buttons: preorderDeadlineButtons,
+        };
+      }
       return {
         text: "Chưa tạo được mã thanh toán cho suất đặt cọc này. Vui lòng mở “Đặt cọc của tôi” để thử lại.",
         buttons: preorderHomeButtons,
@@ -2000,6 +2096,8 @@ async function bootstrap(): Promise<void> {
       depositVnd: BigInt(row.deposit_amount_vnd),
       balanceVnd: BigInt(row.balance_amount_vnd),
       presentation: presented.presentation,
+      balanceDueUntil: presented.balanceDueUntil,
+      holdUntil: presented.holdUntil,
       reservationId: input.reservationId,
     });
   }
@@ -2394,12 +2492,8 @@ async function bootstrap(): Promise<void> {
         : null;
     },
     restock: {
-      async subscribe(customerId, variantId) {
-        const label = await restockVariantLabel(dbHandle.db, variantId);
-        if (!label) return { text: "Sản phẩm không tồn tại.", buttons: [] };
-        await subscribeRestock(dbHandle.db, customerId, variantId);
-        return { text: `Đã đăng ký báo có hàng: ${label}.`, buttons: [] };
-      },
+      subscribe: (customerId, variantId) =>
+        subscribeRestockForCustomer(dbHandle.db, customerId, variantId),
       async unsubscribe(customerId, variantId) {
         const label = await restockVariantLabel(dbHandle.db, variantId);
         await unsubscribeRestock(dbHandle.db, customerId, variantId);
@@ -2430,9 +2524,14 @@ async function bootstrap(): Promise<void> {
       return formatSePayReconciliationAdminText(status);
     },
     preorder: {
-      async consent(variantId) {
-        const preorderConfig = await loadPreorderVariantConfig(dbHandle.db, variantId);
-        if (!preorderConfig)
+      async consent(input) {
+        const { audience } = await preorderAudienceFor(input.telegramUserId);
+        const preorderConfig = await loadPreorderVariantConfig(
+          dbHandle.db,
+          input.variantId,
+          audience,
+        );
+        if (!preorderConfig || !preorderConfig.preorderEnabled)
           return {
             text: "Sản phẩm không tồn tại hoặc chưa hỗ trợ đặt cọc.",
             buttons: [[{ text: "🛒 Về trang chủ", callbackData: "shop:home" }]],
@@ -2440,13 +2539,13 @@ async function bootstrap(): Promise<void> {
         return presentPreorderConsent(preorderConfig);
       },
       async create(input) {
+        const { audience, isRootAdmin } = await preorderAudienceFor(input.telegramUserId);
         const res = await createPreorderReservation(dbHandle.db, {
           customerId: input.customerId,
           variantId: input.variantId,
+          audience,
           telegramUserId: input.telegramUserId,
-          isRootAdmin:
-            config.ADMIN_TELEGRAM_USER_ID !== undefined &&
-            String(input.telegramUserId) === String(config.ADMIN_TELEGRAM_USER_ID),
+          isRootAdmin,
         });
         if (!res.ok) {
           const msg =
@@ -2581,7 +2680,7 @@ async function bootstrap(): Promise<void> {
       }
       return presentDeliveryReveal(opened);
     },
-    async walletAccount(ctx) {
+    async customerAccount(ctx) {
       const customerId = await resolveCustomerId(ctx.telegramUserId);
       if (!customerId)
         return {
@@ -3147,6 +3246,7 @@ async function bootstrap(): Promise<void> {
           db: dbHandle.db,
           ticketId: input.ticketId,
           toStatus: input.toStatus,
+          expectedVersion: input.expectedVersion,
           actorId: input.telegramUserId,
           correlationId: input.correlationId,
         });
@@ -4892,56 +4992,7 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const result = await sql<{
-          id: string;
-          name: string;
-          variant_count: number;
-          in_stock: number;
-          low_stock: number;
-          out_stock: number;
-          active: boolean;
-          total_products: number;
-          total_variants: number;
-          total_in_stock: number;
-          total_low_stock: number;
-          total_out_stock: number;
-        }>`
-          with variant_stock as (
-            select v.id, v.product_id, v.low_stock_threshold, v.is_active as active,
-              case
-                when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce((select q.available_quantity from variant_quantity_stock q where q.variant_id = v.id), 0)::int
-                when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
-                when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
-                else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
-              end as available
-            from product_variant v
-          ), product_stock as (
-            select p.id, p.name_vi as name, p.is_active as active, p.sort_order, count(vs.id)::int as variant_count,
-              count(vs.id) filter (where vs.available > 0)::int as in_stock,
-              count(vs.id) filter (where vs.low_stock_threshold is not null and vs.low_stock_threshold > 0 and vs.available > 0 and vs.available <= vs.low_stock_threshold)::int as low_stock,
-              count(vs.id) filter (where vs.available <= 0)::int as out_stock
-            from product p
-            left join variant_stock vs on vs.product_id = p.id
-            where p.is_archived = false
-            group by p.id, p.name_vi, p.is_active, p.sort_order
-          )
-          select id, name, active, variant_count, in_stock, low_stock, out_stock,
-            count(*) over()::int as total_products,
-            coalesce(sum(variant_count) over(), 0)::int as total_variants,
-            coalesce(sum(in_stock) over(), 0)::int as total_in_stock,
-            coalesce(sum(low_stock) over(), 0)::int as total_low_stock,
-            coalesce(sum(out_stock) over(), 0)::int as total_out_stock
-          from product_stock
-          order by sort_order asc, id asc
-          limit 20
-        `.execute(dbHandle.db);
-        const extraCounts = await sql<{ held: number; waiting: number }>`
-          select
-            coalesce((select count(*)::int from digital_asset da join product_variant pv on pv.id = da.variant_id join product p on p.id = pv.product_id where da.status = 'RESERVED' and p.is_archived = false), 0)::int as held,
-            coalesce((select count(*)::int from preorder_reservation pr where pr.status in ('WAITING_DEPOSIT', 'DEPOSIT_PAID')), 0)::int as waiting
-        `.execute(dbHandle.db);
-        const held = extraCounts.rows[0]?.held ?? 0;
-        const waiting = extraCounts.rows[0]?.waiting ?? 0;
+        const result = await listAdminInventory(dbHandle.db);
         return presentAdminInventory(
           result.rows.map((row) => ({
             id: row.id,
@@ -4953,13 +5004,13 @@ async function bootstrap(): Promise<void> {
             outOfStock: row.out_stock,
           })),
           {
-            products: result.rows[0]?.total_products ?? 0,
-            variants: result.rows[0]?.total_variants ?? 0,
-            inStock: result.rows[0]?.total_in_stock ?? 0,
-            lowStock: result.rows[0]?.total_low_stock ?? 0,
-            outOfStock: result.rows[0]?.total_out_stock ?? 0,
-            held,
-            waiting,
+            products: result.totals.products,
+            variants: result.totals.variants,
+            inStock: result.totals.in_stock,
+            lowStock: result.totals.low_stock,
+            outOfStock: result.totals.out_stock,
+            held: result.held,
+            waiting: result.waiting,
           },
         );
       },
@@ -4977,60 +5028,16 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const product = await sql<{
-          id: string;
-          name: string;
-        }>`select id, name_vi as name from product where id = ${input.productId} limit 1`.execute(
-          dbHandle.db,
-        );
-        const row = product.rows[0];
-        if (!row)
+        const product = await getAdminInventoryProduct(dbHandle.db, input.productId);
+        if (!product)
           return {
             text: "Sản phẩm không còn hợp lệ.",
             buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
           };
-        const variants = await sql<{
-          id: string;
-          name: string;
-          sku: string;
-          fulfillment_type:
-            | "STOCK_ACCOUNT"
-            | "STOCK_CODE"
-            | "DIGITAL_FILE"
-            | "SUPPLIER_API"
-            | "MANUAL_FULFILLMENT"
-            | "QUANTITY_STOCK"
-            | "UNLIMITED_SERVICE";
-          available: number;
-          reserved: number;
-          delivered: number;
-          error: number;
-          low_stock_threshold: number | null;
-          stock_version: number | null;
-          active: boolean;
-        }>`
-          select v.id, v.name_vi as name, v.sku, v.fulfillment_type, v.is_active as active,
-            case
-              when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
-              when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
-              when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
-              else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
-            end as available,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int as reserved,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'DELIVERED'), 0)::int as delivered,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('FAILED','SUPPLIER_NEEDS_REVIEW','COMPROMISED','REVOKED')), 0)::int as error,
-            v.low_stock_threshold,
-            case when v.fulfillment_type = 'QUANTITY_STOCK' then q.version::int else null end as stock_version
-          from product_variant v
-          left join variant_quantity_stock q on q.variant_id = v.id
-          where v.product_id = ${input.productId}
-          order by v.sort_order asc, v.id asc
-          limit 20
-        `.execute(dbHandle.db);
         return presentAdminInventoryProduct({
-          id: row.id,
-          name: row.name,
-          variants: variants.rows.map((variant) => ({
+          id: product.id,
+          name: product.name,
+          variants: product.variants.map((variant) => ({
             id: variant.id,
             name: variant.name,
             sku: variant.sku,
@@ -5065,46 +5072,7 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const result = await sql<{
-          product_id: string;
-          id: string;
-          name: string;
-          sku: string;
-          fulfillment_type:
-            | "STOCK_ACCOUNT"
-            | "STOCK_CODE"
-            | "DIGITAL_FILE"
-            | "SUPPLIER_API"
-            | "MANUAL_FULFILLMENT"
-            | "QUANTITY_STOCK"
-            | "UNLIMITED_SERVICE";
-          inventory_fields: unknown;
-          available: number;
-          reserved: number;
-          delivered: number;
-          error: number;
-          stock_version: number | null;
-          low_stock_threshold: number | null;
-          active: boolean;
-        }>`
-          select v.product_id, v.id, v.name_vi as name, v.sku, v.fulfillment_type, v.inventory_fields, v.is_active as active,
-            case
-              when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
-              when v.fulfillment_type = 'DIGITAL_FILE' then coalesce((select count(*) from variant_file_artifact a where a.variant_id = v.id and a.is_active), 0)::int
-              when v.fulfillment_type = 'SUPPLIER_API' then coalesce((select count(*) from supplier_sku ss where ss.variant_id = v.id and ss.is_active), 0)::int
-              else coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'AVAILABLE'), 0)::int
-            end as available,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('RESERVED','READY')), 0)::int as reserved,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status = 'DELIVERED'), 0)::int as delivered,
-            coalesce((select count(*) from digital_asset da where da.variant_id = v.id and da.status in ('FAILED','SUPPLIER_NEEDS_REVIEW','COMPROMISED','REVOKED')), 0)::int as error,
-            case when v.fulfillment_type = 'QUANTITY_STOCK' then q.version::int else null end as stock_version,
-            v.low_stock_threshold
-          from product_variant v
-          left join variant_quantity_stock q on q.variant_id = v.id
-          where v.id = ${input.variantId}
-          limit 1
-        `.execute(dbHandle.db);
-        const variant = result.rows[0];
+        const variant = await getAdminInventoryVariant(dbHandle.db, input.variantId);
         if (!variant)
           return {
             text: "Biến thể không còn hợp lệ.",
@@ -5128,6 +5096,7 @@ async function bootstrap(): Promise<void> {
           fileImportSupported: variant.fulfillment_type === "DIGITAL_FILE",
           supplierSupported: variant.fulfillment_type === "SUPPLIER_API",
           announceSupported:
+            variant.available !== null &&
             variant.available > 0 &&
             (variant.fulfillment_type === "STOCK_ACCOUNT" ||
               variant.fulfillment_type === "STOCK_CODE" ||
@@ -5257,6 +5226,7 @@ async function bootstrap(): Promise<void> {
             expectedUsername: config.ADMIN_EXPECTED_USERNAME,
           },
           claimId: input.claimId,
+          expectedVersion: input.expectedVersion,
           correlationId: input.correlationId,
         });
         if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
@@ -5284,6 +5254,7 @@ async function bootstrap(): Promise<void> {
             expectedUsername: config.ADMIN_EXPECTED_USERNAME,
           },
           claimId: input.claimId,
+          expectedVersion: input.expectedVersion,
           note: "Shop cần bạn bổ sung mô tả hoặc ảnh chụp tình trạng tài khoản.",
           correlationId: input.correlationId,
         });
@@ -5306,9 +5277,12 @@ async function bootstrap(): Promise<void> {
         if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        if (claim.version !== input.expectedVersion)
+          return adminWarrantyError(adminClaimErrorText("STALE_VERSION"));
         return presentAdminWarrantyRejectReason({
           claimId: claim.id,
           claimNumber: claim.claimNumber,
+          expectedVersion: input.expectedVersion,
         });
       },
       async warrantyReject(input) {
@@ -5320,7 +5294,12 @@ async function bootstrap(): Promise<void> {
           "Admin warranty",
         );
         if (denied) return presentAdminDenied(denied);
-        const reason = decodeURIComponent(input.reason);
+        const reasonIndex = /^\d{1,2}$/u.test(input.reason) ? Number(input.reason) : -1;
+        const reason =
+          reasonIndex >= 0
+            ? WARRANTY_REJECT_REASONS[reasonIndex]
+            : decodeURIComponent(input.reason);
+        if (!reason) return adminWarrantyError(adminClaimErrorText("INVALID_REASON"));
         const result = await rejectClaim({
           db: dbHandle.db,
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
@@ -5330,6 +5309,7 @@ async function bootstrap(): Promise<void> {
           },
           claimId: input.claimId,
           reason,
+          expectedVersion: input.expectedVersion,
           correlationId: input.correlationId,
         });
         if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
@@ -5370,6 +5350,7 @@ async function bootstrap(): Promise<void> {
             expectedUsername: config.ADMIN_EXPECTED_USERNAME,
           },
           claimId: input.claimId,
+          expectedVersion: input.expectedVersion,
           deliveryBaseUrl: config.APP_BASE_URL,
           bundleTtlSeconds: config.DELIVERY_BUNDLE_TTL_SECONDS,
           correlationId: input.correlationId,
@@ -5379,7 +5360,7 @@ async function bootstrap(): Promise<void> {
         return presentAdminWarrantyActionDone({
           claimNumber: claim?.claimNumber ?? input.claimId,
           claimId: input.claimId,
-          message: "Đã duyệt đổi tài khoản và gửi thông tin nhận hàng mới cho khách.",
+          message: "Đã duyệt đổi tài khoản. Hệ thống sẽ gửi thông tin nhận hàng mới khi sẵn sàng.",
         });
       },
       /** Goal §25: the refund confirmation, with the calculation spelled out before approving. */
@@ -5409,7 +5390,10 @@ async function bootstrap(): Promise<void> {
           });
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        if (claim.version !== input.expectedVersion)
+          return adminWarrantyError(adminClaimErrorText("STALE_VERSION"));
         return presentAdminRefundConfirm({
+          expectedVersion: input.expectedVersion,
           claimId: claim.id,
           claimNumber: claim.claimNumber,
           paidAmountVnd: claim.paidAmountVnd,
@@ -5450,6 +5434,7 @@ async function bootstrap(): Promise<void> {
             expectedUsername: config.ADMIN_EXPECTED_USERNAME,
           },
           claimId: input.claimId,
+          expectedVersion: input.expectedVersion,
           correlationId: input.correlationId,
         });
         if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
@@ -5472,6 +5457,8 @@ async function bootstrap(): Promise<void> {
         if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        if (claim.version !== input.expectedVersion)
+          return adminWarrantyError(adminClaimErrorText("STALE_VERSION"));
         // One pending prompt at a time: an older unexpired row would otherwise claim the next
         // unrelated message the owner sends.
         await sql`
@@ -5482,10 +5469,15 @@ async function bootstrap(): Promise<void> {
         await createAdminCallbackState(dbHandle.db, {
           adminTelegramUserId: input.telegramUserId,
           kind: "WARRANTY_REFUND_ADJUST_PROMPT",
-          payload: { claimId: input.claimId, recommendedVnd: claim.calculatedRefundVnd.toString() },
+          payload: {
+            claimId: input.claimId,
+            expectedVersion: input.expectedVersion,
+            recommendedVnd: claim.calculatedRefundVnd.toString(),
+          },
         });
         return presentAdminRefundAdjustPrompt({
           claimId: input.claimId,
+          expectedVersion: input.expectedVersion,
           recommendedVnd: claim.calculatedRefundVnd,
         });
       },
@@ -5500,8 +5492,11 @@ async function bootstrap(): Promise<void> {
         if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        if (claim.version !== input.expectedVersion)
+          return adminWarrantyError(adminClaimErrorText("STALE_VERSION"));
         return presentAdminRefundPayout({
           claimId: claim.id,
+          expectedVersion: input.expectedVersion,
           claimNumber: claim.claimNumber,
           customerLabel: claim.customerLabel,
           productName: claim.productName,
@@ -5523,8 +5518,11 @@ async function bootstrap(): Promise<void> {
         if (denied) return presentAdminDenied(denied);
         const claim = await loadAdminWarrantyClaim(dbHandle.db, input.claimId);
         if (!claim) return adminWarrantyError("Không tìm thấy yêu cầu bảo hành.");
+        if (claim.version !== input.expectedVersion)
+          return adminWarrantyError(adminClaimErrorText("STALE_VERSION"));
         return presentAdminRefundPaidConfirm({
           claimId: claim.id,
+          expectedVersion: input.expectedVersion,
           claimNumber: claim.claimNumber,
           amountVnd: claim.approvedRefundVnd ?? claim.calculatedRefundVnd,
         });
@@ -5546,6 +5544,7 @@ async function bootstrap(): Promise<void> {
             expectedUsername: config.ADMIN_EXPECTED_USERNAME,
           },
           claimId: input.claimId,
+          expectedVersion: input.expectedVersion,
           correlationId: input.correlationId,
         });
         if (!result.ok) return adminWarrantyError(adminClaimErrorText(result.code));
@@ -6475,19 +6474,45 @@ async function bootstrap(): Promise<void> {
             kind: "file",
           });
         }
+        const importActor = {
+          numericUserId: Number(input.telegramUserId),
+          chatType: "private" as const,
+        };
+        const importConfig = {
+          adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
+          expectedUsername: config.ADMIN_EXPECTED_USERNAME,
+        };
+        const replaced = await cancelInventoryImportSession(dbHandle.db, vault, {
+          actor: importActor,
+          config: importConfig,
+          correlationId: input.correlationId,
+        });
+        if (!replaced.ok && replaced.code !== "NOT_FOUND") {
+          return {
+            text:
+              replaced.code === "BUSY"
+                ? "Phiên nhập kho đang được xử lý."
+                : "Không thể thay thế phiên nhập kho. Hãy thử lại.",
+            buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
+          };
+        }
         const session = await startInventoryImportSession(dbHandle.db, {
-          actor: { numericUserId: Number(input.telegramUserId), chatType: "private" },
-          config: {
-            adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-            expectedUsername: config.ADMIN_EXPECTED_USERNAME,
-          },
+          actor: importActor,
+          config: importConfig,
           correlationId: input.correlationId,
           variantId: row.id,
         });
-        if (!session.ok)
+        if (!session.ok) {
+          if (session.code === "BUSY") {
+            return {
+              text: "Phiên nhập kho đang được xử lý.",
+              buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
+            };
+          }
           return presentAdminDenied(
             session.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
+        }
         return presentInventoryImportPrompt({
           variantId: row.id,
           variantName: row.name,
@@ -6537,6 +6562,7 @@ async function bootstrap(): Promise<void> {
               expectedUsername: config.ADMIN_EXPECTED_USERNAME,
             },
             correlationId: input.correlationId,
+            expectedGeneration: session.generation,
             rawInput: input.text,
           });
           if (!result.ok) {
@@ -6550,7 +6576,16 @@ async function bootstrap(): Promise<void> {
             };
           }
           const preview = result.preview;
+          const stateId = await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "ADMIN_INVENTORY_IMPORT_CONFIRM",
+            payload: {
+              inputVaultRef: result.inputVaultRef,
+              generation: result.generation,
+            },
+          });
           return presentInventoryImportPreview({
+            stateId,
             ready: preview.ready,
             invalid: preview.invalid,
             duplicates: preview.duplicates,
@@ -6594,6 +6629,7 @@ async function bootstrap(): Promise<void> {
               expectedUsername: config.ADMIN_EXPECTED_USERNAME,
             },
             correlationId: input.correlationId,
+            expectedGeneration: textSession.generation,
             document: input.document,
             downloader: createTelegramTextFileDownloader(config.TELEGRAM_BOT_TOKEN, {
               telegramEnvironment: config.TELEGRAM_API_ENVIRONMENT,
@@ -6608,7 +6644,16 @@ async function bootstrap(): Promise<void> {
               ],
             };
           const preview = result.preview;
+          const stateId = await createAdminCallbackState(dbHandle.db, {
+            adminTelegramUserId: input.telegramUserId,
+            kind: "ADMIN_INVENTORY_IMPORT_CONFIRM",
+            payload: {
+              inputVaultRef: result.inputVaultRef,
+              generation: result.generation,
+            },
+          });
           return presentInventoryImportPreview({
+            stateId,
             ready: preview.ready,
             invalid: preview.invalid,
             duplicates: preview.duplicates,
@@ -6701,6 +6746,28 @@ async function bootstrap(): Promise<void> {
       async importConfirm(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
         if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const state = await resolveAdminCallbackState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          stateId: input.stateId,
+        });
+        const expectedInputVaultRef =
+          state?.kind === "ADMIN_INVENTORY_IMPORT_CONFIRM" &&
+          typeof state.payload.inputVaultRef === "string" &&
+          state.payload.inputVaultRef.length > 0
+            ? state.payload.inputVaultRef
+            : null;
+        const expectedGeneration =
+          state?.kind === "ADMIN_INVENTORY_IMPORT_CONFIRM" &&
+          typeof state.payload.generation === "string" &&
+          state.payload.generation.length > 0
+            ? state.payload.generation
+            : null;
+        if (!expectedInputVaultRef || !expectedGeneration) {
+          return {
+            text: "Phiên xác nhận nhập kho đã hết hạn.",
+            buttons: [[{ text: "📦 Kho hàng", callbackData: "admin:inventory" }]],
+          };
+        }
         const result = await confirmInventoryImportSession(dbHandle.db, vault, {
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           config: {
@@ -6708,6 +6775,8 @@ async function bootstrap(): Promise<void> {
             expectedUsername: config.ADMIN_EXPECTED_USERNAME,
           },
           correlationId: input.correlationId,
+          expectedGeneration,
+          expectedInputVaultRef,
         });
         if (!result.ok) {
           return {
@@ -7219,10 +7288,18 @@ async function bootstrap(): Promise<void> {
           `.execute(dbHandle.db);
           const pendingAdjust = adjustState.rows[0];
           if (pendingAdjust) {
-            const payload = (pendingAdjust.payload ?? {}) as { claimId?: unknown };
+            const payload = (pendingAdjust.payload ?? {}) as {
+              claimId?: unknown;
+              expectedVersion?: unknown;
+            };
             const claimId = typeof payload.claimId === "string" ? payload.claimId : null;
-            if (!claimId) {
-              // Unusable state: drop it and let the message fall through rather than swallow it.
+            const expectedVersion =
+              typeof payload.expectedVersion === "number" &&
+              Number.isSafeInteger(payload.expectedVersion) &&
+              payload.expectedVersion > 0
+                ? payload.expectedVersion
+                : null;
+            if (!claimId || expectedVersion === null) {
               await sql`
                 delete from admin_callback_state
                 where admin_telegram_user_id = ${input.telegramUserId}
@@ -7250,6 +7327,7 @@ async function bootstrap(): Promise<void> {
               requestedData: {
                 amountVnd: adjusted.amountVnd.toString(),
                 reason: adjusted.reason,
+                expectedVersion,
               },
               consumeGrant: true,
             });
@@ -7273,6 +7351,7 @@ async function bootstrap(): Promise<void> {
                 expectedUsername: config.ADMIN_EXPECTED_USERNAME,
               },
               claimId,
+              expectedVersion,
               amountVnd: adjusted.amountVnd,
               overrideReason: adjusted.reason,
               correlationId: input.correlationId,

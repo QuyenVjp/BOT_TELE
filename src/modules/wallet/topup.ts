@@ -2,7 +2,7 @@ import { sql } from "kysely";
 import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
-import { insertBankTransactionIfNew } from "../payments/repository.js";
+import { insertBankTransactionIfNew, insertDiscrepancy } from "../payments/repository.js";
 import { isVerifiedSePayEvidence, type VerifiedSePayEvidence } from "../payments/sepay-ingress.js";
 import { presentPayment, type PaymentPresentation } from "../payments/vietqr.js";
 import { newId } from "../../shared/ids/index.js";
@@ -271,6 +271,20 @@ export async function applyWalletTopupEvidence(
     const bankTxn = await insertBankTransactionIfNew(trx, evidence, "VERIFIED", "sepay.v1");
     if (bankTxn.kind === "DUPLICATE") return { ok: true, kind: "ALREADY_APPLIED" };
     if (bankTxn.kind === "MUTATION") return { ok: true, kind: "NEEDS_REVIEW" };
+    if (bankTxn.kind === "AMBIGUOUS") {
+      await insertDiscrepancy(trx, {
+        type: "AMBIGUOUS_CORRELATION",
+        bankTransactionId: bankTxn.id,
+        paymentIntentId: null,
+        orderId: null,
+        reason: `ambiguous cross-source correlation; candidates ${bankTxn.candidateIds.join(", ")}`,
+        owner: "wallet",
+      });
+      const key = (evidence.structuredCode ?? evidence.content ?? evidence.reference)?.trim() ?? "";
+      const intent = key ? await findLiveTopupByContentForUpdate(trx, key) : null;
+      if (intent) await markTopupNeedsReview(trx, intent.id, intent.version);
+      return { ok: true, kind: "NEEDS_REVIEW" };
+    }
 
     const key = (evidence.structuredCode ?? evidence.content ?? evidence.reference)?.trim() ?? "";
     const intent = key ? await findTopupByContentForUpdate(trx, key) : null;
@@ -366,6 +380,20 @@ async function findTopupByContentForUpdate(
   const result = await sql<TopupRow>`
     select * from wallet_topup_intent
     where transfer_content = ${content}
+    order by created_at desc
+    limit 1
+    for update
+  `.execute(exec);
+  return result.rows[0] ? mapTopup(result.rows[0]) : null;
+}
+
+async function findLiveTopupByContentForUpdate(
+  exec: Executor,
+  content: string,
+): Promise<WalletTopupIntent | null> {
+  const result = await sql<TopupRow>`
+    select * from wallet_topup_intent
+    where transfer_content = ${content} and status in ('CREATED','PRESENTED')
     order by created_at desc
     limit 1
     for update

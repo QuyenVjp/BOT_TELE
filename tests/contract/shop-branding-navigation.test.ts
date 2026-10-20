@@ -255,7 +255,12 @@ describe("catalog callback ACK", () => {
       support: {
         reasonMenu: vi.fn(() => presentSupportReasonMenu()),
         open: vi.fn(),
+        beginDescription: vi.fn(),
+        submitDescription: vi.fn(),
+        cancelDescription: vi.fn(),
         list: vi.fn(),
+        view: vi.fn(),
+        close: vi.fn(),
       },
       responder: { ack, send },
     });
@@ -316,7 +321,12 @@ describe("bot-only catalog navigation", () => {
       support: {
         reasonMenu: vi.fn(() => presentSupportReasonMenu()),
         open: vi.fn(),
+        beginDescription: vi.fn(),
+        submitDescription: vi.fn(),
+        cancelDescription: vi.fn(),
         list: vi.fn(),
+        view: vi.fn(),
+        close: vi.fn(),
       },
       responder: { ack: vi.fn(), send },
     });

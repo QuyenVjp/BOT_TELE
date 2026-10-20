@@ -1,3 +1,4 @@
+import { CUSTOMER_BUTTONS } from "./customer-buttons.js";
 import { compactInlineRows, type InlineButton, type PresentedMessage } from "./catalog.js";
 import type { SupportReasonCode, SupportTicketStatus } from "../../modules/support/domain.js";
 import type { SupportTicket } from "../../modules/support/service.js";
@@ -21,8 +22,8 @@ export const SUPPORT_COPY = {
   replacementPending: "Yêu cầu thay thế đã được ghi nhận và đang chờ chủ shop duyệt.",
   listTitle: "📋 Ticket của bạn",
   empty: "Bạn chưa có ticket hỗ trợ nào.",
-  mainMenu: "Menu chính",
-  back: "Quay lại",
+  mainMenu: CUSTOMER_BUTTONS.home,
+  back: CUSTOMER_BUTTONS.back,
   close: "Đóng ticket",
 } as const;
 
@@ -43,6 +44,29 @@ const STATUS_LABEL: Record<SupportTicketStatus, string> = {
   CLOSED: "Đã đóng",
   MANUAL_REVIEW: "Đang kiểm tra",
 };
+export function presentTicketDetail(
+  ticket: SupportTicket,
+  orderNumber?: string | null,
+): PresentedMessage {
+  const lines = [
+    "💬 Chi tiết ticket",
+    "",
+    `Lý do: ${REASON_LABEL[ticket.reasonCode]}`,
+    `Trạng thái: ${STATUS_LABEL[ticket.status]}`,
+    `Nội dung: ${ticket.safeSummary}`,
+  ];
+  if (orderNumber) lines.push(`Đơn hàng: ${orderNumber}`);
+
+  const buttons: InlineButton[][] = [];
+  if (ticket.status === "RESOLVED") {
+    buttons.push([{ text: SUPPORT_COPY.close, callbackData: `sup:close:${ticket.id}` }]);
+  }
+  buttons.push([
+    { text: SUPPORT_COPY.back, callbackData: "sup:list" },
+    { text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" },
+  ]);
+  return { text: lines.join("\n"), buttons };
+}
 
 /** Reason picker — structured only, no free-form secret invitation. */
 export function presentSupportReasonMenu(orderNumber?: string): PresentedMessage {
@@ -62,6 +86,7 @@ export function presentSupportReasonMenu(orderNumber?: string): PresentedMessage
         { text: "👨‍💻 Nhắn Admin", url: ADMIN_CONTACT_URL, callbackData: "" },
         { text: "📢 Cộng đồng", url: COMMUNITY_URL, callbackData: "" },
       ],
+      [{ text: "📋 Ticket của tôi", callbackData: "sup:list" }],
       [{ text: "🛒 Về trang chủ", callbackData: "shop:home" }],
     ],
   };

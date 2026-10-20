@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
+import { withTransaction } from "../../src/infrastructure/db/transaction.js";
+import { insertBankTransactionIfNew } from "../../src/modules/payments/repository.js";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import {
   applyWalletTopupEvidence,
@@ -116,6 +118,99 @@ describe.skipIf(!hasDocker)("wallet topup evidence integration", () => {
       bank_txns: "1",
       status: "SUCCEEDED",
     });
+  });
+
+  it("does not credit a matching live topup when bank identity is ambiguous", async () => {
+    const topup = await seedPresentedTopup();
+    const reference = "FT-" + newId().slice(-6);
+    const transactedAt = new Date();
+    const firstCandidate = evidenceFor(topup, {
+      providerTransactionId: "SEPAY-CANDIDATE-" + newId(),
+      reference,
+      transactedAt,
+    });
+    const secondCandidate = evidenceFor(topup, {
+      providerTransactionId: "SEPAY-CANDIDATE-" + newId(),
+      reference,
+      transactedAt: new Date(transactedAt.getTime() + 30_000),
+    });
+
+    const first = await withTransaction(ctx.db, (trx) =>
+      insertBankTransactionIfNew(trx, firstCandidate, "VERIFIED", "sepay.v1"),
+    );
+    const second = await withTransaction(ctx.db, (trx) =>
+      insertBankTransactionIfNew(trx, secondCandidate, "VERIFIED", "sepay.v1"),
+    );
+    expect(first).toMatchObject({ kind: "INSERTED" });
+    expect(second).toMatchObject({ kind: "AMBIGUOUS" });
+    if (first.kind !== "INSERTED" || second.kind !== "AMBIGUOUS") {
+      throw new Error("expected two distinct correlation candidates");
+    }
+    expect(second.candidateIds).toEqual([first.id]);
+
+    const arrival = evidenceFor(topup, {
+      providerTransactionId: "api:" + newId(),
+      reference,
+      transactedAt: new Date(transactedAt.getTime() + 60_000),
+    });
+    await expect(applyWalletTopupEvidence(ctx.db, arrival)).resolves.toEqual({
+      ok: true,
+      kind: "NEEDS_REVIEW",
+    });
+
+    const rows = await sql<{
+      status: string;
+      balance_vnd: string;
+      ledger_count: string;
+      credit_count: string;
+      credited_events: string;
+      bank_txns: string;
+      review_count: string;
+    }>`
+      select
+        (select status from wallet_topup_intent where id = ${topup.intentId}) as status,
+        (select balance_vnd::text from wallet_account where customer_id = ${topup.customerId}) as balance_vnd,
+        (
+          select count(*)::text
+          from wallet_ledger l
+          join wallet_account a on a.id = l.wallet_account_id
+          where a.customer_id = ${topup.customerId}
+        ) as ledger_count,
+        (
+          select count(*)::text
+          from wallet_ledger l
+          join wallet_account a on a.id = l.wallet_account_id
+          where a.customer_id = ${topup.customerId} and l.entry_type = 'CREDIT'
+        ) as credit_count,
+        (
+          select count(*)::text
+          from outbox_event
+          where aggregate_id = ${topup.intentId} and event_type = 'WalletTopupCredited'
+        ) as credited_events,
+        (select count(*)::text from bank_transaction where provider = 'sepay') as bank_txns,
+        (
+          select count(*)::text
+          from discrepancy
+          where type = 'AMBIGUOUS_CORRELATION'
+        ) as review_count
+    `.execute(ctx.db);
+
+    expect(rows.rows[0]).toEqual({
+      status: "NEEDS_REVIEW",
+      balance_vnd: "0",
+      ledger_count: "0",
+      credit_count: "0",
+      credited_events: "0",
+      bank_txns: "3",
+      review_count: "1",
+    });
+    const review = await sql<{ type: string; reason: string }>`
+      select type, reason from discrepancy where type = 'AMBIGUOUS_CORRELATION'
+    `.execute(ctx.db);
+    expect(review.rows).toHaveLength(1);
+    expect(review.rows[0]?.type).toBe("AMBIGUOUS_CORRELATION");
+    expect(review.rows[0]?.reason).toContain(first.id);
+    expect(review.rows[0]?.reason).toContain(second.id);
   });
 
   it("credits a concurrent duplicate topup replay once and emits one credit event", async () => {

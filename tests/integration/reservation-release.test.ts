@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import {
   buyNow,
   cancelUnpaidOrder,
@@ -110,6 +111,7 @@ describe.skipIf(!hasDocker)("reservation release (T155)", () => {
         bank_transaction, payment_intent, order_transition, "order",
         product_variant, product, category, customer cascade
     `.execute(ctx.db);
+    await setStoreModeForTest(ctx.db, "OPEN", "test");
   });
 
   async function reserve(seed: Seed, customerId: string, key: string) {

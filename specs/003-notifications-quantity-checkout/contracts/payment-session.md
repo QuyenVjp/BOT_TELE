@@ -29,4 +29,3 @@ the race, cancel returns `ALREADY_PAID`; it cannot revert Payment Intent or disc
 
 `ORDER_CREATED`, `AWAITING_PAYMENT`, `PAYMENT_SETTLED`, `PROCESSING`, `NEEDS_REVIEW`, `CANCELLED`,
 `EXPIRED`, `COMPLETED` each map to distinct Vietnamese copy.
-

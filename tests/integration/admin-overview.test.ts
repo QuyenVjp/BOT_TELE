@@ -1,8 +1,19 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
-import { newId } from "../../src/shared/ids/index.js";
+import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
+import { fulfillPaidOrder } from "../../src/modules/digital-goods/fulfillment.js";
+import { listAdminManualFulfillmentTasks } from "../../src/modules/digital-goods/manual-fulfillment.js";
+import { applyPaymentEvidence } from "../../src/modules/payments/service.js";
+import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import { getAdminOverview, vietnamDayStart } from "../../src/modules/admin/overview.js";
+import {
+  getAdminInventoryProduct,
+  getAdminInventoryVariant,
+  listAdminInventory,
+} from "../../src/modules/admin/inventory.js";
+import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import { verifiedSePayEvidence } from "../helpers/verified-sepay.js";
 
 /**
  * Admin overview (goal §71 summary block, §136): real trade only.
@@ -23,6 +34,8 @@ afterAll(async () => {
 
 interface Seed {
   customerId: string;
+  categoryId: string;
+  realProductId: string;
   realVariantId: string;
   testVariantId: string;
 }
@@ -73,7 +86,7 @@ async function seed(): Promise<Seed> {
       values (${assetId}, ${testVariantId}, 'LOCAL', ${"vault:" + assetId}, ${"fpt-" + assetId}, 'AVAILABLE')
     `.execute(ctx.db);
   }
-  return { customerId, realVariantId, testVariantId };
+  return { customerId, categoryId, realProductId, realVariantId, testVariantId };
 }
 
 async function addOrder(
@@ -84,17 +97,24 @@ async function addOrder(
     priceVnd: number;
     createdAt: Date;
     completedAt?: Date | null;
+    fulfillmentType?: "STOCK_ACCOUNT" | "MANUAL_FULFILLMENT" | "UNLIMITED_SERVICE";
   },
-): Promise<void> {
+): Promise<string> {
   const id = newId();
+  const fulfillmentType = input.fulfillmentType ?? "STOCK_ACCOUNT";
+  const deliveryType =
+    fulfillmentType === "MANUAL_FULFILLMENT" || fulfillmentType === "UNLIMITED_SERVICE"
+      ? "MANUAL_REVIEW"
+      : "CREDENTIAL";
   await sql`
     insert into "order" (id, order_number, customer_id, variant_id, product_name_vi, variant_name_vi,
       price_vnd, duration_code, delivery_type, status, expires_at, created_at, completed_at, fulfillment_type)
     values (${id}, ${"ORD-" + id.slice(-10)}, ${seedRow.customerId},
       ${input.variantId ?? seedRow.realVariantId}, 'Claude Pro', '1 tháng', ${input.priceVnd}, 'P1M',
-      'CREDENTIAL', ${input.status}, ${new Date(input.createdAt.getTime() + 900_000).toISOString()},
-      ${input.createdAt.toISOString()}, ${input.completedAt ? input.completedAt.toISOString() : null}, 'STOCK_ACCOUNT')
+      ${deliveryType}, ${input.status}, ${new Date(input.createdAt.getTime() + 900_000).toISOString()},
+      ${input.createdAt.toISOString()}, ${input.completedAt ? input.completedAt.toISOString() : null}, ${fulfillmentType})
   `.execute(ctx.db);
+  return id;
 }
 
 beforeEach(async () => {
@@ -156,6 +176,88 @@ describe("admin overview", () => {
     expect(overview.awaitingAction).toBe(2);
     expect(overview.paymentsNeedingReview).toBe(1);
   });
+  it("keeps paid manual work visible after its product is archived", async () => {
+    const seedRow = await seed();
+    await sql`
+      update product_variant
+      set fulfillment_type = 'MANUAL_FULFILLMENT', delivery_type = 'MANUAL_REVIEW'
+      where id = ${seedRow.realVariantId}
+    `.execute(ctx.db);
+    await sql`
+      insert into variant_service_fulfillment (variant_id, fulfillment_type, instructions, is_active)
+      values (
+        ${seedRow.realVariantId}, 'MANUAL_FULFILLMENT',
+        'Provision the customer manually after payment.', true
+      )
+    `.execute(ctx.db);
+
+    const amountVnd = 199000;
+    const orderId = await addOrder(seedRow, {
+      status: "PENDING_PAYMENT",
+      priceVnd: amountVnd,
+      createdAt: new Date("2026-09-10T18:30:00.000Z"),
+      fulfillmentType: "MANUAL_FULFILLMENT",
+    });
+    const transferContent = "MANUAL-" + orderId.slice(-12);
+    const merchantAccountId = "0123456789";
+    await sql`
+      insert into payment_intent (
+        id, order_id, status, amount_vnd, merchant_account_id, transfer_content, expires_at
+      )
+      values (
+        ${newId()}, ${orderId}, 'PRESENTED', ${amountVnd}, ${merchantAccountId},
+        ${transferContent}, now() + interval '15 minutes'
+      )
+    `.execute(ctx.db);
+
+    const evidence: PaymentEvidence = {
+      provider: "sepay",
+      providerTransactionId: "SEPAY-" + newId(),
+      direction: "IN",
+      merchantAccountId,
+      amountVnd,
+      content: transferContent,
+      reference: "FT-" + newId().slice(-6),
+      transactedAt: new Date("2026-09-10T18:31:00.000Z"),
+      rawHash: "hash-" + newId(),
+      correlationId: "manual-archive-" + newId().slice(-6),
+    };
+    const settled = await applyPaymentEvidence(ctx.db, verifiedSePayEvidence(evidence));
+    expect(settled).toMatchObject({ ok: true, kind: "SETTLED", orderId });
+
+    const fulfilled = await fulfillPaidOrder(ctx.db, {
+      orderId,
+      correlationId: evidence.correlationId,
+      deps: {
+        vault: createInMemoryVault(),
+        supplier: null,
+        deliveryBaseUrl: "https://shop.example/d",
+        bundleTtlSeconds: 900,
+      },
+    });
+    expect(fulfilled).toMatchObject({
+      ok: true,
+      kind: "WAITING_MANUAL",
+      orderId,
+      fulfillmentType: "MANUAL_FULFILLMENT",
+    });
+
+    await sql`update product set is_archived = true where id = ${seedRow.realProductId}`.execute(
+      ctx.db,
+    );
+
+    const overview = await getAdminOverview(ctx.db, new Date("2026-09-10T19:00:00.000Z"));
+    expect(overview.awaitingAction).toBe(1);
+
+    const taskPage = await listAdminManualFulfillmentTasks(ctx.db);
+    expect(taskPage.tasks).toHaveLength(1);
+    expect(taskPage.tasks[0]).toMatchObject({
+      orderId,
+      status: "OPEN",
+      fulfillmentType: "MANUAL_FULFILLMENT",
+    });
+  });
+
 
   it("flags a sellable variant at or below its threshold and ignores test stock", async () => {
     await seed();
@@ -192,6 +294,72 @@ describe("admin overview", () => {
     }
     const overview = await getAdminOverview(ctx.db, new Date("2026-09-10T04:00:00.000Z"));
     expect(overview.newTickets).toBe(2);
+  });
+
+  it("tracks finite local availability only and leaves service/supplier routes untracked", async () => {
+    const seedRow = await seed();
+    const untracked = ["MANUAL_FULFILLMENT", "UNLIMITED_SERVICE", "SUPPLIER_API"] as const;
+    const untrackedRows: Array<{ productId: string; variantId: string }> = [];
+
+    for (const [index, fulfillmentType] of untracked.entries()) {
+      const productId = newId();
+      const variantId = newId();
+      untrackedRows.push({ productId, variantId });
+      await sql`
+        insert into product (id, category_id, name_vi, slug, is_active, sort_order)
+        values (${productId}, ${seedRow.categoryId}, ${fulfillmentType}, ${"inventory-" + productId}, true, ${index + 3})
+      `.execute(ctx.db);
+      await sql`
+        insert into product_variant (
+          id, product_id, sku, name_vi, price_vnd, duration_code, delivery_type,
+          stock_policy, fulfillment_type, low_stock_threshold
+        )
+        values (
+          ${variantId}, ${productId}, ${"SKU-" + variantId}, ${fulfillmentType},
+          199000, 'P1M', 'CREDENTIAL', 'LOCAL_ONLY', ${fulfillmentType}, 5
+        )
+      `.execute(ctx.db);
+      for (let assetIndex = 0; assetIndex < 2; assetIndex++) {
+        const assetId = newId();
+        await sql`
+          insert into digital_asset (id, variant_id, source_type, vault_ref, fingerprint_hash, status)
+          values (${assetId}, ${variantId}, 'LOCAL', ${"vault:" + assetId}, ${"fp-" + assetId + "-" + assetIndex}, 'AVAILABLE')
+        `.execute(ctx.db);
+      }
+    }
+
+    const finiteVariant = await getAdminInventoryVariant(ctx.db, seedRow.realVariantId);
+    expect(finiteVariant?.available).toBe(2);
+
+    const untrackedVariants = await Promise.all(
+      untrackedRows.map(({ variantId }) => getAdminInventoryVariant(ctx.db, variantId)),
+    );
+    expect(untrackedVariants.map((variant) => variant?.available)).toEqual([null, null, null]);
+
+    const finiteProduct = await getAdminInventoryProduct(ctx.db, seedRow.realProductId);
+    expect(
+      finiteProduct?.variants.find((variant) => variant.id === seedRow.realVariantId)?.available,
+    ).toBe(2);
+    for (const { productId, variantId } of untrackedRows) {
+      const product = await getAdminInventoryProduct(ctx.db, productId);
+      expect(product?.variants.find((variant) => variant.id === variantId)?.available).toBeNull();
+    }
+
+    const inventory = await listAdminInventory(ctx.db);
+    expect(inventory.rows.find((row) => row.id === seedRow.realProductId)).toMatchObject({
+      variant_count: 1,
+      in_stock: 1,
+      low_stock: 1,
+      out_stock: 0,
+    });
+    for (const { productId } of untrackedRows) {
+      expect(inventory.rows.find((row) => row.id === productId)).toMatchObject({
+        variant_count: 0,
+        in_stock: 0,
+        low_stock: 0,
+        out_stock: 0,
+      });
+    }
   });
 
   it("is empty, not throwing, on a store with no trade at all", async () => {

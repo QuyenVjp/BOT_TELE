@@ -1,11 +1,13 @@
 import { createHash } from "node:crypto";
 import { sql } from "kysely";
+import { getVariantById } from "../catalog/repository.js";
 import { ISSUE_TYPE_LABELS } from "../warranty/claims.js";
 import type { OutboxEvent } from "../../infrastructure/outbox/repository.js";
 import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
+import { formatHoChiMinh } from "../../shared/time/index.js";
 import { newId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
 
@@ -156,8 +158,20 @@ export async function setNotificationPreferences(
 /** Emits a redacted stock delta; delivery policy evaluates opt-in at send time. */
 export async function emitStockDelta(
   exec: Executor,
-  input: { variantId: string; delta: number; stockAfter: number; correlationId: string },
+  input: {
+    variantId: string;
+    aggregateVersion: number;
+    delta: number;
+    stockAfter: number;
+    correlationId: string;
+  },
 ): Promise<void> {
+  if (
+    !Number.isInteger(input.aggregateVersion) ||
+    input.aggregateVersion < 1 ||
+    input.aggregateVersion > 2_147_483_647
+  )
+    throw new RangeError("invalid aggregate version");
   if (
     !Number.isInteger(input.delta) ||
     input.delta === 0 ||
@@ -169,7 +183,7 @@ export async function emitStockDelta(
     id: newId(),
     aggregateType: "ProductVariant",
     aggregateId: input.variantId,
-    aggregateVersion: Date.now(),
+    aggregateVersion: input.aggregateVersion,
     eventType: "StockDelta",
     payloadRedacted: {
       variantId: input.variantId,
@@ -797,6 +811,19 @@ export async function processNotificationDeliveryClaim(
         ? "SUPPRESSED"
         : "STALE";
     }
+    if (delivery.class === "SHOP_UPDATE" && delivery.productVariantId != null) {
+      const variant = await getVariantById(exec, delivery.productVariantId, "public");
+      if (!variant?.is_ready) {
+        return (await markNotificationSuppressed(
+          exec,
+          delivery.id,
+          delivery.generation,
+          "product_not_sellable",
+        ))
+          ? "SUPPRESSED"
+          : "STALE";
+      }
+    }
     await responder.send({
       telegramUserId: delivery.telegramUserId ?? delivery.chatId,
       chatId: delivery.chatId,
@@ -1042,7 +1069,7 @@ export async function queueManualFulfillmentNotification(
   const content =
     input.state === "WAITING"
       ? "Đơn hàng của bạn đang chờ nhân viên xử lý thủ công. Shop sẽ thông báo khi hoàn tất."
-      : "Đơn hàng xử lý thủ công của bạn đã hoàn tất. Cảm ơn bạn đã chờ.";
+      : "Đơn hàng xử lý thủ công của bạn đã hoàn tất.";
   return withTransaction(db, async (trx) => {
     const target = await sql<{ chat_id: string }>`
       select coalesce(cps.chat_id, ci.channel_user_id) as chat_id
@@ -1161,6 +1188,23 @@ function warrantyAdminAlert(event: OutboxEvent): { campaignId: string; content: 
   };
 }
 
+function parseNotificationVnd(value: unknown): bigint | null {
+  if (typeof value === "bigint") return value >= 0n ? value : null;
+  if (typeof value === "number") {
+    return Number.isSafeInteger(value) && value >= 0 ? BigInt(value) : null;
+  }
+  if (typeof value === "string" && /^[0-9]{1,19}$/.test(value)) return BigInt(value);
+  return null;
+}
+
+function parseNotificationDate(value: unknown): Date | null {
+  if (value instanceof Date) {
+    return Number.isNaN(value.getTime()) ? null : value;
+  }
+  if (typeof value !== "string") return null;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
 function warrantyCustomerNotice(
   event: OutboxEvent,
 ): { campaignId: string; customerId: string; content: string } | null {
@@ -1185,48 +1229,55 @@ function warrantyCustomerNotice(
           "Shop sẽ liên hệ để đổi tài khoản hoặc hoàn tiền.",
         ].join("\n"),
       };
-    // Stock arrived and the rest is owed. The deposit notice promised exactly this message, so
-    // without it the customer's first word after paying is the forfeit notice.
+    // Stock arrived and the rest is owed. Persisted cutoffs are rendered as exact instants;
+    // legacy hour-only payloads must not be turned into a fresh relative promise.
     case "PreorderStockAllocated": {
-      const owed =
-        typeof p.balanceVnd === "number" && Number.isSafeInteger(p.balanceVnd)
-          ? BigInt(p.balanceVnd)
-          : typeof p.balanceVnd === "string" && /^[0-9]{1,19}$/.test(p.balanceVnd)
-            ? BigInt(p.balanceVnd)
-            : null;
-      const hours =
-        typeof p.balanceDueHours === "number" && Number.isSafeInteger(p.balanceDueHours)
-          ? p.balanceDueHours
-          : typeof p.holdHours === "number" && Number.isSafeInteger(p.holdHours)
-            ? p.holdHours
-            : null;
+      const owed = parseNotificationVnd(p.balanceVnd);
+      const balanceDueUntil = parseNotificationDate(p.balanceDueUntil);
+      const holdUntil = parseNotificationDate(p.holdUntil);
       return {
         campaignId: `preorder-allocated:${event.aggregateId}`,
         customerId,
         content: [
           "📦 Hàng đã về — Giữ suất cho bạn",
           "",
-          owed ? `Còn phải thanh toán: ${owed.toLocaleString("vi-VN")} ₫` : null,
-          hours ? `Bạn có ${hours} giờ để thanh toán phần còn lại.` : null,
+          owed !== null ? `Còn phải thanh toán: ${formatVnd(makeVnd(owed))}` : null,
+          balanceDueUntil !== null
+            ? `Hạn thanh toán phần còn lại: ${formatHoChiMinh(balanceDueUntil)}`
+            : null,
+          holdUntil !== null ? `Hạn giữ hàng đến: ${formatHoChiMinh(holdUntil)}` : null,
+          balanceDueUntil === null || holdUntil === null
+            ? "Mở «📌 Đặt cọc của tôi» để xem hạn hiện tại."
+            : null,
           "Mở «📌 Đặt cọc của tôi» để lấy mã chuyển khoản.",
         ]
           .filter((line): line is string => line !== null)
           .join("\n"),
       };
     }
-    // The deposit landed: tell the customer, or their money disappears into silence until they
-    // think to reopen the reservation screen.
-    case "PreorderDepositPaid":
+    // The deposit landed: include only the stored factual amounts and send the customer back to
+    // the live list for the current FIFO position.
+    case "PreorderDepositPaid": {
+      const total = parseNotificationVnd(p.totalVnd);
+      const deposit = parseNotificationVnd(p.depositVnd);
+      const balance = parseNotificationVnd(p.balanceVnd);
       return {
         campaignId: `preorder-deposit-paid:${event.aggregateId}`,
         customerId,
         content: [
           "✅ Đã nhận tiền cọc",
           "",
+          total !== null ? `Tổng giá trị: ${formatVnd(makeVnd(total))}` : null,
+          deposit !== null ? `Đã cọc: ${formatVnd(makeVnd(deposit))}` : null,
+          balance !== null ? `Còn lại khi có hàng: ${formatVnd(makeVnd(balance))}` : null,
           "Shop đã ghi nhận tiền cọc của bạn và giữ suất trong hàng chờ.",
           "Shop sẽ thông báo ngay khi hàng về.",
-        ].join("\n"),
+          "Mở «📌 Đặt cọc của tôi» để xem vị trí hàng chờ hiện tại.",
+        ]
+          .filter((line): line is string => line !== null)
+          .join("\n"),
       };
+    }
     // The hold expired and the deposit is kept. Silence here is the worst outcome: the customer
     // paid money and would only find out by opening the screen.
     case "PreorderHoldForfeited": {
@@ -1316,7 +1367,7 @@ function warrantyCustomerNotice(
         content: [
           "🔄 Yêu cầu đổi tài khoản đã được duyệt",
           "",
-          "Shop đã gửi thông tin nhận hàng mới cho đơn của bạn.",
+          "Shop đang chuẩn bị thông tin nhận hàng mới và sẽ gửi cho bạn khi sẵn sàng.",
         ].join("\n"),
       };
     default:

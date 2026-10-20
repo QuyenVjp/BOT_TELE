@@ -25,11 +25,46 @@ import {
   presentAdminSupplierVariant,
   presentAdminSuppliersMenu,
   presentAdminSupportMenu,
+  presentAdminSystemHealth,
   presentAdminOperations,
   presentAdminStoreOpenBlocked,
   presentAdminStoreOpenConfirmation,
   presentProductDraftPreview,
 } from "../../src/bot/presenters/admin.js";
+
+type AdminHealthFacts = Parameters<typeof presentAdminSystemHealth>[0];
+
+const HEALTH_QUEUES: AdminHealthFacts["queues"] = {
+  outboxBacklog: 0,
+  outboxDeadLettered: 0,
+  outboxDeadLetteredDisposed: 0,
+  inboxDeadLetteredTelegram: 0,
+  inboxDeadLetteredSePay: 0,
+  inboxPendingTelegram: 0,
+  inboxPendingSePay: 0,
+  openDiscrepancies: 0,
+  resolvedDiscrepancies: 0,
+  intentsAwaitingSettlement: 0,
+  paymentsNeedingReview: 0,
+  openSupportTickets: 0,
+  criticalSupportTickets: 0,
+};
+
+function systemHealthFacts(overrides: Partial<AdminHealthFacts> = {}): AdminHealthFacts {
+  const { queues, ...facts } = overrides;
+  return {
+    workerCommit: "worker-commit",
+    builtAt: "2026-10-01T00:00:00.000Z",
+    apiCommit: "api-commit",
+    storeMode: "CLOSED",
+    database: "ok",
+    vaultDriver: "local",
+    telegramWebhook: "CONFIGURED",
+    sepayReconciliation: "ready",
+    ...facts,
+    queues: { ...HEALTH_QUEUES, ...queues },
+  };
+}
 
 describe("admin operational presenters", () => {
   it("only exposes live admin route keys in the root menu", () => {
@@ -90,6 +125,20 @@ describe("admin operational presenters", () => {
     expect(labels).not.toMatch(
       /Dashboard|Products|Inventory|Orders|Payments|Suppliers|Restock|Health|Settings|Audit/,
     );
+  });
+
+  it("reports readiness signals and actionable queue counts", () => {
+    const healthy = presentAdminSystemHealth(systemHealthFacts());
+    expect(healthy.text).toContain("🟢 Cơ sở dữ liệu: hoạt động");
+    expect(healthy.text).toContain("☠️ Outbox dead-letter cần xử lý: 0");
+
+    const unavailable = presentAdminSystemHealth(systemHealthFacts({ database: "down" }));
+    expect(unavailable.text).toContain("🔴 Cơ sở dữ liệu: KHÔNG truy cập được");
+
+    const needsAction = presentAdminSystemHealth(
+      systemHealthFacts({ queues: { ...HEALTH_QUEUES, outboxDeadLettered: 1 } }),
+    );
+    expect(needsAction.text).toContain("☠️ Outbox dead-letter cần xử lý: 1");
   });
 
   it("provides back and home navigation for every visible admin submenu", () => {
@@ -379,6 +428,64 @@ describe("admin operational presenters", () => {
     );
   });
 
+  it("leads with current work queues and links each owner screen", () => {
+    const message = presentAdminDashboard({
+      activeProducts: 4,
+      outOfStock: 1,
+      lowStock: 2,
+      availableInventory: 17,
+      ordersToday: 8,
+      paidToday: 6,
+      revenueTodayVnd: 1_250_000n,
+      pendingPayment: 2,
+      paymentReview: 1,
+      fulfillmentFailures: 3,
+    });
+
+    expect(message.text.startsWith("📊 Tổng quan\n\n📌 Việc cần xử lý")).toBe(true);
+    expect(message.text).toContain("Chờ thanh toán: 2");
+    expect(message.text).toContain("Cần xem thanh toán: 1");
+    expect(message.text).toContain("Lỗi giao hàng: 3");
+    expect(message.buttons.flat()).toEqual(
+      expect.arrayContaining([
+        { text: "🧾 Đơn hàng", callbackData: "admin:orders" },
+        { text: "💳 Thanh toán", callbackData: "admin:payments" },
+        { text: "💬 Hỗ trợ", callbackData: "admin:support" },
+        { text: "🛠 Xử lý thủ công", callbackData: "admin:manual" },
+        { text: "📦 Kho hàng", callbackData: "admin:inventory" },
+        { text: "🩺 Hệ thống", callbackData: "admin:health" },
+      ]),
+    );
+    expect(message.buttons.at(-1)).toEqual([{ text: ADMIN_COPY.home, callbackData: "admin:menu" }]);
+  });
+
+  it("retains detailed health totals and renders zero queues without invented urgency", () => {
+    const message = presentAdminDashboard({
+      activeProducts: 0,
+      outOfStock: 0,
+      lowStock: 0,
+      availableInventory: 0,
+      ordersToday: 0,
+      paidToday: 0,
+      revenueTodayVnd: 0n,
+      pendingPayment: 0,
+      paymentReview: 0,
+      fulfillmentFailures: 0,
+    });
+
+    expect(message.text).toContain("Chờ thanh toán: 0");
+    expect(message.text).toContain("Cần xem thanh toán: 0");
+    expect(message.text).toContain("Lỗi giao hàng: 0");
+    expect(message.text).toContain("Sản phẩm đang bán: 0");
+    expect(message.text).toContain("Kho khả dụng: 0");
+    expect(message.text).toContain("Đơn hôm nay: 0");
+    expect(message.text).toContain("Đã thanh toán hôm nay: 0");
+    expect(message.text).toContain("Doanh thu hôm nay: 0 ₫");
+    expect(message.text).toContain("Hết hàng: 0");
+    expect(message.text).toContain("Sắp hết: 0");
+    expect(message.text).not.toMatch(/khẩn cấp|urgent|ngưỡng|threshold/i);
+  });
+
   it("renders bounded dashboard counters without sensitive data", () => {
     const message = presentAdminDashboard({
       activeProducts: 4,
@@ -390,8 +497,9 @@ describe("admin operational presenters", () => {
       revenueTodayVnd: 1_250_000n,
       pendingPayment: 2,
       paymentReview: 1,
-      fulfillmentFailures: 0,
+      fulfillmentFailures: 3,
     });
+
     expect(message.text).toContain("Sản phẩm đang bán: 4");
     expect(message.text).toContain("Kho khả dụng: 17");
     expect(message.text).toContain("Doanh thu hôm nay: 1.250.000 ₫");
@@ -516,6 +624,44 @@ describe("admin operational presenters", () => {
       ]),
     );
   });
+  it("renders untracked inventory availability without calling it zero", () => {
+    const product = presentAdminInventoryProduct({
+      id: "p-untracked",
+      name: "Supplier",
+      variants: [
+        {
+          id: "v-untracked",
+          name: "Supplier route",
+          sku: "SUP",
+          fulfillmentType: "SUPPLIER_API",
+          available: null,
+          reserved: 0,
+          delivered: 0,
+          error: 0,
+          lowStockThreshold: null,
+          importSupported: false,
+        },
+      ],
+    });
+    expect(product.text).toContain("khả dụng không theo dõi");
+    expect(product.buttons.flat()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ text: "Supplier route · không theo dõi" }),
+      ]),
+    );
+
+    const variant = presentAdminInventoryVariant({
+      productId: "p-untracked",
+      id: "v-untracked",
+      name: "Supplier route",
+      sku: "SUP",
+      fulfillmentType: "SUPPLIER_API",
+      available: null,
+      lowStockThreshold: null,
+      importSupported: false,
+    });
+    expect(variant.text).toContain("Khả dụng: không theo dõi");
+  });
 
   it("renders a variant import prompt without secret material", () => {
     const message = presentAdminInventoryVariant({
@@ -544,6 +690,7 @@ describe("admin operational presenters", () => {
 
   it("does not expose selected variant ids in import previews", () => {
     const message = presentInventoryImportPreview({
+      stateId: "state-123",
       ready: 2,
       invalid: 0,
       duplicates: 0,
@@ -553,6 +700,10 @@ describe("admin operational presenters", () => {
     expect(message.text).toContain("Biến thể trong tệp: 1");
     expect(message.text).not.toContain("variant-secret-id");
     expect(message.text).not.toMatch(/password|credential|token|vault:/i);
+    expect(message.buttons.flat()).toContainEqual({
+      text: "✅ Xác nhận nhập",
+      callbackData: "admin:inventory:confirm:state-123",
+    });
   });
 
   it("renders fulfillment choices with separate navigation and cancel rows", () => {

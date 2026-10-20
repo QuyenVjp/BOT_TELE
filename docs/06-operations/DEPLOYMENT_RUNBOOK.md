@@ -82,31 +82,38 @@ npm run preflight:production
 npm run migrate:production
 ```
 
-## Current production migration head
+## Branch migration inventory and recorded production head
 
-The source tree currently contains **82** SQL files under `src/infrastructure/db/migrations/`.
-The latest source migration is:
+The last recorded read-only production preflight observed production at
+`082_paid_delivery_reconciliation.sql` (**81** migrations). That observation is
+historical; production was not inspected during this stabilization sprint and
+the recorded head must not be treated as current.
 
-- **filename:** `083_google_sheets_inventory_intake.sql`
-- **count:** `82`
+The current source tree contains **87** SQL migration files; the highest source
+migration is `103_admin_inventory_import_callback_state.sql`. This branch also
+contains migrations 083, 093, 097, 100, 101, and 103 beyond the recorded 082
+head. Source files do not prove that any of them are applied to production.
+Before any production migration, check the actual `schema_migrations` head and
+count from the exact release checkout and target database.
 
-The current read-only production preflight observed production at
-`082_paid_delivery_reconciliation.sql` (**81** migrations). Migration 082 is therefore
-already applied. Migration 083 is a forward-only expand migration for safe Google
-Sheets projection metadata, the Sheet-native owner challenge and inventory Vault-orphan
-recovery. Apply it only after the exact release artifact, Apps Script intake acceptance,
-and a controlled migration window are ready. Keep the store `CLOSED`; do not activate
-sales as part of applying 083. See `docs/06-operations/google-sheets-inventory-intake.md`.
+Migration 083 is a forward-only expand migration for Google Sheets projection
+metadata, the Sheet-native owner challenge, and inventory Vault-orphan recovery.
+Apply it only after the exact release artifact, Apps Script intake acceptance,
+and a controlled migration window are ready. Keep the store `CLOSED`; do not
+activate sales as part of applying it. See
+`docs/06-operations/google-sheets-inventory-intake.md`.
 
-Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while the migration and Apps Script
-acceptance are pending. This gate enables the OIDC-backed catalog/preview/confirm route
-and challenge recovery only after the configured audience and owner acceptance exist; the
-existing secret-free projection lane may remain enabled independently.
+Keep `GOOGLE_SHEETS_INVENTORY_INTAKE_ENABLED=false` while migration and Apps
+Script acceptance are pending. This gate enables the OIDC-backed
+catalog/preview/confirm route and challenge recovery only after the configured
+audience and owner acceptance exist; the existing secret-free projection lane
+may remain enabled independently.
 
 Do not edit older migration files.
 
-The 072–076 procedure below is historical evidence only. Do not use it as the current
-production migration target; use the release-specific procedure above for pending 083.
+The 072–076 procedure below is historical evidence only. Do not use it as the
+current production migration target; use the release-specific migration
+inventory and preflight above.
 
 ## Historical migrations 072–076 — post-merge production procedure
 

@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import {
   dockerAvailable,
   startPostgresContainer,
@@ -97,7 +98,8 @@ describe.skipIf(!hasDocker)("Buy Now revalidation is transaction-consistent (T15
         bank_transaction, payment_intent, order_transition, "order",
         product_variant, product, category, customer cascade
     `.execute(ctx.db);
-  });
+    await setStoreModeForTest(ctx.db, "OPEN", "test");
+});
 
   it("rejects a stale price the moment the admin changes it (no Order created)", async () => {
     const s = await seed();

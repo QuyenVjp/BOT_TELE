@@ -1,9 +1,13 @@
 import type { Db } from "../../infrastructure/db/transaction.js";
-import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
+import {
+  findOrderByIdForOwner,
+  findOrderByNumberForOwner,
+} from "../../modules/commerce/repository.js";
 import { createSupportService } from "../../modules/support/service.js";
 import { isSupportReasonCode } from "../../modules/support/domain.js";
 import {
   presentSupportReasonMenu,
+  presentTicketDetail,
   presentTicketOpened,
   presentTicketList,
   SUPPORT_COPY,
@@ -34,6 +38,12 @@ export interface SupportCallbacks {
     correlationId: string;
   }): Promise<PresentedMessage>;
   list(customerId: string): Promise<PresentedMessage>;
+  view(ticketId: string, customerId: string): Promise<PresentedMessage>;
+  close(input: {
+    ticketId: string;
+    customerId: string;
+    correlationId: string;
+  }): Promise<PresentedMessage>;
 }
 
 function errorMessage(text: string): PresentedMessage {
@@ -41,6 +51,9 @@ function errorMessage(text: string): PresentedMessage {
     text,
     buttons: [[{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }]],
   };
+}
+function missingTicketMessage(): PresentedMessage {
+  return errorMessage("Không tìm thấy ticket.");
 }
 
 export function createSupportCallbacks(deps: SupportCallbackDeps): SupportCallbacks {
@@ -90,6 +103,30 @@ export function createSupportCallbacks(deps: SupportCallbackDeps): SupportCallba
     async list(customerId) {
       const tickets = await svc.listTickets({ customerId });
       return presentTicketList(tickets);
+    },
+    async view(ticketId, customerId) {
+      const ticket = await svc.getTicket({ ticketId, customerId });
+      if (!ticket) return missingTicketMessage();
+      let orderNumber: string | null = null;
+      if (ticket.orderId) {
+        const order = await findOrderByIdForOwner(deps.db, ticket.orderId, customerId);
+        orderNumber = order?.orderNumber ?? null;
+      }
+      return presentTicketDetail(ticket, orderNumber);
+    },
+
+    async close(input) {
+      const ticket = await svc.getTicket({
+        ticketId: input.ticketId,
+        customerId: input.customerId,
+      });
+      if (!ticket || ticket.status !== "RESOLVED") return missingTicketMessage();
+      const result = await svc.closeTicket(input);
+      if (!result.ok) return missingTicketMessage();
+      return {
+        text: "✅ Đã đóng ticket hỗ trợ.",
+        buttons: [[{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }]],
+      };
     },
   };
 }

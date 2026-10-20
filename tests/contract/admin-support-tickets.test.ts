@@ -24,6 +24,7 @@ const OTHER_TICKET_ID = "01ARZ3NDEKTSV4RRFFQ69G5FBW";
 function ticket(overrides: Partial<AdminSupportTicketRow> = {}): AdminSupportTicketRow {
   return {
     id: TICKET_ID,
+    version: 1,
     customerLabel: "Khách AB12",
     reasonCode: "DELIVERY_NOT_RECEIVED",
     status: "OPEN",
@@ -52,6 +53,15 @@ const LEGAL_TARGETS: Record<SupportTicketStatus, string[]> = {
   MANUAL_REVIEW: ["WAITING_SHOP", "RESOLVED"],
   CLOSED: [],
 };
+const STATUS_CODES: Record<SupportTicketStatus, string> = {
+  OPEN: "o",
+  WAITING_SHOP: "s",
+  WAITING_CUSTOMER: "c",
+  RESOLVED: "r",
+  CLOSED: "x",
+  MANUAL_REVIEW: "m",
+};
+
 
 describe("admin support ticket list", () => {
   it("hangs the ticket queue off the existing support screen", () => {
@@ -114,16 +124,17 @@ describe("admin support ticket detail", () => {
       const msg = presentAdminSupportTicket(ticket({ status }));
 
       expect(statusCallbacks(msg)).toEqual(
-        targets.map((to) => `admin:support:status:${TICKET_ID}:${to}`),
+        targets.map(
+          (to) =>
+            `admin:support:status:${TICKET_ID}:${STATUS_CODES[to as SupportTicketStatus]}:${ticket().version.toString(36)}`,
+        ),
       );
       for (const button of flat(msg)) {
         if (button.callbackData.startsWith("admin:support:status:")) {
+          const statusCode = button.callbackData.split(":")[4] ?? "";
+          const matched = Object.entries(STATUS_CODES).find(([, code]) => code === statusCode);
           expect(button.text).toBe(
-            SUPPORT_STATUS_LABELS[
-              button.callbackData.slice(
-                button.callbackData.lastIndexOf(":") + 1,
-              ) as SupportTicketStatus
-            ],
+            matched ? SUPPORT_STATUS_LABELS[matched[0] as SupportTicketStatus] : undefined,
           );
         }
       }
@@ -152,7 +163,9 @@ describe("admin support ticket detail", () => {
     const messages = [
       presentAdminSupportTickets([ticket()]),
       ...Object.keys(LEGAL_TARGETS).map((status) =>
-        presentAdminSupportTicket(ticket({ status: status as SupportTicketStatus })),
+        presentAdminSupportTicket(
+          ticket({ status: status as SupportTicketStatus, version: Number.MAX_SAFE_INTEGER }),
+        ),
       ),
     ];
     const all = messages.flatMap((message) => callbacks(message));

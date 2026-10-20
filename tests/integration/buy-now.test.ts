@@ -7,6 +7,7 @@ import {
   expireOverdueOrders,
   type BuyNowResult,
 } from "../../src/modules/commerce/buy-now.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
@@ -132,6 +133,7 @@ beforeEach(async () => {
   await sql`truncate table quantity_stock_ledger, variant_quantity_stock, supplier_order, supplier_sku, supplier, order_transition, payment_intent, digital_asset, "order", product_variant, product_alias, product, category, customer cascade`.execute(
     ctx.db,
   );
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 describe("Buy Now creates one immutable Order (FR-006/FR-007)", () => {

@@ -216,7 +216,9 @@ export function createSupportService(db: Db): SupportService {
       const closed = await sql<{ id: string }>`
         update support_ticket
         set status = 'CLOSED', updated_at = now(), version = version + 1
-        where id = ${input.ticketId} and customer_id = ${input.customerId}
+        where id = ${input.ticketId}
+          and customer_id = ${input.customerId}
+          and status = 'RESOLVED'
         returning id
       `.execute(db);
       if (closed.rows.length === 0) {
@@ -230,6 +232,7 @@ export function createSupportService(db: Db): SupportService {
 /** Owner-facing ticket row. A short customer label, never a raw telegram identity. */
 export interface AdminSupportTicketRow {
   id: string;
+  version: number;
   customerLabel: string;
   reasonCode: SupportReasonCode;
   status: SupportTicketStatus;
@@ -240,6 +243,7 @@ export interface AdminSupportTicketRow {
 
 interface AdminTicketRow {
   id: string;
+  version: number;
   customer_id: string;
   reason_code: SupportReasonCode;
   status: SupportTicketStatus;
@@ -251,6 +255,7 @@ interface AdminTicketRow {
 function mapAdminTicket(row: AdminTicketRow): AdminSupportTicketRow {
   return {
     id: row.id,
+    version: row.version,
     // Same short label the warranty queue uses; the owner reads a ticket, not an id.
     customerLabel: `Khách ${row.customer_id.slice(-4).toUpperCase()}`,
     reasonCode: row.reason_code,
@@ -264,7 +269,7 @@ function mapAdminTicket(row: AdminTicketRow): AdminSupportTicketRow {
 /** Tickets still needing an answer, most urgent SLA first. */
 export async function listOpenTickets(db: Db, limit = 20): Promise<AdminSupportTicketRow[]> {
   const result = await sql<AdminTicketRow>`
-    select t.id, t.customer_id, t.reason_code, t.status, t.safe_summary, t.due_at,
+    select t.id, t.version, t.customer_id, t.reason_code, t.status, t.safe_summary, t.due_at,
            o.order_number
     from support_ticket t
     left join "order" o on o.id = t.order_id
@@ -280,7 +285,7 @@ export async function getAdminTicket(
   ticketId: string,
 ): Promise<AdminSupportTicketRow | null> {
   const result = await sql<AdminTicketRow>`
-    select t.id, t.customer_id, t.reason_code, t.status, t.safe_summary, t.due_at,
+    select t.id, t.version, t.customer_id, t.reason_code, t.status, t.safe_summary, t.due_at,
            o.order_number
     from support_ticket t
     left join "order" o on o.id = t.order_id
@@ -293,7 +298,7 @@ export async function getAdminTicket(
 
 export type SetTicketStatusResult =
   | { ok: true; from: SupportTicketStatus; to: SupportTicketStatus; customerId: string }
-  | { ok: false; code: "NOT_FOUND" | "ILLEGAL_STATE" };
+  | { ok: false; code: "NOT_FOUND" | "STALE_VERSION" | "ILLEGAL_STATE" | "INVALID_VERSION" };
 
 /**
  * Move a ticket to `toStatus`, refusing any transition the customer-facing state
@@ -304,18 +309,27 @@ export async function setTicketStatus(input: {
   db: Db;
   ticketId: string;
   toStatus: string;
+  expectedVersion: number;
   actorId: string;
   correlationId: string;
 }): Promise<SetTicketStatusResult> {
+  if (!Number.isSafeInteger(input.expectedVersion) || input.expectedVersion < 1) {
+    return { ok: false, code: "INVALID_VERSION" };
+  }
   if (!isTicketStatus(input.toStatus)) return { ok: false, code: "ILLEGAL_STATE" };
   const to = input.toStatus;
   return withTransaction(input.db, async (trx) => {
     // Lock the row: two taps must not both read the same `from` status and apply twice.
-    const found = await sql<{ status: SupportTicketStatus; customer_id: string }>`
-      select status, customer_id from support_ticket where id = ${input.ticketId} for update
+    const found = await sql<{
+      status: SupportTicketStatus;
+      customer_id: string;
+      version: number;
+    }>`
+      select status, customer_id, version from support_ticket where id = ${input.ticketId} for update
     `.execute(trx);
     const row = found.rows[0];
     if (!row) return { ok: false, code: "NOT_FOUND" };
+    if (row.version !== input.expectedVersion) return { ok: false, code: "STALE_VERSION" };
     if (!canTicketTransition(row.status, to)) return { ok: false, code: "ILLEGAL_STATE" };
     await sql`
       update support_ticket

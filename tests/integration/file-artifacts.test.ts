@@ -141,6 +141,20 @@ describe("digital file artifacts", () => {
         correlationId: "activate-v1",
       }),
     ).resolves.toMatchObject({ ok: true, artifact: { id: v1.artifact.id, isActive: true } });
+    const firstActivationEvents = await sql<{
+      aggregate_version: number;
+      payload_redacted: { variantId: string; delta: number; stockAfter: number };
+    }>`
+      select aggregate_version, payload_redacted
+      from outbox_event
+      where event_type = 'StockDelta' and aggregate_id = ${variantId}
+    `.execute(ctx.db);
+    expect(firstActivationEvents.rows).toEqual([
+      {
+        aggregate_version: v1.artifact.version,
+        payload_redacted: expect.objectContaining({ variantId, delta: 1, stockAfter: 1 }),
+      },
+    ]);
     await expect(
       activateFileArtifact({
         actor: rootActor,
@@ -152,6 +166,14 @@ describe("digital file artifacts", () => {
         correlationId: "activate-v2",
       }),
     ).resolves.toMatchObject({ ok: true, artifact: { id: v2.artifact.id, isActive: true } });
+    const afterReplacementEvents = await sql<{
+      payload_redacted: { variantId: string; delta: number; stockAfter: number };
+    }>`
+      select payload_redacted
+      from outbox_event
+      where event_type = 'StockDelta' and aggregate_id = ${variantId}
+    `.execute(ctx.db);
+    expect(afterReplacementEvents.rows).toHaveLength(1);
 
     const activeRows = await sql<{
       id: string;

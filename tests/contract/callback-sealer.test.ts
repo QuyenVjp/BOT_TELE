@@ -188,13 +188,41 @@ describe("callback sealing", () => {
     });
   });
 
+  it("keeps rst:list available as an actor-bound RESTOCK_LIST callback", async () => {
+    const tokenCodec = codec();
+    const telegramUserId = "123456789";
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "restock",
+        buttons: [[{ text: "Restock subscriptions", callbackData: "rst:list" }]],
+      },
+      {
+        codec: tokenCodec,
+        telegramUserId,
+        resolveOrderId: async () => null,
+      },
+    );
+
+    expect(sealed.buttons).toHaveLength(1);
+    const callbackData = sealed.buttons[0]![0]!.callbackData;
+    expect(callbackData).toMatch(/^cb:/);
+    expect(tokenCodec.verify(callbackData, { telegramUserId })).toMatchObject({
+      ok: true,
+      value: { action: "RESTOCK_LIST" },
+    });
+    expect(tokenCodec.verify(callbackData, { telegramUserId: "987654321" })).toMatchObject({
+      ok: false,
+      code: "INVALID_SIGNATURE",
+    });
+  });
+
   it("keeps native copy_text buttons unsealed", async () => {
     const sealed = await sealPresentedMessageCallbacks(
       {
         text: "pay",
         buttons: [
           [{ text: "📋 Sao chép STK", callbackData: "", copyText: "0123456789" }],
-          [{ text: "🏠 Menu", callbackData: "menu:main" }],
+          [{ text: "🏠 Trang chủ", callbackData: "menu:main" }],
         ],
       },
       { codec: codec(), telegramUserId: "123456789", resolveOrderId: async () => null },

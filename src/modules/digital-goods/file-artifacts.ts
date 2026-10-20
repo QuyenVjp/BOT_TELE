@@ -5,6 +5,7 @@ import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
 import { appendAuditEvent } from "../identity/audit.js";
 import type { RootActor, RootAdminConfig } from "../identity/root-admin.js";
+import { emitStockDelta } from "../notification/service.js";
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const TELEGRAM_FILE_ID = /^[A-Za-z0-9_-]{20,512}$/;
@@ -272,6 +273,14 @@ export async function activateFileArtifact(
   if (denied) return denied;
 
   return withTransaction(input.db, async (trx) => {
+    const variant = await sql<{ one: number }>`
+      select 1 as one
+      from product_variant
+      where id = ${input.variantId} and fulfillment_type = 'DIGITAL_FILE'
+      for update
+    `.execute(trx);
+    if (!variant.rows[0]) return { ok: false, code: "VARIANT_NOT_DIGITAL_FILE" };
+
     const existing = await sql<FileArtifactRow>`
       select id, variant_id, version, filename, mime_type, size_bytes::text as size_bytes, sha256,
              storage_reference, telegram_file_id, telegram_file_unique_id, is_active, created_at
@@ -282,9 +291,16 @@ export async function activateFileArtifact(
     `.execute(trx);
     const row = existing.rows[0];
     if (!row) return { ok: false, code: "ARTIFACT_NOT_FOUND" };
-    if (!(await ensureDigitalFileVariant(trx, input.variantId)))
-      return { ok: false, code: "VARIANT_NOT_DIGITAL_FILE" };
     if (row.is_active) return { ok: true, artifact: mapArtifact(row) };
+    const hadActiveArtifact =
+      (
+        await sql<{ one: number }>`
+        select 1 as one
+        from variant_file_artifact
+        where variant_id = ${input.variantId} and is_active
+        limit 1
+      `.execute(trx)
+      ).rows.length > 0;
 
     await sql`update variant_file_artifact set is_active = false where variant_id = ${input.variantId} and id <> ${input.artifactId} and is_active`.execute(
       trx,
@@ -310,6 +326,15 @@ export async function activateFileArtifact(
         sha256: artifact.sha256,
       },
     });
+    if (!hadActiveArtifact) {
+      await emitStockDelta(trx, {
+        variantId: input.variantId,
+        aggregateVersion: artifact.version,
+        delta: 1,
+        stockAfter: 1,
+        correlationId: input.correlationId,
+      });
+    }
     return { ok: true, artifact };
   });
 }

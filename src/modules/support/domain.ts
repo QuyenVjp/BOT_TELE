@@ -20,6 +20,26 @@ export type SupportReasonCode =
 export type SupportTicketStatus =
   "OPEN" | "WAITING_SHOP" | "WAITING_CUSTOMER" | "RESOLVED" | "CLOSED" | "MANUAL_REVIEW";
 
+const SUPPORT_TICKET_STATUS_CODES: Record<SupportTicketStatus, string> = {
+  OPEN: "o",
+  WAITING_SHOP: "s",
+  WAITING_CUSTOMER: "c",
+  RESOLVED: "r",
+  CLOSED: "x",
+  MANUAL_REVIEW: "m",
+};
+
+const SUPPORT_TICKET_STATUSES_BY_CODE: Record<string, SupportTicketStatus> = Object.fromEntries(
+  Object.entries(SUPPORT_TICKET_STATUS_CODES).map(([status, code]) => [code, status]),
+) as Record<string, SupportTicketStatus>;
+
+export function supportTicketStatusCode(status: SupportTicketStatus): string {
+  return SUPPORT_TICKET_STATUS_CODES[status];
+}
+
+export function supportTicketStatusFromCode(code: string): SupportTicketStatus | undefined {
+  return SUPPORT_TICKET_STATUSES_BY_CODE[code];
+}
 export const SUPPORT_REASON_CODES: readonly SupportReasonCode[] = [
   "ASSET_NOT_WORKING",
   "PAYMENT_QUESTION",

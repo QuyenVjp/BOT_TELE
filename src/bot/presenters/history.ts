@@ -1,8 +1,15 @@
 import { PAYMENT_COPY } from "./payment.js";
+import { toHoChiMinh } from "../../shared/time/index.js";
 import { formatVnd, makeVnd } from "../../shared/money/index.js";
-import type { InlineButton, PresentedMessage } from "./catalog.js";
-import type { OrderHistoryItem, OrderHistoryPage } from "../../modules/commerce/history.js";
-import type { Order, OrderStatus } from "../../modules/commerce/order.js";
+import { compactInlineRows, type InlineButton, type PresentedMessage } from "./catalog.js";
+import { CUSTOMER_BUTTONS } from "./customer-buttons.js";
+import type {
+  CustomerOrderDetail,
+  CustomerPaymentEvidence,
+  OrderHistoryItem,
+  OrderHistoryPage,
+} from "../../modules/commerce/history.js";
+import type { OrderStatus } from "../../modules/commerce/order.js";
 
 /**
  * Vietnamese Order history + detail presenters (T087, FR-018, goal §50-§52).
@@ -18,9 +25,9 @@ export const HISTORY_COPY = {
   title: "🧾 Đơn hàng của tôi",
   empty: "Bạn chưa có đơn hàng nào.",
   more: "Xem thêm",
-  back: "⬅️ Quay lại",
-  mainMenu: "Menu chính",
-  support: "💬 Hỗ trợ",
+  back: CUSTOMER_BUTTONS.back,
+  mainMenu: CUSTOMER_BUTTONS.home,
+  support: CUSTOMER_BUTTONS.support,
   detailTitle: "🧾 Chi tiết đơn hàng",
   priceLabel: "Giá",
   paymentLabel: "Thanh toán",
@@ -45,24 +52,65 @@ export const ORDER_STATUS_LABEL: Readonly<Partial<Record<OrderStatus, string>>> 
 
 export const ORDER_STATUS_FALLBACK = "⚠️ Cần hỗ trợ";
 
-function statusLabel(status: OrderStatus): string {
+function hasSettledPurchaseEvidence(evidence: CustomerPaymentEvidence): boolean {
+  return evidence === "SEPAY_SETTLED" || evidence === "WALLET_PURCHASED";
+}
+
+function statusLabel(status: OrderStatus, paymentEvidence: CustomerPaymentEvidence): string {
+  if (status === "REFUND_PENDING") {
+    return hasSettledPurchaseEvidence(paymentEvidence)
+      ? "⏳ Đang xử lý yêu cầu hoàn tiền"
+      : ORDER_STATUS_FALLBACK;
+  }
+  if (status === "REFUNDED") {
+    return paymentEvidence === "WALLET_REFUNDED" ? "✅ Đã hoàn vào ví" : ORDER_STATUS_FALLBACK;
+  }
+  if (
+    (status === "PAID" || status === "PROCESSING" || status === "COMPLETED") &&
+    !hasSettledPurchaseEvidence(paymentEvidence)
+  ) {
+    return ORDER_STATUS_FALLBACK;
+  }
   return ORDER_STATUS_LABEL[status] ?? ORDER_STATUS_FALLBACK;
 }
 
 /** Payment state from settlement evidence, never from a raw internal status. */
-function paymentLabel(order: Order): string {
+function paymentLabel(order: CustomerOrderDetail): string {
   if (order.status === "PAYMENT_NEEDS_REVIEW") return ORDER_STATUS_FALLBACK;
-  if (order.status === "REFUND_PENDING" || order.status === "REFUNDED") return "💸 Đã hoàn tiền";
-  if (order.paidAt) return "✅ Đã thanh toán";
+  if (order.status === "REFUND_PENDING") {
+    return hasSettledPurchaseEvidence(order.paymentEvidence)
+      ? "⏳ Đang chờ hoàn tiền"
+      : ORDER_STATUS_FALLBACK;
+  }
+  if (order.status === "REFUNDED") {
+    return order.paymentEvidence === "WALLET_REFUNDED" ? "💸 Đã hoàn tiền" : ORDER_STATUS_FALLBACK;
+  }
+  if (order.status === "PAID" || order.status === "PROCESSING" || order.status === "COMPLETED") {
+    return hasSettledPurchaseEvidence(order.paymentEvidence)
+      ? "✅ Đã thanh toán"
+      : ORDER_STATUS_FALLBACK;
+  }
   if (order.status === "CANCELLED" || order.status === "EXPIRED" || order.status === "REJECTED")
     return "❌ Chưa thanh toán";
   return "⏳ Chờ thanh toán";
 }
 
 /** Delivery + warranty policy line: what the customer gets next, in human words. */
-function deliveryWarrantyLine(order: Order): string {
+function deliveryWarrantyLine(order: CustomerOrderDetail): string {
   const warranty =
     order.warrantyDays > 0 ? `Bảo hành ${order.warrantyDays} ngày` : "Không kèm bảo hành";
+  if (
+    (order.status === "PAID" ||
+      order.status === "PROCESSING" ||
+      order.status === "COMPLETED" ||
+      order.status === "REFUND_PENDING") &&
+    !hasSettledPurchaseEvidence(order.paymentEvidence)
+  ) {
+    return `Liên hệ hỗ trợ để kiểm tra · ${warranty}`;
+  }
+  if (order.status === "REFUNDED" && order.paymentEvidence !== "WALLET_REFUNDED") {
+    return `Liên hệ hỗ trợ để kiểm tra · ${warranty}`;
+  }
   switch (order.status) {
     case "COMPLETED":
       return `✅ Đã giao · ${warranty}`;
@@ -82,12 +130,10 @@ function deliveryWarrantyLine(order: Order): string {
 }
 
 function formatDate(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso;
-  const y = d.getUTCFullYear();
-  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
-  const day = String(d.getUTCDate()).padStart(2, "0");
-  return `${day}/${m}/${y}`;
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  const { year, month, day } = toHoChiMinh(date);
+  return `${String(day).padStart(2, "0")}/${String(month).padStart(2, "0")}/${year}`;
 }
 
 /** Paginated history list. Each row shows order number, product and amount. */
@@ -104,10 +150,17 @@ export function presentOrderHistory(page: OrderHistoryPage): PresentedMessage {
   for (const item of page.items) {
     const amount = formatVnd(makeVnd(BigInt(item.priceVnd)));
     lines.push(
-      `• ${item.orderNumber} — ${item.productNameVi} · ${amount} · ${statusLabel(item.status)}`,
+      `• ${item.orderNumber} — ${item.productNameVi} · ${amount} · ${statusLabel(item.status, item.paymentEvidence)}`,
     );
-    buttons.push([{ text: `${item.orderNumber}`, callbackData: `ord:view:${item.orderNumber}` }]);
   }
+  buttons.push(
+    ...compactInlineRows(
+      page.items.map((item) => ({
+        text: item.orderNumber,
+        callbackData: `ord:view:${item.orderNumber}`,
+      })),
+    ),
+  );
 
   if (page.nextCursor) {
     buttons.push([
@@ -129,11 +182,25 @@ export interface OrderWarrantyState {
   usedDays: number;
   remainingDays: number;
   expired: boolean;
-  variantId: string;
+  orderId: string;
+}
+
+function warrantyLines(warranty: OrderWarrantyState | undefined): string[] {
+  if (!warranty || warranty.warrantyDays <= 0) return [];
+  if (warranty.expired) return ["", "🛡 Bảo hành: đã hết hạn"];
+  return [
+    "",
+    "🛡 Bảo hành đến: " +
+      new Date(warranty.endsAt).toLocaleDateString("vi-VN", {
+        timeZone: "Asia/Ho_Chi_Minh",
+      }),
+    `Đã sử dụng: ${warranty.usedDays} ngày`,
+    `Còn bảo hành: ${warranty.remainingDays} ngày`,
+  ];
 }
 
 export function presentOrderDetail(
-  order: Order,
+  order: CustomerOrderDetail,
   warranty?: OrderWarrantyState | undefined,
 ): PresentedMessage {
   const price = formatVnd(makeVnd(BigInt(order.priceVnd)));
@@ -144,24 +211,10 @@ export function presentOrderDetail(
     `${order.productNameVi} — ${order.variantNameVi}`,
     `${HISTORY_COPY.priceLabel}: ${price}`,
     `${HISTORY_COPY.paymentLabel}: ${paymentLabel(order)}`,
-    `${HISTORY_COPY.statusLabel}: ${statusLabel(order.status)}`,
+    `${HISTORY_COPY.statusLabel}: ${statusLabel(order.status, order.paymentEvidence)}`,
     `${HISTORY_COPY.createdLabel}: ${formatDate(order.createdAt)}`,
     `${HISTORY_COPY.deliveryLabel}: ${deliveryWarrantyLine(order)}`,
-    // Goal §7: a live warranty states its end date and how much of it is left, so the customer can
-    // see their own position without asking. An expired one says so instead of counting backwards.
-    ...(warranty && warranty.warrantyDays > 0
-      ? warranty.expired
-        ? ["", "🛡 Bảo hành: đã hết hạn"]
-        : [
-            "",
-            "🛡 Bảo hành đến: " +
-              new Date(warranty.endsAt).toLocaleDateString("vi-VN", {
-                timeZone: "Asia/Ho_Chi_Minh",
-              }),
-            `Đã sử dụng: ${warranty.usedDays} ngày`,
-            `Còn bảo hành: ${warranty.remainingDays} ngày`,
-          ]
-      : []),
+    ...warrantyLines(warranty),
   ].join("\n");
 
   const buttons: PresentedMessage["buttons"] = [
@@ -179,15 +232,15 @@ export function presentOrderDetail(
       ? [
           [
             {
-              text: "🛡 Báo lỗi / Bảo hành",
-              callbackData: `warranty:report:${warranty.variantId}`,
+              text: CUSTOMER_BUTTONS.reportIssue,
+              callbackData: `warranty:report:${warranty.orderId}`,
             },
           ],
         ]
       : []),
     [
-      { text: HISTORY_COPY.support, callbackData: `sup:open:${order.orderNumber}` },
-      { text: HISTORY_COPY.back, callbackData: "ord:list" },
+      { text: CUSTOMER_BUTTONS.support, callbackData: `sup:open:${order.orderNumber}` },
+      { text: CUSTOMER_BUTTONS.back, callbackData: "ord:list" },
     ],
   ];
 
@@ -196,5 +249,5 @@ export function presentOrderDetail(
 
 /** Convenience: the summary row shape used in tests. */
 export function summarizeHistoryItem(item: OrderHistoryItem): string {
-  return `${item.orderNumber} · ${statusLabel(item.status)}`;
+  return `${item.orderNumber} · ${statusLabel(item.status, item.paymentEvidence)}`;
 }

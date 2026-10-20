@@ -264,8 +264,10 @@ export type PresentPreorderPaymentResult =
       presentation: PaymentPresentation;
       productName: string;
       variantName: string;
+      balanceDueUntil: Date | null;
+      holdUntil: Date | null;
     }
-  | { ok: false; error: "NOT_FOUND" | "NOT_PAYABLE" | "AMOUNT_INVALID" };
+  | { ok: false; error: "NOT_FOUND" | "NOT_PAYABLE" | "AMOUNT_INVALID" | "DEADLINE_PASSED" };
 
 /** Bounded deposit-QR window: long enough to open a bank app, short enough to free the queue. */
 const MIN_PREORDER_TTL_SECONDS = 300;
@@ -287,6 +289,7 @@ export async function presentPreorderPayment(
   return withTransaction(db, async (trx) => {
     const reservation = await lockPreorderForSettlement(trx, input.reservationId, input.customerId);
     if (!reservation) return { ok: false, error: "NOT_FOUND" };
+    if (!reservation.isRestockLocalRoute) return { ok: false, error: "NOT_FOUND" };
     if (preorderPayableLeg(reservation.status) !== input.leg) {
       return { ok: false, error: "NOT_PAYABLE" };
     }
@@ -314,10 +317,45 @@ export async function presentPreorderPayment(
         ...(input.bankName !== undefined ? { bankName: input.bankName } : {}),
         ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
       });
-
     const now = new Date();
+    const nowMs = now.getTime();
+    let effectiveBalanceCutoff: Date | null = null;
+    if (input.leg === "BALANCE") {
+      const balanceDueMs = reservation.balanceDueUntil?.getTime() ?? null;
+      const holdMs = reservation.holdUntil?.getTime() ?? null;
+      if (
+        (balanceDueMs !== null && (!Number.isFinite(balanceDueMs) || balanceDueMs <= nowMs)) ||
+        (holdMs !== null && (!Number.isFinite(holdMs) || holdMs <= nowMs))
+      ) {
+        return { ok: false, error: "DEADLINE_PASSED" };
+      }
+      if (balanceDueMs !== null) effectiveBalanceCutoff = reservation.balanceDueUntil;
+      if (
+        holdMs !== null &&
+        (effectiveBalanceCutoff === null || holdMs < effectiveBalanceCutoff.getTime())
+      ) {
+        effectiveBalanceCutoff = reservation.holdUntil;
+      }
+    }
+    const ttlSeconds = Math.min(
+      MAX_PREORDER_TTL_SECONDS,
+      Math.max(
+        MIN_PREORDER_TTL_SECONDS,
+        Math.trunc(input.ttlSeconds ?? DEFAULT_PREORDER_TTL_SECONDS),
+      ),
+    );
+    const ttlExpiresAtMs = nowMs + ttlSeconds * 1000;
+    const balanceExpiryMs =
+      input.leg === "BALANCE"
+        ? Math.min(ttlExpiresAtMs, effectiveBalanceCutoff?.getTime() ?? Number.POSITIVE_INFINITY)
+        : null;
+
     const existing = await findLiveIntentByPreorderLeg(trx, reservation.id, input.leg);
-    if (existing && existing.expiresAt.getTime() > now.getTime()) {
+    if (
+      existing &&
+      existing.expiresAt.getTime() > nowMs &&
+      (balanceExpiryMs === null || existing.expiresAt.getTime() <= balanceExpiryMs)
+    ) {
       return {
         ok: true,
         intentId: existing.id,
@@ -328,25 +366,13 @@ export async function presentPreorderPayment(
         }),
         productName: reservation.productName,
         variantName: reservation.variantName,
+        balanceDueUntil: reservation.balanceDueUntil,
+        holdUntil: reservation.holdUntil,
       };
     }
     if (existing) await expireIntent(trx, existing.id, existing.version);
+    const expiresAt = new Date(balanceExpiryMs === null ? ttlExpiresAtMs : balanceExpiryMs);
 
-    const ttlSeconds = Math.min(
-      MAX_PREORDER_TTL_SECONDS,
-      Math.max(
-        MIN_PREORDER_TTL_SECONDS,
-        Math.trunc(input.ttlSeconds ?? DEFAULT_PREORDER_TTL_SECONDS),
-      ),
-    );
-    // The balance leg is bound to the deadline the customer was told: paying
-    // after `balance_due_until` must not settle, so the QR must not outlive it.
-    const expiresAt =
-      input.leg === "BALANCE" &&
-      reservation.balanceDueUntil !== null &&
-      reservation.balanceDueUntil.getTime() > now.getTime()
-        ? reservation.balanceDueUntil
-        : new Date(now.getTime() + ttlSeconds * 1000);
     const transferContent = generatePreorderPaymentCode(reservation.id, input.leg);
     const intentId = newId();
 
@@ -400,6 +426,8 @@ export async function presentPreorderPayment(
       presentation: presentation({ amountVnd, transferContent, expiresAt }),
       productName: reservation.productName,
       variantName: reservation.variantName,
+      balanceDueUntil: reservation.balanceDueUntil,
+      holdUntil: reservation.holdUntil,
     };
   });
 }
@@ -434,6 +462,7 @@ async function settlePreorderLeg(
   const payable =
     leg !== null &&
     reservation !== null &&
+    reservation.isRestockLocalRoute &&
     (leg === "DEPOSIT"
       ? reservation.status === "WAITING_DEPOSIT"
       : preorderPayableLeg(reservation.status) === "BALANCE");
@@ -449,6 +478,27 @@ async function settlePreorderLeg(
     });
     // A live intent is flagged so it cannot settle later; an already non-live
     // intent (voided at cancel/forfeit) needs no flag.
+    if (intent.status === "CREATED" || intent.status === "PRESENTED") {
+      await flagIntentNeedsReview(trx, intent.id, intent.version);
+    }
+    return { ok: true, kind: "DISCREPANCY", type: "UNMATCHED", discrepancyId };
+  }
+  const transferMs = evidence.transactedAt.getTime();
+  if (
+    leg === "BALANCE" &&
+    reservation !== null &&
+    ((reservation.balanceDueUntil !== null &&
+      transferMs >= reservation.balanceDueUntil.getTime()) ||
+      (reservation.holdUntil !== null && transferMs >= reservation.holdUntil.getTime()))
+  ) {
+    const discrepancyId = await insertDiscrepancy(trx, {
+      type: "UNMATCHED",
+      bankTransactionId: input.bankTransactionId,
+      paymentIntentId: intent.id,
+      orderId: null,
+      reason: "balance transfer arrived at or after preorder deadline",
+      owner: "payments",
+    });
     if (intent.status === "CREATED" || intent.status === "PRESENTED") {
       await flagIntentNeedsReview(trx, intent.id, intent.version);
     }
@@ -559,20 +609,67 @@ export async function applyPaymentEvidence(
       };
     }
     if (bankTxn.kind === "AMBIGUOUS") {
-      // Two canonical rows already share this physical transfer's correlation
-      // key, so this arrival cannot be attributed to one of them without
-      // guessing. It is stored (no evidence is dropped) and recorded for a human.
-      // The matcher MUST NOT run: a sibling row already settled the intent, so
-      // matching would report a false `UNMATCHED` / "intent not settleable" and
-      // turn settled revenue into an operator incident.
+      // The transfer code may identify a live order for review, but the ambiguous
+      // bank identity itself must remain unattributed and must never settle.
+      const matchKey =
+        (evidence.structuredCode ?? evidence.content ?? evidence.reference)?.trim() ?? "";
+      const candidate = matchKey.length > 0 ? await findIntentByContent(trx, matchKey) : null;
+      const lockedPreorder =
+        candidate?.preorderId !== null && candidate?.preorderId !== undefined
+          ? await lockPreorderForSettlement(trx, candidate.preorderId)
+          : null;
+      const lockedOrder = candidate?.orderId
+        ? await findOrderByIdForUpdate(trx, candidate.orderId)
+        : null;
+      const intent =
+        candidate && (lockedPreorder || lockedOrder)
+          ? await findIntentByIdForUpdate(trx, candidate.id)
+          : candidate;
+      const reason = `ambiguous cross-source correlation; candidates ${bankTxn.candidateIds.join(", ")}`;
       const discrepancyId = await insertDiscrepancy(trx, {
         type: "AMBIGUOUS_CORRELATION",
         bankTransactionId: bankTxn.id,
         paymentIntentId: null,
         orderId: null,
-        reason: `ambiguous cross-source correlation; candidates ${bankTxn.candidateIds.join(", ")}`,
+        reason,
         owner: "payments",
       });
+      if (intent && (intent.status === "CREATED" || intent.status === "PRESENTED")) {
+        const intentVersion = await flagIntentNeedsReview(trx, intent.id, intent.version);
+        await enqueueOutboxEvent(trx, {
+          id: newId(),
+          aggregateType: "PaymentIntent",
+          aggregateId: intent.id,
+          aggregateVersion: intentVersion,
+          eventType: "PaymentNeedsReview",
+          payloadRedacted: {
+            intentId: intent.id,
+            orderId: intent.orderId,
+            discrepancyType: "AMBIGUOUS_CORRELATION",
+            reason,
+            correlationId: evidence.correlationId,
+          },
+        });
+      }
+      if (intent?.orderId) {
+        const order = lockedOrder ?? (await findOrderByIdForUpdate(trx, intent.orderId));
+        if (order) {
+          const target = projectDiscrepancyOrderStatus(order.status);
+          if (target !== null) {
+            await transitionOrder(
+              trx,
+              order,
+              target,
+              "PAYMENT_DISCREPANCY",
+              evidence.correlationId,
+              {
+                type: "SYSTEM",
+                id: "payments",
+              },
+            );
+          }
+        }
+      }
       return {
         ok: true,
         kind: "AMBIGUOUS_CORRELATION",

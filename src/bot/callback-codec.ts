@@ -256,6 +256,8 @@ export const CALLBACK_ACTION_CODES = {
   SUPPORT_REASON: 13,
   ADMIN_COMMAND: 14,
   SUPPORT_TICKET_VIEW: 15,
+  SUPPORT_TICKET_LIST: 32,
+  SUPPORT_TICKET_CLOSE: 33,
   RESTOCK_SUBSCRIBE: 16,
   RESTOCK_UNSUBSCRIBE: 17,
   RESTOCK_LIST: 18,
@@ -272,6 +274,7 @@ export const CALLBACK_ACTION_CODES = {
   CHECKOUT_WALLET: 29,
   PREORDER_LIST: 30,
   PREORDER_PAY: 31,
+  WARRANTY_REPORT: 34,
 } as const;
 
 export type CallbackAction = keyof typeof CALLBACK_ACTION_CODES;
@@ -447,6 +450,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "PAYMENT_CANCEL":
     case "PAYMENT_REOPEN":
     case "SUPPORT_TICKET_VIEW":
+    case "SUPPORT_TICKET_CLOSE":
     case "RESTOCK_SUBSCRIBE":
     case "RESTOCK_UNSUBSCRIBE":
     case "SHOP_PRODUCT":
@@ -454,9 +458,15 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "PREORDER_CONSENT":
     case "PREORDER_CREATE":
     case "PREORDER_PAY":
+    case "WARRANTY_REPORT":
     case "CHECKOUT_PREVIEW":
       assertOnlyResource(input);
       return encodeResourceId(input.resourceId!);
+    case "SUPPORT_TICKET_LIST":
+      if (input.secondaryResourceId !== undefined || input.option !== undefined) {
+        throw new Error("Invalid support ticket list callback payload");
+      }
+      return input.resourceId ? encodeResourceId(input.resourceId) : Buffer.alloc(0);
     case "CHECKOUT_WALLET": {
       // The confirmed price rides in the token. Without it the wallet path would re-read the
       // live price and hand THAT to buyNow as the expected price, making the stale-price guard
@@ -542,6 +552,10 @@ function decodeActionPayload(
   ) {
     return payload.byteLength === 0 ? {} : null;
   }
+  if (action === "SUPPORT_TICKET_LIST") {
+    if (payload.byteLength === 0) return {};
+    return payload.byteLength === 16 ? { resourceId: decodeUlid(payload) } : null;
+  }
   if (
     [
       "VARIANT_VIEW",
@@ -551,6 +565,7 @@ function decodeActionPayload(
       "PAYMENT_CANCEL",
       "PAYMENT_REOPEN",
       "SUPPORT_TICKET_VIEW",
+      "SUPPORT_TICKET_CLOSE",
       "RESTOCK_SUBSCRIBE",
       "RESTOCK_UNSUBSCRIBE",
       "SHOP_PRODUCT",
@@ -558,6 +573,7 @@ function decodeActionPayload(
       "PREORDER_CONSENT",
       "PREORDER_CREATE",
       "PREORDER_PAY",
+      "WARRANTY_REPORT",
       "CUSTOMER_NOTIFICATION_TOGGLE",
       "CHECKOUT_PREVIEW",
     ].includes(action)

@@ -3,6 +3,7 @@ import { sql } from "kysely";
 import { buyNow } from "../../src/modules/commerce/buy-now.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+import { setStoreModeForTest } from "../../src/modules/commerce/store-mode.js";
 
 let ctx: PgTestContext;
 
@@ -21,6 +22,7 @@ beforeEach(async () => {
   `.execute(ctx.db);
   await sql`drop function if exists test_slow_order_insert() cascade`.execute(ctx.db);
   await sql`drop function if exists test_hold_first_checkout() cascade`.execute(ctx.db);
+  await setStoreModeForTest(ctx.db, "OPEN", "test");
 });
 
 interface VariantSeed {

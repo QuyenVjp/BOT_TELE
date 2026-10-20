@@ -141,6 +141,17 @@ CANCELLED BY OWNER — DO NOT IMPLEMENT. No `initData`, WebApp session, or Mini 
 2. Admin can read customer summary, wallet balance, ledger, spend, and last order.
 3. Admin message-to-customer is emitted as audited outbound messaging, not direct DB mutation.
 
+### Signed callback expiry flow (item39)
+
+1. The callback codec returns a narrowly typed `ExpiredCallbackToken` only after prefix/shape, action, payload, key-version, and current-actor HMAC checks succeed. Its authenticated action/resource/option/expiry metadata is navigation context only; untrusted `peekCallbackAction` output is never used to select a resource or handler.
+2. `staleNavigation` may use that context only through an explicit read-navigation allowlist. History detail/timeline/list, support ticket detail/reason menu/list, restock list, notification preferences, preorder list, warranty read handlers/home, trust/preferences/catalog/shop reads, and current variant detail for checkout preview/wallet all re-read canonical state with the existing customer owner, audience, sellability, and actor predicates. Payment actions likewise read current order detail/timeline/list; they never refresh or mint payment state.
+3. Expired context never dispatches `dispatchVerified` and never replays a stale action. No payment or refund mutation, SePay poll, payment QR mint/reopen/reminder/cancel, wallet charge, reservation, preorder create/pay, notification change, subscription, support close/prompt mutation, warranty prompt transition, or owner/admin handler is allowed. `ADMIN_COMMAND` fails closed.
+4. Invalid, malformed, future/not-yet-valid, wrong-actor, wrong-key, or failed-signature callbacks receive only a generic safe home with no action hint, resource context, or resource-specific customer read. Telegram private-chat restrictions and callback acknowledgement remain unchanged. Rendering keeps the `isRenderCurrent` supersession guard, and recovery copy describes the current canonical read rather than asserting stale-token state.
+
+- `invariants_preserved`: current-actor HMAC and key-version verification; private-chat and callback-ACK behavior; customer ownership, catalog audience/sellability, and protected-data predicates; canonical read authority; no payment/refund/notification/preorder/support/warranty mutation replay; owner/admin fail-closed boundaries; `isRenderCurrent` render supersession.
+- `intentional_breaks`: an authenticated expired callback may recover to the matching current canonical read instead of always showing a generic stale home; expired metadata can guide that navigation but cannot authorize or mutate.
+- `risked_invariants`: action-to-read allowlist drift, deleted or changed resources, owner/customer mismatch during re-read, stale renders racing with newer navigation, and accidental mutation leakage into a recovery handler. Keep the allowlist explicit and fail closed.
+
 ## 5. Telegram UI contract
 
 ### Persistent reply keyboard
@@ -394,7 +405,8 @@ The managed tabs are `Dashboard`, `Inventory`, `Orders`, `Payments`,
 `Fulfillment`, `Warranty_Support`, `Suppliers`, `Requests` and `Audit`. Tab
 creation is additive and non-destructive. Every projection row carries an
 immutable source key (`asset_id`/`asset_code`, `order_id`/`order_code`,
-`payment_intent_id`, `case_id` or `request_id`); spreadsheet row numbers are
+`payment_intent_id`, `case_id`, `supplier_sku_id` or the namespaced
+no-SKU supplier fallback, or `request_id`); spreadsheet row numbers are
 never production identity.
 
 The column ownership is explicit and structural, not a color convention:
@@ -412,6 +424,26 @@ The column ownership is explicit and structural, not a color convention:
 - Columns outside the canonical header width are `FORMULA_VIEW`. Reconciliation
   reads `A:Z` to discover stable keys and existing rows but writes only managed
   ranges, so formulas/views are never cleared.
+
+The workbook schema marker is v4. `Suppliers` appends the canonical
+`supplier_sku_id` column at the former v3 managed boundary. For SKU-backed
+rows the cell contains the raw PostgreSQL `supplier_sku.id`; suppliers without
+a SKU retain a null cell and use the disjoint reconciliation key
+`supplier:<supplier_id>` (SKU rows use `sku:<supplier_sku_id>`). A v3-to-v4
+cutover inserts that column before the former formula/view boundary, so
+existing view columns shift right and remain outside managed writes; canonical
+Supplier rows are PostgreSQL-owned and may be rebuilt.
+
+Before values writes, reconciliation grows only undersized managed grids to
+the required header-plus-canonical-row count. Values requests are serialized
+and sent in sequential idempotent chunks below the conservative 1,500,000-byte
+payload ceiling; an unrepresentable row or failed grid expansion fails closed
+without recording sync success.
+
+Audit projection reads the complete `audit_event` history rather than a
+fixed-row truncation. Every PostgreSQL audit event remains represented by its
+stable `audit_event.id` key and converges through the same idempotent
+reconciliation path.
 
 Projection uses immutable source keys to update the existing row in place,
 appends only missing keys, clears only stale system cells, and preserves
@@ -438,7 +470,6 @@ payload, descriptive `requested_by`, timestamps, result and audit linkage are
 durable in PostgreSQL. `PENDING`/`PROCESSING` rows resume safely; a repeated
 request ID replays its terminal result and a changed payload becomes a
 `REQUEST_ID_CONFLICT` rejection without a second domain mutation.
-
 
 ### Secret boundary
 
@@ -471,3 +502,56 @@ direct `READY -> AVAILABLE` release and credential submission through
 - `risked_invariants`: collaborator edits, stale versions, quota/network
   failure, credential misconfiguration, and incomplete reconciliation.
   Projection-contract tests and periodic full reconciliation cover them.
+
+## 16. Growth, retention and operational trust contract (2026-09)
+
+This feature branch extends the Telegram-only commerce surface with verified reviews,
+repeat purchase, bounded promotions, referral attribution, explicit checkout resume,
+and aggregate operator metrics. PostgreSQL remains authoritative; Telegram is the
+only customer/admin UI; VietQR + SePay and the existing payment/fulfillment paths
+are reused rather than forked.
+
+### Module seams
+
+- `modules/reviews/*` owns eligibility, customer-scoped review writes, public visible-review
+  summaries, and audited moderation. It reuses `marketing/social-proof.generateCustomerAlias`
+  for public pseudonyms and never changes social-proof event delivery.
+- `modules/promotions/*` owns normalized promo codes, transactional validation/redemption,
+  and immutable order snapshots. Checkout submits only a code; the service computes the
+  discount and final payable amount inside the same transaction as the order.
+- `modules/referrals/*` owns bounded HMAC referral tokens, one-time attribution, fraud flags,
+  and post-fulfillment reward idempotency. Raw Telegram IDs never enter links or public views.
+- `modules/commerce/buy-again.ts` owns only the historical-reference lookup and delegates
+  to the existing current-catalog Buy Now command; old price, payment, reservation, asset,
+  promotion and terms are never copied.
+- `modules/checkout-retention/*` owns active pending-order lookup and one explicit reminder
+  per exact customer/order/payment-intent binding. Existing active PaymentIntents are reused;
+  no automatic abandoned-cart campaign is introduced.
+- `modules/operations/*` owns daily digest and explainable inventory/funnel read models.
+  Metrics are aggregate or customer-safe and cannot mutate commerce state.
+
+### Required invariants
+
+- A review is writable only when the customer owns the order and the same order proves payment
+  `SUCCEEDED`, allocation `SETTLED`, order `COMPLETED`, and delivery `DELIVERED`; one active
+  review per order is enforced by a database uniqueness constraint.
+- Moderation may change only visibility/status and append audit evidence; operators cannot create,
+  re-rate, or rewrite a customer review.
+- A promotion is normalized case/whitespace-insensitively, validated server-side, reserved and
+  accounted transactionally, and snapshotted on the order/payment intent. Cancelled/unpaid
+  semantics are explicit and cannot create free usage through retries.
+- Referral rewards require a real non-test settled and fulfilled order, are idempotent per
+  completed order, reject self/loop attribution, and remain reviewable when abuse signals fire.
+- Pending-checkout resume is customer-scoped and returns the existing live intent; expiry/cancel
+  never silently creates a replacement or sends a reminder.
+- Admin digest, forecast and funnel views contain no credentials, provider identifiers, raw
+  Telegram identity, or customer-level behavioral analytics.
+
+### Risk ledger
+
+- `invariants_preserved`: Telegram-only UX; numeric identity; immutable order/payment evidence;
+  transaction/outbox boundaries; opt-in notifications; secret-safe admin/public projections.
+- `intentional_breaks`: none to payment provider, delivery semantics, or store-mode gates.
+- `risked_invariants`: concurrent promotion usage, stale Buy Again references, review eligibility
+  drift, referral replay, reminder retry duplication, and aggregate metric leakage. Focused
+  transaction/security/acceptance tests must cover each boundary before release.
