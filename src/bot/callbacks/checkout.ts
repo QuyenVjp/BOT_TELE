@@ -24,6 +24,7 @@ import {
   loadVariantPresentationOverride,
 } from "../../modules/catalog/repository.js";
 import { loadOrderReservedQuantity } from "../../modules/digital-goods/repository.js";
+import type { SupplierReadinessChecker } from "../../modules/supplier/readiness.js";
 import type { FulfillmentType } from "../../modules/catalog/fulfillment-type.js";
 import type { CatalogAudience } from "../../modules/catalog/visibility.js";
 
@@ -70,6 +71,7 @@ export interface CheckoutCallbackDeps {
     idempotencyKey: string;
     correlationId: string;
   }) => Promise<{ ok: boolean; message: string }>;
+  supplierReadiness?: SupplierReadinessChecker;
 }
 
 /**
@@ -176,6 +178,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       orderId: result.order.id,
       correlationId: input.correlationId,
       ...merchantInput(),
+      ...(deps.supplierReadiness ? { supplierReadiness: deps.supplierReadiness } : {}),
     });
     if (!presented.ok) return errorMessage("Không tạo được mã thanh toán. Vui lòng thử lại.");
     lastOrderNumber = presented.presentation.orderNumber;
@@ -323,6 +326,7 @@ export function createCheckoutCallbacks(deps: CheckoutCallbackDeps): CheckoutCal
       orderId: order.id,
       correlationId: `refresh-${order.id}`,
       ...merchantInput(),
+      ...(deps.supplierReadiness ? { supplierReadiness: deps.supplierReadiness } : {}),
     });
     if (!presented.ok) {
       // Intent may already be non-live (e.g. NEEDS_REVIEW on the intent).

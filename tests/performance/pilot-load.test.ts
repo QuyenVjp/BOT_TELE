@@ -198,7 +198,7 @@ describe("pilot-load performance (SC-003 / SC-004)", () => {
         correlationId: "ful-" + i,
         deps: {
           vault,
-          supplier: null,
+          resolveSupplier: async (_supplierId: string) => null,
           deliveryBaseUrl: "https://shop.example/d",
           bundleTtlSeconds: 900,
         },

@@ -425,14 +425,14 @@ The column ownership is explicit and structural, not a color convention:
   reads `A:Z` to discover stable keys and existing rows but writes only managed
   ranges, so formulas/views are never cleared.
 
-The workbook schema marker is v4. `Suppliers` appends the canonical
-`supplier_sku_id` column at the former v3 managed boundary. For SKU-backed
-rows the cell contains the raw PostgreSQL `supplier_sku.id`; suppliers without
-a SKU retain a null cell and use the disjoint reconciliation key
-`supplier:<supplier_id>` (SKU rows use `sku:<supplier_sku_id>`). A v3-to-v4
-cutover inserts that column before the former formula/view boundary, so
-existing view columns shift right and remain outside managed writes; canonical
-Supplier rows are PostgreSQL-owned and may be rebuilt.
+The workbook schema marker is v5. `Suppliers` contains the canonical
+`supplier_sku_id` column. For SKU-backed rows the cell contains the raw
+PostgreSQL `supplier_sku.id`; suppliers without a SKU retain a null cell and
+use the disjoint reconciliation key `supplier:<supplier_id>` (SKU rows use
+`sku:<supplier_sku_id>`). A v3-to-v4 cutover inserts the SKU column before the
+former formula/view boundary. The v4-to-v5 cutover removes legacy Vault
+reference columns from `Inventory` and `Suppliers`; canonical rows remain
+PostgreSQL-owned and may be rebuilt.
 
 Before values writes, reconciliation grows only undersized managed grids to
 the required header-plus-canonical-row count. Values requests are serialized
@@ -477,9 +477,10 @@ No spreadsheet value, formula, hyperlink, audit metadata, request payload or
 log may contain passwords, TOTP, cookies, sessions, access/refresh tokens,
 Telegram auth, raw Vault values or digital-asset secrets. The raw candidate
 may exist only transiently in the Apps Script server call, protected HTTPS
-request and backend process memory until Vault staging; account rows may
-contain only a masked login, stable non-reversible identity fingerprint, opaque
-Vault reference and safe operational metadata.
+request and backend process memory until Vault staging. Account rows contain
+only masked login, stable non-reversible identity fingerprint and safe
+operational metadata. Opaque Vault references remain in PostgreSQL only and
+must not appear in any workbook tab.
 
 ### Controlled request allowlist
 
@@ -521,9 +522,9 @@ are reused rather than forked.
   discount and final payable amount inside the same transaction as the order.
 - `modules/referrals/*` owns bounded HMAC referral tokens, one-time attribution, fraud flags,
   and post-fulfillment reward idempotency. Raw Telegram IDs never enter links or public views.
-- `modules/commerce/buy-again.ts` owns only the historical-reference lookup and delegates
-  to the existing current-catalog Buy Now command; old price, payment, reservation, asset,
-  promotion and terms are never copied.
+- `src/bot/callbacks/history.ts` owns owner-scoped historical-order eligibility and delegates
+  to the current catalog for an actor-bound checkout preview; historical price, payment intent,
+  reservation, asset, promotion, and terms are never reused.
 - `modules/checkout-retention/*` owns active pending-order lookup and one explicit reminder
   per exact customer/order/payment-intent binding. Existing active PaymentIntents are reused;
   no automatic abandoned-cart campaign is introduced.

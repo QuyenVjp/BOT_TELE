@@ -5,6 +5,7 @@ import { enqueueOutboxEvent } from "../../src/infrastructure/outbox/repository.j
 import { drainOutboxOnce } from "../../src/infrastructure/outbox/worker.js";
 import { createFulfillmentOutboxHandler } from "../../src/modules/digital-goods/handlers.js";
 import { createSandboxSupplierAdapter } from "../../src/modules/supplier/adapters/primary.js";
+import { createSupplierProviderResolver } from "../../src/modules/supplier/resolver.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -31,7 +32,7 @@ async function seedSupplierPaidOrder() {
   const variantId = newId();
   const customerId = newId();
   const orderId = newId();
-  const supplierId = newId();
+  const supplierId = "sandbox";
   const supplierSkuId = newId();
   const externalSku = `SUP-${newId().slice(-8)}`;
 
@@ -61,8 +62,15 @@ async function seedSupplierPaidOrder() {
        199000, 'P1M', 'CREDENTIAL', 'SUPPLIER_API', 'PAID', now())
   `.execute(ctx.db);
   await sql`
-    insert into supplier (id, name, adapter_type, credential_vault_ref, status)
-    values (${supplierId}, 'Primary', 'sandbox', 'vault:sup-cred', 'ACTIVE')
+    insert into supplier (id, name, adapter_type, credential_vault_ref, status, provider_capabilities)
+    values (
+      ${supplierId},
+      'Primary',
+      'sandbox',
+      'vault:sup-cred',
+      'ACTIVE',
+      '["ORDER_CREATE","ORDER_READ","ORDER_LIST","CANCEL","REFUND","DELIVERY_PAYLOAD"]'::jsonb
+    )
   `.execute(ctx.db);
   await sql`
     insert into supplier_sku (id, supplier_id, variant_id, external_sku, cost_vnd, region, delivery_type, is_active)
@@ -90,10 +98,13 @@ describe("supplier fulfillment from OrderPaid", () => {
     const f = await seedSupplierPaidOrder();
     const eventId = await enqueueOrderPaid(f.orderId, "supplier-paid");
     const vault = createInMemoryVault();
+    const supplierResolver = createSupplierProviderResolver(ctx.db, vault, {
+      allowFixtureAdapters: true,
+    });
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault,
-      supplier: createSandboxSupplierAdapter({ mode: "fulfill" }),
+      resolveSupplier: (supplierId) => supplierResolver.resolve(supplierId),
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });
@@ -110,12 +121,17 @@ describe("supplier fulfillment from OrderPaid", () => {
       source_type: string;
       status: string;
       reserved_order_id: string | null;
-    }>`select source_type, status, reserved_order_id from digital_asset where reserved_order_id = ${f.orderId}`.execute(
+      vault_ref: string;
+    }>`select source_type, status, reserved_order_id, vault_ref from digital_asset where reserved_order_id = ${f.orderId}`.execute(
       ctx.db,
     );
-    expect(asset.rows).toEqual([
-      { source_type: "SUPPLIER", status: "READY", reserved_order_id: f.orderId },
-    ]);
+    expect(asset.rows).toHaveLength(1);
+    expect(asset.rows[0]).toMatchObject({
+      source_type: "SUPPLIER",
+      status: "READY",
+      reserved_order_id: f.orderId,
+    });
+    await expect(vault.reveal(asset.rows[0]!.vault_ref)).resolves.toMatch(/^fixture-asset:/u);
     const bundles = await sql<{
       count: number;
     }>`select count(*)::int as count from delivery_bundle where order_id = ${f.orderId}`.execute(
@@ -128,10 +144,11 @@ describe("supplier fulfillment from OrderPaid", () => {
     const f = await seedSupplierPaidOrder();
     const eventId = await enqueueOrderPaid(f.orderId, "supplier-timeout");
     const vault = createInMemoryVault();
+    const supplier = createSandboxSupplierAdapter({ mode: "timeout-then-fulfill", vault });
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault,
-      supplier: createSandboxSupplierAdapter({ mode: "timeout-then-fulfill" }),
+      resolveSupplier: async (supplierId) => (supplierId === f.supplierId ? supplier : null),
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });
@@ -151,10 +168,19 @@ describe("supplier fulfillment from OrderPaid", () => {
     await drainOutboxOnce(ctx.db, { batchSize: 10, maxAttempts: 5, handler });
     const afterRecovery = await sql<{
       published: boolean;
-    }>`select (published_at is not null) as published from outbox_event where id = ${eventId}`.execute(
+      vault_ref: string | null;
+      asset_status: string | null;
+    }>`select
+        (select published_at is not null from outbox_event where id = ${eventId}) as published,
+        (select vault_ref from digital_asset where reserved_order_id = ${f.orderId} limit 1) as vault_ref,
+        (select status from digital_asset where reserved_order_id = ${f.orderId} limit 1) as asset_status`.execute(
       ctx.db,
     );
     expect(afterRecovery.rows[0]?.published).toBe(true);
+    expect(afterRecovery.rows[0]?.asset_status).toBe("READY");
+    await expect(vault.reveal(afterRecovery.rows[0]!.vault_ref!)).resolves.toMatch(
+      /^fixture-asset:/u,
+    );
 
     await handler({
       id: eventId,
@@ -180,7 +206,7 @@ describe("supplier fulfillment from OrderPaid", () => {
     const f = await seedSupplierPaidOrder();
     const eventId = await enqueueOrderPaid(f.orderId, "supplier-completed-replay");
     const vault = createInMemoryVault();
-    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill", vault });
     let createCount = 0;
     const supplier = {
       ...sandbox,
@@ -192,7 +218,7 @@ describe("supplier fulfillment from OrderPaid", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault,
-      supplier,
+      resolveSupplier: async (supplierId) => (supplierId === f.supplierId ? supplier : null),
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });

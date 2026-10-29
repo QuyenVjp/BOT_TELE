@@ -37,6 +37,8 @@ Docker/OrbStack.
 - [ ] Production env has real values for: `ADMIN_TELEGRAM_USER_ID`, SePay secrets, vault endpoint,
       supplier credentials, Telegram bot token / webhook secret. `loadConfig` fails closed if
       production still has `memory`/`fixture` drivers or a zero admin id.
+- [ ] If a pending byte-backed digital-file delivery exists, set the worker's `PRIVATE_ARTIFACT_ROOT`
+      to its private storage root; cached Telegram `file_id` deliveries do not need local storage.
 
 ## Health and readiness
 
@@ -84,17 +86,41 @@ npm run migrate:production
 
 ## Branch migration inventory and recorded production head
 
-The last recorded read-only production preflight observed production at
-`082_paid_delivery_reconciliation.sql` (**81** migrations). That observation is
-historical; production was not inspected during this stabilization sprint and
-the recorded head must not be treated as current.
+Production application history is unknown. Source files, build artifacts, and
+any earlier read-only notes do not prove which migrations are applied to the
+production database. Before any production migration, check the actual
+`schema_migrations` head and count from the exact release checkout and target
+database.
 
-The current source tree contains **87** SQL migration files; the highest source
-migration is `103_admin_inventory_import_callback_state.sql`. This branch also
-contains migrations 083, 093, 097, 100, 101, and 103 beyond the recorded 082
-head. Source files do not prove that any of them are applied to production.
-Before any production migration, check the actual `schema_migrations` head and
-count from the exact release checkout and target database.
+The migration source runner discovers only
+`src/infrastructure/db/migrations/*.sql` (and the compiled equivalent). The
+current source tree contains **91** SQL migration files; the highest source
+migration is `107_file_delivery_recover_confirmation.sql`. The root-level
+`102_admin_order_search_prompt.sql` is outside the discovered path and is not
+discovered; it **must not be moved or renamed**.
+
+If `093_supplier_catalog_platform.sql` is still pending after the root-level
+`102_admin_order_search_prompt.sql` was applied, apply 093 once from the repaired
+release artifact. Its allowlist includes `ORDER_SEARCH_PROMPT`, so existing owner
+callback rows and payload/configuration are validated and preserved. If 093 is
+already recorded as applied, do not rerun it or delete/rewrite its receipt;
+continue with the pending runner migrations.
+
+If runner migration `103_admin_inventory_import_callback_state.sql` is still
+pending after root-level 102 was applied, the repaired 103 allowlist also
+includes `ORDER_SEARCH_PROMPT`; apply 103 normally and do not rewrite existing
+owner callback rows or payload/configuration. If 103 was already applied before
+this repair, leave it recorded/applied and run additive migration
+`106_admin_order_search_prompt_state.sql` to restore `ORDER_SEARCH_PROMPT`
+without deleting or rewriting owner callback rows or payload/configuration.
+Migration `107_file_delivery_recover_confirmation.sql` extends the durable
+confirmation allowlist to `file_delivery.recover`.
+
+Build the exact release checkout before using the compiled runner. `npm run
+build` synchronizes the source migration set into
+`dist/infrastructure/db/migrations/` and removes stale destination SQL. Verify
+the compiled migration head against a disposable database. This inventory does
+not prove production application history.
 
 Migration 083 is a forward-only expand migration for Google Sheets projection
 metadata, the Sheet-native owner challenge, and inventory Vault-orphan recovery.
@@ -271,7 +297,55 @@ sales as part of the migration.
 
 Before a rolling restart or scale-in, stop accepting new outbox work, wait for in-flight handlers
 to finish, confirm no handler is mid-transaction, then start the new worker. Handlers are designed
-for at-least-once delivery plus domain unique keys = exactly-once effects.
+for at-least-once delivery; domain unique keys make business fulfillment effectively-once. Telegram
+sends themselves are not exactly-once.
+
+### Safe `SEND_UNCERTAIN` recovery
+
+`SEND_UNCERTAIN` means the Telegram provider outcome is unknown. A missing Telegram receipt does
+not prove that no send occurred. Never blindly resend or retry, rerun the worker to force a send,
+or mutate the database directly.
+
+Use the existing recovery path only: in the private chat, the numeric root admin opens the order
+details and starts the durable `file_delivery.recover` action for the exact job and artifact.
+There is no dedicated uncertainty filter or Telegram audit viewer.
+
+1. Re-read the order details and confirm the order version, job id, artifact id/version/hash,
+   `claim_generation`, and `FAILED` + `SEND_UNCERTAIN` state.
+   The recovery callback binds to the job's stored Telegram chat; a sibling identity
+   linked to the same customer is not interchangeable.
+2. Choose exactly one resolution:
+   - **`KEEP_UNCERTAIN`** parks the same job with no retry. Verify afterward that the same job is
+     still uncertain and no retry event was created.
+   - **`REQUEUE`** keeps the same job and artifact, emits the typed
+     `FileDeliveryRetryRequested` event and recovery audit, and returns the job to the queue.
+     Requeue retains the current `claim_generation` until the next claim increments it; the
+     retry event binds to generation + 1. Verify the same job/artifact, the retry event, and then
+     either one `SENT` result or a new uncertainty. This is not proof of an exactly-once Telegram
+     send.
+3. If step-up is enabled, run `/verify <code> <requestId>`, reopen the exact action, then run
+   `/confirm <confirmationId> <challenge>`. A reason is required. If state is stale, stop and
+   re-read the order details before reopening and confirming the exact action.
+4. While the store is `CLOSED`/`TEST`, the server permits `REQUEUE` only for a test product whose
+   Telegram customer identity is the authenticated root admin or is present in
+   `test_customer_allowlist`; a missing store-control row is treated as `CLOSED`. The policy is
+   checked under the same transaction lock before any job, retry-event, or recovery-audit mutation.
+   In `OPEN`, any otherwise-valid order remains eligible; `KEEP_UNCERTAIN` never sends or requeues.
+
+For a read-only audit check, use the actual `audit_event` columns and select only event/action,
+time, correlation, and redacted metadata:
+
+```sql
+select action as event_type, occurred_at, correlation_id, metadata_redacted
+from audit_event
+where target_type = 'FileDeliveryJob'
+  and target_id = '<order-id>'
+  and action in ('file_delivery.uncertain', 'file_delivery.recovery')
+order by occurred_at, id;
+```
+
+Never select or copy secrets or customer content from audit data. Do not infer a Telegram send
+outcome from the absence of an audit row, and do not claim exactly-once Telegram delivery.
 
 ## Rollback
 

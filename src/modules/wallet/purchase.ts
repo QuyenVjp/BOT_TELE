@@ -2,11 +2,20 @@ import { sql } from "kysely";
 import type { Db } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
-import { findOrderByIdForOwnerForUpdate, transitionOrder } from "../commerce/repository.js";
+import {
+  findOrderByIdForOwner,
+  findOrderByIdForOwnerForUpdate,
+  transitionOrder,
+} from "../commerce/repository.js";
 import { isFeature001SellablePolicy } from "../catalog/domain.js";
 import { orderHasActiveReservation } from "../digital-goods/repository.js";
 import { voidLiveIntentsForOrder } from "../payments/repository.js";
 import { debitWalletLedgerEntry, type WalletLedgerErrorCode } from "./ledger.js";
+import {
+  lockAndVerifySupplierReadinessPermit,
+  type SupplierReadinessChecker,
+  type SupplierReadinessPermit,
+} from "../supplier/readiness.js";
 import { newId } from "../../shared/ids/index.js";
 
 export type WalletPurchaseResult =
@@ -25,9 +34,31 @@ export interface WalletPurchaseInput {
   correlationId: string;
 }
 
-export function createWalletPurchaseService(db: Db) {
+export function createWalletPurchaseService(db: Db, supplierReadiness?: SupplierReadinessChecker) {
   return {
     async purchase(input: WalletPurchaseInput): Promise<WalletPurchaseResult> {
+      const candidate = await findOrderByIdForOwner(db, input.orderId, input.customerId);
+      let supplierReadinessPermit: SupplierReadinessPermit | null = null;
+      if (
+        candidate?.status === "PENDING_PAYMENT" &&
+        candidate.fulfillmentType === "SUPPLIER_API" &&
+        (candidate.expiresAt === null || new Date(candidate.expiresAt).getTime() > Date.now())
+      ) {
+        const storeState = await sql<{ status: string }>`
+          select status from store_control where id = 'main' limit 1
+        `.execute(db);
+        if (storeState.rows[0]?.status !== "CLOSED") {
+          const readiness = supplierReadiness ? await supplierReadiness(candidate.variantId) : null;
+          if (!readiness?.ok) {
+            return {
+              ok: false,
+              code: "ORDER_NOT_PAYABLE",
+              message: "Nhà cung cấp hiện không sẵn sàng.",
+            };
+          }
+          supplierReadinessPermit = readiness.permit;
+        }
+      }
       return withTransaction(db, async (trx) => {
         const storeState = await sql<{ status: string }>`
           select status from store_control where id = 'main' limit 1
@@ -61,6 +92,18 @@ export function createWalletPurchaseService(db: Db) {
             ok: false,
             code: "ORDER_NOT_PAYABLE",
             message: "Đơn hàng đã hết hạn thanh toán.",
+          };
+        }
+        if (
+          order.fulfillmentType === "SUPPLIER_API" &&
+          (!supplierReadinessPermit ||
+            supplierReadinessPermit.variantId !== order.variantId ||
+            !(await lockAndVerifySupplierReadinessPermit(trx, supplierReadinessPermit)))
+        ) {
+          return {
+            ok: false,
+            code: "ORDER_NOT_PAYABLE",
+            message: "Nhà cung cấp hiện không sẵn sàng.",
           };
         }
         const variant = await sql<{

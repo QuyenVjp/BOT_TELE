@@ -18,8 +18,9 @@ const envelope = {
   vaultRef: "vault:asset-1",
 };
 
-function makePort(overrides: Partial<SupplierPort> = {}): SupplierPort {
+function makePort(overrides: Partial<SupplierPort> = {}): SupplierPort & { providerKey: string } {
   return {
+    providerKey: "supplier-1",
     getAvailability: async () => ({ status: "AVAILABLE", observedAt: new Date().toISOString() }),
     createOrder: async () => ({
       kind: "FULFILLED",
@@ -37,9 +38,11 @@ function makePort(overrides: Partial<SupplierPort> = {}): SupplierPort {
 function makeStore(): SupplierPurchaseRecordStore & {
   rows: Map<string, SupplierPurchaseRecord>;
   reviewCodes: string[];
+  transportFailures: Array<{ code: string; retryAfterSeconds: number | null }>;
 } {
   const rows = new Map<string, SupplierPurchaseRecord>();
   const reviewCodes: string[] = [];
+  const transportFailures: Array<{ code: string; retryAfterSeconds: number | null }> = [];
   const byKey = new Map<string, string>();
   let next = 0;
   const claimed = new Set<string>();
@@ -51,6 +54,7 @@ function makeStore(): SupplierPurchaseRecordStore & {
   return {
     rows,
     reviewCodes,
+    transportFailures,
     async findByIdempotency(input) {
       const id = byKey.get(`${input.supplierId}:${input.idempotencyKey}`);
       return id ? (rows.get(id) ?? null) : null;
@@ -78,11 +82,6 @@ function makeStore(): SupplierPurchaseRecordStore & {
       byKey.set(key, record.id);
       return { inserted: true, record };
     },
-    async refreshIntent(id, input) {
-      await patch(id, {
-        ...(input.costCeilingVnd === undefined ? {} : { costVndSnapshot: input.costCeilingVnd }),
-      });
-    },
     async markAttempt(id) {
       if (claimed.has(id)) return false;
       claimed.add(id);
@@ -90,8 +89,12 @@ function makeStore(): SupplierPurchaseRecordStore & {
       await patch(id, { status: "SUBMITTED", queryKey: record?.idempotencyKey ?? null });
       return true;
     },
-    async markTransportFailure(id) {
-      await patch(id, {});
+    async markTransportFailure(_id, input) {
+      transportFailures.push({
+        code: input.code,
+        retryAfterSeconds: input.retryAfterSeconds ?? null,
+      });
+      await patch(_id, {});
     },
     async markResponse(id, fingerprint) {
       await patch(id, { responseFingerprint: fingerprint });
@@ -137,6 +140,76 @@ const input = (store: SupplierPurchaseRecordStore, overrides: Record<string, unk
 });
 
 describe("durable supplier purchase core", () => {
+  it.each(["missing", "mismatched"] as const)(
+    "blocks a new purchase with %s provider identity before claiming an attempt",
+    async (identity) => {
+      const store = makeStore();
+      let creates = 0;
+      const base = makePort({
+        createOrder: async () => {
+          creates += 1;
+          return { kind: "REJECTED", code: "unexpected", retryable: false };
+        },
+      });
+      const port =
+        identity === "missing"
+          ? { ...base, providerKey: undefined }
+          : { ...base, providerKey: "supplier-2" };
+
+      const result = await executeSupplierPurchase(input(store, { port }));
+
+      expect(result).toMatchObject({
+        kind: "BLOCKED",
+        code: "SUPPLIER_PROVIDER_MISMATCH",
+      });
+      expect(store.rows.size).toBe(0);
+      expect(creates).toBe(0);
+    },
+  );
+
+  it.each(["missing", "mismatched"] as const)(
+    "does not query an UNKNOWN purchase with %s provider identity",
+    async (identity) => {
+      const store = makeStore();
+      const seeded = await store.insertIntent({
+        supplierId: "supplier-1",
+        supplierSkuId: "sku-1",
+        requestReference: "run-1",
+        idempotencyKey: "canary-1",
+        requestFingerprint: "fingerprint",
+        costCeilingVnd: 23000,
+      });
+      seeded.record.status = "UNKNOWN";
+      seeded.record.queryKey = "canary-1";
+      let queries = 0;
+      const base = makePort({
+        queryOrder: async () => {
+          queries += 1;
+          return { status: "PENDING", externalOrderId: "ext-1" };
+        },
+      });
+      const port =
+        identity === "missing"
+          ? { ...base, providerKey: undefined }
+          : { ...base, providerKey: "supplier-2" };
+
+      const result = await recoverSupplierPurchase({
+        store,
+        recordId: seeded.record.id,
+        queryKey: "canary-1",
+        expectedSku: "SKU-1",
+        port,
+      });
+
+      expect(result).toMatchObject({
+        kind: "BLOCKED",
+        code: "SUPPLIER_PROVIDER_MISMATCH",
+      });
+      expect(store.rows.get(seeded.record.id)).toMatchObject({ status: "UNKNOWN" });
+      expect(queries).toBe(0);
+    },
+  );
+
   it("blocks before insert and upstream I/O when the gate is off", async () => {
     const store = makeStore();
     let creates = 0;
@@ -200,6 +273,68 @@ describe("durable supplier purchase core", () => {
       port,
     });
     expect(recovered).toMatchObject({ kind: "FULFILLED", externalOrderId: "ext-1" });
+    expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
+  });
+  it.each(["IDENTITY_MISMATCH", "SCHEMA_INVALID"] as const)(
+    "routes create %s to durable review instead of UNKNOWN",
+    async (supplierCode) => {
+      const store = makeStore();
+      const port = makePort({
+        createOrder: async () => {
+          throw new SupplierPortError(supplierCode, "provider response is not trustworthy");
+        },
+      });
+
+      const result = await executeSupplierPurchase(input(store, { port }));
+
+      expect(result).toMatchObject({ kind: "BLOCKED", code: supplierCode });
+      expect(store.reviewCodes).toEqual([supplierCode]);
+      expect(store.transportFailures).toEqual([]);
+      expect([...store.rows.values()][0]).toMatchObject({ status: "SUBMITTED" });
+    },
+  );
+
+  it("returns durable UNKNOWN after a recovery query timeout without creating again", async () => {
+    const store = makeStore();
+    let creates = 0;
+    let queries = 0;
+    const port = makePort({
+      createOrder: async () => {
+        creates += 1;
+        throw new SupplierPortError("TRANSPORT_TIMEOUT", "create timeout");
+      },
+      queryOrder: async ({ queryKey }) => {
+        queries += 1;
+        expect(queryKey).toBe("canary-1");
+        throw new SupplierPortError("TRANSPORT_TIMEOUT", "query timeout", 17);
+      },
+    });
+
+    const first = await executeSupplierPurchase(input(store, { port }));
+    expect(first).toMatchObject({ kind: "UNKNOWN", queryKey: "canary-1" });
+    const row = [...store.rows.values()][0]!;
+
+    const recovered = await recoverSupplierPurchase({
+      store,
+      recordId: row.id,
+      queryKey: "stale-query-key",
+      expectedSku: "SKU-1",
+      port,
+    });
+
+    expect(recovered).toMatchObject({
+      kind: "UNKNOWN",
+      queryKey: "canary-1",
+      record: { status: "UNKNOWN", queryKey: "canary-1" },
+    });
+    expect(store.rows.get(row.id)).toMatchObject({
+      status: "UNKNOWN",
+      queryKey: "canary-1",
+    });
+    expect(store.transportFailures).toEqual([
+      { code: "TRANSPORT_TIMEOUT", retryAfterSeconds: null },
+      { code: "TRANSPORT_TIMEOUT", retryAfterSeconds: 17 },
+    ]);
     expect({ creates, queries }).toEqual({ creates: 1, queries: 1 });
   });
 
@@ -291,8 +426,8 @@ describe("durable supplier purchase core", () => {
     });
     seeded.record.status = "AUTHORIZED";
     const markAttempt = store.markAttempt.bind(store);
-    store.markAttempt = async (id) => {
-      const claimed = await markAttempt(id);
+    store.markAttempt = async (id, input) => {
+      const claimed = await markAttempt(id, input);
       if (claimed) throw new Error("simulated crash after durable claim");
       return claimed;
     };

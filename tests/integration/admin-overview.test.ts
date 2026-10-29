@@ -168,6 +168,14 @@ describe("admin overview", () => {
       createdAt: new Date("2026-09-09T10:00:00.000Z"),
       completedAt: new Date("2026-09-09T10:05:00.000Z"),
     });
+    // The next Vietnam-day boundary must not leak into this day's overview.
+    const tomorrowVn = new Date("2026-09-11T17:00:00.000Z");
+    await addOrder(seedRow, {
+      status: "COMPLETED",
+      priceVnd: 1_000_000,
+      createdAt: tomorrowVn,
+      completedAt: tomorrowVn,
+    });
 
     const overview = await getAdminOverview(ctx.db, now);
 
@@ -230,7 +238,7 @@ describe("admin overview", () => {
       correlationId: evidence.correlationId,
       deps: {
         vault: createInMemoryVault(),
-        supplier: null,
+        resolveSupplier: async (_supplierId) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       },
@@ -257,7 +265,6 @@ describe("admin overview", () => {
       fulfillmentType: "MANUAL_FULFILLMENT",
     });
   });
-
 
   it("flags a sellable variant at or below its threshold and ignores test stock", async () => {
     await seed();

@@ -8,8 +8,10 @@ import {
   QueryOrderResultSchema,
   SupplierPortError,
   type AssetEnvelope,
-  type CreateOrderInput,
   type CreateOrderResult,
+  type CreateOrderInput,
+  type QueryOrderResult,
+  type SupplierCapability,
   type SupplierPort,
 } from "../port.js";
 
@@ -62,10 +64,17 @@ const WireQuerySchema = z.discriminatedUnion("status", [
   QueryOrderResultSchema.options[3],
   QueryOrderResultSchema.options[4],
 ]);
+const WireQueryIdentitySchema = z.object({ externalOrderId: z.string().min(1) }).passthrough();
+
+function parseSupplierSchema<T>(schema: z.ZodType<T>, value: unknown, message: string): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new SupplierPortError("SCHEMA_INVALID", message);
+  return parsed.data;
+}
 
 export interface HttpSupplierOptions {
   baseUrl: string;
-  token: string;
+  credentialVaultRef: string;
   timeoutMs: number;
   maxAttempts: number;
   vault: Vault;
@@ -74,6 +83,39 @@ export interface HttpSupplierOptions {
     fetch?: typeof fetch;
     resolve?: (hostname: string) => Promise<readonly string[]>;
   };
+}
+
+function validateCredentialVaultRef(ref: string): boolean {
+  return /^vault:\S{1,512}$/u.test(ref);
+}
+
+function validateCredential(material: string): boolean {
+  return /^[\x21-\x7e]{16,512}$/u.test(material);
+}
+
+function credentialError(): SupplierPortError {
+  return new SupplierPortError("CREDENTIAL_UNAVAILABLE", "supplier authentication failed");
+}
+
+function credentialInvalidError(): SupplierPortError {
+  return new SupplierPortError("CREDENTIAL_INVALID", "supplier authentication failed");
+}
+
+function capabilities(): ReadonlySet<SupplierCapability> {
+  return new Set<SupplierCapability>([
+    "ORDER_CREATE",
+    "ORDER_READ",
+    "ORDER_LIST",
+    "CANCEL",
+    "REFUND",
+    "DELIVERY_PAYLOAD",
+  ]);
+}
+
+export interface HttpSupplierProvider extends SupplierPort {
+  readonly providerKey: "http";
+  readonly displayName: "HTTP Supplier";
+  readonly capabilities: ReadonlySet<SupplierCapability>;
 }
 
 function validateOptions(options: HttpSupplierOptions): URL {
@@ -93,7 +135,7 @@ function validateOptions(options: HttpSupplierOptions): URL {
     url.password ||
     url.search ||
     url.hash ||
-    !options.token.trim() ||
+    !validateCredentialVaultRef(options.credentialVaultRef) ||
     !Number.isInteger(options.timeoutMs) ||
     options.timeoutMs < 10 ||
     options.timeoutMs > 30_000 ||
@@ -142,7 +184,7 @@ async function readBounded(response: Response, signal: AbortSignal): Promise<unk
   }
 }
 
-export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPort {
+export function createHttpSupplierPort(options: HttpSupplierOptions): HttpSupplierProvider {
   const base = validateOptions(options);
   const resolve = options.testTransport?.resolve;
   /**
@@ -173,6 +215,13 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
     if (serialized && Buffer.byteLength(serialized, "utf8") > MAX_REQUEST_BYTES) {
       throw new SupplierPortError("REQUEST_TOO_LARGE", "supplier request is invalid");
     }
+    let credential: string;
+    try {
+      credential = await options.vault.reveal(options.credentialVaultRef);
+    } catch {
+      throw credentialError();
+    }
+    if (!validateCredential(credential)) throw credentialInvalidError();
     const attempts = input.attempts ?? options.maxAttempts;
     for (let attempt = 1; attempt <= attempts; attempt += 1) {
       const controller = new AbortController();
@@ -187,7 +236,7 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
             method: input.method,
             signal: controller.signal,
             headers: {
-              authorization: `Bearer ${options.token}`,
+              authorization: `Bearer ${credential}`,
               accept: "application/json",
               ...(serialized ? { "content-type": "application/json" } : {}),
               ...(input.idempotencyKey ? { "idempotency-key": input.idempotencyKey } : {}),
@@ -204,7 +253,14 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
         if (error instanceof OutboundPolicyError) {
           throw new SupplierPortError("CONFIG_INVALID", "supplier endpoint is not allowed");
         }
-        if (attempt === attempts || error instanceof SupplierPortError) throw error;
+        if (error instanceof SupplierPortError) throw error;
+        if (attempt === attempts) {
+          const timedOut = controller.signal.aborted;
+          throw new SupplierPortError(
+            timedOut ? "TRANSPORT_TIMEOUT" : "TRANSPORT_ERROR",
+            timedOut ? "supplier request timed out" : "supplier request failed",
+          );
+        }
       } finally {
         clearTimeout(timer);
       }
@@ -240,6 +296,9 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
   };
 
   return {
+    providerKey: "http",
+    displayName: "HTTP Supplier",
+    capabilities: capabilities(),
     getAvailability(input) {
       const query = new URLSearchParams({
         supplierSku: input.supplierSku,
@@ -248,7 +307,7 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
       return request({
         method: "GET",
         path: `availability?${query}`,
-        parse: (v) => AvailabilitySchema.parse(v),
+        parse: (v) => parseSupplierSchema(AvailabilitySchema, v, "supplier response is invalid"),
       });
     },
     async createOrder(input: CreateOrderInput) {
@@ -263,18 +322,38 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
         });
         return await mapCreate(raw);
       } catch (error) {
+        if (
+          error instanceof SupplierPortError &&
+          (error.supplierCode === "TRANSPORT_TIMEOUT" || error.supplierCode === "TRANSPORT_ERROR")
+        ) {
+          return { kind: "UNKNOWN", queryKey: input.idempotencyKey, reason: "transport_timeout" };
+        }
         if (!(error instanceof SupplierPortError))
           return { kind: "UNKNOWN", queryKey: input.idempotencyKey, reason: "transport_timeout" };
         throw error;
       }
     },
     async queryOrder(input) {
+      if (!input.externalOrderId && !input.queryKey) {
+        throw new SupplierPortError("INPUT_INVALID", "supplier query identity is required");
+      }
       const query = new URLSearchParams(
         input.externalOrderId
-          ? { externalOrderId: input.externalOrderId }
-          : { queryKey: input.queryKey ?? "" },
+          ? {
+              externalOrderId: input.externalOrderId,
+              ...(input.queryKey ? { queryKey: input.queryKey } : {}),
+            }
+          : { queryKey: input.queryKey as string },
       );
       const raw = await request({ method: "GET", path: `orders/query?${query}`, parse: (v) => v });
+      const identity = WireQueryIdentitySchema.safeParse(raw);
+      if (
+        input.externalOrderId !== undefined &&
+        identity.success &&
+        identity.data.externalOrderId !== input.externalOrderId
+      ) {
+        throw new SupplierPortError("IDENTITY_MISMATCH", "supplier order identity mismatch");
+      }
       const parsed = WireQuerySchema.safeParse(raw);
       if (!parsed.success)
         throw new SupplierPortError("SCHEMA_INVALID", "supplier response is invalid");
@@ -291,7 +370,7 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
         path: `orders/${encodeURIComponent(input.externalOrderId)}/cancel`,
         body: { reason: input.reason },
         idempotencyKey: input.idempotencyKey,
-        parse: (v) => ActionSchema.parse(v),
+        parse: (v) => parseSupplierSchema(ActionSchema, v, "supplier response is invalid"),
       });
     },
     requestRefund(input) {
@@ -300,7 +379,7 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
         path: `orders/${encodeURIComponent(input.externalOrderId)}/refund`,
         body: { reason: input.reason },
         idempotencyKey: input.idempotencyKey,
-        parse: (v) => ActionSchema.parse(v),
+        parse: (v) => parseSupplierSchema(ActionSchema, v, "supplier response is invalid"),
       });
     },
     async reconcile(input) {
@@ -312,10 +391,13 @@ export function createHttpSupplierPort(options: HttpSupplierOptions): SupplierPo
       const parsed = await request({
         method: "GET",
         path: `reconcile?${query}`,
-        parse: (v) => ReconcileSchema.parse(v),
+        parse: (v) => parseSupplierSchema(ReconcileSchema, v, "supplier response is invalid"),
       });
+      const observations: QueryOrderResult[] = parsed.observations.map((item) =>
+        parseSupplierSchema(QueryOrderResultSchema, item, "supplier response is invalid"),
+      );
       return {
-        observations: parsed.observations.map((item) => QueryOrderResultSchema.parse(item)),
+        observations,
         nextCursor: parsed.nextCursor,
       };
     },

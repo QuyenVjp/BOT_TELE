@@ -39,6 +39,7 @@ export const KNOWN_OUTBOX_EVENT_TYPES = [
   "DeliveryBundleCreated",
   "DigitalAssetClaimed",
   "DigitalAssetDelivered",
+  "FileDeliveryRetryRequested",
   "ManualFulfillmentTaskCreated",
   "ManualFulfillmentTaskCompleted",
   "StockDelta",
@@ -65,9 +66,10 @@ export const KNOWN_OUTBOX_EVENT_TYPES = [
   "PreorderHoldForfeited",
   "PreorderShopCancelled",
   "PreorderStockAllocated",
-  // A support ticket is opened by the customer, so without this the row dead-letters and nobody is
-  // told. It acks through the notification service once known.
+  // Support-ticket lifecycle notices are dispatched by the notification service; without these
+  // allowlist entries the row dead-letters and the customer/owner hears nothing.
   "TicketOpened",
+  "TicketStatusChanged",
 ] as const;
 
 export type KnownOutboxEventType = (typeof KNOWN_OUTBOX_EVENT_TYPES)[number];

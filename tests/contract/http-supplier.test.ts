@@ -1,9 +1,11 @@
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { afterEach, describe, expect, it } from "vitest";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
+import type { Vault } from "../../src/infrastructure/vault/port.js";
 import { createHttpSupplierPort } from "../../src/modules/supplier/adapters/http.js";
 
 const AUTHORIZATION_FIXTURE = "test-only-supplier-auth-value";
+const AUTHORIZATION_REF = "vault:test:supplier-auth";
 const CREATE_INPUT = {
   idempotencyKey: "supplier-order:ord-1",
   supplierSku: "NF-1M-PREMIUM",
@@ -56,14 +58,24 @@ function wireAsset(secretMaterial = "supplier-user:supplier-password") {
     secretMaterial,
   };
 }
+function createTestVault(): Vault {
+  const vault = createInMemoryVault();
+  return {
+    ...vault,
+    reveal: async (ref) => {
+      if (ref === AUTHORIZATION_REF) return AUTHORIZATION_FIXTURE;
+      return vault.reveal(ref);
+    },
+  };
+}
 
 function createPort(baseUrl: string, timeoutMs = 500) {
   return createHttpSupplierPort({
     baseUrl,
-    token: AUTHORIZATION_FIXTURE,
+    credentialVaultRef: AUTHORIZATION_REF,
     timeoutMs,
     maxAttempts: 2,
-    vault: createInMemoryVault(),
+    vault: createTestVault(),
     testTransport: { allowInsecureLoopback: true },
   });
 }
@@ -105,10 +117,10 @@ describe("authenticated HTTP SupplierPort (T137 RED)", () => {
         assetEnvelope: wireAsset(),
       });
     });
-    const vault = createInMemoryVault();
+    const vault = createTestVault();
     const port = createHttpSupplierPort({
       baseUrl: server.baseUrl,
-      token: AUTHORIZATION_FIXTURE,
+      credentialVaultRef: AUTHORIZATION_REF,
       timeoutMs: 500,
       maxAttempts: 2,
       vault,
@@ -138,6 +150,30 @@ describe("authenticated HTTP SupplierPort (T137 RED)", () => {
       reason: "transport_timeout",
     });
     expect(calls).toBe(1);
+  });
+  it("surfaces malformed successful create responses as SCHEMA_INVALID", async () => {
+    const server = await startServer((_request, response) => {
+      sendJson(response, {
+        kind: "FULFILLED",
+        externalOrderId: "supplier-order-1",
+      });
+    });
+
+    await expect(createPort(server.baseUrl).createOrder(CREATE_INPUT)).rejects.toMatchObject({
+      name: "SupplierPortError",
+      supplierCode: "SCHEMA_INVALID",
+    });
+  });
+
+  it("surfaces a query timeout as a sanitized transport error", async () => {
+    const server = await startServer((_request, _response) => undefined);
+
+    await expect(
+      createPort(server.baseUrl, 25).queryOrder({ queryKey: CREATE_INPUT.idempotencyKey }),
+    ).rejects.toMatchObject({
+      name: "SupplierPortError",
+      supplierCode: "TRANSPORT_TIMEOUT",
+    });
   });
 
   it("supports query, cancel, refund, and paginated reconcile with stable idempotency", async () => {
@@ -202,5 +238,21 @@ describe("authenticated HTTP SupplierPort (T137 RED)", () => {
     await expect(
       createPort(server.baseUrl).getAvailability({ supplierSku: "SKU-1" }),
     ).rejects.toThrow(/supplier response/i);
+  });
+  it("rejects a fulfilled query response for a different external order id", async () => {
+    const server = await startServer((_request, response) => {
+      sendJson(response, {
+        status: "FULFILLED",
+        externalOrderId: "supplier-order-b",
+        assetEnvelope: wireAsset(),
+      });
+    });
+
+    await expect(
+      createPort(server.baseUrl).queryOrder({ externalOrderId: "supplier-order-a" }),
+    ).rejects.toMatchObject({
+      name: "SupplierPortError",
+      supplierCode: "IDENTITY_MISMATCH",
+    });
   });
 });

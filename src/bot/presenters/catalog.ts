@@ -323,9 +323,7 @@ export function presentProductDetail(
             isPreorder ? "💰 " : "🔔 ",
             durationLabel(variant.duration_code),
           ),
-          callbackData: isPreorder
-            ? `preorder:consent:${variant.id}`
-            : `rst:sub:${variant.id}`,
+          callbackData: isPreorder ? `preorder:consent:${variant.id}` : `rst:sub:${variant.id}`,
         },
       ]);
     }

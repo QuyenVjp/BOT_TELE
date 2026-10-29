@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { presentPaymentForOrder } from "../../src/modules/payments/service.js";
+import {
+  checkSelectedSupplierReadiness,
+  type SupplierProviderResolverLike,
+} from "../../src/modules/supplier/readiness.js";
+import type { SupplierCapability, SupplierProvider } from "../../src/modules/supplier/port.js";
 import { newId } from "../../src/shared/ids/index.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
@@ -72,8 +77,67 @@ async function seedOrder(
       insert into supplier_sku (id, supplier_id, variant_id, external_sku, cost_vnd, delivery_type, is_active)
       values (${newId()}, ${supplierId}, ${variantId}, 'EXT-SUP', 50000, 'CREDENTIAL', true)
     `.execute(ctx.db);
+    await sql`
+      update supplier
+      set provider_capabilities = '["ORDER_CREATE","DELIVERY_PAYLOAD"]'::jsonb
+      where id = ${supplierId}
+    `.execute(ctx.db);
+    await sql`
+      update product_variant
+      set supplier_sku_id = (select id from supplier_sku where supplier_id = ${supplierId} and variant_id = ${variantId} limit 1)
+      where id = ${variantId}
+    `.execute(ctx.db);
   }
   return orderId;
+}
+
+function fakeSupplierProvider(
+  supplierId: string,
+  ready: boolean,
+  availability: "AVAILABLE" | "OUT" | "UNKNOWN",
+): SupplierProvider {
+  return {
+    providerKey: supplierId,
+    displayName: "test",
+    capabilities: new Set<SupplierCapability>(["ORDER_CREATE", "DELIVERY_PAYLOAD"]),
+    health: async () => ({ ready, service: null }),
+    getAvailability: async () => ({
+      status: availability,
+      observedAt: new Date().toISOString(),
+      quantity: availability === "OUT" ? 0 : 1,
+    }),
+    createOrder: async () => ({ kind: "REJECTED", code: "unused", retryable: false }),
+    queryOrder: async () => ({ status: "REJECTED", externalOrderId: "unused" }),
+    cancelOrder: async () => ({ status: "UNSUPPORTED" }),
+    requestRefund: async () => ({ status: "UNSUPPORTED" }),
+    reconcile: async () => ({ observations: [], nextCursor: null }),
+  };
+}
+
+async function readinessForOrder(
+  orderId: string,
+  ready = true,
+  availability: "AVAILABLE" | "OUT" | "UNKNOWN" = "AVAILABLE",
+) {
+  const selected = await sql<{ supplier_id: string }>`
+    select ss.supplier_id
+    from "order" o
+    join product_variant v on v.id = o.variant_id
+    join supplier_sku ss on ss.id = v.supplier_sku_id
+    where o.id = ${orderId}
+  `.execute(ctx.db);
+  const row = selected.rows[0];
+  if (!row) throw new Error("supplier seed missing");
+  const provider = fakeSupplierProvider(row.supplier_id, ready, availability);
+  const resolver: SupplierProviderResolverLike = {
+    resolve: async (supplierId) => (supplierId === row.supplier_id ? provider : null),
+  };
+  return (variantId: string) =>
+    checkSelectedSupplierReadiness(ctx.db, {
+      variantId,
+      providerResolver: resolver,
+      purchaseEnabled: true,
+    });
 }
 
 describe("payment stock-policy fail-closed guard", () => {
@@ -98,7 +162,7 @@ describe("payment stock-policy fail-closed guard", () => {
     });
   }
 
-  it("mints an intent for a configured supplier-only SUPPLIER_API order", async () => {
+  it("does not mint an intent from a supplier-SKU mapping alone", async () => {
     const orderId = await seedOrder("SUPPLIER_ONLY", "SUPPLIER_API");
     const result = await presentPaymentForOrder(ctx.db, {
       orderId,
@@ -107,7 +171,127 @@ describe("payment stock-policy fail-closed guard", () => {
       bankBin: "970422",
       accountName: "SHOP DIGITAL MVP",
       bankName: "MB Bank",
+      correlationId: "policy-supplier-mapping-only",
+    });
+    expect(result).toEqual({ ok: false, error: "supplier unavailable" });
+    const count = await sql<{ count: number }>`
+      select count(*)::int as count from payment_intent where order_id = ${orderId}
+    `.execute(ctx.db);
+    expect(count.rows[0]?.count).toBe(0);
+  });
+
+  for (const [label, ready, availability] of [
+    ["health false", false, "AVAILABLE"],
+    ["availability OUT", true, "OUT"],
+    ["availability UNKNOWN", true, "UNKNOWN"],
+  ] as const) {
+    it(`does not mint an intent when supplier ${label}`, async () => {
+      const orderId = await seedOrder("SUPPLIER_ONLY", "SUPPLIER_API");
+      const supplierReadiness = await readinessForOrder(orderId, ready, availability);
+      const result = await presentPaymentForOrder(ctx.db, {
+        orderId,
+        merchantAccountId: "0123456789",
+        beneficiaryAccountNumber: "9876543210",
+        bankBin: "970422",
+        accountName: "SHOP DIGITAL MVP",
+        bankName: "MB Bank",
+        correlationId: `policy-supplier-${label}`,
+        supplierReadiness,
+      });
+      expect(result).toEqual({ ok: false, error: "supplier unavailable" });
+      const count = await sql<{ count: number }>`
+        select count(*)::int as count from payment_intent where order_id = ${orderId}
+      `.execute(ctx.db);
+      expect(count.rows[0]?.count).toBe(0);
+    });
+  }
+
+  it("mints an intent for a healthy selected supplier SKU", async () => {
+    const orderId = await seedOrder("SUPPLIER_ONLY", "SUPPLIER_API");
+    const supplierReadiness = await readinessForOrder(orderId);
+    const result = await presentPaymentForOrder(ctx.db, {
+      orderId,
+      merchantAccountId: "0123456789",
+      beneficiaryAccountNumber: "9876543210",
+      bankBin: "970422",
+      accountName: "SHOP DIGITAL MVP",
+      bankName: "MB Bank",
       correlationId: "policy-supplier-ok",
+      supplierReadiness,
+    });
+    expect(result.ok).toBe(true);
+  });
+  it("does not mint an intent when the selected mapping changes after preflight", async () => {
+    const orderId = await seedOrder("SUPPLIER_ONLY", "SUPPLIER_API");
+    const preflight = await readinessForOrder(orderId);
+    let changed = false;
+    const supplierReadiness = async (variantId: string) => {
+      const readiness = await preflight(variantId);
+      if (readiness.ok && !changed) {
+        changed = true;
+        await sql`
+          update supplier_sku
+          set external_sku = 'EXT-SUP-CHANGED', version = version + 1
+          where id = (select supplier_sku_id from product_variant where id = ${variantId})
+        `.execute(ctx.db);
+      }
+      return readiness;
+    };
+    const result = await presentPaymentForOrder(ctx.db, {
+      orderId,
+      merchantAccountId: "0123456789",
+      beneficiaryAccountNumber: "9876543210",
+      bankBin: "970422",
+      accountName: "SHOP DIGITAL MVP",
+      bankName: "MB Bank",
+      correlationId: "policy-supplier-mapping-race",
+      supplierReadiness,
+    });
+    expect(result).toEqual({ ok: false, error: "supplier unavailable" });
+    const count = await sql<{ count: number }>`
+      select count(*)::int as count from payment_intent where order_id = ${orderId}
+    `.execute(ctx.db);
+    expect(count.rows[0]?.count).toBe(0);
+  });
+  it("reuses a live supplier intent if provider readiness later degrades", async () => {
+    const orderId = await seedOrder("SUPPLIER_ONLY", "SUPPLIER_API");
+    const payment = {
+      orderId,
+      merchantAccountId: "0123456789",
+      beneficiaryAccountNumber: "9876543210",
+      bankBin: "970422",
+      accountName: "SHOP DIGITAL MVP",
+      bankName: "MB Bank",
+      correlationId: "policy-supplier-reuse",
+    };
+    const first = await presentPaymentForOrder(ctx.db, {
+      ...payment,
+      supplierReadiness: await readinessForOrder(orderId),
+    });
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+
+    const reopened = await presentPaymentForOrder(ctx.db, {
+      ...payment,
+      supplierReadiness: await readinessForOrder(orderId, false, "OUT"),
+    });
+    expect(reopened).toMatchObject({ ok: true, intentId: first.intentId });
+  });
+
+  it("keeps local-stock payment independent of supplier readiness", async () => {
+    const orderId = await seedOrder("LOCAL_ONLY", "STOCK_ACCOUNT");
+    const result = await presentPaymentForOrder(ctx.db, {
+      orderId,
+      merchantAccountId: "0123456789",
+      beneficiaryAccountNumber: "9876543210",
+      bankBin: "970422",
+      accountName: "SHOP DIGITAL MVP",
+      bankName: "MB Bank",
+      correlationId: "policy-local-stock",
+      supplierReadiness: async () => ({
+        ok: false,
+        reason: "SUPPLIER_UNAVAILABLE",
+      }),
     });
     expect(result.ok).toBe(true);
   });

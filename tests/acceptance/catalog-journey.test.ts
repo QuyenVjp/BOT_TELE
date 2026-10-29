@@ -4,7 +4,7 @@ import { newId } from "../../src/shared/ids/index.js";
 import { seedCatalog } from "../../src/infrastructure/db/seeds/catalog.js";
 import { createCatalogCallbacks } from "../../src/bot/callbacks/catalog.js";
 import { createHistoryCallbacks } from "../../src/bot/callbacks/history.js";
-import { createCallbackTokenCodec } from "../../src/bot/callback-codec.js";
+import { createCallbackTokenCodec, type CallbackTokenCodec } from "../../src/bot/callback-codec.js";
 import { createSearchParser } from "../../src/modules/catalog/search-parser-adapter.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 /**
@@ -22,6 +22,7 @@ import { startPostgresContainer, type PgTestContext } from "../helpers/pg-contai
 
 let ctx: PgTestContext;
 let callbacks: ReturnType<typeof createCatalogCallbacks>;
+let callbackTokenCodec: CallbackTokenCodec;
 const TELEGRAM_USER_ID = "123456789";
 
 beforeAll(async () => {
@@ -60,15 +61,16 @@ beforeEach(async () => {
            published_by = 'test'
      where v.sku in ('CG-1M', 'CG-3M', 'CL-1M')
   `.execute(ctx.db);
+  callbackTokenCodec = createCallbackTokenCodec({
+    key: "test-only-buy-now-callback-key-material-v1",
+    keyVersion: 1,
+    ttlSeconds: 900,
+    clockSkewSeconds: 5,
+  });
   callbacks = createCatalogCallbacks({
     db: ctx.db,
     parser: createSearchParser({ driver: "deterministic", timeoutMs: 100 }),
-    tokenCodec: createCallbackTokenCodec({
-      key: "test-only-buy-now-callback-key-material-v1",
-      keyVersion: 1,
-      ttlSeconds: 900,
-      clockSkewSeconds: 5,
-    }),
+    tokenCodec: callbackTokenCodec,
   });
 });
 
@@ -164,6 +166,7 @@ describe("catalog journey (US1)", () => {
 
     const history = createHistoryCallbacks({
       db: ctx.db,
+      tokenCodec: callbackTokenCodec,
       buyAgainVariantDetail: (variantId, telegramUserId) =>
         callbacks.variantDetail(variantId, telegramUserId),
     });
@@ -177,7 +180,16 @@ describe("catalog journey (US1)", () => {
     expect(reopened.text).toContain("💰 Giá: 123.456");
     expect(reopened.text).not.toContain("111.000");
     expect(reopened.text).toContain("🟢 Tình trạng: Còn hàng");
-    expect(reopened.buttons.flat().some((b) => b.callbackData.startsWith("cb:"))).toBe(true);
+    const preview = reopened.buttons
+      .flat()
+      .find((button) => button.callbackData.startsWith("cb:"))?.callbackData;
+    expect(preview).toBeDefined();
+    expect(
+      callbackTokenCodec.verify(preview ?? "", { telegramUserId: TELEGRAM_USER_ID }),
+    ).toMatchObject({
+      ok: true,
+      value: { action: "CHECKOUT_PREVIEW", resourceId: seeded.variantId },
+    });
 
     const orders = await sql<{ count: string }>`
       select count(*)::text as count from "order"
@@ -187,6 +199,59 @@ describe("catalog journey (US1)", () => {
     `.execute(ctx.db);
     expect(Number(orders.rows[0]?.count ?? "0")).toBe(1);
     expect(Number(intents.rows[0]?.count ?? "0")).toBe(0);
+  });
+  it("does not cross customer ownership or reuse an old payment intent", async () => {
+    const seeded = await seedCompletedOrder(111000);
+    const otherCustomerId = newId();
+    await sql`
+      insert into customer (id, status, locale)
+      values (${otherCustomerId}, 'ACTIVE', 'vi')
+    `.execute(ctx.db);
+
+    const oldIntentId = newId();
+    await sql`
+      insert into payment_intent
+        (id, order_id, status, amount_vnd, merchant_account_id, transfer_content, expires_at)
+      values
+        (${oldIntentId}, ${seeded.orderId}, 'PRESENTED', 111000, 'merchant-old',
+         ${"old-" + oldIntentId}, now() + interval '15 minutes')
+    `.execute(ctx.db);
+
+    const history = createHistoryCallbacks({
+      db: ctx.db,
+      tokenCodec: callbackTokenCodec,
+      buyAgainVariantDetail: (variantId, telegramUserId) =>
+        callbacks.variantDetail(variantId, telegramUserId),
+    });
+
+    const foreign = await history.buyAgain(seeded.orderNumber, otherCustomerId, "987654321");
+    expect(foreign.buttons.flat().some((button) => button.callbackData.startsWith("cb:"))).toBe(
+      false,
+    );
+    expect(JSON.stringify(foreign)).not.toContain(seeded.orderId);
+    expect(JSON.stringify(foreign)).not.toContain(seeded.variantId);
+
+    const reopened = await history.buyAgain(
+      seeded.orderNumber,
+      seeded.customerId,
+      TELEGRAM_USER_ID,
+    );
+    expect(reopened.buttons.flat().some((button) => button.callbackData.startsWith("cb:"))).toBe(
+      true,
+    );
+
+    const orders = await sql<{ count: string }>`
+      select count(*)::text as count from "order"
+    `.execute(ctx.db);
+    const intents = await sql<{ count: string }>`
+      select count(*)::text as count from payment_intent
+    `.execute(ctx.db);
+    expect(Number(orders.rows[0]?.count ?? "0")).toBe(1);
+    expect(Number(intents.rows[0]?.count ?? "0")).toBe(1);
+    const intent = await sql<{ id: string }>`
+      select id from payment_intent where order_id = ${seeded.orderId}
+    `.execute(ctx.db);
+    expect(intent.rows[0]?.id).toBe(oldIntentId);
   });
 
   it("buy again gives unavailable recovery when the owned variant is no longer sellable", async () => {
@@ -199,6 +264,7 @@ describe("catalog journey (US1)", () => {
 
     const history = createHistoryCallbacks({
       db: ctx.db,
+      tokenCodec: callbackTokenCodec,
       buyAgainVariantDetail: (variantId, telegramUserId) =>
         callbacks.variantDetail(variantId, telegramUserId),
     });

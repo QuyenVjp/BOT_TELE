@@ -111,6 +111,7 @@ function errorStatus(code: string): number {
   if (code === "UNAUTHORIZED" || code === "WORKBOOK_MISMATCH") return 401;
   if (code === "NOT_FOUND") return 404;
   if (code === "EXPIRED" || code === "BUSY" || code === "NOT_READY") return 409;
+  if (code === "IMPORT_LIMIT_EXCEEDED") return 422;
   return 422;
 }
 

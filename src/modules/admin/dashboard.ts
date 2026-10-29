@@ -59,14 +59,34 @@ export async function getAdminDashboardMetrics(
       from "order" o
       join product_variant v on v.id = o.variant_id
       join product p on p.id = v.product_id
-      where not p.is_test and not p.is_archived
+      where not p.is_test
+        and not p.is_archived
+        and p.name_vi not ilike '%canary%'
+    ),
+    operational_orders as (
+      select o.id, o.customer_id, o.status
+      from "order" o
+      join product_variant v on v.id = o.variant_id
+      join product p on p.id = v.product_id
+      where not p.is_test
+        and p.name_vi not ilike '%canary%'
     ),
     real_preorders as (
       select pr.id
       from preorder_reservation pr
       join product_variant v on v.id = pr.variant_id
       join product p on p.id = v.product_id
-      where not p.is_test and not p.is_archived
+      where not p.is_test
+        and not p.is_archived
+        and p.name_vi not ilike '%canary%'
+    ),
+    operational_preorders as (
+      select pr.id
+      from preorder_reservation pr
+      join product_variant v on v.id = pr.variant_id
+      join product p on p.id = v.product_id
+      where not p.is_test
+        and p.name_vi not ilike '%canary%'
     ),
     local_variant_stock as (
       select
@@ -92,9 +112,13 @@ export async function getAdminDashboardMetrics(
         end as available
       from product_variant v
       join product p on p.id = v.product_id
+      join category c on c.id = p.category_id
       where v.is_active
+        and p.is_active
+        and c.is_active
         and not p.is_test
         and not p.is_archived
+        and p.name_vi not ilike '%canary%'
         and v.fulfillment_type in (
           'STOCK_ACCOUNT', 'STOCK_CODE', 'QUANTITY_STOCK', 'DIGITAL_FILE'
         )
@@ -104,7 +128,12 @@ export async function getAdminDashboardMetrics(
         (
           select count(*)::int
           from product p
-          where p.is_active and not p.is_test and not p.is_archived
+          join category c on c.id = p.category_id
+          where p.is_active
+            and c.is_active
+            and not p.is_test
+            and not p.is_archived
+            and p.name_vi not ilike '%canary%'
         ) as active_products,
         (
           select count(*)::int
@@ -139,53 +168,68 @@ export async function getAdminDashboardMetrics(
         ), 0)::bigint as revenue_today_vnd,
         (
           select count(*)::int
-          from real_orders
+          from operational_orders
           where status = 'PENDING_PAYMENT'
         ) as pending_payment,
         (
           select count(*)::int
-          from real_orders
+          from operational_orders
           where status = 'PAYMENT_NEEDS_REVIEW'
         ) as payment_review,
         (
           select count(*)::int
-          from real_orders
+          from operational_orders
           where status = 'FULFILLMENT_NEEDS_REVIEW'
         ) as fulfillment_failures,
         (
           select count(*)::int
           from manual_fulfillment_task task
-          join real_orders o on o.id = task.order_id
+          join operational_orders o on o.id = task.order_id
           where task.status = 'OPEN'
+            and o.status = 'PROCESSING'
         ) as manual_open_tasks,
         (
           select count(*)::int
-          from delivery_notification_handoff h
-          join delivery_bundle b on b.id = h.bundle_id
-          join real_orders o on o.id = b.order_id
-          where h.status = 'DEAD'
-            and h.last_error_code in ('DELIVERY_UNCERTAIN', 'SEND_UNCERTAIN')
-            and not exists (
-              select 1
-              from channel_identity ci
-              join test_customer_allowlist allowlist
-                on allowlist.telegram_user_id::text = ci.channel_user_id::text
-              where ci.customer_id = o.customer_id
-            )
+          from (
+            select h.id
+            from delivery_notification_handoff h
+            join delivery_bundle b on b.id = h.bundle_id
+            join operational_orders o on o.id = b.order_id
+            where h.status = 'DEAD'
+              and h.last_error_code in ('DELIVERY_UNCERTAIN', 'SEND_UNCERTAIN')
+              and not exists (
+                select 1
+                from channel_identity ci
+                join test_customer_allowlist allowlist
+                  on allowlist.telegram_user_id::text = ci.channel_user_id::text
+                where ci.customer_id = o.customer_id
+              )
+            union all
+            select fdj.order_id
+            from file_delivery_job fdj
+            join operational_orders o on o.id = fdj.order_id
+            where fdj.status = 'FAILED'
+              and fdj.last_error = 'SEND_UNCERTAIN'
+              and not exists (
+                select 1
+                from test_customer_allowlist allowlist
+                where allowlist.telegram_user_id::text = fdj.telegram_chat_id::text
+              )
+          ) uncertain
         ) as notification_send_uncertain,
         (
           select count(*)::int
           from warranty_claim claim
-          join real_orders o on o.id = claim.order_id
+          join operational_orders o on o.id = claim.order_id
           where claim.status = 'SUBMITTED'
         ) as warranty_new,
         (
           select count(*)::int
           from shop_refund_obligation refund
-          left join real_orders order_subject on order_subject.id = refund.order_id
-          left join real_preorders preorder_subject on preorder_subject.id = refund.preorder_id
+          left join operational_orders order_subject on order_subject.id = refund.order_id
+          left join operational_preorders preorder_subject on preorder_subject.id = refund.preorder_id
           left join warranty_claim claim_subject on claim_subject.id = refund.claim_id
-          left join real_orders claim_order_subject on claim_order_subject.id = claim_subject.order_id
+          left join operational_orders claim_order_subject on claim_order_subject.id = claim_subject.order_id
           where refund.status = 'OPEN'
             and (
               order_subject.id is not null
@@ -196,21 +240,16 @@ export async function getAdminDashboardMetrics(
         (
           select count(*)::int
           from support_ticket ticket
-          left join real_orders order_subject on order_subject.id = ticket.order_id
-          where ticket.status in ('OPEN', 'MANUAL_REVIEW')
-            and (
-              order_subject.id is not null
-              or (
-                ticket.order_id is null
-                and not exists (
-                  select 1
-                  from channel_identity ci
-                  join test_customer_allowlist allowlist
-                    on allowlist.telegram_user_id::text = ci.channel_user_id::text
-                  where ci.customer_id = ticket.customer_id
-                )
-              )
+          left join operational_orders order_subject on order_subject.id = ticket.order_id
+          where ticket.status in ('OPEN', 'WAITING_SHOP', 'WAITING_CUSTOMER', 'MANUAL_REVIEW')
+            and not exists (
+              select 1
+              from channel_identity ci
+              join test_customer_allowlist allowlist
+                on allowlist.telegram_user_id::text = ci.channel_user_id::text
+              where ci.customer_id = ticket.customer_id
             )
+            and (order_subject.id is not null or ticket.order_id is null)
         ) as support_open_tickets
     )
     select * from metrics

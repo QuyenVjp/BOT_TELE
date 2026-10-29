@@ -1,9 +1,11 @@
 import { sql } from "kysely";
 import type { Db } from "../../infrastructure/db/transaction.js";
+import type { CallbackTokenCodec } from "../callback-codec.js";
 import { listOrderHistory, getOrderDetailForCustomer } from "../../modules/commerce/history.js";
 import { findOrderByNumberForOwner } from "../../modules/commerce/repository.js";
 import { isId } from "../../shared/ids/index.js";
 import {
+  presentBuyAgainUnavailable,
   presentOrderHistory,
   presentOrderDetail,
   HISTORY_COPY,
@@ -24,11 +26,20 @@ import { isWithinWarranty, usedDaysAt, warrantyEndOf } from "../../modules/warra
 export interface HistoryCallbackDeps {
   db: Db;
   pageSize?: number;
+  /** Re-reads the live catalog and returns a pre-checkout screen; it must not charge. */
+  buyAgainVariantDetail?: (variantId: string, telegramUserId: string) => Promise<PresentedMessage>;
+  /** Verifies that live catalog output contains this actor's current checkout preview. */
+  tokenCodec?: CallbackTokenCodec;
 }
 
 export interface HistoryCallbacks {
   list(customerId: string, cursor?: string | null): Promise<PresentedMessage>;
   detail(orderReference: string, customerId: string): Promise<PresentedMessage>;
+  buyAgain(
+    orderReference: string,
+    customerId: string,
+    telegramUserId: string,
+  ): Promise<PresentedMessage>;
 }
 
 function errorMessage(text: string): PresentedMessage {
@@ -109,6 +120,47 @@ export function createHistoryCallbacks(deps: HistoryCallbackDeps): HistoryCallba
         return errorMessage("Không tìm thấy đơn hàng hoặc bạn không sở hữu đơn hàng này.");
       }
       return presentOrderDetail(owned, await orderWarrantyState(deps.db, owned));
+    },
+    async buyAgain(orderReference, customerId, telegramUserId) {
+      const orderId = isId(orderReference)
+        ? orderReference
+        : ((await findOrderByNumberForOwner(deps.db, orderReference, customerId))?.id ?? null);
+      if (!orderId) {
+        return errorMessage("Không tìm thấy đơn hàng hoặc bạn không sở hữu đơn hàng này.");
+      }
+      const owned = await getOrderDetailForCustomer(deps.db, {
+        orderId,
+        customerId,
+      });
+      // Only a completed historical purchase is an eligible source. The current
+      // variant, price, publication and stock are re-read by the catalog adapter below.
+      if (!owned || owned.status !== "COMPLETED" || !owned.completedAt) {
+        return errorMessage("Đơn hàng này chưa đủ điều kiện để mua lại.");
+      }
+      if (!deps.buyAgainVariantDetail) return errorMessage("Mua lại hiện chưa khả dụng.");
+      try {
+        const current = await deps.buyAgainVariantDetail(owned.variantId, telegramUserId);
+        // A buy-again result is safe only when it is the current signed checkout
+        // preview. A legacy charge token or a generic/stale screen fails closed.
+        const tokenCodec = deps.tokenCodec;
+        const hasCheckoutPreview =
+          tokenCodec !== undefined &&
+          current.buttons.some((row) =>
+            row.some((button) => {
+              const callbackData = button.callbackData;
+              if (!callbackData.startsWith("cb:")) return false;
+              const verification = tokenCodec.verify(callbackData, { telegramUserId });
+              return (
+                verification.ok &&
+                verification.value.action === "CHECKOUT_PREVIEW" &&
+                verification.value.resourceId === owned.variantId
+              );
+            }),
+          );
+        return hasCheckoutPreview ? current : presentBuyAgainUnavailable();
+      } catch {
+        return presentBuyAgainUnavailable();
+      }
     },
   };
 }

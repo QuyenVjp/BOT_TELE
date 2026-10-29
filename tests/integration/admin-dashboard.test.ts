@@ -67,11 +67,11 @@ beforeEach(async () => {
   `.execute(ctx.db);
 });
 
-async function insertCategory(): Promise<string> {
+async function insertCategory(isActive = true): Promise<string> {
   const id = newId();
   await sql`
     insert into category (id, name_vi, slug, is_active, sort_order)
-    values (${id}, 'Dashboard fixture', ${`dashboard-${id}`}, true, 1)
+    values (${id}, 'Dashboard fixture', ${`dashboard-${id}`}, ${isActive}, 1)
   `.execute(ctx.db);
   return id;
 }
@@ -93,6 +93,7 @@ async function insertProduct(
     isTest?: boolean;
     isArchived?: boolean;
     lowStockThreshold?: number | null;
+    nameVi?: string;
   } = {},
 ): Promise<ProductFixture> {
   const productId = newId();
@@ -109,7 +110,7 @@ async function insertProduct(
     insert into product (
       id, category_id, name_vi, slug, is_active, sort_order, is_test, is_archived
     ) values (
-      ${productId}, ${categoryId}, 'Dashboard product', ${`product-${productId}`},
+      ${productId}, ${categoryId}, ${options.nameVi ?? "Dashboard product"}, ${`product-${productId}`},
       ${options.isActive ?? true}, 1, ${options.isTest ?? false}, ${options.isArchived ?? false}
     )
   `.execute(ctx.db);
@@ -283,6 +284,8 @@ async function insertUncertainDelivery(
 describe("admin dashboard read model", () => {
   it("filters test/archive trade and counts local stock at the Vietnam day boundary", async () => {
     const categoryId = await insertCategory();
+    const inactiveCategoryId = await insertCategory(false);
+    await insertProduct(inactiveCategoryId, "UNLIMITED_SERVICE");
     const realAccount = await insertProduct(categoryId, "STOCK_ACCOUNT", { lowStockThreshold: 3 });
     await insertProduct(categoryId, "STOCK_CODE");
     const realQuantity = await insertProduct(categoryId, "QUANTITY_STOCK", {
@@ -295,6 +298,9 @@ describe("admin dashboard read model", () => {
     await insertProduct(categoryId, "MANUAL_FULFILLMENT", { isActive: false });
     const testAccount = await insertProduct(categoryId, "STOCK_ACCOUNT", { isTest: true });
     const archivedAccount = await insertProduct(categoryId, "STOCK_ACCOUNT", { isArchived: true });
+    const canaryProduct = await insertProduct(categoryId, "MANUAL_FULFILLMENT", {
+      nameVi: "Canary dashboard service",
+    });
 
     await insertDigitalAssets(realAccount.variantId, 2);
     await insertDigitalAssets(realManual.variantId, 3);
@@ -396,6 +402,14 @@ describe("admin dashboard read model", () => {
       createdAt: today,
       paidAt: today,
     });
+    await insertOrder({
+      customerId: realCustomerId,
+      variantId: canaryProduct.variantId,
+      status: "COMPLETED",
+      priceVnd: 50_000_000,
+      createdAt: today,
+      paidAt: today,
+    });
 
     const metrics = await getAdminDashboardMetrics(ctx.db, DASHBOARD_NOW);
 
@@ -425,12 +439,16 @@ describe("admin dashboard read model", () => {
     const archivedProduct = await insertProduct(categoryId, "MANUAL_FULFILLMENT", {
       isArchived: true,
     });
+    const canaryProduct = await insertProduct(categoryId, "MANUAL_FULFILLMENT", {
+      nameVi: "Canary dashboard service",
+    });
     const realCustomerId = await insertCustomer();
     const testCustomerId = await insertCustomer();
     const archivedCustomerId = await insertCustomer();
     const allowlistedCustomerId = await insertCustomer();
     const orderlessCustomerId = await insertCustomer();
     const allowlistedOrderlessCustomerId = await insertCustomer();
+    const canaryCustomerId = await insertCustomer();
     await allowlistCustomer(allowlistedCustomerId, "dashboard-allowlisted-order");
     await allowlistCustomer(allowlistedOrderlessCustomerId, "dashboard-allowlisted-ticket");
 
@@ -477,10 +495,23 @@ describe("admin dashboard read model", () => {
       status: "FULFILLMENT_NEEDS_REVIEW",
       createdAt: old,
     });
+    const canaryFulfillmentOrderId = await insertOrder({
+      customerId: canaryCustomerId,
+      variantId: canaryProduct.variantId,
+      status: "FULFILLMENT_NEEDS_REVIEW",
+      createdAt: old,
+    });
+    const canaryProcessingOrderId = await insertOrder({
+      customerId: canaryCustomerId,
+      variantId: canaryProduct.variantId,
+      status: "PROCESSING",
+      createdAt: old,
+    });
 
     await insertManualTask(realOrderId, realCustomerId, realProduct.variantId);
     await insertManualTask(testOrderId, testCustomerId, testProduct.variantId);
     await insertManualTask(archivedOrderId, archivedCustomerId, archivedProduct.variantId);
+    await insertManualTask(canaryProcessingOrderId, canaryCustomerId, canaryProduct.variantId);
 
     await insertWarrantyClaim(realOrderId, realCustomerId, realProduct.variantId, "SUBMITTED");
     await insertWarrantyClaim(realOrderId, realCustomerId, realProduct.variantId, "TRIAGE");
@@ -491,18 +522,29 @@ describe("admin dashboard read model", () => {
       archivedProduct.variantId,
       "SUBMITTED",
     );
+    await insertWarrantyClaim(
+      canaryFulfillmentOrderId,
+      canaryCustomerId,
+      canaryProduct.variantId,
+      "SUBMITTED",
+    );
 
     await insertRefund(realOrderId, realCustomerId);
     await insertRefund(testOrderId, testCustomerId);
     await insertRefund(archivedOrderId, archivedCustomerId);
+    await insertRefund(canaryProcessingOrderId, canaryCustomerId);
 
     await insertSupportTicket(realCustomerId, "OPEN", realOrderId);
     await insertSupportTicket(realCustomerId, "MANUAL_REVIEW", realOrderId);
+    await insertSupportTicket(realCustomerId, "WAITING_SHOP", realOrderId);
+    await insertSupportTicket(realCustomerId, "WAITING_CUSTOMER", realOrderId);
     await insertSupportTicket(testCustomerId, "OPEN", testOrderId);
     await insertSupportTicket(archivedCustomerId, "OPEN", archivedOrderId);
     await insertSupportTicket(orderlessCustomerId, "OPEN", null);
     await insertSupportTicket(allowlistedOrderlessCustomerId, "OPEN", null);
     await insertSupportTicket(realCustomerId, "RESOLVED", realOrderId);
+    await insertSupportTicket(allowlistedCustomerId, "OPEN", allowlistedUncertainOrderId);
+    await insertSupportTicket(canaryCustomerId, "OPEN", canaryFulfillmentOrderId);
 
     await insertUncertainDelivery(uncertainOrderId, realCustomerId, realProduct.variantId);
     await insertUncertainDelivery(
@@ -516,6 +558,36 @@ describe("admin dashboard read model", () => {
       archivedCustomerId,
       archivedProduct.variantId,
     );
+    await insertUncertainDelivery(
+      canaryFulfillmentOrderId,
+      canaryCustomerId,
+      canaryProduct.variantId,
+    );
+    const fileProduct = await insertProduct(categoryId, "DIGITAL_FILE", { isActive: false });
+    const fileOrderId = await insertOrder({
+      customerId: realCustomerId,
+      variantId: fileProduct.variantId,
+      status: "PROCESSING",
+      createdAt: old,
+    });
+    const fileArtifactId = newId();
+    const fileArtifactHash = "c".repeat(64);
+    await sql`
+      insert into variant_file_artifact
+        (id, variant_id, version, filename, mime_type, size_bytes, sha256, storage_reference)
+      values
+        (${fileArtifactId}, ${fileProduct.variantId}, 1, 'uncertain.bin',
+         'application/octet-stream', 1, ${fileArtifactHash}, 'fixture://uncertain')
+    `.execute(ctx.db);
+    await sql`
+      insert into file_delivery_job
+        (order_id, customer_id, variant_id, artifact_id, artifact_version, artifact_sha256,
+         telegram_chat_id, status, last_error)
+      values
+        (${fileOrderId}, ${realCustomerId}, ${fileProduct.variantId}, ${fileArtifactId}, 1,
+         ${fileArtifactHash}, '123456', 'FAILED', 'SEND_UNCERTAIN')
+    `.execute(ctx.db);
+
 
     const metrics = await getAdminDashboardMetrics(ctx.db, DASHBOARD_NOW);
 
@@ -528,12 +600,12 @@ describe("admin dashboard read model", () => {
       paidToday: 0,
       pendingPayment: 0,
       paymentReview: 0,
-      fulfillmentFailures: 2,
-      manualOpenTasks: 1,
-      notificationSendUncertain: 1,
-      warrantyNew: 1,
-      refundDue: 1,
-      supportOpenTickets: 3,
+      fulfillmentFailures: 3,
+      manualOpenTasks: 2,
+      notificationSendUncertain: 3,
+      warrantyNew: 2,
+      refundDue: 2,
+      supportOpenTickets: 6,
     });
     expect(metrics.revenueTodayVnd).toBe(0n);
   });

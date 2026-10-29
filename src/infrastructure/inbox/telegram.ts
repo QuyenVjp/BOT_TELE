@@ -1,5 +1,5 @@
 import { sql, type RawBuilder } from "kysely";
-import { newId } from "../../shared/ids/index.js";
+import { isId, newId } from "../../shared/ids/index.js";
 import type {
   DistributedRateLimiter,
   TelegramRateLimitAction,
@@ -26,6 +26,9 @@ export interface TelegramCommandEnvelope {
   productContentEditText?: true;
   warrantyRefundAdjustText?: true;
   ownerPromptText?: true;
+  /** The ingress proved one active customer support description ticket owns this text. */
+  supportDescriptionText?: true;
+  supportDescriptionTicketId?: string;
   searchQuery?: string;
   firstName?: string;
   lastName?: string;
@@ -186,8 +189,8 @@ export const RETAINED_ENVELOPE_KEYS = [
   "productContentEditText",
   "warrantyRefundAdjustText",
   "ownerPromptText",
-  "firstName",
-  "lastName",
+  "supportDescriptionText",
+  "supportDescriptionTicketId",
   "languageCode",
   "messageThreadId",
   "replyToMessageId",
@@ -639,6 +642,13 @@ function validateAcceptInput(input: AcceptTelegramInput): void {
   if (!HASH_PATTERN.test(input.rawHash)) throw new Error("Invalid Telegram raw hash");
   if (!/^[1-9][0-9]{0,19}$/.test(input.envelope.actorUserId)) {
     throw new Error("Invalid Telegram actor id");
+  }
+  const { supportDescriptionText, supportDescriptionTicketId } = input.envelope;
+  if (supportDescriptionText === true && !isId(supportDescriptionTicketId)) {
+    throw new Error("Support description requires a valid ticket id");
+  }
+  if (supportDescriptionText !== true && supportDescriptionTicketId !== undefined) {
+    throw new Error("Support description ticket id requires a marker");
   }
   if (
     input.envelope.actorUsername !== undefined &&

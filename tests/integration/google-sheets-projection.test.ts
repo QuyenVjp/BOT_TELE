@@ -225,6 +225,56 @@ describe.skipIf(!hasDocker)("Google Sheets projection boundaries", () => {
     expect(after.last_outbox_event_id).toBe("outbox-0003");
     expect(after.last_success_at).not.toBe(before.last_success_at);
   });
+  it("processes every request row beyond the former 500-row limit", async () => {
+    const requestRows: SheetValue[][] = [[...SHEET_HEADERS.Requests] as SheetValue[]];
+    for (let index = 0; index < 501; index += 1) {
+      requestRows.push([
+        `request-overflow-${index}`,
+        "2026-01-01T00:00:00.000Z",
+        projectionConfig.ownerId,
+        "INVALID_ACTION",
+        "DigitalAsset",
+        `asset-${index}`,
+        "1",
+        "{}",
+        "",
+        "",
+        "",
+        "",
+      ]);
+    }
+    const api = new FakeSheetsApi();
+    api.requestRows = requestRows;
+
+    await expect(
+      processGoogleSheetsRequestsOnce({ db: ctx.db, api, config: projectionConfig }),
+    ).resolves.toEqual({ processed: 0, rejected: 501, stale: 0, failed: 0 });
+
+    const persisted = await sql<{ count: string }>`
+      select count(*)::text as count
+      from google_sheets_request
+      where result_code = 'INVALID_SHEET_ACTION'
+    `.execute(ctx.db);
+    expect(persisted.rows[0]?.count).toBe("501");
+  });
+
+  it("advances the cursor by occurrence time when event ids are reordered", async () => {
+    await insertOutboxEvent("zz-cursor", 1, "2026-01-01T00:00:00Z");
+    await sql`
+      update google_sheets_sync_state
+         set last_outbox_event_id = 'zz-cursor'
+       where id = 'main'
+    `.execute(ctx.db);
+    await insertOutboxEvent("aa-newer", 2, "2026-01-02T00:00:00Z");
+
+    const result = await reconcileGoogleSheetsOnce(
+      { db: ctx.db, api: new FakeSheetsApi(), config: projectionConfig },
+      { structureReady: true },
+    );
+
+    expect(result.outboxEventId).toBe("aa-newer");
+    expect((await readSyncState()).last_outbox_event_id).toBe("aa-newer");
+  });
   it("stores the latest outbox cursor by occurrence time", async () => {
     await insertOutboxEvent("zz-early", 1, "2026-01-01T00:00:00Z");
     await insertOutboxEvent("aa-late", 2, "2026-01-02T00:00:00Z");

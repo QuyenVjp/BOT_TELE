@@ -99,7 +99,7 @@ describe.skipIf(!hasDocker)("delivery handoff terminal classification", () => {
       correlationId: "handoff-issue",
       deps: {
         vault: f.vault,
-        supplier: null,
+        resolveSupplier: async (_supplierId) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
         deliveryTokenKeys: [BUNDLE_KEY],
@@ -123,7 +123,7 @@ describe.skipIf(!hasDocker)("delivery handoff terminal classification", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: f.vault,
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
       deliverySession: {
@@ -183,7 +183,7 @@ describe.skipIf(!hasDocker)("delivery handoff terminal classification", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: f.vault,
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
       deliverySession: {

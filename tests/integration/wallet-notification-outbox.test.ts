@@ -45,7 +45,7 @@ describe("wallet notification outbox", () => {
     return createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: createInMemoryVault(),
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });

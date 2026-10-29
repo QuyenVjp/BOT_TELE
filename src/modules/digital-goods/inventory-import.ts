@@ -84,6 +84,9 @@ type ParsedLine = {
   fieldValues?: string[];
   invalid?: true;
 };
+type ImportParseFailure = { ok: false; code: "INVALID_INPUT" | "IMPORT_LIMIT_EXCEEDED" };
+type InventoryImportFailureCode =
+  "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "INVALID_INPUT" | "IMPORT_LIMIT_EXCEEDED";
 
 interface VariantInventoryConfig {
   id: string;
@@ -240,10 +243,18 @@ function parseLine(columns: string[]): ParsedLine | null {
   };
 }
 
-function parseLines(raw: string): { parsed: (ParsedLine | null)[]; invalid: number } | null {
-  if (Buffer.byteLength(raw, "utf8") > MAX_IMPORT_BYTES || raw.includes("\0")) return null;
+function parseLines(
+  raw: string,
+): { parsed: (ParsedLine | null)[]; invalid: number } | ImportParseFailure | null {
+  if (raw.includes("\0")) return { ok: false, code: "INVALID_INPUT" };
+  if (Buffer.byteLength(raw, "utf8") > MAX_IMPORT_BYTES) {
+    return { ok: false, code: "IMPORT_LIMIT_EXCEEDED" };
+  }
   const records = parseCsvRecords(raw);
-  if (!records || records.length > MAX_IMPORT_LINES) return null;
+  if (!records) return null;
+  if (records.length > MAX_IMPORT_LINES) {
+    return { ok: false, code: "IMPORT_LIMIT_EXCEEDED" };
+  }
   const parsed = records.map(parseLine);
   return { parsed, invalid: parsed.filter((row) => !row).length };
 }
@@ -290,9 +301,7 @@ export async function previewDigitalInventory(
   input: Pick<InventoryImportInput, "db" | "actor" | "config" | "correlationId"> & {
     input: string;
   },
-): Promise<
-  InventoryPreviewResult | { ok: false; code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "INVALID_INPUT" }
-> {
+): Promise<InventoryPreviewResult | { ok: false; code: InventoryImportFailureCode }> {
   const gate = await guardRootAction(input.db, {
     actor: input.actor,
     config: input.config,
@@ -304,6 +313,7 @@ export async function previewDigitalInventory(
   if (!gate.ok) return { ok: false, code: gate.reason };
   const parsed = parseLines(input.input);
   if (!parsed) return { ok: false, code: "INVALID_INPUT" };
+  if ("ok" in parsed) return parsed;
   const rows = parsed.parsed.filter((row): row is ParsedLine => Boolean(row));
   const variantConfigs = await loadVariantInventoryConfigs(
     input.db,
@@ -334,8 +344,7 @@ export async function previewDigitalInventory(
 export async function importDigitalInventory(
   input: InventoryImportInput,
 ): Promise<
-  | { ok: true; summary: InventoryImportResult }
-  | { ok: false; code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "INVALID_INPUT" }
+  { ok: true; summary: InventoryImportResult } | { ok: false; code: InventoryImportFailureCode }
 > {
   const gate = await guardRootAction(input.db, {
     actor: input.actor,
@@ -356,6 +365,7 @@ export async function importDigitalInventory(
 
   const parsed = parseLines(input.input);
   if (!parsed) return { ok: false, code: "INVALID_INPUT" };
+  if ("ok" in parsed) return parsed;
   const rows = parsed.parsed.filter((row): row is ParsedLine => Boolean(row));
   const variantConfigs = await loadVariantInventoryConfigs(
     input.db,

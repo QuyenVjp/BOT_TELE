@@ -141,4 +141,42 @@ describe("persistent notification rate", () => {
       ].sort((a, b) => a.id.localeCompare(b.id)),
     );
   });
+  it("dead-letters an expired lease at the configured attempt limit and never reclaims it", async () => {
+    await resetNotifications();
+    const deliveryId = await seedDelivery("3001", "expired-max");
+    await sql`
+      update notification_delivery
+      set status='RETRY',
+          attempts=2,
+          claim_expires_at=now()-interval '1 second',
+          next_attempt_at=now()-interval '1 second'
+      where id=${deliveryId}
+    `.execute(ctx.db);
+
+    const sender = { send: vi.fn(async () => undefined) };
+    await runNotificationDeliveryLane({
+      db: ctx.db,
+      responder: sender,
+      ratePerSecond: 20,
+      maxAttempts: 2,
+      workers: 2,
+      sleep: async () => undefined,
+    });
+
+    const row = await sql<{
+      status: string;
+      attempts: number;
+      last_error: string | null;
+      claim_expires_at: Date | null;
+    }>`select status, attempts, last_error, claim_expires_at
+       from notification_delivery where id=${deliveryId}`.execute(ctx.db);
+    expect(row.rows[0]).toMatchObject({
+      status: "DEAD",
+      attempts: 2,
+      last_error: "claim_expired_max_attempts",
+      claim_expires_at: null,
+    });
+    expect(sender.send).not.toHaveBeenCalled();
+    expect(await claimNotificationDeliveries(ctx.db, 1, 2)).toEqual([]);
+  });
 });

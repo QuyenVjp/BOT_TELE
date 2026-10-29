@@ -1,4 +1,5 @@
 import { sql } from "kysely";
+import { appendAuditEvent } from "../identity/audit.js";
 import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { newId } from "../../shared/ids/index.js";
@@ -48,6 +49,8 @@ export interface OpenReplacementInput {
   /** Request a refund review instead of a replacement asset. */
   requestRefund?: boolean;
   correlationId: string;
+  /** Durable support-ticket intent owner for replay-safe case binding. */
+  supportTicketId?: string;
   /** Injectable clock for warranty-deadline tests. */
   now?: Date;
 }
@@ -78,6 +81,46 @@ export interface ApproveReplacementInput {
   deliveryTokenKeys?: readonly string[];
 }
 
+async function bindSupportReplacementIntent(
+  exec: Executor,
+  input: OpenReplacementInput,
+  caseId: string,
+): Promise<void> {
+  if (!input.supportTicketId) return;
+  const current = await sql<{ audit_event_id: string | null }>`
+    select audit_event_id
+    from replacement_case
+    where id = ${caseId}
+    for update
+  `.execute(exec);
+  if (!current.rows[0]) return;
+  const linked = await sql<{ id: string }>`
+    select id
+    from audit_event
+    where target_type = 'SupportTicket'
+      and target_id = ${input.supportTicketId}
+      and action = 'support.replacement.open'
+      and metadata_redacted ->> 'replacementCaseId' = ${caseId}
+    limit 1
+  `.execute(exec);
+  if (linked.rows[0]) return;
+  const auditEventId = await appendAuditEvent(exec, {
+    actorType: "CUSTOMER",
+    actorId: input.customerId,
+    action: "support.replacement.open",
+    targetType: "SupportTicket",
+    targetId: input.supportTicketId,
+    reason: "Support ticket replacement intent",
+    correlationId: input.correlationId,
+    metadataRedacted: { replacementCaseId: caseId },
+  });
+  await sql`
+    update replacement_case
+    set audit_event_id = ${auditEventId}
+    where id = ${caseId} and audit_event_id is null
+  `.execute(exec);
+}
+
 /**
  * Open a replacement/refund case for a delivered (or ready) asset. Ownership is
  * enforced against the Order's customer. The original asset row is left intact.
@@ -97,6 +140,28 @@ export async function openReplacementCase(
     const order = await findOrderByIdForOwnerForUpdate(trx, input.orderId, input.customerId);
     if (!order) {
       return { ok: false, code: "NOT_FOUND", message: "Không tìm thấy đơn hàng." };
+    }
+    if (input.supportTicketId) {
+      const linked = await sql<{ id: string; status: ReplacementCaseStatus }>`
+        select rc.id, rc.status
+        from replacement_case rc
+        join audit_event ae
+          on ae.target_type = 'SupportTicket'
+         and ae.target_id = ${input.supportTicketId}
+         and ae.action = 'support.replacement.open'
+         and ae.metadata_redacted ->> 'replacementCaseId' = rc.id
+        where rc.order_id = ${order.id}
+        order by rc.opened_at asc, rc.id asc
+        limit 1
+        for update of rc
+      `.execute(trx);
+      if (linked.rows[0]) {
+        return {
+          ok: true,
+          caseId: linked.rows[0].id,
+          status: linked.rows[0].status,
+        };
+      }
     }
 
     // Eligible once the order has been paid and fulfillment has started/finished.
@@ -167,8 +232,12 @@ export async function openReplacementCase(
       }
     }
 
-    const existing = await sql<{ id: string; status: ReplacementCaseStatus }>`
-      select id, status
+    const existing = await sql<{
+      id: string;
+      status: ReplacementCaseStatus;
+      audit_event_id: string | null;
+    }>`
+      select id, status, audit_event_id
       from replacement_case
       where order_id = ${order.id}
         and original_asset_id = ${asset.id}
@@ -181,6 +250,7 @@ export async function openReplacementCase(
     const wantRefund = input.requestRefund === true;
     const existingCase = existing.rows[0];
     if (existingCase) {
+      await bindSupportReplacementIntent(trx, input, existingCase.id);
       if (wantRefund && existingCase.status !== "REFUND_REQUESTED") {
         await sql`
           update replacement_case
@@ -223,6 +293,7 @@ export async function openReplacementCase(
         (${caseId}, ${order.id}, ${asset.id}, ${input.reasonCode}, ${status},
          ${warrantyDeadline ? warrantyDeadline.toISOString() : null})
     `.execute(trx);
+    await bindSupportReplacementIntent(trx, input, caseId);
 
     // A refund request moves the Order into REFUND_PENDING so finance can act;
     // a pure replacement stays on the current status (support fulfills later).

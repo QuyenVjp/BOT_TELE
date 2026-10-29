@@ -573,9 +573,14 @@ export async function rejectClaim(
     const claim = await loadClaimForUpdate(trx, input.claimId);
     if (!claim) return { ok: false, code: "NOT_FOUND" };
     if (claim.version !== input.expectedVersion) return { ok: false, code: "STALE_VERSION" };
+    if (claim.refund_obligation_id) return { ok: false, code: "ILLEGAL_STATE" };
     if (claim.status === "REJECTED")
       return { ok: true, claimId: claim.id, status: "REJECTED", idempotent: true };
-    if (["REFUND_PAID", "RESOLVED", "CANCELLED"].includes(claim.status))
+    if (
+      ["REFUND_APPROVED", "REFUND_DUE", "REFUND_PAID", "RESOLVED", "CANCELLED"].includes(
+        claim.status,
+      )
+    )
       return { ok: false, code: "ILLEGAL_STATE" };
     if (
       !(await setStatus(trx, claim.id, input.expectedVersion, "REJECTED", {

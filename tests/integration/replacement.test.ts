@@ -232,7 +232,7 @@ describe("replacement / refund-request (T078 / FR-020)", () => {
       correlationId: "replacement-reentry",
       deps: {
         vault: createInMemoryVault(),
-        supplier: null,
+        resolveSupplier: async (_supplierId: string) => null,
         deliveryBaseUrl: "https://delivery.example.test",
         bundleTtlSeconds: 900,
       },
@@ -335,7 +335,7 @@ describe("replacement / refund-request (T078 / FR-020)", () => {
         correlationId: `fulfillment-${historicalStatus.toLowerCase()}`,
         deps: {
           vault: createInMemoryVault(),
-          supplier: null,
+          resolveSupplier: async (_supplierId: string) => null,
           deliveryBaseUrl: "https://delivery.example.test",
           bundleTtlSeconds: 900,
         },

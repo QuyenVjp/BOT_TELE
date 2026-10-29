@@ -171,7 +171,6 @@ function summarizeTelegramResult(result: unknown): Record<string, unknown> {
   return {
     ok: true,
     message_id: row.message_id ?? message?.message_id ?? null,
-    document_file_id: document?.file_id ?? null,
     document_file_unique_id: document?.file_unique_id ?? null,
   };
 }
@@ -308,7 +307,11 @@ function sentMessage(chatId: string, result: unknown): SentTelegramMessage | nul
   return { chatId, messageId: String(messageId) };
 }
 
-function telegramFileIds(result: unknown): { fileId: string; fileUniqueId: string | null } {
+function telegramFileIds(result: unknown): {
+  fileId: string;
+  fileUniqueId: string | null;
+  messageId: string | null;
+} {
   if (!result || typeof result !== "object" || !("document" in result))
     throw new Error("Telegram document response missing");
   const document = result.document;
@@ -321,9 +324,17 @@ function telegramFileIds(result: unknown): { fileId: string; fileUniqueId: strin
     throw new Error("Telegram document file_id missing");
   }
   const unique = "file_unique_id" in document ? document.file_unique_id : null;
+  const messageId =
+    "message_id" in result &&
+    typeof result.message_id === "number" &&
+    Number.isInteger(result.message_id)
+      ? String(result.message_id)
+      : null;
+  if (!messageId) throw new Error("Telegram document message_id missing");
   return {
     fileId: document.file_id,
     fileUniqueId: typeof unique === "string" ? unique : null,
+    messageId,
   };
 }
 
@@ -402,7 +413,7 @@ export function createGrammyDocumentSender(
       const ids = telegramFileIds(result);
       traceTelegram(trace, {
         method: "sendDocument",
-        document_file_id: ids.fileId,
+        message_id: ids.messageId,
         document_file_unique_id: ids.fileUniqueId,
       });
       return ids;

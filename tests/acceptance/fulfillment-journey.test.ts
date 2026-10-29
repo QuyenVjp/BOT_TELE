@@ -186,7 +186,7 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
       correlationId: "corr-ful",
       deps: {
         vault,
-        supplier: null,
+        resolveSupplier: async (_supplierId) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       },
@@ -318,7 +318,7 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
       correlationId: "visibility-fulfill",
       deps: {
         vault,
-        supplier: null,
+        resolveSupplier: async (_supplierId) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       },
@@ -414,7 +414,7 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
       correlationId: "code-fulfill",
       deps: {
         vault,
-        supplier: null,
+        resolveSupplier: async (_supplierId) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       },
@@ -480,7 +480,7 @@ describe("US3 fulfillment journey (paid → delivery)", () => {
       correlationId: "partial-fulfill",
       deps: {
         vault,
-        supplier: null,
+        resolveSupplier: async (_supplierId) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       },

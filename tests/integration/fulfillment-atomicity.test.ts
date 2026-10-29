@@ -79,7 +79,7 @@ async function seed(initialStatus: "AVAILABLE" | "RESERVED") {
 function deps(): FulfillmentDeps {
   return {
     vault,
-    supplier: null,
+    resolveSupplier: async (_supplierId) => null,
     deliveryBaseUrl: "https://shop.example/d",
     bundleTtlSeconds: 900,
   };

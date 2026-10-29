@@ -74,7 +74,7 @@ describe("manual fulfillment tasks", () => {
       const f = await seedServiceOrder({ fulfillmentType });
       const deps = {
         vault: createInMemoryVault(),
-        supplier: null,
+        resolveSupplier: async (_supplierId: string) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       };
@@ -116,7 +116,7 @@ describe("manual fulfillment tasks", () => {
     const f = await seedServiceOrder({ fulfillmentType: "UNLIMITED_SERVICE" });
     const deps = {
       vault: createInMemoryVault(),
-      supplier: null,
+      resolveSupplier: async (_supplierId: string) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     };
@@ -150,7 +150,7 @@ describe("manual fulfillment tasks", () => {
     const f = await seedServiceOrder({ fulfillmentType: "UNLIMITED_SERVICE" });
     const deps = {
       vault: createInMemoryVault(),
-      supplier: null,
+      resolveSupplier: async (_supplierId: string) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     };
@@ -213,7 +213,7 @@ describe("manual fulfillment tasks", () => {
     const f = await seedServiceOrder({ fulfillmentType: "MANUAL_FULFILLMENT" });
     const deps = {
       vault: createInMemoryVault(),
-      supplier: null,
+      resolveSupplier: async (_supplierId: string) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     };

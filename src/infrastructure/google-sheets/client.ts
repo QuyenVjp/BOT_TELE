@@ -11,9 +11,15 @@ export interface SheetValueRange {
   values: readonly (readonly SheetValue[])[];
 }
 
+export interface SheetsDeveloperMetadata {
+  metadataKey: string;
+  metadataValue: string | null;
+  locationType?: string | null;
+}
+
 export interface SheetsSpreadsheet {
   sheets: readonly { sheetId: number; title: string; rowCount?: number }[];
-  developerMetadata: readonly { metadataKey: string; metadataValue: string | null }[];
+  developerMetadata: readonly SheetsDeveloperMetadata[];
 }
 
 export interface GoogleSheetsApi {
@@ -97,6 +103,7 @@ export function classifySheetsError(error: unknown): GoogleSheetsError {
   if (status === 401) return new GoogleSheetsError("AUTH", false, status);
   if (status === 403) return new GoogleSheetsError("PERMISSION_DENIED", false, status);
   if (status === 429) return new GoogleSheetsError("RATE_LIMITED", true, status);
+  if (status === 408) return new GoogleSheetsError("NETWORK", true, status);
   if (status !== undefined && status >= 500 && status <= 599) {
     return new GoogleSheetsError("UPSTREAM_5XX", true, status);
   }
@@ -108,7 +115,20 @@ export function classifySheetsError(error: unknown): GoogleSheetsError {
     error !== null &&
     typeof error === "object" &&
     "code" in error &&
-    (error.code === "ECONNRESET" || error.code === "ETIMEDOUT" || error.code === "ENOTFOUND")
+    typeof error.code === "string" &&
+    [
+      "ECONNRESET",
+      "ECONNABORTED",
+      "ETIMEDOUT",
+      "ENOTFOUND",
+      "EAI_AGAIN",
+      "ENETUNREACH",
+      "EHOSTUNREACH",
+      "ECONNREFUSED",
+      "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_SOCKET",
+      "ERR_STREAM_PREMATURE_CLOSE",
+    ].includes(error.code)
   ) {
     return new GoogleSheetsError("NETWORK", true);
   }
@@ -134,7 +154,9 @@ export async function withSheetsRetry<T>(
       setTimeout(resolve, ms);
       return promise;
     });
-  const maxAttempts = Math.max(1, Math.min(options.maxAttempts, 5));
+  const maxAttempts = Number.isSafeInteger(options.maxAttempts)
+    ? Math.max(1, Math.min(options.maxAttempts, 5))
+    : 1;
   for (let attempt = 0; ; attempt += 1) {
     try {
       return await operation();
@@ -348,7 +370,7 @@ export async function createGoogleSheetsClient(
           {
             spreadsheetId,
             fields:
-              "sheets(properties(sheetId,title,gridProperties(rowCount))),developerMetadata(metadataKey,metadataValue)",
+              "sheets(properties(sheetId,title,gridProperties(rowCount))),developerMetadata(metadataKey,metadataValue,location(locationType))",
           },
           requestOptions,
         ),
@@ -368,8 +390,14 @@ export async function createGoogleSheetsClient(
           ];
         }),
         developerMetadata: (response.data.developerMetadata ?? []).flatMap((entry) =>
-          entry.metadataKey
-            ? [{ metadataKey: entry.metadataKey, metadataValue: entry.metadataValue ?? null }]
+          entry.metadataKey && entry.location?.locationType === "SPREADSHEET"
+            ? [
+                {
+                  metadataKey: entry.metadataKey,
+                  metadataValue: entry.metadataValue ?? null,
+                  locationType: entry.location.locationType,
+                },
+              ]
             : [],
         ),
       };

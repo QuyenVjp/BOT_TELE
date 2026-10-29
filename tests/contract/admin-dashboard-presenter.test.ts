@@ -440,12 +440,22 @@ describe("admin operational presenters", () => {
       pendingPayment: 2,
       paymentReview: 1,
       fulfillmentFailures: 3,
+      manualOpenTasks: 5,
+      notificationSendUncertain: 4,
+      warrantyNew: 3,
+      refundDue: 2,
+      supportOpenTickets: 1,
     });
 
     expect(message.text.startsWith("📊 Tổng quan\n\n📌 Việc cần xử lý")).toBe(true);
     expect(message.text).toContain("Chờ thanh toán: 2");
     expect(message.text).toContain("Cần xem thanh toán: 1");
     expect(message.text).toContain("Lỗi giao hàng: 3");
+    expect(message.text).toContain("Tác vụ thủ công đang mở: 5");
+    expect(message.text).toContain("Thông báo cần đối soát: 4");
+    expect(message.text).toContain("Bảo hành mới: 3");
+    expect(message.text).toContain("Hoàn tiền chờ chi: 2");
+    expect(message.text).toContain("Hỗ trợ đang mở: 1");
     expect(message.buttons.flat()).toEqual(
       expect.arrayContaining([
         { text: "🧾 Đơn hàng", callbackData: "admin:orders" },
@@ -471,6 +481,11 @@ describe("admin operational presenters", () => {
       pendingPayment: 0,
       paymentReview: 0,
       fulfillmentFailures: 0,
+      manualOpenTasks: 0,
+      notificationSendUncertain: 0,
+      warrantyNew: 0,
+      refundDue: 0,
+      supportOpenTickets: 0,
     });
 
     expect(message.text).toContain("Chờ thanh toán: 0");
@@ -482,6 +497,11 @@ describe("admin operational presenters", () => {
     expect(message.text).toContain("Đã thanh toán hôm nay: 0");
     expect(message.text).toContain("Doanh thu hôm nay: 0 ₫");
     expect(message.text).toContain("Hết hàng: 0");
+    expect(message.text).toContain("Tác vụ thủ công đang mở: 0");
+    expect(message.text).toContain("Thông báo cần đối soát: 0");
+    expect(message.text).toContain("Bảo hành mới: 0");
+    expect(message.text).toContain("Hoàn tiền chờ chi: 0");
+    expect(message.text).toContain("Hỗ trợ đang mở: 0");
     expect(message.text).toContain("Sắp hết: 0");
     expect(message.text).not.toMatch(/khẩn cấp|urgent|ngưỡng|threshold/i);
   });
@@ -498,6 +518,11 @@ describe("admin operational presenters", () => {
       pendingPayment: 2,
       paymentReview: 1,
       fulfillmentFailures: 3,
+      manualOpenTasks: 0,
+      notificationSendUncertain: 0,
+      warrantyNew: 0,
+      refundDue: 0,
+      supportOpenTickets: 0,
     });
 
     expect(message.text).toContain("Sản phẩm đang bán: 4");

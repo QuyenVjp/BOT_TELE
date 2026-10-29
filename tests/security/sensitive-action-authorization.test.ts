@@ -80,6 +80,7 @@ describe("sensitive action policy table", () => {
         "support.replacement.approve",
         "inventory.ready.release",
         "fulfillment.reconcile",
+        "file_delivery.recover",
         "discrepancy.resolve",
         "outbox.orphan.dispose",
         "store.open",
@@ -110,6 +111,8 @@ describe("sensitive action policy table", () => {
     expect(SENSITIVE_ACTION_POLICY["catalog.variant.price.change"]).toBe("BULK_PRICE_CHANGE");
     expect(SENSITIVE_ACTION_POLICY["catalog.variant.deposit.change"]).toBe("BULK_PRICE_CHANGE");
     expect(SENSITIVE_ACTION_POLICY["inventory.stock.adjust"]).toBe("STOCK_ADJUSTMENT");
+    expect(isSensitiveActionKey("file_delivery.recover")).toBe(true);
+    expect(SENSITIVE_ACTION_POLICY["file_delivery.recover"]).toBe("DELIVERY_REISSUE");
 
     expect(SENSITIVE_ACTION_POLICY).toEqual({
       "wallet.refund": "REFUND",
@@ -117,6 +120,7 @@ describe("sensitive action policy table", () => {
       "support.replacement.approve": "REFUND",
       "inventory.ready.release": "STOCK_ADJUSTMENT",
       "fulfillment.reconcile": "DELIVERY_REISSUE",
+      "file_delivery.recover": "DELIVERY_REISSUE",
       "warranty.refund.approve": "REFUND",
       "warranty.refund.adjust": "REFUND",
       "warranty.replacement.approve": "DELIVERY_REISSUE",

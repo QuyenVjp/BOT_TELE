@@ -7,6 +7,8 @@ import { createTelegramDomainDispatcher } from "../../src/bot/callbacks/telegram
 import { createCallbackTokenCodec } from "../../src/bot/callback-codec.js";
 import { sealPresentedMessageCallbacks } from "../../src/bot/callback-sealer.js";
 import { createSupportService } from "../../src/modules/support/service.js";
+import { drainOutboxOnce } from "../../src/infrastructure/outbox/worker.js";
+import { handleNotificationOutboxEvent } from "../../src/modules/notification/service.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
@@ -130,7 +132,7 @@ async function seedTwoCustomers(): Promise<Seeded> {
 beforeEach(async () => {
   await sql`
     truncate table support_ticket, delivery_bundle, digital_asset, order_transition, outbox_event,
-      "order", product_variant, product, category, customer cascade
+      audit_event, "order", product_variant, product, category, customer cascade
   `.execute(ctx.db);
 });
 
@@ -353,6 +355,299 @@ describe("US4 history → support journey", () => {
     `.execute(ctx.db);
     expect(closed.rows[0]?.status).toBe("CLOSED");
   });
+  it("claims a customer description for its owner, falls through for others, and supports cancel", async () => {
+    const seed = await seedTwoCustomers();
+    const rootTelegramUserId = 123456789;
+    const rootCustomerId = newId();
+    await sql`insert into customer (id, status, locale) values (${rootCustomerId}, 'ACTIVE', 'vi')`.execute(
+      ctx.db,
+    );
+    await sql`
+      insert into channel_identity (id, customer_id, channel, channel_user_id)
+      values (${newId()}, ${rootCustomerId}, 'TELEGRAM', ${String(rootTelegramUserId)})
+    `.execute(ctx.db);
+    await sql`
+      insert into channel_identity (id, customer_id, channel, channel_user_id)
+      values (${newId()}, ${seed.aliceId}, 'TELEGRAM', '700000001')
+    `.execute(ctx.db);
+    const codec = createCallbackTokenCodec({
+      key: "test-only-description-callback-key-material-123456",
+      keyVersion: 1,
+      ttlSeconds: 900,
+      clockSkewSeconds: 5,
+    });
+    const messages: string[] = [];
+    const screen = async () => ({ text: "catalog-fallback", buttons: [] });
+    const dispatcher = createTelegramDomainDispatcher({
+      codec,
+      resolveCustomerId: async (telegramUserId) =>
+        telegramUserId === "700000001"
+          ? seed.aliceId
+          : telegramUserId === "700000002"
+            ? seed.bobId
+            : null,
+      resolveOrderByIdForOwner: async (orderId, customerId) =>
+        orderId === seed.aliceOrderId && customerId === seed.aliceId
+          ? {
+              id: seed.aliceOrderId,
+              orderNumber: seed.aliceOrderNumber,
+              customerId: seed.aliceId,
+              createdAt: "2026-10-20T00:00:00.000Z",
+            }
+          : null,
+      resolveOrderIdByNumber: async (orderNumber) =>
+        orderNumber === seed.aliceOrderNumber ? seed.aliceOrderId : null,
+      resolveCatalogPage: async () => null,
+      catalog: {
+        mainMenu: screen,
+        categoryList: screen,
+        categoryView: screen,
+        variantDetail: screen,
+        search: screen,
+      },
+      checkout: {
+        buyNowFromCallback: screen,
+        refresh: screen,
+        reopen: screen,
+        cancel: screen,
+      },
+      history: { list: screen, detail: screen },
+      support: createSupportCallbacks({ db: ctx.db }),
+      responder: {
+        send: async ({ message }) => {
+          messages.push(message.text);
+          return null;
+        },
+      },
+    });
+    const dispatch = (input: {
+      actorUserId: string;
+      updateId: number;
+      callbackData?: string;
+      messageText?: string;
+    }) =>
+      dispatcher.handle({
+        actorUserId: input.actorUserId,
+        chatId: input.actorUserId,
+        chatType: "private",
+        messageId: String(input.updateId),
+        action: "CATALOG",
+        ...(input.callbackData
+          ? { callbackData: input.callbackData, callbackQueryId: `description-${input.updateId}` }
+          : {}),
+        ...(input.messageText ? { messageText: input.messageText } : {}),
+      });
+    const rawDescription =
+      "Đăng nhập lỗi: alice:secret; mật\u200Bkhẩu = z; password ＝ z; password = ,x; 用户@example.com:pw; 8:30, Mã đơn: 1234";
+
+    // No pending ticket: ordinary text keeps its normal catalog/search behavior.
+    await dispatch({
+      actorUserId: "700000002",
+      updateId: 1,
+      messageText: "catalog before pending",
+    });
+    expect(messages.at(-1)).toBe("catalog-fallback");
+
+    // The sealed reason callback creates a durable owner-scoped WAITING_CUSTOMER draft.
+    await dispatch({
+      actorUserId: "700000001",
+      updateId: 2,
+      callbackData: codec.issue({
+        action: "SUPPORT_REASON",
+        option: 0,
+        resourceId: seed.aliceOrderId,
+        telegramUserId: "700000001",
+      }),
+    });
+    expect(messages.at(-1)).toContain("Mô tả ngắn gọn vấn đề");
+    const draft = await sql<{
+      id: string;
+      customer_id: string;
+      order_id: string | null;
+      status: string;
+      safe_summary: string;
+    }>`
+      select id, customer_id, order_id, status, safe_summary
+      from support_ticket
+      where customer_id = ${seed.aliceId}
+      order by created_at desc, id desc
+      limit 1
+    `.execute(ctx.db);
+    expect(draft.rows).toHaveLength(1);
+    expect(draft.rows[0]).toMatchObject({
+      customer_id: seed.aliceId,
+      order_id: seed.aliceOrderId,
+      status: "WAITING_CUSTOMER",
+      safe_summary: "Đang chờ bạn bổ sung mô tả.",
+    });
+    const ticketId = draft.rows[0]?.id;
+    expect(ticketId).toBeDefined();
+    if (!ticketId) return;
+    const opened = await sql<{ event_type: string; payload_redacted: Record<string, unknown> }>`
+      select event_type, payload_redacted
+      from outbox_event
+      where aggregate_id = ${ticketId}
+    `.execute(ctx.db);
+    expect(opened.rows).toEqual([
+      {
+        event_type: "TicketOpened",
+        payload_redacted: {
+          ticketId,
+          customerId: seed.aliceId,
+          orderId: seed.aliceOrderId,
+          reasonCode: "ASSET_NOT_WORKING",
+          descriptionState: "WAITING_CUSTOMER",
+          correlationId: "telegram:2",
+        },
+      },
+    ]);
+
+    const drain = await drainOutboxOnce(ctx.db, {
+      batchSize: 1,
+      maxAttempts: 5,
+      handler: (event) => handleNotificationOutboxEvent(ctx.db, event, { rootTelegramUserId }),
+    });
+    expect(drain).toMatchObject({ claimed: 1, published: 1, failed: 0 });
+    const notification = await sql<{ class: string; content: string }>`
+      select class, content
+      from notification_campaign
+      where id = ${`ticket-opened:${ticketId}`}
+    `.execute(ctx.db);
+    expect(notification.rows).toEqual([
+      {
+        class: "CRITICAL_SERVICE",
+        content: [
+          "🛡 Yêu cầu hỗ trợ mới",
+          "",
+          `Khách: ${seed.aliceId.slice(-4).padStart(8, "•")}`,
+          "Loại: Tài khoản không dùng được",
+          "Mở mục Hỗ trợ để xử lý.",
+        ].join("\n"),
+      },
+    ]);
+    expect(notification.rows[0]?.content).not.toContain(rawDescription);
+    for (const secret of ["alice", "secret", "zZeroWidth", ",x", "pw"]) {
+      expect(notification.rows[0]?.content).not.toContain(secret);
+    }
+
+    // Bob cannot claim Alice's pending draft; his ordinary text still falls through.
+    await dispatch({
+      actorUserId: "700000002",
+      updateId: 3,
+      messageText: "Bob's unrelated catalog question",
+    });
+    expect(messages.at(-1)).toBe("catalog-fallback");
+    const stillWaiting = await sql<{ status: string }>`
+      select status from support_ticket where id = ${draft.rows[0]?.id}
+    `.execute(ctx.db);
+    expect(stillWaiting.rows[0]?.status).toBe("WAITING_CUSTOMER");
+
+    // Empty text is rejected without consuming the pending draft.
+    await dispatch({
+      actorUserId: "700000001",
+      updateId: 4,
+      messageText: "   ",
+    });
+    expect(messages.at(-1)).toContain("Vui lòng mô tả vấn đề ngắn gọn");
+    const rejected = await sql<{ status: string }>`
+      select status from support_ticket where id = ${draft.rows[0]?.id}
+    `.execute(ctx.db);
+    expect(rejected.rows[0]?.status).toBe("WAITING_CUSTOMER");
+
+    // Alice's ordinary text is validated, redacted, and transitions her ticket.
+    await dispatch({
+      actorUserId: "700000001",
+      updateId: 5,
+      messageText: rawDescription,
+    });
+    expect(messages.at(-1)).toContain("Đã tạo ticket hỗ trợ");
+    const submitted = await sql<{ status: string; safe_summary: string }>`
+      select status, safe_summary from support_ticket where id = ${ticketId}
+    `.execute(ctx.db);
+    expect(submitted.rows[0]?.status).toBe("WAITING_SHOP");
+    expect(submitted.rows[0]?.safe_summary).toContain("[đã ẩn]");
+    expect(submitted.rows[0]?.safe_summary).toContain("8:30");
+    expect(submitted.rows[0]?.safe_summary).toContain("Mã đơn: 1234");
+    for (const secret of ["alice", "secret", "z", ",x", "pw"]) {
+      expect(submitted.rows[0]?.safe_summary).not.toContain(secret);
+    }
+    const submittedNotificationDrain = await drainOutboxOnce(ctx.db, {
+      batchSize: 1,
+      maxAttempts: 5,
+      handler: (event) => handleNotificationOutboxEvent(ctx.db, event, { rootTelegramUserId }),
+    });
+    expect(submittedNotificationDrain).toMatchObject({ claimed: 1, published: 1, failed: 0 });
+    const submittedNotification = await sql<{ class: string; content: string }>`
+      select class, content
+      from notification_campaign
+      where id = ${`support-ticket-status:${ticketId}:2`}
+    `.execute(ctx.db);
+    expect(submittedNotification.rows).toEqual([
+      { class: "CRITICAL_SERVICE", content: "Shop đang xử lý yêu cầu hỗ trợ của bạn." },
+    ]);
+    expect(submittedNotification.rows[0]?.content).not.toContain(rawDescription);
+    const submitAudit = await sql<{
+      action: string;
+      actor_type: string;
+      correlation_id: string;
+      metadata_redacted: Record<string, string>;
+    }>`
+      select action, actor_type, correlation_id, metadata_redacted
+      from audit_event
+      where target_type = 'SupportTicket' and target_id = ${draft.rows[0]?.id}
+    `.execute(ctx.db);
+    expect(submitAudit.rows).toEqual([
+      expect.objectContaining({
+        action: "support.ticket.description",
+        actor_type: "CUSTOMER",
+        correlation_id: "telegram:5",
+        metadata_redacted: { from: "WAITING_CUSTOMER", to: "WAITING_SHOP" },
+      }),
+    ]);
+
+    // A second pending draft can be cancelled through the sealed callback route.
+    await dispatch({
+      actorUserId: "700000001",
+      updateId: 6,
+      callbackData: codec.issue({
+        action: "SUPPORT_REASON",
+        option: 4,
+        telegramUserId: "700000001",
+      }),
+    });
+    const secondDraft = await sql<{ id: string }>`
+      select id
+      from support_ticket
+      where customer_id = ${seed.aliceId} and status = 'WAITING_CUSTOMER'
+      order by created_at desc, id desc
+      limit 1
+    `.execute(ctx.db);
+    const secondTicketId = secondDraft.rows[0]?.id;
+    expect(secondTicketId).toBeDefined();
+    if (!secondTicketId) return;
+    await dispatch({
+      actorUserId: "700000001",
+      updateId: 7,
+      callbackData: codec.issue({
+        action: "SUPPORT_DESCRIPTION_CANCEL",
+        resourceId: secondTicketId,
+        telegramUserId: "700000001",
+      }),
+    });
+    expect(messages.at(-1)).toContain("Đã huỷ yêu cầu hỗ trợ");
+    const cancelled = await sql<{ status: string }>`
+      select status from support_ticket where id = ${secondTicketId}
+    `.execute(ctx.db);
+    expect(cancelled.rows[0]?.status).toBe("RESOLVED");
+    const cancelAudit = await sql<{ action: string; actor_type: string }>`
+      select action, actor_type
+      from audit_event
+      where target_type = 'SupportTicket' and target_id = ${secondTicketId}
+    `.execute(ctx.db);
+    expect(cancelAudit.rows).toEqual([
+      { action: "support.ticket.description.cancel", actor_type: "CUSTOMER" },
+    ]);
+  });
   it("renders selected-order warranty state and seals the report action to that order", async () => {
     const seed = await seedTwoCustomers();
     const history = createHistoryCallbacks({ db: ctx.db });
@@ -374,7 +669,7 @@ describe("US4 history → support journey", () => {
       resolveOrderId: async (orderNumber) =>
         orderNumber === seed.aliceOrderNumber ? seed.aliceOrderId : null,
     });
-    const report = sealed.buttons.flat().find((button) => button.callbackData?.startsWith("cb:"));
+    const report = sealed.buttons.flat().find((button) => button.text === "⚠️ Báo lỗi");
     expect(report).toBeDefined();
     const reportToken = codec.verify(report?.callbackData ?? "", {
       telegramUserId: "700000001",

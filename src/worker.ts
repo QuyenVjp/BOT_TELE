@@ -26,6 +26,7 @@ import { resolveCatalogAudience } from "./modules/catalog/visibility.js";
 
 import { pathToFileURL } from "node:url";
 import { getAdminOverview } from "./modules/admin/overview.js";
+import { getAdminDashboardMetrics } from "./modules/admin/dashboard.js";
 import {
   listAdminInventory,
   getAdminInventoryProduct,
@@ -45,11 +46,16 @@ import { createPinnedFetch } from "./infrastructure/net/pinned-fetch.js";
 import type { CallbackTokenCodec } from "./bot/callback-codec.js";
 import type { Db } from "./infrastructure/db/transaction.js";
 import type { FulfillmentType, InventoryField } from "./modules/catalog/fulfillment-type.js";
-import type {
-  presentAdminOrderDetail,
-  presentAdminOrders as presentAdminOrdersPresenter,
-} from "./bot/presenters/admin.js";
-import type { AdminCallbacks, HandleResult } from "./bot/callbacks/admin.js";
+import { presentAdminOrderDetail, presentHighRiskChallenge } from "./bot/presenters/admin.js";
+import type { presentAdminOrders as presentAdminOrdersPresenter } from "./bot/presenters/admin.js";
+import {
+  createAdminCallbacks,
+  OWNER_COMMANDS,
+  type AdminCallbacks,
+  type HandleResult,
+} from "./bot/callbacks/admin.js";
+import { createTelegramDomainDispatcher } from "./bot/callbacks/telegram-dispatch.js";
+import { createAdminConfirmation } from "./modules/identity/admin-confirmation.js";
 import type { AuthorizationJsonValue } from "./modules/identity/authorization-payload.js";
 import type {
   SensitiveActionDeps,
@@ -116,7 +122,12 @@ import {
   createPostgresTelegramInbox,
 } from "./infrastructure/inbox/telegram.js";
 import type { SePayReconciliationPort } from "./modules/payments/reconciliation.js";
-import type { SupplierPort } from "./modules/supplier/port.js";
+import type { SupplierPort, SupplierProvider } from "./modules/supplier/port.js";
+import { createSupplierProviderResolver } from "./modules/supplier/resolver.js";
+import {
+  checkSelectedSupplierReadiness,
+  type SupplierReadinessChecker,
+} from "./modules/supplier/readiness.js";
 import type { RecoveryTelemetry } from "./modules/recovery-result.js";
 import type { PreorderStatus } from "./modules/commerce/preorder.js";
 import { recoverExpiredOrdersBatch } from "./modules/commerce/recovery.js";
@@ -124,6 +135,10 @@ import {
   recoverExpiredDeliveryBundlesBatch,
   recoverStaleReservationsBatch,
 } from "./modules/digital-goods/recovery.js";
+import {
+  getAdminManualFulfillmentTask,
+  listAdminManualFulfillmentTasks,
+} from "./modules/digital-goods/manual-fulfillment.js";
 import {
   cleanupDeliveryNotificationCapabilitiesBatch,
   openTelegramDeliveryHandoff,
@@ -215,7 +230,7 @@ export interface RecoveryCycleResult {
   usernamePrivacy: { observationsDeleted: number; identitiesCleared: number };
   inboxRetention: { payloadsRedacted: number; rowsPruned: number };
   sePay: RecoveryTelemetry | null;
-  supplier: RecoveryTelemetry | null;
+  supplier: RecoveryTelemetry;
 }
 
 /** Conservative, documented retention defaults for the Telegram inbox. */
@@ -240,7 +255,7 @@ export async function runRecoveryJobsOnce(input: {
   batchSize: number;
   now?: Date;
   sePayPort: SePayReconciliationPort | null;
-  supplierPort: SupplierPort | null;
+  resolveSupplier: (supplierId: string) => Promise<SupplierPort | SupplierProvider | null>;
   vault: Vault;
   inboxRetention?: Partial<TelegramInboxRetention>;
 }): Promise<RecoveryCycleResult> {
@@ -286,14 +301,12 @@ export async function runRecoveryJobsOnce(input: {
   const sePay = input.sePayPort
     ? await recoverSePayBatch(input.db, { batchSize: input.batchSize, now, port: input.sePayPort })
     : null;
-  const supplier = input.supplierPort
-    ? await recoverSupplierOrdersBatch(input.db, {
-        batchSize: input.batchSize,
-        now,
-        resolvePort: () => input.supplierPort,
-        vault: input.vault,
-      })
-    : null;
+  const supplier = await recoverSupplierOrdersBatch(input.db, {
+    batchSize: input.batchSize,
+    now,
+    resolvePort: input.resolveSupplier,
+    vault: input.vault,
+  });
   return {
     orders,
     reservations,
@@ -773,7 +786,11 @@ export interface NotificationDeliveryLaneInput {
 export async function runNotificationDeliveryLane(
   input: NotificationDeliveryLaneInput,
 ): Promise<void> {
-  const deliveries = await claimNotificationDeliveries(input.db, input.batchSize ?? 100);
+  const deliveries = await claimNotificationDeliveries(
+    input.db,
+    input.batchSize ?? 100,
+    input.maxAttempts,
+  );
   let next = 0;
   const sleep = input.sleep ?? delayNotification;
   const sendNext = async (): Promise<void> => {
@@ -1180,18 +1197,6 @@ function safeWarrantyMessage(text: string): PresentedMessage {
   };
 }
 
-/**
- * What the customer reads when the shop moves their ticket. Kept apart from the
- * owner's labels: the customer never sees an internal status code.
- */
-const SUPPORT_TICKET_CUSTOMER_MESSAGE: Record<string, string> = {
-  WAITING_SHOP: "Shop đang xử lý yêu cầu hỗ trợ của bạn.",
-  WAITING_CUSTOMER: "Shop cần bạn bổ sung thông tin cho yêu cầu hỗ trợ.",
-  RESOLVED: "Yêu cầu hỗ trợ của bạn đã được xử lý.",
-  CLOSED: "Yêu cầu hỗ trợ đã đóng.",
-  MANUAL_REVIEW: "Shop đang xem xét thêm yêu cầu của bạn.",
-};
-
 /** A support screen we could not serve; never a stack trace or an internal code. */
 function adminSupportError(text: string): PresentedMessage {
   return {
@@ -1484,7 +1489,6 @@ async function bootstrap(): Promise<void> {
   const { drainOutboxOnce } = await import("./infrastructure/outbox/worker.js");
   const { createFulfillmentOutboxHandler } = await import("./modules/digital-goods/handlers.js");
   const { createFulfillmentTelemetry } = await import("./modules/digital-goods/telemetry.js");
-  const { createSandboxSupplierAdapter } = await import("./modules/supplier/adapters/primary.js");
   const { createSePayApiPort } = await import("./modules/payments/sepay-api.js");
   const {
     consumeTelegramUsernameObservation,
@@ -1524,7 +1528,6 @@ async function bootstrap(): Promise<void> {
     saveWalletTopupSelection,
   } = await import("./modules/wallet/topup.js");
   const { createWalletPurchaseService } = await import("./modules/wallet/purchase.js");
-  const { createTelegramDomainDispatcher } = await import("./bot/callbacks/telegram-dispatch.js");
   const { createPostgresUiSurfaceRegistry } = await import("./bot/ui-surface.js");
   const { createGrammyDocumentSender, createGrammyResponder, ensureTelegramCommandMenu } =
     await import("./bot/grammy-responder.js");
@@ -1535,8 +1538,6 @@ async function bootstrap(): Promise<void> {
     await import("./modules/identity/channel-identity.js");
   const { upsertTelegramCustomerProfileSnapshot } =
     await import("./modules/identity/customer-profile.js");
-  const { createAdminConfirmation } = await import("./modules/identity/admin-confirmation.js");
-  const { createAdminCallbacks, OWNER_COMMANDS } = await import("./bot/callbacks/admin.js");
   const { importDigitalInventory } = await import("./modules/digital-goods/inventory-import.js");
   const {
     createInventoryImportTemplate,
@@ -1556,8 +1557,6 @@ async function bootstrap(): Promise<void> {
     stageFileArtifactDocument,
     startFileArtifactImportSession,
   } = await import("./modules/digital-goods/file-artifact-import-session.js");
-  const { getManualTaskById, listManualFulfillmentTasks } =
-    await import("./modules/digital-goods/manual-fulfillment.js");
   const {
     createDurableProductDraftWorkflow,
     createProductDraftRepository,
@@ -1626,7 +1625,6 @@ async function bootstrap(): Promise<void> {
     presentAdminTestCustomerPrompt,
     presentAdminCategories,
     presentAdminCategoryPrompt,
-    presentHighRiskChallenge,
     presentHighRiskDone,
     presentSensitiveRefusal,
     presentAdminBroadcastRefused,
@@ -1657,7 +1655,6 @@ async function bootstrap(): Promise<void> {
     presentAdminSupportQueue,
     presentAdminSupportTickets,
     presentAdminSupportTicket,
-    presentAdminOrderDetail,
     presentAdminOrders: presentAdminOrdersPage,
     presentAdminOrderSearchPrompt,
     presentAuditList,
@@ -1725,6 +1722,16 @@ async function bootstrap(): Promise<void> {
       allowedCidrs: config.VAULT_EGRESS_CIDR_ALLOWLIST,
     },
   });
+  const supplierResolver = createSupplierProviderResolver(dbHandle.db, vault, {
+    allowFixtureAdapters: config.SUPPLIER_DRIVER === "fixture",
+    timeoutMs: config.SUPPLIER_TIMEOUT_MS,
+  });
+  const supplierReadiness: SupplierReadinessChecker = (variantId) =>
+    checkSelectedSupplierReadiness(dbHandle.db, {
+      variantId,
+      providerResolver: supplierResolver,
+      purchaseEnabled: true,
+    });
   let googleSheetsApi: GoogleSheetsApi | null = null;
   let createGoogleSheetsApi: (() => Promise<GoogleSheetsApi>) | null = null;
   if (config.GOOGLE_SHEETS_ENABLED) {
@@ -1745,9 +1752,6 @@ async function bootstrap(): Promise<void> {
       });
   }
   const telemetry = createFulfillmentTelemetry();
-  // Fixture supplier for local/dev; production swaps an HTTP adapter (T143).
-  const supplier =
-    config.SUPPLIER_DRIVER === "fixture" ? createSandboxSupplierAdapter({ mode: "fulfill" }) : null;
   const sePayRecoveryPort =
     config.SEPAY_API_TOKEN.length > 0
       ? createSePayApiPort({
@@ -1767,7 +1771,7 @@ async function bootstrap(): Promise<void> {
   const handler = createFulfillmentOutboxHandler({
     db: dbHandle.db,
     vault,
-    supplier,
+    resolveSupplier: (supplierId) => supplierResolver.resolve(supplierId),
     deliveryBaseUrl: `${config.APP_BASE_URL.replace(/\/$/, "")}/d`,
     bundleTtlSeconds: config.DELIVERY_BUNDLE_TTL_SECONDS,
     deliverySession: {
@@ -1787,14 +1791,10 @@ async function bootstrap(): Promise<void> {
       },
       ttlSeconds: config.DELIVERY_SESSION_TTL_SECONDS,
     },
-    ...(config.PRIVATE_ARTIFACT_ROOT
-      ? {
-          fileDelivery: {
-            storageRoots: [config.PRIVATE_ARTIFACT_ROOT],
-            sender: telegramDocumentSender,
-          },
-        }
-      : {}),
+    fileDelivery: {
+      storageRoots: config.PRIVATE_ARTIFACT_ROOT ? [config.PRIVATE_ARTIFACT_ROOT] : [],
+      sender: telegramDocumentSender,
+    },
     telemetry,
     // Telegram notifier is wired once the bot client is available (T150).
     // Until then the outbox still advances domain state; notification is a
@@ -1977,6 +1977,7 @@ async function bootstrap(): Promise<void> {
     callbackCodec: buyNowCodec,
     tokenCodec: callbackCodec,
     resolveCustomerId,
+    supplierReadiness,
     adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
     resolveAudience: (input) =>
       resolveCatalogAudience(dbHandle.db, {
@@ -2001,10 +2002,18 @@ async function bootstrap(): Promise<void> {
       return result.ok ? { ok: true, message: "" } : { ok: false, message: result.message };
     },
   });
-  const history = createHistoryCallbacks({ db: dbHandle.db });
+  const history = createHistoryCallbacks({
+    db: dbHandle.db,
+    tokenCodec: callbackCodec,
+    buyAgainVariantDetail: (variantId, telegramUserId) =>
+      catalog.variantDetail(variantId, telegramUserId, {
+        telegramUserId,
+        isRootAdmin: false,
+      }),
+  });
   const notificationService = { getNotificationPreferences, setNotificationPreferences };
   const walletLedger = createWalletLedgerService(dbHandle.db);
-  const walletPurchase = createWalletPurchaseService(dbHandle.db);
+  const walletPurchase = createWalletPurchaseService(dbHandle.db, supplierReadiness);
   const merchant = {
     merchantAccountId: config.SEPAY_MERCHANT_ACCOUNT_ID,
     beneficiaryAccountNumber: config.VIETQR_ACCOUNT_NUMBER,
@@ -3006,6 +3015,123 @@ async function bootstrap(): Promise<void> {
             })
           : presentHighRiskDone("fulfillment.reconcile");
       },
+      async orderFileDeliveryRecover(input) {
+        if (
+          Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
+          input.chatType !== "private"
+        )
+          return presentAdminDenied("NOT_ROOT_ADMIN");
+        if (!adminCallbacks) return presentAdminDenied("NOT_ROOT_ADMIN");
+        const state = await resolveAdminOrderState(dbHandle.db, {
+          adminTelegramUserId: input.telegramUserId,
+          stateId: input.stateId,
+        });
+        if (
+          (state?.kind !== "ORDER_DETAIL" && state?.kind !== "ORDER_MESSAGE_PROMPT") ||
+          !state.orderId
+        ) {
+          return {
+            text: "Phiên đơn hàng đã hết hạn.",
+            buttons: [[{ text: "Đơn hàng", callbackData: "admin:orders" }]],
+          };
+        }
+        const current = await sql<{
+          version: number;
+          status: string;
+          job_id: string | null;
+          file_status: string | null;
+          file_error: string | null;
+          artifact_id: string | null;
+          artifact_version: number | null;
+          artifact_sha256: string | null;
+          claim_generation: number | null;
+          telegram_chat_id: string | null;
+        }>`
+          select
+            o.version,
+            o.status,
+            fdj.order_id as job_id,
+            fdj.status as file_status,
+            fdj.last_error as file_error,
+            fdj.artifact_id,
+            fdj.artifact_version,
+            fdj.artifact_sha256,
+            fdj.claim_generation,
+            fdj.telegram_chat_id
+          from "order" o
+          left join file_delivery_job fdj on fdj.order_id = o.id
+          where o.id = ${state.orderId}
+          limit 1
+        `.execute(dbHandle.db);
+        const row = current.rows[0];
+        const snapshot = state.fileDelivery;
+        const snapshotMatches =
+          snapshot !== undefined &&
+          state.orderVersion !== undefined &&
+          row !== undefined &&
+          row.version === state.orderVersion &&
+          row.job_id === snapshot.jobId &&
+          row.file_status === snapshot.status &&
+          row.file_error === snapshot.lastError &&
+          row.artifact_id === snapshot.artifactId &&
+          row.artifact_version === snapshot.artifactVersion &&
+          row.artifact_sha256 === snapshot.artifactSha256 &&
+          row.claim_generation === snapshot.claimGeneration &&
+          row.telegram_chat_id === snapshot.telegramChatId;
+        if (
+          !snapshotMatches ||
+          row === undefined ||
+          row.job_id === null ||
+          row.file_status !== "FAILED" ||
+          row.file_error !== "SEND_UNCERTAIN" ||
+          row.artifact_id === null ||
+          row.artifact_version === null ||
+          row.artifact_sha256 === null ||
+          row.claim_generation === null ||
+          row.telegram_chat_id === null ||
+          (row.status !== "PAID" && row.status !== "PROCESSING")
+        ) {
+          return presentAdminOrderState(
+            dbHandle.db,
+            { presentAdminOrderDetail, presentAdminOrders: presentAdminOrdersPage },
+            { adminTelegramUserId: input.telegramUserId, stateId: input.stateId },
+          );
+        }
+        const result = await adminCallbacks.handle({
+          command: "file_delivery.recover",
+          actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
+          targetId: row.job_id,
+          expectedVersion: row.version,
+          resolutionCode: input.decision,
+          reason:
+            input.decision === "REQUEUE"
+              ? "Xác nhận xếp hàng gửi lại dù Telegram có thể đã nhận tệp trước đó."
+              : "Giữ trạng thái gửi chưa xác định vì Telegram có thể đã nhận tệp.",
+          correlationId: input.correlationId,
+          fileDelivery: {
+            jobId: row.job_id,
+            artifactId: row.artifact_id,
+            artifactVersion: row.artifact_version,
+            artifactSha256: row.artifact_sha256,
+            claimGeneration: row.claim_generation,
+            telegramChatId: row.telegram_chat_id,
+          },
+        });
+        if (!result.ok)
+          return presentAdminHandleRefusal(result, "file_delivery.recover", input.correlationId);
+        return result.needsConfirmation
+          ? presentHighRiskChallenge({
+              confirmationId: result.confirmationId,
+              challenge: result.challenge,
+              expiresAt: result.expiresAt,
+              action: "file_delivery.recover",
+              warning:
+                input.decision === "REQUEUE"
+                  ? "⚠️ Telegram có thể đã nhận tệp trước đó; xác nhận sẽ xếp hàng một lần gửi lại."
+                  : "Telegram có thể đã nhận tệp trước đó; lựa chọn này không gửi lại.",
+            })
+          : presentHighRiskDone("file_delivery.recover");
+      },
       async orderSearch(input) {
         if (
           Number(input.telegramUserId) !== config.ADMIN_TELEGRAM_USER_ID ||
@@ -3256,23 +3382,13 @@ async function bootstrap(): Promise<void> {
               ? "Không tìm thấy yêu cầu hỗ trợ."
               : "Trạng thái này không còn phù hợp.",
           );
-        // Stable per transition, so a replayed tap cannot message the customer twice.
-        const notified = await queueAdminCustomerMessage(dbHandle.db, {
-          customerId: result.customerId,
-          content:
-            SUPPORT_TICKET_CUSTOMER_MESSAGE[result.to] ??
-            "Yêu cầu hỗ trợ của bạn vừa được cập nhật.",
-          actorId: input.telegramUserId,
-          correlationId: `admin-support-status:${input.ticketId}:${result.from}:${result.to}`,
-        });
+        // The status transition and this notification intent commit together in the outbox.
         const ticket = await getAdminTicket(dbHandle.db, input.ticketId);
         if (!ticket) return adminSupportError("Không tìm thấy yêu cầu hỗ trợ.");
         const screen = presentAdminSupportTicket(ticket);
         return {
           ...screen,
-          text: `${screen.text}\n\n${
-            notified ? "Đã thông báo cho khách." : "Khách chưa có kênh nhận thông báo."
-          }`,
+          text: `${screen.text}\n\nĐã ghi nhận trạng thái. Thông báo đang được xếp hàng xử lý.`,
         };
       },
       async manualTasks(input) {
@@ -3289,9 +3405,7 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        return presentAdminManualTasks(
-          await listManualFulfillmentTasks(dbHandle.db, { status: "OPEN" }),
-        );
+        return presentAdminManualTasks(await listAdminManualFulfillmentTasks(dbHandle.db));
       },
       async manualTask(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -3307,7 +3421,7 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const task = await getManualTaskById(dbHandle.db, input.taskId);
+        const task = await getAdminManualFulfillmentTask(dbHandle.db, input.taskId);
         if (!task)
           return {
             text: "Không tìm thấy tác vụ thủ công.",
@@ -3318,7 +3432,7 @@ async function bootstrap(): Promise<void> {
             ? await createAdminCallbackState(dbHandle.db, {
                 adminTelegramUserId: input.telegramUserId,
                 kind: "MANUAL_TASK_COMPLETE",
-                payload: { taskId: task.id },
+                payload: { taskId: task.taskId, expectedVersion: task.expectedVersion },
               })
             : undefined;
         return presentAdminManualTaskDetail({
@@ -3337,7 +3451,12 @@ async function bootstrap(): Promise<void> {
           state?.kind === "MANUAL_TASK_COMPLETE" && typeof state.payload.taskId === "string"
             ? state.payload.taskId
             : null;
-        if (!taskId)
+        const expectedVersion =
+          state?.kind === "MANUAL_TASK_COMPLETE" &&
+          typeof state.payload.expectedVersion === "string"
+            ? state.payload.expectedVersion
+            : null;
+        if (!taskId || !expectedVersion)
           return {
             text: "Phiên xác nhận tác vụ đã hết hạn.",
             buttons: [[{ text: "🛠 Xử lý thủ công", callbackData: "admin:manual" }]],
@@ -3348,6 +3467,7 @@ async function bootstrap(): Promise<void> {
           targetId: taskId,
           reason: "Manual fulfillment completion requested from Telegram admin UI",
           correlationId: input.correlationId,
+          expectedVersion,
         });
         if (!result.ok)
           return presentAdminHandleRefusal(
@@ -3482,67 +3602,7 @@ async function bootstrap(): Promise<void> {
           return presentAdminDenied(
             gate.code === "WRONG_CONTEXT" ? "WRONG_CONTEXT" : "NOT_ROOT_ADMIN",
           );
-        const result = await sql<{
-          active_products: number;
-          out_of_stock: number;
-          low_stock: number;
-          available_inventory: number;
-          orders_today: number;
-          paid_today: number;
-          revenue_today_vnd: string | number;
-          pending_payment: number;
-          payment_review: number;
-          fulfillment_failures: number;
-        }>`
-          with variant_stock as (
-            select v.id as variant_id,
-              v.low_stock_threshold,
-              case
-                when v.fulfillment_type = 'QUANTITY_STOCK' then coalesce(q.available_quantity, 0)::int
-                else count(da.id)::int
-              end as available
-            from product_variant v
-            left join digital_asset da on da.variant_id = v.id and da.status = 'AVAILABLE'
-            left join variant_quantity_stock q on q.variant_id = v.id
-            where v.is_active
-            group by v.id, q.available_quantity
-          )
-          select
-            (select count(*)::int from product where is_active) as active_products,
-            (select count(*)::int from variant_stock where available = 0) as out_of_stock,
-            (select count(*)::int from variant_stock where low_stock_threshold is not null and low_stock_threshold > 0 and available > 0 and available <= low_stock_threshold) as low_stock,
-            coalesce((select sum(available)::int from variant_stock), 0) as available_inventory,
-            (select count(*)::int from "order" where created_at >= date_trunc('day', now())) as orders_today,
-            (select count(*)::int from "order" where status in ('PAID', 'PROCESSING', 'COMPLETED') and paid_at >= date_trunc('day', now())) as paid_today,
-            coalesce((select sum(price_vnd)::bigint from "order" where status in ('PAID', 'PROCESSING', 'COMPLETED') and paid_at >= date_trunc('day', now())), 0) as revenue_today_vnd,
-            (select count(*)::int from "order" where status = 'PENDING_PAYMENT') as pending_payment,
-            (select count(*)::int from "order" where status = 'PAYMENT_NEEDS_REVIEW') as payment_review,
-            (select count(*)::int from "order" where status = 'FULFILLMENT_NEEDS_REVIEW') as fulfillment_failures
-        `.execute(dbHandle.db);
-        const row = result.rows[0] ?? {
-          active_products: 0,
-          out_of_stock: 0,
-          low_stock: 0,
-          available_inventory: 0,
-          orders_today: 0,
-          paid_today: 0,
-          revenue_today_vnd: 0,
-          pending_payment: 0,
-          payment_review: 0,
-          fulfillment_failures: 0,
-        };
-        return presentAdminDashboard({
-          activeProducts: row.active_products,
-          outOfStock: row.out_of_stock,
-          lowStock: row.low_stock,
-          availableInventory: row.available_inventory,
-          ordersToday: row.orders_today,
-          paidToday: row.paid_today,
-          revenueTodayVnd: BigInt(row.revenue_today_vnd),
-          pendingPayment: row.pending_payment,
-          paymentReview: row.payment_review,
-          fulfillmentFailures: row.fulfillment_failures,
-        });
+        return presentAdminDashboard(await getAdminDashboardMetrics(dbHandle.db));
       },
       async health(input) {
         if (input.chatType !== "private") return presentAdminDenied("WRONG_CONTEXT");
@@ -4955,7 +5015,30 @@ async function bootstrap(): Promise<void> {
           actor: { numericUserId: Number(input.telegramUserId), chatType: input.chatType },
           correlationId: input.correlationId,
         });
-        if (result.ok) return presentHighRiskDone("admin.confirm");
+        if (result.ok) {
+          const completed = await sql<{
+            command_ref: string | null;
+            target_id: string | null;
+          }>`
+            select allowlisted_command_ref as command_ref,
+                   payload_redacted->>'targetId' as target_id
+            from admin_confirmation
+            where id = ${input.confirmationId}
+            limit 1
+          `.execute(dbHandle.db);
+          const recoveryTarget =
+            completed.rows[0]?.command_ref === "file_delivery.recover"
+              ? completed.rows[0].target_id
+              : null;
+          if (recoveryTarget) {
+            const refreshed = await getAdminOrderDetail(dbHandle.db, {
+              adminTelegramUserId: input.telegramUserId,
+              orderId: recoveryTarget,
+            });
+            if (refreshed) return presentAdminOrderDetail(refreshed);
+          }
+          return presentHighRiskDone("admin.confirm");
+        }
         if (result.code === "NOT_READY" || result.code === "ACTION_REFUSED") {
           return {
             text: result.message,
@@ -6568,7 +6651,10 @@ async function bootstrap(): Promise<void> {
           if (!result.ok) {
             if (result.code === "NOT_FOUND" || result.code === "EXPIRED") return null;
             return {
-              text: "Dữ liệu nhập kho không hợp lệ. Dán lại nội dung CSV đúng định dạng.",
+              text:
+                result.code === "IMPORT_LIMIT_EXCEEDED"
+                  ? "Dữ liệu nhập kho vượt giới hạn 64 KiB hoặc 500 dòng. Hãy chia nhỏ rồi gửi lại."
+                  : "Dữ liệu nhập kho không hợp lệ. Dán lại nội dung CSV đúng định dạng.",
               buttons: [
                 [{ text: "↩️ Huỷ nhập kho", callbackData: "admin:inventory:cancel" }],
                 [{ text: "📦 Nhập kho", callbackData: "admin:inventory:import" }],
@@ -6783,11 +6869,13 @@ async function bootstrap(): Promise<void> {
             text:
               result.code === "NOT_READY"
                 ? "Phiên nhập kho chưa sẵn sàng. Hãy dán dữ liệu trước."
-                : result.code === "BUSY"
-                  ? "Phiên nhập kho đang được xử lý."
-                  : result.code === "EXPIRED"
-                    ? "Phiên nhập kho đã hết hạn. Hãy tạo lại phiên mới."
-                    : "Không thể xác nhận nhập kho.",
+                : result.code === "IMPORT_LIMIT_EXCEEDED"
+                  ? "Dữ liệu nhập kho vượt giới hạn 64 KiB hoặc 500 dòng. Hãy nhập lại dữ liệu nhỏ hơn."
+                  : result.code === "BUSY"
+                    ? "Phiên nhập kho đang được xử lý."
+                    : result.code === "EXPIRED"
+                      ? "Phiên nhập kho đã hết hạn. Hãy tạo lại phiên mới."
+                      : "Không thể xác nhận nhập kho.",
             buttons: [
               [{ text: "📦 Nhập kho", callbackData: "admin:inventory:import" }],
               [{ text: "🛍 Sản phẩm", callbackData: "admin:products" }],
@@ -8729,7 +8817,7 @@ async function bootstrap(): Promise<void> {
       db: dbHandle.db,
       batchSize: 20,
       sePayPort: sePayRecoveryPort,
-      supplierPort: supplier,
+      resolveSupplier: (supplierId) => supplierResolver.resolve(supplierId),
       vault,
       inboxRetention: {
         processedRetentionDays: config.TELEGRAM_INBOX_PROCESSED_RETENTION_DAYS,
@@ -8761,7 +8849,7 @@ async function bootstrap(): Promise<void> {
         expiredSheetChallenges,
         preorderHolds,
         sePayRecoveryConfigured: sePayRecoveryPort !== null,
-        supplierRecoveryConfigured: supplier !== null,
+        supplierRecoveryConfigured: true,
       },
       "bounded recovery cycle",
     );
@@ -8861,7 +8949,7 @@ async function bootstrap(): Promise<void> {
       telegramOwnerId,
       recoveryIntervalMs: 60_000,
       sePayRecoveryConfigured: sePayRecoveryPort !== null,
-      supplierRecoveryConfigured: supplier !== null,
+      supplierRecoveryConfigured: true,
     },
     "worker process starting (outbox + fulfillment)",
   );

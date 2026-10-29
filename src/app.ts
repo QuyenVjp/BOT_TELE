@@ -9,6 +9,7 @@ import {
   type AdminProductContentEditIngress,
   type AdminWarrantyAdjustTextIngress,
   type AdminOwnerPromptTextIngress,
+  type SupportDescriptionTextIngress,
   type CustomerSearchQueryIngress,
   type UpdateInbox,
 } from "./bot/webhook.js";
@@ -61,6 +62,8 @@ export interface CreateAppDeps {
     warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress;
     /** Publication evidence / disposition note prompts; admitted only while one is pending. */
     ownerPromptText?: AdminOwnerPromptTextIngress;
+    /** Customer support description, admitted only for one active pending ticket. */
+    supportDescriptionText?: SupportDescriptionTextIngress;
     customerSearchQuery?: CustomerSearchQueryIngress;
   };
   sepay: {
@@ -133,6 +136,9 @@ export async function createApp(deps: CreateAppDeps): Promise<FastifyInstance> {
     ...(deps.telegram.ownerPromptText === undefined
       ? {}
       : { ownerPromptText: deps.telegram.ownerPromptText }),
+    ...(deps.telegram.supportDescriptionText === undefined
+      ? {}
+      : { supportDescriptionText: deps.telegram.supportDescriptionText }),
     ...(deps.telegram.customerSearchQuery === undefined
       ? {}
       : { customerSearchQuery: deps.telegram.customerSearchQuery }),

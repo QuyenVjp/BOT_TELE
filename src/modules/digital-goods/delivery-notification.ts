@@ -1179,7 +1179,6 @@ async function persistDeliveryNotificationProviderEvidence(
         and status = 'PROCESSING'
         and claimed_by = ${claim.owner}
         and claim_generation = ${claim.generation}
-        and claim_expires_at > now()
         and bundle_id = ${claim.bundleId}
         and customer_id = ${claim.customerId}
         and telegram_chat_id = ${claim.telegramChatId}
@@ -1191,13 +1190,30 @@ async function persistDeliveryNotificationProviderEvidence(
     const payload = parseHandoffPayload(owned.payload_redacted);
     const current = readDeliveryNotificationHandoffEvidence(payload).provider;
     if (current) {
-      return (
-        current.chatId === evidence.chatId &&
-        current.messageId === evidence.messageId &&
-        current.succeededAt === evidence.succeededAt
-      );
+      if (
+        current.chatId !== evidence.chatId ||
+        current.messageId !== evidence.messageId ||
+        current.succeededAt !== evidence.succeededAt
+      ) {
+        return false;
+      }
+      const renewed = await sql`
+        update delivery_notification_handoff
+        set claim_expires_at = now() +
+          (${DELIVERY_NOTIFICATION_LEASE_SECONDS} * interval '1 second')
+        where id = ${claim.id}
+          and status = 'PROCESSING'
+          and claimed_by = ${claim.owner}
+          and claim_generation = ${claim.generation}
+          and bundle_id = ${claim.bundleId}
+          and customer_id = ${claim.customerId}
+          and telegram_chat_id = ${claim.telegramChatId}
+          and capability_ref = ${claim.capabilityRef}
+        returning id
+      `.execute(trx);
+      return Boolean(renewed.rows[0]);
     }
-    await sql`
+    const persisted = await sql`
       update delivery_notification_handoff
       set payload_redacted = ${JSON.stringify({
         ...payload,
@@ -1210,9 +1226,13 @@ async function persistDeliveryNotificationProviderEvidence(
         and status = 'PROCESSING'
         and claimed_by = ${claim.owner}
         and claim_generation = ${claim.generation}
-        and claim_expires_at > now()
+        and bundle_id = ${claim.bundleId}
+        and customer_id = ${claim.customerId}
+        and telegram_chat_id = ${claim.telegramChatId}
+        and capability_ref = ${claim.capabilityRef}
+      returning id
     `.execute(trx);
-    return true;
+    return Boolean(persisted.rows[0]);
   });
 }
 

@@ -99,7 +99,7 @@ describe.skipIf(!hasDocker)("Buy Now revalidation is transaction-consistent (T15
         product_variant, product, category, customer cascade
     `.execute(ctx.db);
     await setStoreModeForTest(ctx.db, "OPEN", "test");
-});
+  });
 
   it("rejects a stale price the moment the admin changes it (no Order created)", async () => {
     const s = await seed();

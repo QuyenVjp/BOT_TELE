@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { sql } from "kysely";
 import { withTransaction } from "../../src/infrastructure/db/transaction.js";
+import type { Db, Trx } from "../../src/infrastructure/db/transaction.js";
 import { insertBankTransactionIfNew } from "../../src/modules/payments/repository.js";
 import type { PaymentEvidence } from "../../src/modules/payments/domain.js";
 import {
@@ -79,6 +80,60 @@ describe.skipIf(!hasDocker)("wallet topup evidence integration", () => {
     });
   }
 
+  function pauseWalletTopupExpiryTrigger(db: Db): Db {
+    return new Proxy(db, {
+      get(target, property) {
+        if (property !== "transaction") {
+          const value = Reflect.get(target, property, target);
+          return typeof value === "function" ? value.bind(target) : value;
+        }
+        return () => ({
+          execute: <T>(callback: (trx: Trx) => Promise<T>) =>
+            target.transaction().execute(async (trx) => {
+              await sql`
+                select
+                  set_config('app.wallet_topup_lock_test', 'on', true),
+                  set_config('application_name', 'wallet-topup-present-lock-test', true)
+              `.execute(trx);
+              return callback(trx);
+            }),
+        });
+      },
+    }) as Db;
+  }
+
+  async function waitForPresentationStatementLock(): Promise<void> {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      const waiting = await sql<{ count: number }>`
+        select count(*)::int as count
+        from pg_stat_activity
+        where application_name = 'wallet-topup-present-lock-test'
+          and wait_event_type = 'Lock'
+      `.execute(ctx.db);
+      if ((waiting.rows[0]?.count ?? 0) > 0) return;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    throw new Error("wallet topup presentation did not reach the lock barrier");
+  }
+
+  async function waitForWalletAccountLock(isSettled: () => boolean): Promise<boolean> {
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline && !isSettled()) {
+      const waiting = await sql<{ count: number }>`
+        select count(*)::int as count
+        from pg_stat_activity
+        where datname = current_database()
+          and wait_event_type = 'Lock'
+          and lower(coalesce(query, '')) like '%wallet_account%'
+          and lower(coalesce(query, '')) like '%for update%'
+      `.execute(ctx.db);
+      if ((waiting.rows[0]?.count ?? 0) > 0) return true;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    return false;
+  }
+
   it("credits 100 concurrent duplicate topup replays once and emits one credit event", async () => {
     const topup = await seedPresentedTopup();
     const providerTransactionId = "SEPAY-DUP-" + newId();
@@ -119,6 +174,119 @@ describe.skipIf(!hasDocker)("wallet topup evidence integration", () => {
       status: "SUCCEEDED",
     });
   });
+  it("rejects future-dated evidence without changing topup or wallet state", async () => {
+    const topup = await seedPresentedTopup();
+    const providerTransactionId = "SEPAY-FUTURE-" + newId();
+    const result = await applyWalletTopupEvidence(
+      ctx.db,
+      evidenceFor(topup, {
+        providerTransactionId,
+        transactedAt: new Date(Date.now() + 5 * 60_000),
+      }),
+    );
+
+    expect(result).toEqual({ ok: false, error: "invalid transaction time" });
+    const rows = await sql<{
+      status: string;
+      balance_vnd: string;
+      ledger_count: string;
+      bank_transactions: string;
+    }>`
+      select
+        (select status from wallet_topup_intent where id = ${topup.intentId}) as status,
+        (select balance_vnd::text from wallet_account where customer_id = ${topup.customerId}) as balance_vnd,
+        (select count(*)::text from wallet_ledger) as ledger_count,
+        (select count(*)::text from bank_transaction where provider_transaction_id = ${providerTransactionId}) as bank_transactions
+    `.execute(ctx.db);
+    expect(rows.rows[0]).toEqual({
+      status: "PRESENTED",
+      balance_vnd: "0",
+      ledger_count: "0",
+      bank_transactions: "0",
+    });
+  });
+
+  it("does not deadlock topup amount replacement against concurrent settlement", async () => {
+    await sql
+      .raw(
+        `
+      create or replace function test_pause_wallet_topup_update() returns trigger
+      language plpgsql as $$
+      begin
+        if current_setting('app.wallet_topup_lock_test', true) = 'on' then
+          perform pg_advisory_xact_lock(910000, 777);
+        end if;
+        return null;
+      end;
+      $$
+    `,
+      )
+      .execute(ctx.db);
+    await sql
+      .raw(
+        `
+      create trigger test_pause_wallet_topup_update
+      before update on wallet_topup_intent
+      for each statement execute function test_pause_wallet_topup_update()
+    `,
+      )
+      .execute(ctx.db);
+
+    const topup = await seedPresentedTopup();
+    const lockReady = Promise.withResolvers<void>();
+    const releaseLock = Promise.withResolvers<void>();
+    const blocker = ctx.db.transaction().execute(async (trx) => {
+      await sql`select pg_advisory_xact_lock(910000, 777)`.execute(trx);
+      lockReady.resolve();
+      await releaseLock.promise;
+    });
+    await lockReady.promise;
+    const replacement = presentWalletTopup({
+      db: pauseWalletTopupExpiryTrigger(ctx.db),
+      customerId: topup.customerId,
+      amountVnd: 200_000n,
+      merchantAccountId: "0123456789",
+      beneficiaryAccountNumber: "0123456789",
+      bankBin: "970422",
+      accountName: "BOT TELE",
+      correlationId: "present-replacement-" + newId().slice(-8),
+    });
+    let settlementObserved: Promise<void> | undefined;
+
+    try {
+      await waitForPresentationStatementLock();
+      let settlementFinished = false;
+      const settlement = applyWalletTopupEvidence(ctx.db, evidenceFor(topup));
+      settlementObserved = settlement.then(
+        () => {
+          settlementFinished = true;
+        },
+        () => {
+          settlementFinished = true;
+        },
+      );
+      const observedLockInversion = await waitForWalletAccountLock(() => settlementFinished);
+      releaseLock.resolve();
+
+      const [replacementResult, settlementResult] = await Promise.all([replacement, settlement]);
+      await settlementObserved;
+      expect(observedLockInversion).toBe(false);
+      expect(replacementResult.ok).toBe(true);
+      expect(settlementResult).toMatchObject({ ok: true, kind: "CREDITED" });
+    } finally {
+      releaseLock.resolve();
+      await blocker;
+      await Promise.allSettled([replacement, ...(settlementObserved ? [settlementObserved] : [])]);
+      await sql
+        .raw(
+          `
+        drop trigger if exists test_pause_wallet_topup_update on wallet_topup_intent;
+        drop function if exists test_pause_wallet_topup_update();
+      `,
+        )
+        .execute(ctx.db);
+    }
+  }, 15_000);
 
   it("does not credit a matching live topup when bank identity is ambiguous", async () => {
     const topup = await seedPresentedTopup();

@@ -13,6 +13,11 @@ import {
 } from "../commerce/preorder.js";
 import { isSupportedCatalogRoute } from "../catalog/domain.js";
 import { orderHasActiveReservation } from "../digital-goods/repository.js";
+import {
+  lockAndVerifySupplierReadinessPermit,
+  type SupplierReadinessChecker,
+  type SupplierReadinessPermit,
+} from "../supplier/readiness.js";
 import { isVerifiedSePayEvidence, type VerifiedSePayEvidence } from "./sepay-ingress.js";
 import { decideMatch, LATE_PAYMENT_SKEW_MS, type MatchableIntent } from "./domain.js";
 import { projectDiscrepancyOrderStatus, projectSettlement } from "./projection.js";
@@ -97,6 +102,7 @@ export interface PresentPaymentForOrderInput {
   correlationId: string;
   /** Intent TTL in seconds (default 900). */
   ttlSeconds?: number;
+  supplierReadiness?: SupplierReadinessChecker;
 }
 
 /**
@@ -108,6 +114,22 @@ export async function presentPaymentForOrder(
   db: Db,
   input: PresentPaymentForOrderInput,
 ): Promise<PresentPaymentResult> {
+  let supplierReadinessPermit: SupplierReadinessPermit | null = null;
+  const candidate = await findOrderById(db, input.orderId);
+  if (
+    candidate?.status === "PENDING_PAYMENT" &&
+    candidate.fulfillmentType === "SUPPLIER_API" &&
+    (candidate.expiresAt === null || new Date(candidate.expiresAt).getTime() > Date.now())
+  ) {
+    const existing = await findLiveIntentByOrder(db, candidate.id);
+    if (!existing) {
+      const readiness = input.supplierReadiness
+        ? await input.supplierReadiness(candidate.variantId)
+        : null;
+      if (!readiness?.ok) return { ok: false, error: "supplier unavailable" };
+      supplierReadinessPermit = readiness.permit;
+    }
+  }
   return withTransaction(db, async (trx) => {
     const order = await findOrderById(trx, input.orderId);
     if (!order) return { ok: false, error: "order not found" };
@@ -157,6 +179,14 @@ export async function presentPaymentForOrder(
         ...(input.bankAlias !== undefined ? { bankAlias: input.bankAlias } : {}),
       });
       return { ok: true, intentId: existing.id, presentation };
+    }
+    if (
+      order.fulfillmentType === "SUPPLIER_API" &&
+      (!supplierReadinessPermit ||
+        supplierReadinessPermit.variantId !== order.variantId ||
+        !(await lockAndVerifySupplierReadinessPermit(trx, supplierReadinessPermit)))
+    ) {
+      return { ok: false, error: "supplier unavailable" };
     }
 
     // Fresh intent: unique transfer content derived from the order number so

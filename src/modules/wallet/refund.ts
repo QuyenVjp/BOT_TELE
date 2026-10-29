@@ -138,6 +138,19 @@ export async function refundWalletCredit(
       message: "Đơn hàng không được thanh toán bằng ví.",
     };
 
+  const credit = await creditWalletLedgerEntry(trx, {
+    customerId: order.customerId,
+    amountVnd: BigInt(amount),
+    idempotencyKey: `refund:${order.id}`,
+    correlationId: input.correlationId,
+    reason: `wallet refund ${order.orderNumber}`,
+  });
+  if (!credit.ok) {
+    if (credit.code === "IDEMPOTENCY_CONFLICT")
+      return { ok: false, code: "IDEMPOTENCY_CONFLICT", message: credit.message };
+    return { ok: false, code: "NOT_ELIGIBLE", message: credit.message };
+  }
+
   let refundPending = order;
   if (order.status === "PAID") {
     refundPending = await transitionOrder(
@@ -156,19 +169,6 @@ export async function refundWalletCredit(
   // This path only releases checkout-time RESERVED local/quantity stock.
   // READY, delivered, and fulfillment-started evidence was rejected above.
   await releaseTypedStockForOrder(trx, order.id);
-
-  const credit = await creditWalletLedgerEntry(trx, {
-    customerId: order.customerId,
-    amountVnd: BigInt(amount),
-    idempotencyKey: `refund:${order.id}`,
-    correlationId: input.correlationId,
-    reason: `wallet refund ${order.orderNumber}`,
-  });
-  if (!credit.ok) {
-    if (credit.code === "IDEMPOTENCY_CONFLICT")
-      return { ok: false, code: "IDEMPOTENCY_CONFLICT", message: credit.message };
-    return { ok: false, code: "NOT_ELIGIBLE", message: credit.message };
-  }
 
   const refunded = await transitionOrder(
     trx,

@@ -18,7 +18,11 @@ import type {
   AdminOrderListPage,
   AdminOrderStatusFilter,
 } from "../../modules/admin/order-operations.js";
-import { canTicketTransition, supportTicketStatusCode, type SupportTicketStatus } from "../../modules/support/domain.js";
+import {
+  canTicketTransition,
+  supportTicketStatusCode,
+  type SupportTicketStatus,
+} from "../../modules/support/domain.js";
 import type { AdminSupportTicketRow } from "../../modules/support/service.js";
 import type {
   AdminDiscrepancyDetail,
@@ -546,6 +550,41 @@ export function presentAdminOrderDetail(order: AdminOrderDetail): PresentedMessa
         `Send attempt: ${review.sendAttemptedAt ?? "không có"}`,
       ]
     : [];
+  const fileDelivery = order.fileDelivery;
+  const uncertainFileDelivery =
+    fileDelivery?.status === "FAILED" &&
+    fileDelivery.outcome === "UNKNOWN" &&
+    fileDelivery.lastError === "SEND_UNCERTAIN";
+  const fileDeliveryLines = fileDelivery
+    ? [
+        "",
+        "Đối soát gửi tệp",
+        `Job: …${fileDelivery.jobId.slice(-8)}`,
+        `Trạng thái: ${fileDelivery.status}`,
+        `Kết quả: ${fileDelivery.outcome ?? "chưa kết luận"}`,
+        `Lỗi: ${fileDelivery.lastError ?? "không có"}`,
+        `Artifact: ${fileDelivery.artifactId} · phiên bản ${fileDelivery.artifactVersion}`,
+        `SHA-256: ${fileDelivery.artifactSha256}`,
+        `Lần thử: ${fileDelivery.attemptCount} · claim generation: ${fileDelivery.claimGeneration}`,
+        `Telegram message receipt: ${fileDelivery.telegramMessageId ? "đã ghi nhận" : "chưa ghi nhận"}`,
+        `Sent at: ${fileDelivery.sentAt ?? "chưa có"}`,
+      ]
+    : [];
+  const recoveryButtons =
+    uncertainFileDelivery && (order.orderStatus === "PAID" || order.orderStatus === "PROCESSING")
+      ? [
+          [
+            {
+              text: "🛑 Giữ chưa xác định",
+              callbackData: `admin:orders:file_delivery:keep:${order.messageStateId}`,
+            },
+            {
+              text: "⚠️ Xác nhận gửi lại",
+              callbackData: `admin:orders:file_delivery:requeue:${order.messageStateId}`,
+            },
+          ],
+        ]
+      : [];
   return {
     text: [
       "Chi tiết đơn hàng",
@@ -565,9 +604,11 @@ export function presentAdminOrderDetail(order: AdminOrderDetail): PresentedMessa
       `Completed at: ${order.completedAt ?? "chưa có"}`,
       `Created at: ${order.createdAt}`,
       ...reviewLines,
+      ...fileDeliveryLines,
     ].join("\n"),
     buttons: [
       [{ text: "✉️ Nhắn khách", callbackData: `admin:orders:message:${order.messageStateId}` }],
+      ...recoveryButtons,
       ...(order.orderStatus === "PROCESSING" && order.fulfillmentStatus === "EXPIRED"
         ? [
             [
@@ -1456,19 +1497,14 @@ export interface AdminDashboardSummary {
   pendingPayment: number;
   paymentReview: number;
   fulfillmentFailures: number;
-  manualOpenTasks?: number;
-  notificationSendUncertain?: number;
-  warrantyNew?: number;
-  refundDue?: number;
-  supportOpenTickets?: number;
+  manualOpenTasks: number;
+  notificationSendUncertain: number;
+  warrantyNew: number;
+  refundDue: number;
+  supportOpenTickets: number;
 }
 
 export function presentAdminDashboard(data: AdminDashboardSummary): PresentedMessage {
-  const manualOpenTasks = data.manualOpenTasks ?? 0;
-  const notificationSendUncertain = data.notificationSendUncertain ?? 0;
-  const warrantyNew = data.warrantyNew ?? 0;
-  const refundDue = data.refundDue ?? 0;
-  const supportOpenTickets = data.supportOpenTickets ?? 0;
   return {
     text: [
       ADMIN_COPY.overview,
@@ -1481,11 +1517,11 @@ export function presentAdminDashboard(data: AdminDashboardSummary): PresentedMes
       `⚠️ Sắp hết: ${data.lowStock}`,
       "",
       "📋 Hàng đợi vận hành",
-      `🛠 Tác vụ thủ công đang mở: ${manualOpenTasks}`,
-      `📨 Thông báo cần đối soát: ${notificationSendUncertain}`,
-      `🛡 Bảo hành mới: ${warrantyNew}`,
-      `💰 Hoàn tiền chờ chi: ${refundDue}`,
-      `💬 Hỗ trợ đang mở: ${supportOpenTickets}`,
+      `🛠 Tác vụ thủ công đang mở: ${data.manualOpenTasks}`,
+      `📨 Thông báo cần đối soát: ${data.notificationSendUncertain}`,
+      `🛡 Bảo hành mới: ${data.warrantyNew}`,
+      `💰 Hoàn tiền chờ chi: ${data.refundDue}`,
+      `💬 Hỗ trợ đang mở: ${data.supportOpenTickets}`,
       "",
       `📦 Sản phẩm đang bán: ${data.activeProducts}`,
       `📚 Kho khả dụng: ${data.availableInventory}`,
@@ -2604,12 +2640,14 @@ export function presentHighRiskChallenge(input: {
   challenge: string;
   expiresAt: string;
   action: string;
+  warning?: string;
 }): PresentedMessage {
   return {
     text: [
       ADMIN_COPY.confirmTitle,
       "",
       ADMIN_COPY.confirmBody,
+      ...(input.warning ? ["", input.warning] : []),
       `Hành động: ${input.action}`,
       `Mã xác nhận: ${input.challenge}`,
       `Hết hạn: ${input.expiresAt}`,

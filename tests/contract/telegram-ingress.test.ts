@@ -168,7 +168,7 @@ describe("input normalization (SR-004)", () => {
 });
 
 describe("owner remediation prompt text ingress", () => {
-  it("admits owner text only while a remediation prompt is active", async () => {
+  it("admits owner text only while a remediation prompt is active and drops it after closure", async () => {
     const accepted: unknown[] = [];
     let active = true;
     const ingress = Fastify({ bodyLimit: BODY_LIMIT });
@@ -206,12 +206,11 @@ describe("owner remediation prompt text ingress", () => {
         payload: buildUpdate(8992, 123456789, "OWNER_ATTESTATION|REF-2|must not pass"),
       });
 
-      expect(accepted).toHaveLength(2);
+      expect(accepted).toHaveLength(1);
       expect(accepted[0]).toMatchObject({
         messageText: "OWNER_ATTESTATION|REF-1|pre-production authorization",
         ownerPromptText: true,
       });
-      expect(accepted[1]).not.toHaveProperty("messageText");
     } finally {
       await ingress.close();
     }
@@ -258,7 +257,7 @@ describe("owner remediation prompt text ingress", () => {
 });
 
 describe("root product draft text ingress", () => {
-  it("preserves bounded root-active product metadata and suppresses other raw text", async () => {
+  it("preserves bounded root-active product metadata and drops other raw text", async () => {
     const accepted: unknown[] = [];
     const ingress = Fastify({ bodyLimit: BODY_LIMIT });
     await registerTelegramWebhook(ingress, {
@@ -290,12 +289,11 @@ describe("root product draft text ingress", () => {
         payload: buildUpdate(9002, 987654321, "CANARY P0 Inventory - KHONG BAN"),
       });
 
-      expect(accepted).toHaveLength(2);
+      expect(accepted).toHaveLength(1);
       expect(accepted[0]).toMatchObject({
         messageText: "CANARY P0 Inventory - KHONG BAN",
         rootProductDraftText: true,
       });
-      expect(accepted[1]).not.toHaveProperty("messageText");
     } finally {
       await ingress.close();
     }
@@ -459,7 +457,7 @@ describe("root product draft text ingress", () => {
     }
   });
 
-  it("does not persist arbitrary root inventory paste without a product metadata step", async () => {
+  it("drops arbitrary root inventory paste without a product metadata step", async () => {
     const accepted: unknown[] = [];
     const ingress = Fastify({ bodyLimit: BODY_LIMIT });
     await registerTelegramWebhook(ingress, {
@@ -485,9 +483,7 @@ describe("root product draft text ingress", () => {
         payload: buildUpdate(9003, 123456789, "variant-1,secret-value"),
       });
 
-      expect(accepted).toHaveLength(1);
-      expect(accepted[0]).not.toHaveProperty("messageText");
-      expect(JSON.stringify(accepted[0])).not.toContain("secret-value");
+      expect(accepted).toHaveLength(0);
     } finally {
       await ingress.close();
     }
@@ -558,9 +554,7 @@ describe("admin inventory import text ingress", () => {
         payload: buildUpdate(9011, 123456789, payload),
       });
 
-      expect(accepted).toHaveLength(1);
-      expect(accepted[0]).not.toHaveProperty("messageText");
-      expect(accepted[0]?.inventoryImportText).toBeUndefined();
+      expect(accepted).toHaveLength(0);
     } finally {
       await ingress.close();
     }
@@ -1169,15 +1163,7 @@ describe("persistent reply-keyboard allowlist", () => {
           payload: buildUpdate(8000 + i, 100, label),
         });
       }
-      expect(kept).toEqual([
-        "🛒 Mua hàng",
-        "🛡 Bảo hành",
-        "💬 Hỗ trợ",
-        "👤 Tài khoản",
-        "🧾 Đơn hàng",
-        undefined,
-        undefined,
-      ]);
+      expect(kept).toEqual(labels.slice(0, 5));
     } finally {
       await ingress.close();
     }

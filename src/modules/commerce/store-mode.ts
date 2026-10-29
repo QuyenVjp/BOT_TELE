@@ -89,6 +89,17 @@ export async function getStoreMode(db: Executor): Promise<StoreMode> {
   return (await getStoreControl(db)).status;
 }
 
+/** Read and lock the current mode so a transition cannot commit around a policy decision. */
+export async function getStoreModeForUpdate(exec: Executor): Promise<StoreMode> {
+  const result = await sql<{ status: string }>`
+    select status
+    from store_control
+    where id = 'main'
+    for update
+  `.execute(exec);
+  return asMode(result.rows[0]?.status ?? "CLOSED");
+}
+
 export interface StoreOpenReadiness {
   activeProducts: number;
   inStockVariants: number;

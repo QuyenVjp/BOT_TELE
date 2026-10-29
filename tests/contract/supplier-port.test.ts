@@ -6,11 +6,13 @@ import {
   parseCreateOrderResult,
   parseQueryOrderResult,
   parseAssetEnvelope,
+  parseAvailabilityResult,
   SupplierPortError,
   type SupplierPort,
   type CreateOrderInput,
 } from "../../src/modules/supplier/port.js";
 import { createSandboxSupplierAdapter } from "../../src/modules/supplier/adapters/primary.js";
+import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
 
 /**
  * T060 — Supplier Port schema, idempotency, reject, timeout→UNKNOWN,
@@ -116,6 +118,36 @@ describe("Supplier Port response schemas (allowlisted)", () => {
     ).toThrow();
   });
 
+  it("rejects a bare vault prefix", () => {
+    expect(() =>
+      parseAssetEnvelope({
+        deliveryType: "CREDENTIAL",
+        expectedSku: "NF-1M",
+        region: "VN",
+        durationCode: "P1M",
+        expiresAt: null,
+        supplierAssetId: "sa-1",
+        fingerprint: "fp-1",
+        vaultRef: "vault:",
+      }),
+    ).toThrow();
+  });
+
+  it("rejects zero quantity reported as AVAILABLE with the typed schema code", () => {
+    let error: unknown;
+    try {
+      parseAvailabilityResult({
+        status: "AVAILABLE",
+        observedAt: "2026-10-21T00:00:00.000Z",
+        quantity: 0,
+      });
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toBeInstanceOf(SupplierPortError);
+    expect(error).toMatchObject({ supplierCode: "SCHEMA_INVALID" });
+  });
+
   it("query result schema accepts pending / fulfilled / rejected / cancelled", () => {
     for (const status of ["PENDING", "FULFILLED", "REJECTED", "CANCELLED", "REFUNDED"] as const) {
       const base: Record<string, unknown> = { status };
@@ -147,7 +179,10 @@ describe("Supplier Port response schemas (allowlisted)", () => {
 
 describe("sandbox supplier adapter (FR-015/FR-016)", () => {
   it("createOrder is idempotent on the same idempotency key", async () => {
-    const port: SupplierPort = createSandboxSupplierAdapter({ mode: "fulfill" });
+    const port: SupplierPort = createSandboxSupplierAdapter({
+      mode: "fulfill",
+      vault: createInMemoryVault(),
+    });
     const a = await port.createOrder(BASE_CREATE);
     const b = await port.createOrder(BASE_CREATE);
     expect(a.kind).toBe("FULFILLED");
@@ -158,7 +193,7 @@ describe("sandbox supplier adapter (FR-015/FR-016)", () => {
   });
 
   it("createOrder returns REJECTED for a configured reject SKU", async () => {
-    const port = createSandboxSupplierAdapter({ mode: "reject" });
+    const port = createSandboxSupplierAdapter({ mode: "reject", vault: createInMemoryVault() });
     const res = await port.createOrder({ ...BASE_CREATE, supplierSku: "REJECT-ME" });
     expect(res.kind).toBe("REJECTED");
     if (res.kind === "REJECTED") {
@@ -167,7 +202,7 @@ describe("sandbox supplier adapter (FR-015/FR-016)", () => {
   });
 
   it("createOrder returns UNKNOWN on a configured timeout (never auto-retries)", async () => {
-    const port = createSandboxSupplierAdapter({ mode: "timeout" });
+    const port = createSandboxSupplierAdapter({ mode: "timeout", vault: createInMemoryVault() });
     const res = await port.createOrder(BASE_CREATE);
     expect(res.kind).toBe("UNKNOWN");
     if (res.kind === "UNKNOWN") {
@@ -177,7 +212,10 @@ describe("sandbox supplier adapter (FR-015/FR-016)", () => {
   });
 
   it("queryOrder after UNKNOWN recovers the eventual result (query-before-retry)", async () => {
-    const port = createSandboxSupplierAdapter({ mode: "timeout-then-fulfill" });
+    const port = createSandboxSupplierAdapter({
+      mode: "timeout-then-fulfill",
+      vault: createInMemoryVault(),
+    });
     const first = await port.createOrder(BASE_CREATE);
     expect(first.kind).toBe("UNKNOWN");
     if (first.kind !== "UNKNOWN") return;

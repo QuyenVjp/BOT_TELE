@@ -8,16 +8,11 @@
  */
 import { pathToFileURL } from "node:url";
 import { sql } from "kysely";
-
-/**
- * Pending owner remediation prompts. While one is active it owns the owner's next private
- * text, so the product-draft wizard must not read that answer as a wizard step.
- */
-const REMEDIATION_PROMPT_KINDS_SQL = sql`
-  'ADMIN_RESALE_EVIDENCE_PROMPT',
-  'ADMIN_PAYMENT_DISPOSITION_PROMPT',
-  'ADMIN_OUTBOX_DISPOSITION_PROMPT'
-`;
+import {
+  createOwnerPromptTextIngress,
+  createRootProductDraftTextIngress,
+  createSupportDescriptionTextIngress,
+} from "./bot/telegram-ingress-resolvers.js";
 
 async function main(): Promise<void> {
   // Local `.env` only. Production is loaded by `node --env-file=` before this
@@ -106,35 +101,14 @@ async function main(): Promise<void> {
       path: config.TELEGRAM_WEBHOOK_PATH,
       secretToken: config.TELEGRAM_WEBHOOK_SECRET,
       inbox,
-      rootProductDraftText: {
+      rootProductDraftText: createRootProductDraftTextIngress({
+        db: dbHandle.db,
         adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-        async activeStep(telegramUserId: string) {
-          if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return null;
-          const { isRootProductDraftTextStep } = await import("./bot/webhook.js");
-          const row = (
-            await sql<{ step: string }>`
-              select step
-              from admin_workflow
-              where admin_telegram_user_id = ${telegramUserId}
-                and expires_at > now()
-                and step in (
-                  'name','sku','description','variant','deliveryConfig',
-                  'variantName','price','inventoryFields','threshold','initialQuantity',
-                  'serviceInstructions'
-                )
-                and not exists (
-                  select 1
-                  from admin_callback_state prompt
-                  where prompt.admin_telegram_user_id = ${telegramUserId}
-                    and prompt.kind in (${REMEDIATION_PROMPT_KINDS_SQL})
-                    and prompt.expires_at > now()
-                )
-              limit 1
-            `.execute(dbHandle.db)
-          ).rows[0];
-          return row && isRootProductDraftTextStep(row.step) ? row.step : null;
-        },
-      },
+      }),
+      supportDescriptionText: createSupportDescriptionTextIngress({
+        db: dbHandle.db,
+        logger,
+      }),
       customerSearchQuery: {
         // One-shot: the prompt writes the row, the next acceptable text consumes and deletes it, so
         // a typed query is admitted exactly once and raw text stays dropped the rest of the time.
@@ -202,26 +176,10 @@ async function main(): Promise<void> {
           return Boolean(row);
         },
       },
-      ownerPromptText: {
+      ownerPromptText: createOwnerPromptTextIngress({
+        db: dbHandle.db,
         adminTelegramUserId: config.ADMIN_TELEGRAM_USER_ID,
-        // Only one of the remediation prompts being pending vouches for free text: the
-        // publication evidence triple, an evidence revocation reason, a discrepancy
-        // disposition note, or an outbox note. The evidence prompts share one state kind,
-        // discriminated by their payload's intent.
-        async isActive(telegramUserId: string) {
-          if (telegramUserId !== String(config.ADMIN_TELEGRAM_USER_ID)) return false;
-          const row = (
-            await sql<{ id: string }>`
-              select id from admin_callback_state
-              where admin_telegram_user_id = ${telegramUserId}
-                and kind in (${REMEDIATION_PROMPT_KINDS_SQL})
-                and expires_at > now()
-              limit 1
-            `.execute(dbHandle.db)
-          ).rows[0];
-          return Boolean(row);
-        },
-      },
+      }),
     },
     sepay: {
       path: "/webhooks/sepay",

@@ -727,9 +727,9 @@ describe("durable delivery notification handoff (T139/T145)", () => {
     });
   });
 
-  it("parks provider success when the send lease expires before evidence persistence", async () => {
+  it("persists and reconciles provider success when the send lease expires before evidence persistence", async () => {
     const f = await seedBundle();
-    await createDeliveryNotificationHandoff(ctx.db, {
+    const handoff = await createDeliveryNotificationHandoff(ctx.db, {
       vault: f.vault,
       bundleId: f.bundleId,
       customerId: f.customerId,
@@ -773,11 +773,133 @@ describe("durable delivery notification handoff (T139/T145)", () => {
     `.execute(ctx.db);
     releaseSend();
     const result = await run;
-    const row = await sql<{ status: string }>`
-      select status from delivery_notification_handoff limit 1
+    const row = await sql<{
+      handoff_status: string;
+      payload_redacted: {
+        providerChatId?: string;
+        providerMessageId?: string;
+        providerSucceededAt?: string;
+      };
+      bundle_status: string;
+      asset_status: string;
+      order_status: string;
+    }>`
+      select h.status as handoff_status, h.payload_redacted,
+        b.status as bundle_status, a.status as asset_status, o.status as order_status
+      from delivery_notification_handoff h
+      join delivery_bundle b on b.id = h.bundle_id
+      join digital_asset a on a.id = b.asset_id
+      join "order" o on o.id = b.order_id
+      where h.id = ${handoff.id}
     `.execute(ctx.db);
-    expect(result).toMatchObject({ sent: 0, failed: 1, stale: 0 });
-    expect(row.rows[0]?.status).toBe("DEAD");
+    expect(result).toMatchObject({ sent: 1, failed: 0, stale: 0 });
+    expect(row.rows[0]).toMatchObject({
+      handoff_status: "SENT",
+      payload_redacted: {
+        providerChatId: "7788990011",
+        providerMessageId: "test-provider-message",
+        providerSucceededAt: expect.any(String),
+      },
+      bundle_status: "CONSUMED",
+      asset_status: "DELIVERED",
+      order_status: "COMPLETED",
+    });
+  });
+
+  it("rejects a late receipt from a reclaimed generation without sending again", async () => {
+    const f = await seedBundle();
+    const handoff = await createDeliveryNotificationHandoff(ctx.db, {
+      vault: f.vault,
+      bundleId: f.bundleId,
+      customerId: f.customerId,
+      deliveryUrl: `https://shop.example/d/${f.token}`,
+      sessionTtlSeconds: 300,
+      sessionConfig: SESSION_CONFIG,
+    });
+    let sendStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      sendStarted = resolve;
+    });
+    let releaseSend!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseSend = resolve;
+    });
+    let sendCalls = 0;
+    const firstRun = processDeliveryNotificationBatch({
+      db: ctx.db,
+      vault: f.vault,
+      sender: {
+        async send(input) {
+          sendCalls += 1;
+          sendStarted();
+          await release;
+          return {
+            chatId: input.chatId,
+            messageId: "stale-provider-message",
+            succeededAt: new Date().toISOString(),
+          };
+        },
+      },
+      owner: "late-receipt-old-worker",
+      batchSize: 1,
+      maxAttempts: 5,
+      sessionConfig: SESSION_CONFIG,
+      sessionTtlSeconds: 300,
+    });
+    await started;
+    await sql`
+      update delivery_notification_handoff
+      set claim_expires_at = now() - interval '1 second'
+      where id = ${handoff.id}
+    `.execute(ctx.db);
+    const [reclaimed] = await claimDeliveryNotifications(ctx.db, {
+      owner: "late-receipt-new-worker",
+      batchSize: 1,
+      leaseSeconds: 30,
+    });
+    expect(reclaimed).toMatchObject({ id: handoff.id, generation: 2 });
+    releaseSend();
+    const stale = await firstRun;
+
+    await sql`
+      update delivery_notification_handoff
+      set claim_expires_at = now() - interval '1 second'
+      where id = ${handoff.id}
+    `.execute(ctx.db);
+    const recovered = await processDeliveryNotificationBatch({
+      db: ctx.db,
+      vault: f.vault,
+      sender: {
+        async send() {
+          sendCalls += 1;
+          throw new Error("ambiguous retry must not send");
+        },
+      },
+      owner: "late-receipt-recovery-worker",
+      batchSize: 1,
+      maxAttempts: 5,
+      sessionConfig: SESSION_CONFIG,
+      sessionTtlSeconds: 300,
+    });
+    const state = await sql<{
+      handoff_status: string;
+      payload_redacted: { providerMessageId?: string };
+      order_status: string;
+    }>`
+      select h.status as handoff_status, h.payload_redacted, o.status as order_status
+      from delivery_notification_handoff h
+      join delivery_bundle b on b.id = h.bundle_id
+      join "order" o on o.id = b.order_id
+      where h.id = ${handoff.id}
+    `.execute(ctx.db);
+    expect(stale).toMatchObject({ sent: 0, failed: 0, stale: 1 });
+    expect(recovered).toMatchObject({ sent: 0, failed: 1, stale: 0 });
+    expect(sendCalls).toBe(1);
+    expect(state.rows[0]).toMatchObject({
+      handoff_status: "DEAD",
+      order_status: "FULFILLMENT_NEEDS_REVIEW",
+    });
+    expect(state.rows[0]?.payload_redacted).not.toHaveProperty("providerMessageId");
   });
 
   it("parks an ambiguous failure when the send lease expires", async () => {

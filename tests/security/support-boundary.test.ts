@@ -17,7 +17,17 @@ describe("support boundary (SR-003)", () => {
     const svc = createSupportService({} as never);
     const keys = Object.keys(svc);
     // Allowed verbs.
-    expect(keys.sort()).toEqual(["closeTicket", "getTicket", "listTickets", "openTicket"].sort());
+    expect(keys.sort()).toEqual(
+      [
+        "beginDescription",
+        "cancelDescription",
+        "closeTicket",
+        "getTicket",
+        "listTickets",
+        "openTicket",
+        "submitDescription",
+      ].sort(),
+    );
 
     // Forbidden capabilities must be absent.
     for (const forbidden of [

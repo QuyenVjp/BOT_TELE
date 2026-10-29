@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const GOOGLE_SHEETS_SCHEMA_VERSION = 4;
+export const GOOGLE_SHEETS_SCHEMA_VERSION = 5;
 export const SHEETS_API_SCOPE = "https://www.googleapis.com/auth/spreadsheets" as const;
 
 export const GOOGLE_SHEETS_TABS = [
@@ -37,7 +37,6 @@ export const SHEET_HEADERS: Record<GoogleSheetsTab, readonly string[]> = {
     "region",
     "masked_login",
     "fingerprint",
-    "vault_ref",
     "cost_price_vnd",
     "added_at",
     "reserved_at",
@@ -106,7 +105,6 @@ export const SHEET_HEADERS: Record<GoogleSheetsTab, readonly string[]> = {
     "region",
     "supplier_order_id",
     "supplier_order_status",
-    "credential_vault_ref",
     "updated_at",
     "supplier_sku_id",
   ],

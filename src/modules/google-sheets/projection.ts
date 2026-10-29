@@ -33,7 +33,6 @@ interface InventoryProjection {
   region: string;
   masked_login: string;
   fingerprint: string;
-  vault_ref: string;
   cost_price_vnd: string | null;
   added_at: string;
   reserved_at: string | null;
@@ -109,7 +108,6 @@ interface SupplierProjection {
   region: string;
   supplier_order_id: string;
   supplier_order_status: string;
-  credential_vault_ref: string;
   updated_at: string;
   supplier_sku_id: string | null;
 }
@@ -341,8 +339,7 @@ function buildRequestsProjectionPlan(
       used.add(key);
       continue;
     }
-    if (key && desired) orphanCount += 1;
-    if (key && !desired) orphanCount += 1;
+    if (key) orphanCount += 1;
     systemValues.push(
       Array.from(
         { length: managedColumnCount(tab) - 8 },
@@ -387,6 +384,9 @@ interface StructuralOptions {
   ownerEmail?: string;
   serviceAccountEmail?: string;
   migrateSuppliersV3?: boolean;
+  removeLegacyVaultColumns?: boolean;
+  legacyTabs?: readonly GoogleSheetsTab[];
+  legacyVaultColumnIndices?: Partial<Record<GoogleSheetsTab, number>>;
 }
 
 function columnRangesForRole(
@@ -422,16 +422,33 @@ function structuralRequests(
     if (!(GOOGLE_SHEETS_TABS as readonly string[]).includes(sheet.title)) continue;
     const tab = sheet.title as GoogleSheetsTab;
     const columnCount = managedColumnCount(tab);
-    if (tab === "Suppliers" && options?.migrateSuppliersV3) {
+    const isLegacyTab = !options?.legacyTabs || options.legacyTabs.includes(tab);
+    if (tab === "Suppliers" && options?.migrateSuppliersV3 && isLegacyTab) {
       requests.push({
         insertDimension: {
           range: {
             sheetId: sheet.sheetId,
             dimension: "COLUMNS",
-            startIndex: columnCount - 1,
-            endIndex: columnCount,
+            startIndex: columnCount,
+            endIndex: columnCount + 1,
           },
           inheritFromBefore: false,
+        },
+      });
+    }
+    if (options?.removeLegacyVaultColumns && isLegacyTab) {
+      const startIndex = options.legacyVaultColumnIndices?.[tab];
+      if (startIndex === undefined) {
+        throw new Error(`Google Sheets workbook is missing the legacy vault column for ${tab}`);
+      }
+      requests.push({
+        deleteDimension: {
+          range: {
+            sheetId: sheet.sheetId,
+            dimension: "COLUMNS",
+            startIndex,
+            endIndex: startIndex + 1,
+          },
         },
       });
     }
@@ -557,180 +574,287 @@ function structuralRequests(
 export const buildCanonicalSheetRows = canonicalRows;
 export const buildWorkbookStructureRequests = structuralRequests;
 
+const PROJECTION_PAGE_SIZE = 500;
+
+async function readProjectionPages<T, C>(
+  readPage: (cursor: C | null) => Promise<readonly T[]>,
+  nextCursor: (row: T) => C,
+): Promise<T[]> {
+  const rows: T[] = [];
+  let cursor: C | null = null;
+  while (true) {
+    const page = await readPage(cursor);
+    rows.push(...page);
+    if (page.length < PROJECTION_PAGE_SIZE) return rows;
+    cursor = nextCursor(page[page.length - 1]!);
+  }
+}
+
 async function readSnapshot(db: Db, config: SheetsProjectionConfig, now: Date): Promise<Snapshot> {
-  const inventory = await sql<InventoryProjection>`
-    select a.id as asset_id,
-           right(a.id, 8) as asset_code,
-           p.name_vi as product,
-           v.name_vi as variant,
-           a.status,
-           a.source_type,
-           coalesce(a.region, '') as region,
-           coalesce(a.masked_login, '') as masked_login,
-           a.fingerprint_hash as fingerprint,
-           a.vault_ref,
-           coalesce(m.cost_price_vnd, ss.cost_vnd)::text as cost_price_vnd,
-           a.created_at,
-           case when a.status = 'RESERVED' then a.updated_at end as reserved_at,
-           case when a.status = 'READY' then a.updated_at end as ready_at,
-           case when a.status = 'DELIVERED' then a.updated_at end as delivered_at,
-           case when ro.completed_at is not null and ro.warranty_days > 0
-             then ro.completed_at + (ro.warranty_days || ' days')::interval end as warranty_until,
-           case when a.status in ('COMPROMISED','REVOKED','FAILED','SUPPLIER_NEEDS_REVIEW')
-                     or coalesce(m.operational_status, 'ACTIVE') = 'REVIEW'
-                then 'REVIEW' else 'OK' end as health,
-           coalesce(m.safe_note, '') as safe_note
-      from digital_asset a
-      join product_variant v on v.id = a.variant_id
-      join product p on p.id = v.product_id
-      left join supplier_sku ss on ss.id = v.supplier_sku_id
-      left join google_sheets_asset_metadata m on m.asset_id = a.id
-      left join "order" ro on ro.id = a.delivered_order_id or ro.id = a.reserved_order_id
-     order by a.created_at, a.id
-  `.execute(db);
+  const inventoryRows = await readProjectionPages<InventoryProjection, { at: string; id: string }>(
+    (cursor) => {
+      const after = cursor ? sql`where (a.created_at, a.id) > (${cursor.at}, ${cursor.id})` : sql``;
+      return sql<InventoryProjection>`
+        select a.id as asset_id,
+               right(a.id, 8) as asset_code,
+               p.name_vi as product,
+               v.name_vi as variant,
+               a.status,
+               a.source_type,
+               coalesce(a.region, '') as region,
+               coalesce(a.masked_login, '') as masked_login,
+               a.fingerprint_hash as fingerprint,
+               coalesce(m.cost_price_vnd, ss.cost_vnd)::text as cost_price_vnd,
+               a.created_at as added_at,
+               case when a.status = 'RESERVED' then a.updated_at end as reserved_at,
+               case when a.status = 'READY' then a.updated_at end as ready_at,
+               case when a.status = 'DELIVERED' then a.updated_at end as delivered_at,
+               case when ro.completed_at is not null and ro.warranty_days > 0
+                 then ro.completed_at + (ro.warranty_days || ' days')::interval end as warranty_until,
+               case when a.status in ('COMPROMISED','REVOKED','FAILED','SUPPLIER_NEEDS_REVIEW')
+                         or coalesce(m.operational_status, 'ACTIVE') = 'REVIEW'
+                    then 'REVIEW' else 'OK' end as health,
+               coalesce(m.safe_note, '') as safe_note
+          from digital_asset a
+          join product_variant v on v.id = a.variant_id
+          join product p on p.id = v.product_id
+          left join supplier_sku ss on ss.id = v.supplier_sku_id
+          left join google_sheets_asset_metadata m on m.asset_id = a.id
+          left join "order" ro on ro.id = a.delivered_order_id or ro.id = a.reserved_order_id
+          ${after}
+         order by a.created_at, a.id
+         limit ${PROJECTION_PAGE_SIZE}
+      `
+        .execute(db)
+        .then((result) => result.rows);
+    },
+    (row) => ({ at: row.added_at, id: row.asset_id }),
+  );
+  const inventory = inventoryRows.map((row) => ({
+    ...row,
+    added_at: iso(row.added_at) ?? now.toISOString(),
+    reserved_at: iso(row.reserved_at),
+    ready_at: iso(row.ready_at),
+    delivered_at: iso(row.delivered_at),
+    warranty_until: iso(row.warranty_until),
+    masked_login: row.masked_login,
+    fingerprint: row.fingerprint.slice(0, 16),
+  }));
 
-  const orders = await sql<OrderProjection>`
-    select o.id as order_id, o.order_number, o.created_at,
-           o.customer_id, o.product_name_vi as product, o.variant_name_vi as variant,
-           o.price_vnd::text as amount_vnd,
-           coalesce((select pi.status from payment_intent pi where pi.order_id = o.id order by pi.created_at desc, pi.id desc limit 1), 'NONE') as payment_status,
-           o.status as order_status, o.fulfillment_type, o.paid_at, o.completed_at,
-           case when o.completed_at is not null and o.warranty_days > 0
-             then o.completed_at + (o.warranty_days || ' days')::interval end as warranty_until
-      from "order" o
-     order by o.created_at desc, o.id desc
-     limit 5000
-  `
-    .execute(db)
-    .then((result) =>
-      result.rows.map((row) => ({
-        ...row,
-        customer_ref: customerRef(row.customer_id),
-        created_at: iso(row.created_at) ?? now.toISOString(),
-        paid_at: iso(row.paid_at),
-        completed_at: iso(row.completed_at),
-        warranty_until: iso(row.warranty_until),
-      })),
-    );
+  const orderRows = await readProjectionPages<OrderProjection, { at: string; id: string }>(
+    (cursor) => {
+      const before = cursor
+        ? sql`where (o.created_at, o.id) < (${cursor.at}, ${cursor.id})`
+        : sql``;
+      return sql<OrderProjection>`
+        select o.id as order_id, o.order_number, o.created_at,
+               o.customer_id, o.product_name_vi as product, o.variant_name_vi as variant,
+               o.price_vnd::text as amount_vnd,
+               coalesce((select pi.status from payment_intent pi where pi.order_id = o.id order by pi.created_at desc, pi.id desc limit 1), 'NONE') as payment_status,
+               o.status as order_status, o.fulfillment_type, o.paid_at, o.completed_at,
+               case when o.completed_at is not null and o.warranty_days > 0
+                 then o.completed_at + (o.warranty_days || ' days')::interval end as warranty_until
+          from "order" o
+          ${before}
+         order by o.created_at desc, o.id desc
+         limit ${PROJECTION_PAGE_SIZE}
+      `
+        .execute(db)
+        .then((result) => result.rows);
+    },
+    (row) => ({ at: row.created_at, id: row.order_id }),
+  );
+  const orders = orderRows.map((row) => ({
+    ...row,
+    customer_ref: customerRef(row.customer_id),
+    created_at: iso(row.created_at) ?? now.toISOString(),
+    paid_at: iso(row.paid_at),
+    completed_at: iso(row.completed_at),
+    warranty_until: iso(row.warranty_until),
+  }));
 
-  const payments = await sql<PaymentProjection>`
-    select i.id as payment_intent_id, i.order_id, o.order_number, i.amount_vnd::text,
-           i.status,
-           coalesce((select sum(a.allocated_amount_vnd) from payment_allocation a where a.payment_intent_id = i.id and a.status = 'SETTLED'), 0)::text as allocated_amount_vnd,
-           coalesce((select d.status from discrepancy d where d.payment_intent_id = i.id and d.resolved_at is null order by d.id desc limit 1), '') as discrepancy_status,
-           i.created_at, i.settled_at
-      from payment_intent i join "order" o on o.id = i.order_id
-     order by i.created_at desc, i.id desc
-     limit 5000
-  `
-    .execute(db)
-    .then((result) =>
-      result.rows.map((row) => ({
-        ...row,
-        created_at: iso(row.created_at) ?? now.toISOString(),
-        settled_at: iso(row.settled_at),
-      })),
-    );
+  const paymentRows = await readProjectionPages<PaymentProjection, { at: string; id: string }>(
+    (cursor) => {
+      const before = cursor
+        ? sql`where (i.created_at, i.id) < (${cursor.at}, ${cursor.id})`
+        : sql``;
+      return sql<PaymentProjection>`
+        select i.id as payment_intent_id, i.order_id, o.order_number, i.amount_vnd::text,
+               i.status,
+               coalesce((select sum(a.allocated_amount_vnd) from payment_allocation a where a.payment_intent_id = i.id and a.status = 'SETTLED'), 0)::text as allocated_amount_vnd,
+               coalesce((select d.status from discrepancy d where d.payment_intent_id = i.id and d.resolved_at is null order by d.id desc limit 1), '') as discrepancy_status,
+               i.created_at, i.settled_at
+          from payment_intent i join "order" o on o.id = i.order_id
+          ${before}
+         order by i.created_at desc, i.id desc
+         limit ${PROJECTION_PAGE_SIZE}
+      `
+        .execute(db)
+        .then((result) => result.rows);
+    },
+    (row) => ({ at: row.created_at, id: row.payment_intent_id }),
+  );
+  const payments = paymentRows.map((row) => ({
+    ...row,
+    created_at: iso(row.created_at) ?? now.toISOString(),
+    settled_at: iso(row.settled_at),
+  }));
 
-  const fulfillment = await sql<FulfillmentProjection>`
-    select o.id as order_id, o.order_number, o.fulfillment_type,
-           coalesce(db.status, mft.status, so.status, o.status) as status,
-           coalesce(right(da.id, 8), '') as asset_code,
-           coalesce(so.id, '') as supplier_order_id,
-           coalesce(mft.id, '') as manual_task_id,
-           coalesce(db.consumed_at, mft.completed_at, o.completed_at) as delivered_at,
-           case when o.status in ('FULFILLMENT_NEEDS_REVIEW','PAYMENT_NEEDS_REVIEW') then o.status else '' end as review_reason
-      from "order" o
-      left join lateral (select status, consumed_at, asset_id from delivery_bundle where order_id = o.id order by created_at desc, id desc limit 1) db on true
-      left join digital_asset da on da.id = db.asset_id
-      left join lateral (select id, status, completed_at from manual_fulfillment_task where order_id = o.id order by created_at desc, id desc limit 1) mft on true
-      left join lateral (select id, status from supplier_order where order_id = o.id order by id desc limit 1) so on true
-     order by o.created_at desc, o.id desc
-     limit 5000
-  `
-    .execute(db)
-    .then((result) =>
-      result.rows.map((row) => ({
-        ...row,
-        delivered_at: iso(row.delivered_at),
-      })),
-    );
+  const fulfillmentRows = await readProjectionPages<
+    FulfillmentProjection & { cursor_at: string },
+    { at: string; id: string }
+  >(
+    (cursor) => {
+      const before = cursor
+        ? sql`where (o.created_at, o.id) < (${cursor.at}, ${cursor.id})`
+        : sql``;
+      return sql<FulfillmentProjection & { cursor_at: string }>`
+        select o.id as order_id, o.order_number, o.fulfillment_type, o.created_at as cursor_at,
+               coalesce(db.status, mft.status, so.status, o.status) as status,
+               coalesce(right(da.id, 8), '') as asset_code,
+               coalesce(so.id, '') as supplier_order_id,
+               coalesce(mft.id, '') as manual_task_id,
+               coalesce(db.consumed_at, mft.completed_at, o.completed_at) as delivered_at,
+               case when o.status in ('FULFILLMENT_NEEDS_REVIEW','PAYMENT_NEEDS_REVIEW') then o.status else '' end as review_reason
+          from "order" o
+          left join lateral (select status, consumed_at, asset_id from delivery_bundle where order_id = o.id order by created_at desc, id desc limit 1) db on true
+          left join digital_asset da on da.id = db.asset_id
+          left join lateral (select id, status, completed_at from manual_fulfillment_task where order_id = o.id order by created_at desc, id desc limit 1) mft on true
+          left join lateral (select id, status from supplier_order where order_id = o.id order by id desc limit 1) so on true
+          ${before}
+         order by o.created_at desc, o.id desc
+         limit ${PROJECTION_PAGE_SIZE}
+      `
+        .execute(db)
+        .then((result) => result.rows);
+    },
+    (row) => ({ at: row.cursor_at, id: row.order_id }),
+  );
+  const fulfillment = fulfillmentRows.map((row) => ({
+    order_id: row.order_id,
+    order_number: row.order_number,
+    fulfillment_type: row.fulfillment_type,
+    status: row.status,
+    asset_code: row.asset_code,
+    supplier_order_id: row.supplier_order_id,
+    manual_task_id: row.manual_task_id,
+    delivered_at: iso(row.delivered_at),
+    review_reason: row.review_reason,
+  }));
 
-  const warrantySupport = await sql<SupportProjection>`
-    select 'WarrantyClaim'::text as record_type, c.id as record_id, c.claim_number as record_number,
-           c.order_id, c.customer_id, c.status, c.issue_type as reason,
-           coalesce(c.customer_note, '') as safe_summary, c.review_sla_due_at as sla_due_at,
-           c.created_at, c.updated_at
-      from warranty_claim c
-    union all
-    select 'SupportTicket'::text, t.id, '', coalesce(t.order_id, ''), t.customer_id, t.status,
-           t.reason_code, t.safe_summary, t.due_at, t.created_at, t.updated_at
-      from support_ticket t
-     order by created_at desc, record_id desc
-     limit 5000
-  `
-    .execute(db)
-    .then((result) =>
-      result.rows.map((row) => ({
-        ...row,
-        customer_ref: customerRef(row.customer_id),
-        sla_due_at: iso(row.sla_due_at),
-        created_at: iso(row.created_at) ?? now.toISOString(),
-        updated_at: iso(row.updated_at) ?? now.toISOString(),
-      })),
-    );
+  const supportRows = await readProjectionPages<SupportProjection, { at: string; id: string }>(
+    (cursor) => {
+      const before = cursor
+        ? sql`where (created_at, record_id) < (${cursor.at}, ${cursor.id})`
+        : sql``;
+      return sql<SupportProjection>`
+        select *
+          from (
+            select 'WarrantyClaim'::text as record_type, c.id as record_id, c.claim_number as record_number,
+                   c.order_id, c.customer_id, c.status, c.issue_type as reason,
+                   coalesce(c.customer_note, '') as safe_summary, c.review_sla_due_at as sla_due_at,
+                   c.created_at, c.updated_at
+              from warranty_claim c
+            union all
+            select 'SupportTicket'::text, t.id, '', coalesce(t.order_id, ''), t.customer_id, t.status,
+                   t.reason_code, t.safe_summary, t.due_at, t.created_at, t.updated_at
+              from support_ticket t
+          ) support_rows
+          ${before}
+         order by created_at desc, record_id desc
+         limit ${PROJECTION_PAGE_SIZE}
+      `
+        .execute(db)
+        .then((result) => result.rows);
+    },
+    (row) => ({ at: row.created_at, id: row.record_id }),
+  );
+  const warrantySupport = supportRows.map((row) => ({
+    ...row,
+    customer_ref: customerRef(row.customer_id),
+    sla_due_at: iso(row.sla_due_at),
+    created_at: iso(row.created_at) ?? now.toISOString(),
+    updated_at: iso(row.updated_at) ?? now.toISOString(),
+  }));
 
-  const suppliers = await sql<SupplierProjection>`
-    select s.id as supplier_id, s.name as supplier_name, s.status,
-           ss.external_sku, ss.cost_vnd::text, coalesce(ss.region, '') as region,
-           ss.id as supplier_sku_id,
-           coalesce(so.id, '') as supplier_order_id, coalesce(so.status, '') as supplier_order_status,
-           s.credential_vault_ref, coalesce(so.last_queried_at, ss.last_verified_at, s.created_at) as updated_at
-      from supplier s
-      left join supplier_sku ss on ss.supplier_id = s.id
-      left join lateral (select id, status, last_queried_at from supplier_order where supplier_sku_id = ss.id order by id desc limit 1) so on true
-     order by s.id, ss.id
-     limit 5000
-  `
-    .execute(db)
-    .then((result) =>
-      result.rows.map((row) => ({
-        ...row,
-        updated_at: iso(row.updated_at) ?? now.toISOString(),
-      })),
-    );
+  const supplierRows = await readProjectionPages<
+    SupplierProjection & { cursor_supplier_id: string; cursor_sku_id: string },
+    { supplierId: string; skuId: string }
+  >(
+    (cursor) => {
+      const after = cursor
+        ? sql`where (s.id, coalesce(ss.id, '')) > (${cursor.supplierId}, ${cursor.skuId})`
+        : sql``;
+      return sql<SupplierProjection & { cursor_supplier_id: string; cursor_sku_id: string }>`
+        select s.id as supplier_id, s.name as supplier_name, s.status,
+               ss.external_sku, ss.cost_vnd::text, coalesce(ss.region, '') as region,
+               ss.id as supplier_sku_id,
+               s.id as cursor_supplier_id, coalesce(ss.id, '') as cursor_sku_id,
+               coalesce(so.id, '') as supplier_order_id, coalesce(so.status, '') as supplier_order_status,
+               coalesce(so.last_queried_at, ss.last_verified_at, s.created_at) as updated_at
+          from supplier s
+          left join supplier_sku ss on ss.supplier_id = s.id
+          left join lateral (select id, status, last_queried_at from supplier_order where supplier_sku_id = ss.id order by id desc limit 1) so on true
+          ${after}
+         order by s.id, coalesce(ss.id, '')
+         limit ${PROJECTION_PAGE_SIZE}
+      `
+        .execute(db)
+        .then((result) => result.rows);
+    },
+    (row) => ({ supplierId: row.cursor_supplier_id, skuId: row.cursor_sku_id }),
+  );
+  const suppliers = supplierRows.map((row) => ({
+    ...row,
+    updated_at: iso(row.updated_at) ?? now.toISOString(),
+  }));
 
-  const requests = await sql<RequestProjection>`
-    select request_id, requested_at, requested_by, requested_action as action, target_type,
-           target_ref, expected_version, safe_payload::text as payload, status,
-           coalesce(result_code, '') as result_code, coalesce(result_note, '') as result_note, processed_at
-      from google_sheets_request
-     order by requested_at desc, request_id desc
-     limit 1000
-  `
-    .execute(db)
-    .then((result) =>
-      result.rows.map((row) => ({
-        ...row,
-        requested_at: iso(row.requested_at) ?? now.toISOString(),
-        processed_at: iso(row.processed_at),
-      })),
-    );
+  const requestRows = await readProjectionPages<RequestProjection, { at: string; id: string }>(
+    (cursor) => {
+      const before = cursor
+        ? sql`where (requested_at, request_id) < (${cursor.at}, ${cursor.id})`
+        : sql``;
+      return sql<RequestProjection>`
+        select request_id, requested_at, requested_by, requested_action as action, target_type,
+               target_ref, expected_version, safe_payload::text as payload, status,
+               coalesce(result_code, '') as result_code, coalesce(result_note, '') as result_note, processed_at
+          from google_sheets_request
+          ${before}
+         order by requested_at desc, request_id desc
+         limit ${PROJECTION_PAGE_SIZE}
+      `
+        .execute(db)
+        .then((result) => result.rows);
+    },
+    (row) => ({ at: row.requested_at, id: row.request_id }),
+  );
+  const requests = requestRows.map((row) => ({
+    ...row,
+    requested_at: iso(row.requested_at) ?? now.toISOString(),
+    processed_at: iso(row.processed_at),
+  }));
 
-  const audit = await sql<AuditProjection>`
-    select id as audit_id, occurred_at, actor_type,
-           case when actor_id is null then '' else 'actor-' || right(actor_id, 4) end as actor_ref,
-           action, target_type, target_id as target_ref, reason, metadata_redacted::text as metadata
-      from audit_event
-     order by occurred_at desc, id desc
-  `
-    .execute(db)
-    .then((result) =>
-      result.rows.map((row) => ({
-        ...row,
-        occurred_at: iso(row.occurred_at) ?? now.toISOString(),
-      })),
-    );
+  const auditRows = await readProjectionPages<AuditProjection, { at: string; id: string }>(
+    (cursor) => {
+      const before = cursor ? sql`where (occurred_at, id) < (${cursor.at}, ${cursor.id})` : sql``;
+      return sql<AuditProjection>`
+        select id as audit_id, occurred_at, actor_type,
+               case when actor_id is null then '' else 'actor-' || right(actor_id, 4) end as actor_ref,
+               action, target_type, target_id as target_ref, reason, metadata_redacted::text as metadata
+          from audit_event
+          ${before}
+         order by occurred_at desc, id desc
+         limit ${PROJECTION_PAGE_SIZE}
+      `
+        .execute(db)
+        .then((result) => result.rows);
+    },
+    (row) => ({ at: row.occurred_at, id: row.audit_id }),
+  );
+  const audit = auditRows.map((row) => ({
+    ...row,
+    occurred_at: iso(row.occurred_at) ?? now.toISOString(),
+  }));
 
   const dashboardMetrics = await sql<{
     metric_key: string;
@@ -798,10 +922,21 @@ async function readSnapshot(db: Db, config: SheetsProjectionConfig, now: Date): 
      where id = 'main'
   `.execute(db);
   const syncState = state.rows[0];
+  const cursorId = syncState?.last_outbox_event_id ?? null;
   const outbox = await sql<{ id: string }>`
-    select id from outbox_event
-     where (${syncState?.last_outbox_event_id ?? null}::text is null or id > ${syncState?.last_outbox_event_id ?? null})
-     order by occurred_at desc, id desc limit 1
+    with cursor_event as (
+      select id as cursor_id, occurred_at as cursor_occurred_at
+        from outbox_event
+       where id = ${cursorId}
+    )
+    select e.id
+      from outbox_event e
+      left join cursor_event c on true
+     where ${cursorId}::text is null
+        or c.cursor_id is null
+        or (e.occurred_at, e.id) > (c.cursor_occurred_at, c.cursor_id)
+     order by e.occurred_at desc, e.id desc
+     limit 1
   `.execute(db);
 
   const asOf = now.toISOString();
@@ -843,17 +978,7 @@ async function readSnapshot(db: Db, config: SheetsProjectionConfig, now: Date): 
   ];
 
   return {
-    inventory: inventory.rows.map((row) => ({
-      ...row,
-      added_at: iso(row.added_at) ?? asOf,
-      reserved_at: iso(row.reserved_at),
-      ready_at: iso(row.ready_at),
-      delivered_at: iso(row.delivered_at),
-      warranty_until: iso(row.warranty_until),
-      masked_login: row.masked_login,
-      fingerprint: row.fingerprint.slice(0, 16),
-      vault_ref: row.vault_ref,
-    })),
+    inventory,
     orders,
     payments,
     fulfillment,
@@ -893,6 +1018,102 @@ function existingValuesByTab(
   return map;
 }
 
+type HeaderMigration = {
+  legacyVaultColumnIndex?: number;
+  migrateSuppliersV3: boolean;
+};
+
+const LEGACY_VAULT_HEADERS: Record<string, true> = {
+  vault_ref: true,
+  credential_vault_ref: true,
+};
+
+function sameHeaders(actual: readonly SheetValue[], expected: readonly string[]): boolean {
+  return (
+    actual.length === expected.length && expected.every((header, index) => actual[index] === header)
+  );
+}
+
+function headerWithoutColumn(headers: readonly SheetValue[], columnIndex: number): SheetValue[] {
+  return [...headers.slice(0, columnIndex), ...headers.slice(columnIndex + 1)];
+}
+
+function findLegacyVaultColumn(
+  headers: readonly SheetValue[],
+  expectedWithoutVault: readonly string[],
+): number | null {
+  let match: number | null = null;
+  for (const [index, value] of headers.entries()) {
+    if (typeof value !== "string" || !LEGACY_VAULT_HEADERS[value]) continue;
+    if (!sameHeaders(headerWithoutColumn(headers, index), expectedWithoutVault)) continue;
+    if (match !== null) return null;
+    match = index;
+  }
+  return match;
+}
+
+function recognizeHeaderShape(
+  tab: GoogleSheetsTab,
+  headers: readonly SheetValue[],
+): HeaderMigration | null {
+  if (sameHeaders(headers, SHEET_HEADERS[tab])) {
+    return { migrateSuppliersV3: false };
+  }
+  if (tab === "Inventory") {
+    const legacyVaultColumnIndex = findLegacyVaultColumn(headers, SHEET_HEADERS.Inventory);
+    return legacyVaultColumnIndex === null
+      ? null
+      : { legacyVaultColumnIndex, migrateSuppliersV3: false };
+  }
+  if (tab === "Suppliers") {
+    const legacyVaultColumnIndex = findLegacyVaultColumn(headers, SHEET_HEADERS.Suppliers);
+    if (legacyVaultColumnIndex !== null) {
+      return { legacyVaultColumnIndex, migrateSuppliersV3: false };
+    }
+    const legacyV3Headers = SHEET_HEADERS.Suppliers.slice(0, -1);
+    const legacyV3VaultColumnIndex = findLegacyVaultColumn(headers, legacyV3Headers);
+    return legacyV3VaultColumnIndex === null
+      ? null
+      : { legacyVaultColumnIndex: legacyV3VaultColumnIndex, migrateSuppliersV3: true };
+  }
+  return null;
+}
+
+function inspectManagedHeaders(
+  tabs: readonly GoogleSheetsTab[],
+  values: readonly SheetValueRange[],
+): {
+  legacyTabs: GoogleSheetsTab[];
+  legacyVaultColumnIndices: Partial<Record<GoogleSheetsTab, number>>;
+  migrateSuppliersV3: boolean;
+} {
+  const rowsByTab = new Map<GoogleSheetsTab, readonly SheetValue[]>();
+  for (const entry of values) {
+    const separator = entry.range.indexOf("!");
+    if (separator < 0) continue;
+    const tab = entry.range.slice(0, separator);
+    if (!(GOOGLE_SHEETS_TABS as readonly string[]).includes(tab)) continue;
+    const row = entry.values[0];
+    rowsByTab.set(tab as GoogleSheetsTab, row ?? []);
+  }
+
+  const legacyTabs: GoogleSheetsTab[] = [];
+  const legacyVaultColumnIndices: Partial<Record<GoogleSheetsTab, number>> = {};
+  let migrateSuppliersV3 = false;
+  for (const tab of tabs) {
+    const migration = recognizeHeaderShape(tab, rowsByTab.get(tab) ?? []);
+    if (!migration) {
+      throw new Error(`Google Sheets ${tab} header schema is not recognized`);
+    }
+    if (migration.legacyVaultColumnIndex !== undefined) {
+      legacyTabs.push(tab);
+      legacyVaultColumnIndices[tab] = migration.legacyVaultColumnIndex;
+      migrateSuppliersV3 ||= migration.migrateSuppliersV3;
+    }
+  }
+  return { legacyTabs, legacyVaultColumnIndices, migrateSuppliersV3 };
+}
+
 export function buildGridExpansionRequests(
   sheets: readonly { sheetId: number; title: string; rowCount?: number }[],
   desiredRowCounts: Readonly<Partial<Record<GoogleSheetsTab, number>>>,
@@ -926,17 +1147,33 @@ export async function ensureGoogleSheetsWorkbook(input: {
 }): Promise<void> {
   const before = await input.api.getSpreadsheet({ spreadsheetId: input.config.spreadsheetId });
   const existingTitles = new Set(before.sheets.map((sheet) => sheet.title));
+  const existingManagedTabs = GOOGLE_SHEETS_TABS.filter((tab) => existingTitles.has(tab));
   const missing = GOOGLE_SHEETS_TABS.filter((tab) => !existingTitles.has(tab));
   const observedSchemaVersions = before.developerMetadata
-    .filter((entry) => entry.metadataKey === "tier20_google_sheets_schema")
+    .filter(
+      (entry) =>
+        entry.locationType === "SPREADSHEET" && entry.metadataKey === "tier20_google_sheets_schema",
+    )
     .map((entry) => Number(entry.metadataValue))
     .filter((version) => Number.isInteger(version));
   if (observedSchemaVersions.some((version) => version > GOOGLE_SHEETS_SCHEMA_VERSION)) {
     throw new Error("Google Sheets workbook schema is newer than this worker");
   }
-  const schemaReady = observedSchemaVersions.includes(GOOGLE_SHEETS_SCHEMA_VERSION);
-  const migrateSuppliersV3 =
-    !schemaReady && observedSchemaVersions.includes(GOOGLE_SHEETS_SCHEMA_VERSION - 1);
+  const knownSchemaVersions = observedSchemaVersions.filter(
+    (version): version is 3 | 4 | 5 => version === 3 || version === 4 || version === 5,
+  );
+  const highestKnownSchemaVersion = Math.max(0, ...knownSchemaVersions);
+  const schemaReady = highestKnownSchemaVersion === GOOGLE_SHEETS_SCHEMA_VERSION;
+  const headerValues =
+    existingManagedTabs.length > 0
+      ? await input.api.batchGet({
+          spreadsheetId: input.config.spreadsheetId,
+          ranges: existingManagedTabs.map((tab) => `${tab}!1:1`),
+        })
+      : [];
+  const headerMigration = inspectManagedHeaders(existingManagedTabs, headerValues);
+  const needsStructuralUpdate =
+    missing.length > 0 || !schemaReady || headerMigration.legacyTabs.length > 0;
   if (missing.length > 0) {
     await input.api.batchUpdate({
       spreadsheetId: input.config.spreadsheetId,
@@ -944,10 +1181,13 @@ export async function ensureGoogleSheetsWorkbook(input: {
     });
   }
   const workbook = await input.api.getSpreadsheet({ spreadsheetId: input.config.spreadsheetId });
-  if (missing.length > 0 || !schemaReady) {
+  if (needsStructuralUpdate) {
     const structural = structuralRequests(workbook.sheets, [], !schemaReady, {
       ownerEmail: input.config.ownerId,
-      migrateSuppliersV3: migrateSuppliersV3 && !missing.includes("Suppliers"),
+      migrateSuppliersV3: headerMigration.migrateSuppliersV3,
+      removeLegacyVaultColumns: headerMigration.legacyTabs.length > 0,
+      legacyTabs: headerMigration.legacyTabs,
+      legacyVaultColumnIndices: headerMigration.legacyVaultColumnIndices,
       ...(input.config.serviceAccountEmail
         ? { serviceAccountEmail: input.config.serviceAccountEmail }
         : {}),

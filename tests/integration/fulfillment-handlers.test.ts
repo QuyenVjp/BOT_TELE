@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { GrammyError } from "grammy";
 import { sql } from "kysely";
 import { newId } from "../../src/shared/ids/index.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
@@ -10,7 +11,10 @@ import { enqueueOutboxEvent } from "../../src/infrastructure/outbox/repository.j
 import { drainOutboxOnce } from "../../src/infrastructure/outbox/worker.js";
 import { createFulfillmentOutboxHandler } from "../../src/modules/digital-goods/handlers.js";
 import { createFulfillmentTelemetry } from "../../src/modules/digital-goods/telemetry.js";
-import type { TelegramDocumentSender } from "../../src/modules/digital-goods/file-delivery.js";
+import {
+  queueFileDelivery,
+  type TelegramDocumentSender,
+} from "../../src/modules/digital-goods/file-delivery.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
@@ -121,7 +125,7 @@ describe("fulfillment outbox handlers (T076)", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: f.vault,
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
       telemetry,
@@ -179,7 +183,7 @@ describe("fulfillment outbox handlers (T076)", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: f.vault,
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     });
@@ -295,7 +299,7 @@ describe("file delivery handler integration", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: createInMemoryVault(),
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
       fileDelivery: { storageRoots: [storageRoot], sender },
@@ -352,7 +356,7 @@ describe("file delivery handler integration", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: createInMemoryVault(),
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
       fileDelivery: { storageRoots: [storageRoot], sender },
@@ -380,6 +384,119 @@ describe("file delivery handler integration", () => {
     });
   });
 
+  it("replays a proven SEND_FAILED retry event against the next generation", async () => {
+    const f = await seedPaidFileOrder();
+    const queued = await queueFileDelivery({ db: ctx.db, orderId: f.orderId });
+    expect(queued).toMatchObject({ ok: true, inserted: true, job: { status: "QUEUED" } });
+    if (!queued.ok) return;
+    const calls: Array<Parameters<TelegramDocumentSender["sendDocument"]>[0]> = [];
+    let attempts = 0;
+    const sender: TelegramDocumentSender = {
+      async sendDocument(input) {
+        calls.push(input);
+        attempts += 1;
+        if (attempts <= 2) {
+          throw new GrammyError(
+            "Call to 'sendDocument' failed!",
+            { ok: false, error_code: 400, description: "Bad Request: chat not found" },
+            "sendDocument",
+            {},
+          );
+        }
+        return {
+          fileId: "retry_after_send_failed_file_id",
+          fileUniqueId: "retry_after_send_failed_unique",
+          messageId: "retry_after_send_failed_message",
+        };
+      },
+    };
+    const handler = createFulfillmentOutboxHandler({
+      db: ctx.db,
+      vault: createInMemoryVault(),
+      resolveSupplier: async (_supplierId) => null,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+      fileDelivery: { storageRoots: [storageRoot], sender },
+    });
+    const event = {
+      id: newId(),
+      aggregateType: "FileDeliveryJob" as const,
+      aggregateId: f.orderId,
+      aggregateVersion: queued.job.claimGeneration + 1,
+      eventType: "FileDeliveryRetryRequested" as const,
+      payloadRedacted: {
+        orderId: f.orderId,
+        jobId: queued.job.orderId,
+        artifactId: queued.job.artifactId,
+        artifactVersion: queued.job.artifactVersion,
+        artifactSha256: queued.job.artifactSha256,
+        claimGeneration: queued.job.claimGeneration,
+        telegramChatId: queued.job.telegramChatId,
+        correlationId: "file-retry-send-failed",
+      },
+      attemptCount: 1,
+      claimedBy: "handler-test",
+      generation: 1,
+    };
+
+    await expect(handler(event)).resolves.toEqual({
+      kind: "RETRY",
+      errorCode: "SEND_FAILED",
+    });
+    const failed = await sql<{
+      status: string;
+      last_error: string | null;
+      claim_generation: number;
+    }>`
+      select status, last_error, claim_generation
+      from file_delivery_job
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(failed.rows[0]).toEqual({
+      status: "FAILED",
+      last_error: "SEND_FAILED",
+      claim_generation: queued.job.claimGeneration + 1,
+    });
+
+    await expect(handler(event)).resolves.toEqual({
+      kind: "RETRY",
+      errorCode: "SEND_FAILED",
+    });
+    const retried = await sql<{
+      status: string;
+      last_error: string | null;
+      claim_generation: number;
+    }>`
+      select status, last_error, claim_generation
+      from file_delivery_job
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(retried.rows[0]).toEqual({
+      status: "FAILED",
+      last_error: "SEND_FAILED",
+      claim_generation: queued.job.claimGeneration + 2,
+    });
+    await expect(handler(event)).resolves.toEqual({ kind: "PUBLISHED" });
+    expect(calls).toHaveLength(3);
+    const completed = await sql<{
+      order_status: string;
+      job_status: string;
+      last_error: string | null;
+      claim_generation: number;
+    }>`
+      select o.status as order_status, j.status as job_status, j.last_error, j.claim_generation
+      from "order" o
+      join file_delivery_job j on j.order_id = o.id
+      where o.id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(completed.rows[0]).toEqual({
+      order_status: "COMPLETED",
+      job_status: "SENT",
+      last_error: null,
+      claim_generation: queued.job.claimGeneration + 3,
+    });
+  });
+
   it("maps uncertain file delivery to terminal review and does not resend on replay", async () => {
     const f = await seedPaidFileOrder();
     const calls: Array<Parameters<TelegramDocumentSender["sendDocument"]>[0]> = [];
@@ -392,7 +509,7 @@ describe("file delivery handler integration", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: createInMemoryVault(),
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
       fileDelivery: { storageRoots: [storageRoot], sender },
@@ -425,5 +542,321 @@ describe("file delivery handler integration", () => {
       where order_id = ${f.orderId}
     `.execute(ctx.db);
     expect(state.rows[0]).toEqual({ status: "FAILED", last_error: "SEND_UNCERTAIN" });
+  });
+
+  it("retries only the explicitly requeued file job and treats replay as complete", async () => {
+    const f = await seedPaidFileOrder();
+    const queued = await queueFileDelivery({ db: ctx.db, orderId: f.orderId });
+    expect(queued).toMatchObject({ ok: true, inserted: true, job: { status: "QUEUED" } });
+    if (!queued.ok) return;
+    const sender = fileSender("explicit_retry_file_id_1234567890");
+    const handler = createFulfillmentOutboxHandler({
+      db: ctx.db,
+      vault: createInMemoryVault(),
+      resolveSupplier: async (_supplierId) => null,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+      fileDelivery: { storageRoots: [storageRoot], sender },
+    });
+    const event = {
+      id: newId(),
+      aggregateType: "FileDeliveryJob",
+      aggregateId: f.orderId,
+      aggregateVersion: queued.job.claimGeneration,
+      eventType: "FileDeliveryRetryRequested",
+      payloadRedacted: {
+        orderId: f.orderId,
+        jobId: queued.job.orderId,
+        artifactId: queued.job.artifactId,
+        artifactVersion: queued.job.artifactVersion,
+        artifactSha256: queued.job.artifactSha256,
+        claimGeneration: queued.job.claimGeneration,
+        telegramChatId: queued.job.telegramChatId,
+        correlationId: "file-retry-1",
+      },
+      attemptCount: 1,
+      claimedBy: "handler-test",
+      generation: 1,
+    };
+
+    await expect(handler(event)).resolves.toEqual({ kind: "PUBLISHED" });
+    await expect(handler(event)).resolves.toEqual({ kind: "PUBLISHED" });
+    await expect(
+      handler({
+        ...event,
+        payloadRedacted: { ...event.payloadRedacted, artifactId: newId() },
+      }),
+    ).resolves.toEqual({ kind: "TERMINAL_REVIEW", errorCode: "STALE_JOB" });
+    await expect(
+      handler({
+        ...event,
+        payloadRedacted: { ...event.payloadRedacted, telegramChatId: "777777" },
+      }),
+    ).resolves.toEqual({ kind: "TERMINAL_REVIEW", errorCode: "STALE_JOB" });
+    await expect(
+      handler({
+        ...event,
+        payloadRedacted: { ...event.payloadRedacted, jobId: newId() },
+      }),
+    ).resolves.toEqual({ kind: "TERMINAL_REVIEW", errorCode: "STALE_JOB" });
+    await expect(
+      handler({
+        ...event,
+        aggregateId: newId(),
+      }),
+    ).resolves.toEqual({ kind: "TERMINAL_REVIEW", errorCode: "STALE_JOB" });
+    expect(sender.calls).toHaveLength(1);
+    const state = await sql<{ status: string; claim_generation: number }>`
+      select status, claim_generation from file_delivery_job where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(state.rows[0]).toEqual({
+      status: "SENT",
+      claim_generation: queued.job.claimGeneration + 1,
+    });
+  });
+
+  it("does not send a retry event for failed or concurrently processing jobs", async () => {
+    const f = await seedPaidFileOrder();
+    const queued = await queueFileDelivery({ db: ctx.db, orderId: f.orderId });
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    const sender = fileSender("must_not_send_file_id");
+    const handler = createFulfillmentOutboxHandler({
+      db: ctx.db,
+      vault: createInMemoryVault(),
+      resolveSupplier: async (_supplierId) => null,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+      fileDelivery: { storageRoots: [storageRoot], sender },
+    });
+    const event = {
+      id: newId(),
+      aggregateType: "FileDeliveryJob",
+      aggregateId: f.orderId,
+      aggregateVersion: queued.job.claimGeneration,
+      eventType: "FileDeliveryRetryRequested",
+      payloadRedacted: {
+        orderId: f.orderId,
+        jobId: queued.job.orderId,
+        artifactId: queued.job.artifactId,
+        artifactVersion: queued.job.artifactVersion,
+        artifactSha256: queued.job.artifactSha256,
+        claimGeneration: queued.job.claimGeneration,
+        telegramChatId: queued.job.telegramChatId,
+      },
+      attemptCount: 1,
+      claimedBy: "handler-test",
+      generation: 1,
+    };
+
+    await sql`
+      update file_delivery_job
+      set claim_generation = ${queued.job.claimGeneration + 1}
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    await expect(handler(event)).resolves.toEqual({
+      kind: "TERMINAL_REVIEW",
+      errorCode: "STALE_JOB",
+    });
+    await sql`
+      update file_delivery_job
+      set claim_generation = ${queued.job.claimGeneration}
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+
+    await sql`
+      update file_delivery_job
+      set status = 'FAILED', last_error = 'SEND_UNCERTAIN'
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    await expect(handler(event)).resolves.toEqual({
+      kind: "TERMINAL_REVIEW",
+      errorCode: "SEND_UNCERTAIN",
+    });
+
+    await sql`
+      update file_delivery_job
+      set status = 'PROCESSING',
+          claim_generation = ${queued.job.claimGeneration + 1},
+          processing_expires_at = now() + interval '5 minutes',
+          last_error = null
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    await expect(handler(event)).resolves.toEqual({
+      kind: "RETRY",
+      errorCode: "FILE_DELIVERY_PROCESSING",
+    });
+    expect(sender.calls).toHaveLength(0);
+  });
+  it("parks an expired processing generation as uncertain after the order moves to review", async () => {
+    const f = await seedPaidFileOrder();
+    const queued = await queueFileDelivery({ db: ctx.db, orderId: f.orderId });
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    const sender = fileSender("expired_retry_must_not_send");
+    const handler = createFulfillmentOutboxHandler({
+      db: ctx.db,
+      vault: createInMemoryVault(),
+      resolveSupplier: async (_supplierId) => null,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+      fileDelivery: { storageRoots: [storageRoot], sender },
+    });
+    const event = {
+      id: newId(),
+      aggregateType: "FileDeliveryJob" as const,
+      aggregateId: f.orderId,
+      aggregateVersion: queued.job.claimGeneration + 1,
+      eventType: "FileDeliveryRetryRequested" as const,
+      payloadRedacted: {
+        orderId: f.orderId,
+        jobId: queued.job.orderId,
+        artifactId: queued.job.artifactId,
+        artifactVersion: queued.job.artifactVersion,
+        artifactSha256: queued.job.artifactSha256,
+        claimGeneration: queued.job.claimGeneration,
+      },
+      attemptCount: 1,
+      claimedBy: "handler-test",
+      generation: 1,
+    };
+    await sql`update "order" set status = 'FULFILLMENT_NEEDS_REVIEW' where id = ${f.orderId}`.execute(
+      ctx.db,
+    );
+
+    await sql`
+      update file_delivery_job
+      set status = 'PROCESSING',
+          claim_generation = ${queued.job.claimGeneration + 1},
+          processing_expires_at = now() - interval '1 second',
+          last_error = null
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+
+    await expect(handler(event)).resolves.toEqual({
+      kind: "TERMINAL_REVIEW",
+      errorCode: "SEND_UNCERTAIN",
+    });
+    expect(sender.calls).toHaveLength(0);
+    const state = await sql<{
+      status: string;
+      last_error: string | null;
+      claim_generation: number;
+    }>`
+      select status, last_error, claim_generation
+      from file_delivery_job
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    expect(state.rows[0]).toEqual({
+      status: "FAILED",
+      last_error: "SEND_UNCERTAIN",
+      claim_generation: queued.job.claimGeneration + 1,
+    });
+  });
+  it("dead-letters an expired file delivery retry without sending", async () => {
+    const f = await seedPaidFileOrder();
+    const queued = await queueFileDelivery({ db: ctx.db, orderId: f.orderId });
+    if (!queued.ok) throw new Error(`queue fixture failed: ${queued.code}`);
+    const sender = fileSender("expired_retry_must_not_send");
+    const eventId = newId();
+    await enqueueOutboxEvent(ctx.db, {
+      id: eventId,
+      aggregateType: "FileDeliveryJob",
+      aggregateId: f.orderId,
+      aggregateVersion: queued.job.claimGeneration + 1,
+      eventType: "FileDeliveryRetryRequested",
+      payloadRedacted: {
+        orderId: f.orderId,
+        jobId: queued.job.orderId,
+        artifactId: queued.job.artifactId,
+        artifactVersion: queued.job.artifactVersion,
+        artifactSha256: queued.job.artifactSha256,
+        claimGeneration: queued.job.claimGeneration,
+        telegramChatId: queued.job.telegramChatId,
+      },
+    });
+    await sql`update outbox_event set occurred_at = now() - interval '1 second' where id = ${eventId}`.execute(
+      ctx.db,
+    );
+    await sql`
+      update file_delivery_job
+      set status = 'PROCESSING', claim_generation = ${queued.job.claimGeneration + 1},
+          processing_expires_at = now() - interval '1 second'
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+    const handler = createFulfillmentOutboxHandler({
+      db: ctx.db,
+      vault: createInMemoryVault(),
+      resolveSupplier: async () => null,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+      fileDelivery: { storageRoots: [storageRoot], sender },
+    });
+
+    const drain = await drainOutboxOnce(ctx.db, { batchSize: 1, maxAttempts: 5, handler });
+    expect(drain).toMatchObject({ published: 0, failed: 1, terminal: 1 });
+    expect(sender.calls).toHaveLength(0);
+    const outbox = await sql<{
+      published_at: Date | null;
+      dead_lettered_at: Date | null;
+      last_error_code: string | null;
+    }>`
+      select published_at, dead_lettered_at, last_error_code
+      from outbox_event where id = ${eventId}
+    `.execute(ctx.db);
+    expect(outbox.rows[0]).toMatchObject({
+      published_at: null,
+      dead_lettered_at: expect.any(Date),
+      last_error_code: "SEND_UNCERTAIN",
+    });
+  });
+
+  it("never sends a retry replay for SEND_UNCERTAIN", async () => {
+    const f = await seedPaidFileOrder();
+    const queued = await queueFileDelivery({ db: ctx.db, orderId: f.orderId });
+    expect(queued.ok).toBe(true);
+    if (!queued.ok) return;
+    const sender = fileSender("uncertain_retry_must_not_send");
+    const handler = createFulfillmentOutboxHandler({
+      db: ctx.db,
+      vault: createInMemoryVault(),
+      resolveSupplier: async (_supplierId) => null,
+      deliveryBaseUrl: "https://shop.example/d",
+      bundleTtlSeconds: 900,
+      fileDelivery: { storageRoots: [storageRoot], sender },
+    });
+    const event = {
+      id: newId(),
+      aggregateType: "FileDeliveryJob" as const,
+      aggregateId: f.orderId,
+      aggregateVersion: queued.job.claimGeneration + 1,
+      eventType: "FileDeliveryRetryRequested" as const,
+      payloadRedacted: {
+        orderId: f.orderId,
+        jobId: queued.job.orderId,
+        artifactId: queued.job.artifactId,
+        artifactVersion: queued.job.artifactVersion,
+        artifactSha256: queued.job.artifactSha256,
+        claimGeneration: queued.job.claimGeneration,
+        telegramChatId: queued.job.telegramChatId,
+      },
+      attemptCount: 1,
+      claimedBy: "handler-test",
+      generation: 1,
+    };
+    await sql`
+      update file_delivery_job
+      set status = 'FAILED',
+          claim_generation = ${queued.job.claimGeneration + 1},
+          processing_expires_at = null,
+          last_error = 'SEND_UNCERTAIN'
+      where order_id = ${f.orderId}
+    `.execute(ctx.db);
+
+    await expect(handler(event)).resolves.toEqual({
+      kind: "TERMINAL_REVIEW",
+      errorCode: "SEND_UNCERTAIN",
+    });
+    expect(sender.calls).toHaveLength(0);
   });
 });

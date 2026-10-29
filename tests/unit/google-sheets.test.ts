@@ -35,11 +35,12 @@ describe("Google Sheets contracts", () => {
       "Audit",
     ]);
     expect(SHEET_HEADERS.Inventory).toContain("asset_code");
-    expect(SHEET_HEADERS.Inventory).toContain("vault_ref");
+    expect(SHEET_HEADERS.Inventory).not.toContain("vault_ref");
     expect(SHEET_HEADERS.Inventory).not.toContain("secret_value");
     expect(SHEET_HEADERS.Inventory).not.toContain("password");
-    expect(GOOGLE_SHEETS_SCHEMA_VERSION).toBe(4);
+    expect(GOOGLE_SHEETS_SCHEMA_VERSION).toBe(5);
     expect(SHEET_HEADERS.Suppliers).toContain("supplier_sku_id");
+    expect(SHEET_HEADERS.Suppliers).not.toContain("credential_vault_ref");
   });
 
   it("rejects secret-like values before they reach a spreadsheet payload", () => {
@@ -197,7 +198,15 @@ describe("Google Sheets client helpers", () => {
       ).toBeLessThanOrEqual(oneRowBytes + 64);
     }
   });
-
+  it("keeps every row when a values write crosses the 500-row boundary", () => {
+    const values = Array.from({ length: 501 }, (_, index) => [`row-${index}`]);
+    const chunks = chunkSheetValueRanges([{ range: "Audit!A2:A502", values }], 500);
+    const ranges = chunks.flatMap((chunk) => chunk).map((entry) => entry.range);
+    expect(chunks.length).toBeGreaterThan(1);
+    expect(chunks.flatMap((chunk) => chunk.flatMap((entry) => entry.values))).toEqual(values);
+    expect(ranges[0]).toMatch(/^Audit!A2:A\d+$/u);
+    expect(ranges[ranges.length - 1]).toMatch(/A502$/u);
+  });
   it("rejects an oversized row before producing any values batch", () => {
     expect(() =>
       chunkSheetValueRanges([{ range: "Audit!A10:A10", values: [["x".repeat(500)]] }], 200),
@@ -217,7 +226,15 @@ describe("Google Sheets client helpers", () => {
       retryable: true,
     });
     expect(classifySheetsError(new TypeError("fetch failed")).code).toBe("NETWORK");
-    expect(classifySheetsError({ response: { status: 403 } }).code).toBe("PERMISSION_DENIED");
+    expect(classifySheetsError({ response: { status: 408 } })).toMatchObject({
+      code: "NETWORK",
+      retryable: true,
+      status: 408,
+    });
+    expect(classifySheetsError({ code: "ECONNRESET" })).toMatchObject({
+      code: "NETWORK",
+      retryable: true,
+    });
   });
 
   it("uses bounded exponential backoff", () => {
@@ -248,6 +265,19 @@ describe("Google Sheets client helpers", () => {
 
     expect(attempts).toBe(3);
     expect(sleeps).toEqual([100, 200]);
+  });
+  it("bounds retries when the configured attempt count is invalid", async () => {
+    let attempts = 0;
+    await expect(
+      withSheetsRetry(
+        async () => {
+          attempts += 1;
+          throw new TypeError("temporary network failure");
+        },
+        { maxAttempts: Number.NaN, retryable: true, sleep: async () => undefined },
+      ),
+    ).rejects.toMatchObject({ code: "NETWORK" });
+    expect(attempts).toBe(1);
   });
   it("does not retry non-idempotent operations", async () => {
     let attempts = 0;

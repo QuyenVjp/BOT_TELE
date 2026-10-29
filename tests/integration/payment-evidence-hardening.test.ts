@@ -165,6 +165,41 @@ describe.skipIf(!hasDocker)("payment evidence hardening (T124/T124a/T128)", () =
       expect(await countRows("discrepancy")).toBe(1);
     },
   );
+  it("never settles one SePay transaction against two unrelated orders", async () => {
+    const first = await seedPayableOrder();
+    const second = await seedPayableOrder();
+    const providerTransactionId = "SEPAY-CROSS-ORDER-" + newId();
+
+    expect(
+      await applyPaymentEvidence(ctx.db, evidenceFor(first, { providerTransactionId })),
+    ).toMatchObject({ ok: true, kind: "SETTLED" });
+    expect(
+      await applyPaymentEvidence(ctx.db, evidenceFor(second, { providerTransactionId })),
+    ).toMatchObject({ ok: true, kind: "DISCREPANCY", type: "REFERENCE_COLLISION" });
+
+    const proof = await sql<{
+      firstStatus: string;
+      secondStatus: string;
+      bankTransactions: string;
+      settledAllocations: string;
+    }>`
+      select
+        (select status from "order" where id = ${first.orderId}) as "firstStatus",
+        (select status from "order" where id = ${second.orderId}) as "secondStatus",
+        (select count(*)::text from bank_transaction
+         where provider_transaction_id = ${providerTransactionId}) as "bankTransactions",
+        (select count(*)::text from payment_allocation pa
+         join bank_transaction bt on bt.id = pa.bank_transaction_id
+         where bt.provider_transaction_id = ${providerTransactionId}
+           and pa.status = 'SETTLED') as "settledAllocations"
+    `.execute(ctx.db);
+    expect(proof.rows[0]).toEqual({
+      firstStatus: "PAID",
+      secondStatus: "PENDING_PAYMENT",
+      bankTransactions: "1",
+      settledAllocations: "1",
+    });
+  });
 
   it("rejects invalid and future transaction times before persistence", async () => {
     const f = await seedPayableOrder();

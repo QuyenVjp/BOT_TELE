@@ -3,6 +3,7 @@ import type { Db, Executor } from "../../infrastructure/db/transaction.js";
 import { withTransaction } from "../../infrastructure/db/transaction.js";
 import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import { insertBankTransactionIfNew, insertDiscrepancy } from "../payments/repository.js";
+import { LATE_PAYMENT_SKEW_MS } from "../payments/domain.js";
 import { isVerifiedSePayEvidence, type VerifiedSePayEvidence } from "../payments/sepay-ingress.js";
 import { presentPayment, type PaymentPresentation } from "../payments/vietqr.js";
 import { newId } from "../../shared/ids/index.js";
@@ -202,14 +203,14 @@ export async function presentWalletTopup(input: {
     return { ok: false, error: "invalid amount" };
 
   return withTransaction(input.db, async (trx) => {
-    const account = await ensureWalletAccount(trx, input.customerId);
-    if (!account) return { ok: false, error: "customer not found" };
     await sql`
       update wallet_topup_intent set status = 'EXPIRED', version = version + 1
       where customer_id = ${input.customerId} and status in ('CREATED','PRESENTED')
         and expires_at <= now()
     `.execute(trx);
     const existing = await findLiveTopupByCustomer(trx, input.customerId);
+    const account = await ensureWalletAccount(trx, input.customerId);
+    if (!account) return { ok: false, error: "customer not found" };
     if (existing && existing.amountVnd === input.amountVnd) {
       await clearWalletTopupSelection(trx, input.customerId);
       return { ok: true, intentId: existing.id, presentation: render(input, existing) };
@@ -267,6 +268,9 @@ export async function applyWalletTopupEvidence(
 > {
   if (!isVerifiedSePayEvidence(evidence))
     return { ok: false, error: "unverified payment evidence" };
+  const transactionMs = evidence.transactedAt.getTime();
+  if (!Number.isFinite(transactionMs) || transactionMs > Date.now() + LATE_PAYMENT_SKEW_MS)
+    return { ok: false, error: "invalid transaction time" };
   return withTransaction(db, async (trx) => {
     const bankTxn = await insertBankTransactionIfNew(trx, evidence, "VERIFIED", "sepay.v1");
     if (bankTxn.kind === "DUPLICATE") return { ok: true, kind: "ALREADY_APPLIED" };
@@ -356,6 +360,7 @@ async function findLiveTopupByCustomer(
     where customer_id = ${customerId} and status in ('CREATED','PRESENTED')
     order by created_at desc
     limit 1
+    for update
   `.execute(exec);
   return result.rows[0] ? mapTopup(result.rows[0]) : null;
 }

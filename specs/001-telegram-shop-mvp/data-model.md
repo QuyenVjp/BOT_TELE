@@ -163,12 +163,12 @@ READY | DELIVERED -> COMPROMISED | REVOKED
 
 ### Stock-policy state machine (MVP)
 
-| Policy | Pre-payment | Post-payment |
-|---|---|---|
-| `LOCAL_ONLY` | MUST reserve one concrete local asset before Order+QR; no unit → typed stock failure (no Order/intent/QR) | Upgrade the reserved asset; never claim a second unit |
-| `LOCAL_THEN_SUPPLIER` | **Feature 001 = same as LOCAL_ONLY**: MUST reserve a local asset before Order+QR. No local unit → typed stock failure. Supplier is NOT consulted pre-payment | After payment, if the reserved local unit is gone, enter durable supplier/review/refund — NOT a silent second local claim. Full supplier capacity reservation remains mandatory future work |
-| `SUPPLIER_ONLY` | **BLOCKED in Feature 001**: excluded from purchasable catalog and Buy Now; no Order/intent/QR | T142/T143 remain open, but sale stays blocked until a real pre-payment capacity hold + reconciliation + refund contract lands |
-| `PAUSED`, null, unknown | Excluded/rejected as not sellable; no Order/intent/QR | N/A |
+| Policy                  | Pre-payment                                                                                                                                                  | Post-payment                                                                                                                                                                                |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `LOCAL_ONLY`            | MUST reserve one concrete local asset before Order+QR; no unit → typed stock failure (no Order/intent/QR)                                                    | Upgrade the reserved asset; never claim a second unit                                                                                                                                       |
+| `LOCAL_THEN_SUPPLIER`   | **Feature 001 = same as LOCAL_ONLY**: MUST reserve a local asset before Order+QR. No local unit → typed stock failure. Supplier is NOT consulted pre-payment | After payment, if the reserved local unit is gone, enter durable supplier/review/refund — NOT a silent second local claim. Full supplier capacity reservation remains mandatory future work |
+| `SUPPLIER_ONLY`         | **BLOCKED in Feature 001**: excluded from purchasable catalog and Buy Now; no Order/intent/QR                                                                | T142/T143 remain open, but sale stays blocked until a real pre-payment capacity hold + reconciliation + refund contract lands                                                               |
+| `PAUSED`, null, unknown | Excluded/rejected as not sellable; no Order/intent/QR                                                                                                        | N/A                                                                                                                                                                                         |
 
 **Why MVP collapses `LOCAL_THEN_SUPPLIER` to `LOCAL_ONLY` pre-payment:** Feature 001 has no supplier capacity guarantee and no supplier reservation protocol. Treating "no local unit → still mint a QR and hope supplier has stock after payment" reintroduces the exact money-for-no-goods race that FR-006a forbids. Scope change is recorded here so the two readings cannot coexist; when supplier capacity is real, a later feature may restore pre-payment supplier reservation.
 
@@ -332,10 +332,14 @@ the already-deployed `PENDING` and `FAILED` values are migrated forward to `RETR
 
 For Telegram, `envelope` is a bounded allowlisted command projection, never the entire raw update:
 numeric actor/chat/message references, private-chat type, allowlisted action, and an opaque signed
-callback token when present. Callback data is capped at Telegram's 64-byte bound. Free-form message
-text, username, credentials, and the raw payload are not persisted. Search/support text requires a
-separate approved bounded redaction/encryption/retention contract; until then only an allowlisted
-command token is durable. `raw_hash` preserves mutation detection without retaining raw content.
+callback token when present. Callback data is capped at Telegram's 64-byte bound. Unapproved free-form
+text, username, credentials, and the raw payload are not retained. The sole customer free-text
+exception is a private description admitted only when the Telegram identity maps to exactly one
+`WAITING_CUSTOMER` support ticket. Ingress redacts and bounds the description before persistence and
+stores its exact `supportDescriptionTicketId`; dispatch submits only to that ticket and the service
+rechecks ownership and current status. The raw description never enters the inbox; the bounded
+summary is removed from the inbox after processing or terminal failure and remains only in the
+support ticket. `raw_hash` preserves mutation detection without retaining raw content.
 
 Workers claim due rows in deterministic `(next_attempt_at, received_at, id)` order using bounded
 `FOR UPDATE SKIP LOCKED` batches. Retry uses bounded exponential backoff with jitter and a finite

@@ -67,6 +67,19 @@ export interface AdminOrderDetail {
   fulfillmentStatus: string | null;
   fulfillmentCreatedAt: string | null;
   manualTaskStatus: string | null;
+  fileDelivery?: {
+    jobId: string;
+    status: string;
+    outcome: "SENT" | "UNKNOWN" | "PROVEN_FAILURE" | null;
+    lastError: string | null;
+    artifactId: string;
+    artifactVersion: number;
+    artifactSha256: string;
+    attemptCount: number;
+    claimGeneration: number;
+    telegramMessageId: string | null;
+    sentAt: string | null;
+  };
   deliveryReview?: {
     assetStatus: string | null;
     assetRef: string | null;
@@ -80,6 +93,16 @@ export interface AdminOrderDetail {
     evidenceComplete: boolean;
   };
   messageStateId: string;
+}
+interface AdminOrderFileDeliveryState {
+  jobId: string;
+  status: string;
+  lastError: string | null;
+  artifactId: string;
+  artifactVersion: number;
+  artifactSha256: string;
+  claimGeneration: number;
+  telegramChatId: string;
 }
 
 interface OrderRow {
@@ -112,6 +135,7 @@ interface OrderDetailRow extends OrderRow {
   payment_settled_at: Date | string | null;
   fulfillment_created_at: Date | string | null;
   manual_task_status: string | null;
+  order_version: number;
   allocation_settled: boolean;
   asset_status: string | null;
   asset_ref: string | null;
@@ -122,6 +146,24 @@ interface OrderDetailRow extends OrderRow {
   provider_success_at: string | null;
   send_attempted_at: string | null;
   evidence_complete: boolean;
+  file_delivery_status: string | null;
+  file_delivery_telegram_chat_id: string | null;
+  file_delivery_last_error: string | null;
+  file_delivery_artifact_id: string | null;
+  file_delivery_artifact_version: number | null;
+  file_delivery_artifact_sha256: string | null;
+  file_delivery_attempt_count: number | null;
+  file_delivery_claim_generation: number | null;
+  file_delivery_sent_at: Date | string | null;
+  file_delivery_message_id: string | null;
+}
+function fileDeliveryOutcome(
+  status: string,
+  lastError: string | null,
+): "SENT" | "UNKNOWN" | "PROVEN_FAILURE" | null {
+  if (status === "SENT") return "SENT";
+  if (lastError === "SEND_UNCERTAIN") return "UNKNOWN";
+  return lastError ? "PROVEN_FAILURE" : null;
 }
 
 function clampLimit(limit?: number): number {
@@ -274,12 +316,48 @@ export async function listAdminOrders(
   return { items, nextStateId, filter, query };
 }
 
+function parseAdminOrderFileDeliveryState(value: unknown): AdminOrderFileDeliveryState | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.jobId === "string" &&
+    isId(candidate.jobId) &&
+    typeof candidate.status === "string" &&
+    candidate.status.length > 0 &&
+    candidate.status.length <= 32 &&
+    (candidate.lastError === null ||
+      (typeof candidate.lastError === "string" && candidate.lastError.length <= 128)) &&
+    typeof candidate.artifactId === "string" &&
+    isId(candidate.artifactId) &&
+    typeof candidate.artifactVersion === "number" &&
+    Number.isInteger(candidate.artifactVersion) &&
+    candidate.artifactVersion > 0 &&
+    typeof candidate.artifactSha256 === "string" &&
+    /^[a-f0-9]{64}$/u.test(candidate.artifactSha256) &&
+    typeof candidate.claimGeneration === "number" &&
+    Number.isInteger(candidate.claimGeneration) &&
+    candidate.claimGeneration >= 0 &&
+    typeof candidate.telegramChatId === "string" &&
+    /^[1-9][0-9]{0,19}$/u.test(candidate.telegramChatId)
+    ? {
+        jobId: candidate.jobId,
+        status: candidate.status,
+        lastError: candidate.lastError,
+        artifactId: candidate.artifactId,
+        artifactVersion: candidate.artifactVersion,
+        artifactSha256: candidate.artifactSha256,
+        claimGeneration: candidate.claimGeneration,
+        telegramChatId: candidate.telegramChatId,
+      }
+    : undefined;
+}
 export async function resolveAdminOrderState(
   exec: Executor,
   input: { adminTelegramUserId: string; stateId: string },
 ): Promise<{
   kind: AdminStateKind;
   orderId?: string;
+  orderVersion?: number;
+  fileDelivery?: AdminOrderFileDeliveryState;
   filter?: AdminOrderStatusFilter;
   query?: string | null;
   cursor?: string | null;
@@ -290,7 +368,19 @@ export async function resolveAdminOrderState(
     (state.kind === "ORDER_DETAIL" || state.kind === "ORDER_MESSAGE_PROMPT") &&
     typeof state.payload.orderId === "string"
   ) {
-    return { kind: state.kind, orderId: state.payload.orderId };
+    const orderVersion =
+      typeof state.payload.orderVersion === "number" &&
+      Number.isInteger(state.payload.orderVersion) &&
+      state.payload.orderVersion > 0
+        ? state.payload.orderVersion
+        : undefined;
+    const fileDelivery = parseAdminOrderFileDeliveryState(state.payload.fileDelivery);
+    return {
+      kind: state.kind,
+      orderId: state.payload.orderId,
+      ...(orderVersion === undefined ? {} : { orderVersion }),
+      ...(fileDelivery === undefined ? {} : { fileDelivery }),
+    };
   }
   if (state.kind === "ORDER_PAGE") {
     const filter =
@@ -320,6 +410,7 @@ export async function getAdminOrderDetail(
       case when cps.phone_shared_at is not null then cps.phone_number end as phone_number,
       cps.reachable,
       o.status,
+      o.version as order_version,
       o.price_vnd, o.product_name_vi, o.variant_name_vi, o.duration_code, o.delivery_type,
       o.fulfillment_type, o.supplier_policy_snapshot, o.paid_at, o.completed_at, o.created_at,
       pi.status as payment_status, pi.amount_vnd as payment_amount_vnd,
@@ -354,7 +445,17 @@ export async function getAdminOrderDetail(
         and dnh.payload_redacted->>'providerChatId' = coalesce(cps.telegram_user_id, ci.channel_user_id),
         false
       ) as evidence_complete,
-      mft.status as manual_task_status
+      mft.status as manual_task_status,
+      fdj.telegram_chat_id as file_delivery_telegram_chat_id,
+      fdj.status as file_delivery_status,
+      fdj.last_error as file_delivery_last_error,
+      fdj.artifact_id as file_delivery_artifact_id,
+      fdj.artifact_version as file_delivery_artifact_version,
+      fdj.artifact_sha256 as file_delivery_artifact_sha256,
+      fdj.attempt_count as file_delivery_attempt_count,
+      fdj.claim_generation as file_delivery_claim_generation,
+      fdj.sent_at as file_delivery_sent_at,
+      fdr.telegram_message_id as file_delivery_message_id
     from "order" o
     left join customer_profile_snapshot cps on cps.customer_id = o.customer_id
     left join channel_identity ci on ci.customer_id = o.customer_id and ci.channel = 'TELEGRAM'
@@ -387,15 +488,53 @@ export async function getAdminOrderDetail(
       order by created_at desc, id desc
       limit 1
     ) mft on true
+    left join lateral (
+      select order_id, status, last_error, artifact_id, artifact_version, artifact_sha256,
+             attempt_count, claim_generation, telegram_chat_id, telegram_file_id, sent_at
+      from file_delivery_job
+      where order_id = o.id
+      limit 1
+    ) fdj on true
+    left join lateral (
+      select metadata_redacted->>'telegramMessageId' as telegram_message_id
+      from audit_event
+      where action = 'file_delivery.sent'
+        and target_type = 'FileDeliveryJob'
+        and target_id = o.id
+      order by occurred_at desc, id desc
+      limit 1
+    ) fdr on true
     where o.id = ${input.orderId}
     limit 1
   `.execute(exec);
   const row = result.rows[0];
   if (!row) return null;
+  const fileDeliveryState =
+    row.file_delivery_status !== null &&
+    row.file_delivery_artifact_id !== null &&
+    row.file_delivery_artifact_version !== null &&
+    row.file_delivery_artifact_sha256 !== null &&
+    row.file_delivery_claim_generation !== null &&
+    row.file_delivery_telegram_chat_id !== null
+      ? {
+          jobId: row.id,
+          status: row.file_delivery_status,
+          lastError: row.file_delivery_last_error,
+          artifactId: row.file_delivery_artifact_id,
+          artifactVersion: row.file_delivery_artifact_version,
+          artifactSha256: row.file_delivery_artifact_sha256,
+          claimGeneration: row.file_delivery_claim_generation,
+          telegramChatId: row.file_delivery_telegram_chat_id,
+        }
+      : undefined;
   const messageStateId = await createAdminCallbackState(exec, {
     adminTelegramUserId: input.adminTelegramUserId,
     kind: "ORDER_MESSAGE_PROMPT",
-    payload: { orderId: row.id },
+    payload: {
+      orderId: row.id,
+      orderVersion: row.order_version,
+      ...(fileDeliveryState === undefined ? {} : { fileDelivery: fileDeliveryState }),
+    },
   });
   return {
     id: row.id,
@@ -430,6 +569,25 @@ export async function getAdminOrderDetail(
       ? new Date(row.fulfillment_created_at).toISOString()
       : null,
     manualTaskStatus: row.manual_task_status,
+    ...(row.file_delivery_status && row.file_delivery_artifact_id
+      ? {
+          fileDelivery: {
+            jobId: row.id,
+            status: row.file_delivery_status,
+            outcome: fileDeliveryOutcome(row.file_delivery_status, row.file_delivery_last_error),
+            lastError: row.file_delivery_last_error,
+            artifactId: row.file_delivery_artifact_id,
+            artifactVersion: row.file_delivery_artifact_version!,
+            artifactSha256: row.file_delivery_artifact_sha256!,
+            attemptCount: row.file_delivery_attempt_count!,
+            claimGeneration: row.file_delivery_claim_generation!,
+            telegramMessageId: row.file_delivery_message_id,
+            sentAt: row.file_delivery_sent_at
+              ? new Date(row.file_delivery_sent_at).toISOString()
+              : null,
+          },
+        }
+      : {}),
     ...(row.asset_ref || row.review_handoff_status
       ? {
           deliveryReview: {

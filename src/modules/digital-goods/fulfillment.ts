@@ -6,7 +6,7 @@ import { enqueueOutboxEvent } from "../../infrastructure/outbox/repository.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
 import { newId } from "../../shared/ids/index.js";
 import { findOrderById, findOrderByIdForUpdate, transitionOrder } from "../commerce/repository.js";
-import type { SupplierPort } from "../supplier/port.js";
+import type { SupplierPort, SupplierProvider } from "../supplier/port.js";
 import { issueDeliveryBundle } from "./delivery.js";
 import {
   claimLocalAssetInTransaction,
@@ -25,9 +25,8 @@ import { provisionFromSupplier } from "../supplier/service.js";
  *   3. mark the asset READY and issue a Delivery Bundle;
  *   4. transition the Order PAID → PROCESSING and emit DigitalAssetClaimed.
  *
- * When local stock is empty and a supplier port is wired, a later slice will
- * create an idempotent SupplierOrder; today the orchestrator returns
- * OUT_OF_STOCK / NEEDS_REVIEW rather than inventing a silent fulfillment.
+ * Supplier orders resolve the provider for the active selected supplier SKU
+ * immediately before provisioning. Local-stock paths never consult that resolver.
  *
  * Safe under crash/replay: every step is idempotent on its unique-effect key
  * (held asset per order, active bundle per order, outbox dedupe).
@@ -35,8 +34,7 @@ import { provisionFromSupplier } from "../supplier/service.js";
 
 export interface FulfillmentDeps {
   vault: Vault;
-  /** Optional supplier port; null disables the supplier path. */
-  supplier: SupplierPort | null;
+  resolveSupplier: (supplierId: string) => Promise<SupplierPort | SupplierProvider | null>;
   deliveryBaseUrl: string;
   bundleTtlSeconds: number;
   deliveryTokenKeys?: readonly string[];
@@ -165,13 +163,6 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
 
   let assetId: string | null = null;
   if (order.fulfillmentType === "SUPPLIER_API") {
-    if (!deps.supplier) {
-      return {
-        ok: false,
-        code: "NEEDS_REVIEW",
-        message: "Chưa cấu hình nhà cung cấp cho đơn hàng này.",
-      };
-    }
     const supplierSku = await sql<{
       supplier_id: string;
       supplier_sku_id: string;
@@ -183,10 +174,9 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
       from supplier_sku ss
       join supplier s on s.id = ss.supplier_id
       where ss.variant_id = ${order.variantId}
-        and (ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId}) or (select supplier_sku_id from product_variant where id = ${order.variantId}) is null)
+        and ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId})
         and ss.is_active
         and s.status = 'ACTIVE'
-      order by case when ss.id = (select supplier_sku_id from product_variant where id = ${order.variantId}) then 0 else 1 end, ss.id asc
     `.execute(db);
     const sku = supplierSku.rows[0];
     if (!sku) {
@@ -196,6 +186,21 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
         message: "Không tìm thấy SKU nhà cung cấp đang hoạt động.",
       };
     }
+
+    let provider: SupplierPort | SupplierProvider | null = null;
+    try {
+      provider = await deps.resolveSupplier(sku.supplier_id);
+    } catch {
+      provider = null;
+    }
+    if (!provider || ("providerKey" in provider && provider.providerKey !== sku.supplier_id)) {
+      return {
+        ok: false,
+        code: "NEEDS_REVIEW",
+        message: "Chưa cấu hình nhà cung cấp cho đơn hàng này.",
+      };
+    }
+
     const provision = await provisionFromSupplier(db, {
       orderId,
       supplierId: sku.supplier_id,
@@ -208,11 +213,20 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
       durationCode: order.durationCode,
       region: sku.region,
       correlationId,
-      port: deps.supplier,
+      port: provider,
+      purchaseEnabled: true,
       vault: deps.vault,
       idempotencyKey: `${orderId}:${sku.supplier_sku_id}`,
     });
-    if (!provision.ok) return provision;
+    if (!provision.ok) {
+      const code =
+        provision.code === "NOT_FOUND"
+          ? "NOT_FOUND"
+          : provision.code === "NOT_PAID"
+            ? "NOT_PAID"
+            : "NEEDS_REVIEW";
+      return { ok: false, code, message: provision.message };
+    }
     if (provision.kind === "UNKNOWN") {
       return {
         ok: false,
@@ -275,17 +289,10 @@ export async function fulfillPaidOrder(db: Db, input: FulfillInput): Promise<Ful
     });
 
     if (!prepared.ok) {
-      if (deps.supplier === null) {
-        return {
-          ok: false,
-          code: "OUT_OF_STOCK",
-          message: "Không còn tài khoản khả dụng cho sản phẩm này.",
-        };
-      }
       return {
         ok: false,
-        code: "NEEDS_REVIEW",
-        message: "Hết hàng nội bộ; chờ đối soát nhà cung cấp.",
+        code: "OUT_OF_STOCK",
+        message: "Không còn tài khoản khả dụng cho sản phẩm này.",
       };
     }
     assetId = prepared.assetId;

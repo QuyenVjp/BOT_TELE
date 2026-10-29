@@ -9,6 +9,7 @@ import {
   type OutboundPolicyCode,
 } from "../../src/infrastructure/net/outbound-policy.js";
 import { createInMemoryVault } from "../../src/infrastructure/vault/testing-adapter.js";
+import type { Vault } from "../../src/infrastructure/vault/port.js";
 import { createHttpSupplierPort } from "../../src/modules/supplier/adapters/http.js";
 import { SupplierPortError } from "../../src/modules/supplier/port.js";
 
@@ -344,15 +345,26 @@ describe("loopback test-mode escape hatch", () => {
 });
 
 describe("http supplier adapter is wired to the policy", () => {
-  /** Fixture material only: never a real credential, and short enough not to be secret-shaped. */
-  const SUPPLIER_FIXTURE_TOKEN = "fixture-token";
+  /** Fixture material only: valid printable test credential, never a real secret. */
+  const SUPPLIER_FIXTURE_MATERIAL = "test-only-supplier-auth-value";
+  const SUPPLIER_FIXTURE_REF = "vault:test:ssrf-supplier";
+  function supplierVault(): Vault {
+    const vault = createInMemoryVault();
+    return {
+      ...vault,
+      reveal: async (ref) => {
+        if (ref === SUPPLIER_FIXTURE_REF) return SUPPLIER_FIXTURE_MATERIAL;
+        return vault.reveal(ref);
+      },
+    };
+  }
   function port(baseUrl: string, overrides: Record<string, unknown> = {}) {
     return createHttpSupplierPort({
       baseUrl,
-      token: SUPPLIER_FIXTURE_TOKEN,
+      credentialVaultRef: SUPPLIER_FIXTURE_REF,
       timeoutMs: 500,
       maxAttempts: 2,
-      vault: createInMemoryVault(),
+      vault: supplierVault(),
       ...overrides,
     });
   }

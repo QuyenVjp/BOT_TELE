@@ -1,4 +1,5 @@
 import { newId } from "../../../shared/ids/index.js";
+import type { Vault } from "../../../infrastructure/vault/port.js";
 import type {
   AssetEnvelope,
   CreateOrderInput,
@@ -8,7 +9,13 @@ import type {
   SupplierPort,
   AvailabilityResult,
 } from "../port.js";
-import { parseCreateOrderResult, parseQueryOrderResult } from "../port.js";
+import {
+  parseAvailabilityResult,
+  parseCreateOrderResult,
+  parseQueryOrderResult,
+  parseSupplierActionResult,
+  SupplierPortError,
+} from "../port.js";
 
 /**
  * Sandbox / primary supplier adapter (T068).
@@ -30,8 +37,8 @@ export type SandboxMode = "fulfill" | "reject" | "timeout" | "timeout-then-fulfi
 
 export interface SandboxOptions {
   mode: SandboxMode;
-  /** Optional fixed vault ref for fulfilled envelopes (defaults to a fresh one). */
-  vaultRef?: string;
+  /** Real vault used to store fixture asset material. */
+  vault: Vault;
 }
 
 interface Stored {
@@ -44,14 +51,23 @@ interface Stored {
   recoverOnQuery: boolean;
 }
 
-function makeEnvelope(input: CreateOrderInput, vaultRef: string): AssetEnvelope {
+async function makeEnvelope(
+  input: CreateOrderInput,
+  vault: Vault,
+  externalOrderId: string,
+): Promise<AssetEnvelope> {
+  const supplierAssetId = "sa-" + newId().slice(-10);
+  const vaultRef = await vault.write(`fixture-asset:${externalOrderId}:${supplierAssetId}`, {
+    namespace: "asset",
+    idempotencyKey: `supplier:${externalOrderId}:${supplierAssetId}`,
+  });
   return {
     deliveryType: "CREDENTIAL",
     expectedSku: input.supplierSku,
     region: input.region ?? null,
     durationCode: "P1M",
     expiresAt: null,
-    supplierAssetId: "sa-" + newId().slice(-10),
+    supplierAssetId,
     fingerprint: "fp-" + newId().slice(-16),
     vaultRef,
   };
@@ -70,20 +86,21 @@ export function createSandboxSupplierAdapter(options: SandboxOptions): SupplierP
 
   return {
     getAvailability(): Promise<AvailabilityResult> {
-      return Promise.resolve({
-        status: options.mode === "reject" ? "OUT" : "AVAILABLE",
-        observedAt: new Date().toISOString(),
-      });
+      return Promise.resolve(
+        parseAvailabilityResult({
+          status: options.mode === "reject" ? "OUT" : "AVAILABLE",
+          observedAt: new Date().toISOString(),
+        }),
+      );
     },
 
-    createOrder(input: CreateOrderInput): Promise<CreateOrderResult> {
+    async createOrder(input: CreateOrderInput): Promise<CreateOrderResult> {
       // Idempotency: return the original result for a repeated key.
       const existing = byIdempotency.get(input.idempotencyKey);
-      if (existing) return Promise.resolve(existing.result);
+      if (existing) return existing.result;
 
       const externalOrderId = "ext-" + newId().slice(-12);
       const queryKey = "qk-" + input.idempotencyKey;
-      const vaultRef = options.vaultRef ?? `vault:${newId()}`;
 
       let raw: CreateOrderResult;
       switch (options.mode) {
@@ -101,7 +118,7 @@ export function createSandboxSupplierAdapter(options: SandboxOptions): SupplierP
           raw = {
             kind: "FULFILLED",
             externalOrderId,
-            assetEnvelope: makeEnvelope(input, vaultRef),
+            assetEnvelope: await makeEnvelope(input, options.vault, externalOrderId),
           };
           break;
       }
@@ -115,22 +132,28 @@ export function createSandboxSupplierAdapter(options: SandboxOptions): SupplierP
         createInput: input,
         recoverOnQuery: options.mode === "timeout-then-fulfill",
       });
-      return Promise.resolve(result);
+      return result;
     },
 
-    queryOrder(input: QueryOrderInput): Promise<QueryOrderResult> {
+    async queryOrder(input: QueryOrderInput): Promise<QueryOrderResult> {
       const stored =
         (input.queryKey ? byQueryKey.get(input.queryKey) : undefined) ??
         (input.externalOrderId ? byExternal.get(input.externalOrderId) : undefined);
 
+      if (
+        stored &&
+        input.expectedSku !== undefined &&
+        input.expectedSku !== stored.createInput.supplierSku
+      ) {
+        throw new SupplierPortError("IDENTITY_MISMATCH", "supplier order identity mismatch");
+      }
+
       if (!stored) {
         // Unknown key: return a rejected observation so the domain can stop retrying.
-        return Promise.resolve(
-          parseQueryOrderResult({
-            status: "REJECTED",
-            externalOrderId: input.externalOrderId ?? input.queryKey ?? "unknown",
-          }),
-        );
+        return parseQueryOrderResult({
+          status: "REJECTED",
+          externalOrderId: input.externalOrderId ?? input.queryKey ?? "unknown",
+        });
       }
 
       // timeout-then-fulfill: the create was UNKNOWN, but the upstream order
@@ -140,48 +163,47 @@ export function createSandboxSupplierAdapter(options: SandboxOptions): SupplierP
         const envelope =
           stored.result.kind === "FULFILLED"
             ? stored.result.assetEnvelope
-            : makeEnvelope(stored.createInput, options.vaultRef ?? `vault:${newId()}`);
-        return Promise.resolve(
-          parseQueryOrderResult({
-            status: "FULFILLED",
+            : await makeEnvelope(stored.createInput, options.vault, stored.externalOrderId);
+        if (stored.result.kind !== "FULFILLED") {
+          stored.result = parseCreateOrderResult({
+            kind: "FULFILLED",
             externalOrderId: stored.externalOrderId,
             assetEnvelope: envelope,
-          }),
-        );
+          });
+        }
+        return parseQueryOrderResult({
+          status: "FULFILLED",
+          externalOrderId: stored.externalOrderId,
+          assetEnvelope: envelope,
+        });
       }
 
       if (stored.result.kind === "FULFILLED") {
-        return Promise.resolve(
-          parseQueryOrderResult({
-            status: "FULFILLED",
-            externalOrderId: stored.externalOrderId,
-            assetEnvelope: stored.result.assetEnvelope,
-          }),
-        );
+        return parseQueryOrderResult({
+          status: "FULFILLED",
+          externalOrderId: stored.externalOrderId,
+          assetEnvelope: stored.result.assetEnvelope,
+        });
       }
       if (stored.result.kind === "REJECTED") {
-        return Promise.resolve(
-          parseQueryOrderResult({
-            status: "REJECTED",
-            externalOrderId: stored.externalOrderId,
-          }),
-        );
+        return parseQueryOrderResult({
+          status: "REJECTED",
+          externalOrderId: stored.externalOrderId,
+        });
       }
       // ACCEPTED / UNKNOWN without recovery → still pending.
-      return Promise.resolve(
-        parseQueryOrderResult({
-          status: "PENDING",
-          externalOrderId: stored.externalOrderId,
-        }),
-      );
+      return parseQueryOrderResult({
+        status: "PENDING",
+        externalOrderId: stored.externalOrderId,
+      });
     },
 
     cancelOrder() {
-      return Promise.resolve({ status: "ACCEPTED" as const });
+      return Promise.resolve(parseSupplierActionResult({ status: "ACCEPTED" }));
     },
 
     requestRefund() {
-      return Promise.resolve({ status: "PENDING" as const });
+      return Promise.resolve(parseSupplierActionResult({ status: "PENDING" }));
     },
 
     reconcile() {

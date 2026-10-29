@@ -361,6 +361,62 @@ describe("warranty claims", () => {
     expect(claim.rows[0]!.status).toBe("REFUND_DUE");
   });
 
+  it("refuses rejection after a refund obligation is opened and leaves payment settleable", async () => {
+    const fixture = await seed();
+    const opened = await openWarrantyClaim({
+      db: ctx.handle.db,
+      customerId: fixture.customerId,
+      orderId: fixture.orderId,
+      assetId: fixture.assetId,
+      issueType: "LOST_BENEFITS",
+      correlationId: "reject-after-refund-approval",
+      now: new Date(fixture.completedAt.getTime() + 18 * DAY),
+    });
+    if (!opened.ok) throw new Error("claim not opened");
+
+    await verifyClaimDefect(await admin(opened.claimId));
+    await approveClaimRefund(await admin(opened.claimId));
+
+    expect(
+      await rejectClaim({
+        ...(await admin(opened.claimId)),
+        reason: "Không đủ điều kiện",
+      }),
+    ).toMatchObject({ ok: false, code: "ILLEGAL_STATE" });
+
+    const beforePayment = await sql<{ claim_status: string; obligation_status: string }>`
+      select c.status as claim_status, o.status as obligation_status
+      from warranty_claim c
+      join shop_refund_obligation o on o.id = c.refund_obligation_id
+      where c.id = ${opened.claimId}
+    `.execute(ctx.handle.db);
+    expect(beforePayment.rows[0]).toMatchObject({
+      claim_status: "REFUND_DUE",
+      obligation_status: "OPEN",
+    });
+
+    const paid = await markRefundPaid({
+      ...(await admin(opened.claimId)),
+      payoutReference: "FT-AFTER-REJECT-GUARD",
+    });
+    const replay = await markRefundPaid(await admin(opened.claimId));
+    expect(paid).toMatchObject({ ok: true, status: "REFUND_PAID" });
+    expect(replay).toMatchObject({ ok: true, idempotent: true });
+
+    const settled = await sql<{ claim_status: string; obligation_status: string; n: string }>`
+      select c.status as claim_status, o.status as obligation_status, count(*)::text as n
+      from warranty_claim c
+      join shop_refund_obligation o on o.id = c.refund_obligation_id
+      where c.id = ${opened.claimId}
+      group by c.status, o.status
+    `.execute(ctx.handle.db);
+    expect(settled.rows[0]).toMatchObject({
+      claim_status: "REFUND_PAID",
+      obligation_status: "PAID",
+      n: "1",
+    });
+  });
+
   it("marks a refund paid once, only from REFUND_DUE, and never twice", async () => {
     const fixture = await seed();
     const opened = await openWarrantyClaim({

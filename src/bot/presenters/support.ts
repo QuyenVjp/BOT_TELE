@@ -92,6 +92,47 @@ export function presentSupportReasonMenu(orderNumber?: string): PresentedMessage
   };
 }
 
+/** Durable free-text step; the callback carries the opaque draft ticket id. */
+export function presentDescriptionPrompt(input: {
+  ticketId: string;
+  orderNumber?: string | null;
+  reasonCode: SupportReasonCode;
+}): PresentedMessage {
+  const lines = [
+    SUPPORT_COPY.title,
+    "",
+    `Chủ đề: ${REASON_LABEL[input.reasonCode]}`,
+    SUPPORT_COPY.descriptionPrompt,
+  ];
+  if (input.orderNumber) lines.push(`Đơn: ${input.orderNumber}`);
+  return {
+    text: lines.join("\n"),
+    buttons: [
+      [{ text: "Huỷ yêu cầu", callbackData: `sup:description:cancel:${input.ticketId}` }],
+      [{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }],
+    ],
+  };
+}
+
+export function presentDescriptionSubmitted(input: {
+  ticketId: string;
+  orderNumber?: string | null;
+  reasonCode: SupportReasonCode;
+}): PresentedMessage {
+  return presentTicketOpened({
+    ticketId: input.ticketId,
+    reasonCode: input.reasonCode,
+    ...(input.orderNumber !== undefined ? { orderNumber: input.orderNumber } : {}),
+  });
+}
+
+export function presentDescriptionCancelled(): PresentedMessage {
+  return {
+    text: "Đã huỷ yêu cầu hỗ trợ đang chờ mô tả.",
+    buttons: [[{ text: SUPPORT_COPY.mainMenu, callbackData: "menu:main" }]],
+  };
+}
+
 /** Confirmation after a ticket is opened. */
 export function presentTicketOpened(input: {
   ticketId: string;

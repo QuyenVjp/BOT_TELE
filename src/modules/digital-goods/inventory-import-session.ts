@@ -957,7 +957,13 @@ export async function stageInventoryImportInput(
   | { ok: true; preview: InventoryPreviewResult; inputVaultRef: string; generation: string }
   | {
       ok: false;
-      code: "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "INVALID_INPUT" | "NOT_FOUND" | "EXPIRED";
+      code:
+        | "NOT_ROOT_ADMIN"
+        | "WRONG_CONTEXT"
+        | "INVALID_INPUT"
+        | "IMPORT_LIMIT_EXCEEDED"
+        | "NOT_FOUND"
+        | "EXPIRED";
     }
 > {
   const adminTelegramUserId = String(input.actor.numericUserId);
@@ -1108,6 +1114,7 @@ export async function stageInventoryImportDocument(
         | "NOT_ROOT_ADMIN"
         | "WRONG_CONTEXT"
         | "INVALID_INPUT"
+        | "IMPORT_LIMIT_EXCEEDED"
         | "NOT_FOUND"
         | "EXPIRED"
         | "UNSUPPORTED_DOCUMENT";
@@ -1128,7 +1135,10 @@ type ConfirmSessionOutcome =
   | { kind: "NOT_READY" }
   | { kind: "EXPIRED"; session: InventoryImportSession }
   | { kind: "COMMITTED"; session: InventoryImportSession }
-  | { kind: "FAILED"; code: "INVALID_INPUT" | "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" }
+  | {
+      kind: "FAILED";
+      code: "INVALID_INPUT" | "NOT_ROOT_ADMIN" | "WRONG_CONTEXT" | "IMPORT_LIMIT_EXCEEDED";
+    }
   | { kind: "OK"; summary: InventoryImportResult; reused: boolean };
 
 export async function confirmInventoryImportSession(
@@ -1144,6 +1154,7 @@ export async function confirmInventoryImportSession(
         | "NOT_ROOT_ADMIN"
         | "WRONG_CONTEXT"
         | "INVALID_INPUT"
+        | "IMPORT_LIMIT_EXCEEDED"
         | "NOT_FOUND"
         | "NOT_READY"
         | "BUSY"

@@ -49,8 +49,9 @@ credential blindly until the owner checks the reconciliation path.
 - Open `➕ Nhập tài khoản`, select a stock variant, submit one disposable test account, and
   inspect the safe preview. The workbook remains unchanged.
 - Confirm once. Verify PostgreSQL has one `AVAILABLE` asset and the Sheet projection later
-  shows only masked login, fingerprint and status. Verify no raw credential appears in
-  `Requests`, `Audit`, logs or database text fields.
+  shows only masked login, fingerprint and status. No raw credentials or Vault references
+  appear anywhere in the workbook, including projection tabs, Requests and Audit. Verify no
+  raw credential appears in logs or database text fields.
 - Repeat the confirm click. It must replay the terminal safe summary without creating a
   second asset.
 - Try a different workbook or non-owner Google account. The backend must reject before

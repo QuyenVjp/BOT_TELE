@@ -200,5 +200,4 @@ describe("order history BOLA + pagination (FR-018 / SR-003)", () => {
       }),
     ).resolves.toEqual([]);
   });
-
 });

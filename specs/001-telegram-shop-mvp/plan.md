@@ -45,21 +45,21 @@ sole numeric Telegram root admin; no policy bypass
 
 ## Constitution Check
 
-*GATE: design artifacts re-checked after the 2026-07-17 Gate 0 correction; implementation and
-release gates remain REQUEST_CHANGES until the open production paths are proven.*
+_GATE: design artifacts re-checked after the 2026-07-17 Gate 0 correction; implementation and
+release gates remain REQUEST_CHANGES until the open production paths are proven._
 
-| Gate | Status | Evidence |
-|---|---|---|
-| Customer-first retail scope | PASS | Spec Out of Scope; no wallet/cart/reseller surface |
-| VietQR initiation + verified SePay truth | PASS | FR-008–FR-012; payment contract |
-| Exactly-once settlement/supplier/allocation/delivery | PASS | FR-010, FR-014–FR-017; idempotency keys in data model/contracts |
-| Vault-only secrets | PASS | SR-001; Digital Asset and Delivery Bundle model |
-| Sole numeric admin | PASS | FR-021–FR-023; Telegram command contract |
-| Explicit state machines | PASS | data-model.md covers all state owners and guards |
-| Contract-first external adapters | PASS | contracts/telegram-ux.md, payment-sepay.md, supplier-port.md, delivery.md |
-| Test-first recovery and reconciliation | PASS | quickstart.md plus task ordering requirement |
-| Policy and resale launch gates | PASS | SR-007–SR-008; activation and readiness gates |
-| Critical/High design findings | DESIGN PASS | Revised Spec Kit analysis resolves G2-01 through G2-06 with T179–T190 ownership; implementation, staging, and release gates remain open and Feature 001 stays REQUEST_CHANGES |
+| Gate                                                 | Status      | Evidence                                                                                                                                                                      |
+| ---------------------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Customer-first retail scope                          | PASS        | Spec Out of Scope; no wallet/cart/reseller surface                                                                                                                            |
+| VietQR initiation + verified SePay truth             | PASS        | FR-008–FR-012; payment contract                                                                                                                                               |
+| Exactly-once settlement/supplier/allocation/delivery | PASS        | FR-010, FR-014–FR-017; idempotency keys in data model/contracts                                                                                                               |
+| Vault-only secrets                                   | PASS        | SR-001; Digital Asset and Delivery Bundle model                                                                                                                               |
+| Sole numeric admin                                   | PASS        | FR-021–FR-023; Telegram command contract                                                                                                                                      |
+| Explicit state machines                              | PASS        | data-model.md covers all state owners and guards                                                                                                                              |
+| Contract-first external adapters                     | PASS        | contracts/telegram-ux.md, payment-sepay.md, supplier-port.md, delivery.md                                                                                                     |
+| Test-first recovery and reconciliation               | PASS        | quickstart.md plus task ordering requirement                                                                                                                                  |
+| Policy and resale launch gates                       | PASS        | SR-007–SR-008; activation and readiness gates                                                                                                                                 |
+| Critical/High design findings                        | DESIGN PASS | Revised Spec Kit analysis resolves G2-01 through G2-06 with T179–T190 ownership; implementation, staging, and release gates remain open and Feature 001 stays REQUEST_CHANGES |
 
 ### Post-design re-check
 
@@ -100,17 +100,17 @@ flowchart LR
 
 ### Module ownership
 
-| Module | Owns | Does not own |
-|---|---|---|
-| Identity/Admin | Customer/channel mapping, sole-admin policy, admin confirmations | Order/payment mutation |
-| Catalog/Search | Category, Product, Variant, aliases, bounded search filters | Inventory claim, generated product facts |
-| Commerce | Order snapshot and Order transitions | SePay verification, raw credential |
-| Payments | Payment Intent, Bank Transaction, evidence, allocation, discrepancy, refund request | Fulfillment |
-| Digital Goods | Asset lifecycle, reservation/claim, Delivery Bundle, replacement | Payment truth, supplier transport |
-| Supplier | Supplier credential reference, SKU mapping, Supplier Order and reconciliation | Customer-facing facts, internal Order truth |
-| Support | Ticket lifecycle and linked context | Mark-paid, direct refund, credential reveal |
-| Risk/Ingress | Telegram/provider verification, dedupe, rate/body limits | Domain business decisions |
-| Outbox/Worker | Reliable side-effect dispatch and retry/DLQ | Authoritative business state |
+| Module         | Owns                                                                                | Does not own                                |
+| -------------- | ----------------------------------------------------------------------------------- | ------------------------------------------- |
+| Identity/Admin | Customer/channel mapping, sole-admin policy, admin confirmations                    | Order/payment mutation                      |
+| Catalog/Search | Category, Product, Variant, aliases, bounded search filters                         | Inventory claim, generated product facts    |
+| Commerce       | Order snapshot and Order transitions                                                | SePay verification, raw credential          |
+| Payments       | Payment Intent, Bank Transaction, evidence, allocation, discrepancy, refund request | Fulfillment                                 |
+| Digital Goods  | Asset lifecycle, reservation/claim, Delivery Bundle, replacement                    | Payment truth, supplier transport           |
+| Supplier       | Supplier credential reference, SKU mapping, Supplier Order and reconciliation       | Customer-facing facts, internal Order truth |
+| Support        | Ticket lifecycle and linked context                                                 | Mark-paid, direct refund, credential reveal |
+| Risk/Ingress   | Telegram/provider verification, dedupe, rate/body limits                            | Domain business decisions                   |
+| Outbox/Worker  | Reliable side-effect dispatch and retry/DLQ                                         | Authoritative business state                |
 
 ## Project Structure
 
@@ -205,17 +205,17 @@ No constitution violation or speculative abstraction is accepted. Redis/BullMQ r
 the first implementation may use PostgreSQL outbox polling alone if pilot measurements do not
 justify a second runtime dependency.
 
-| Decision | Why simpler alternative rejected | Date |
-|---|---|---|
-| Pre-payment asset reservation in the Order transaction | Creating Payment Intent first and claiming after payment lets multiple customers pay for one final unit (P0 money-loss). Click-time arbitration is unfair under Telegram latency. | 2026-07-16 |
-| Outbox fencing token on every ack/fail | Lease-only claim without owner/generation predicates lets a stale worker overwrite a reclaimer after lease expiry. | 2026-07-16 |
-| Durable AdminConfirmation in PostgreSQL | In-memory confirmation Map loses high-risk actions across restart and creates a consume-before-apply crash window. | 2026-07-16 |
-| Branded `VerifiedSePayEvidence` boundary | Accepting forgeable raw `PaymentEvidence` into settlement and writing `SIGNATURE_STATUS='VERIFIED'` fail-opens payment. | 2026-07-16 |
-| Split SePay merchant identity vs VietQR beneficiary account | Collapsing both into one config value can render a QR that settles against a different matched account. | 2026-07-16 |
-| Feature 001 supplier fail-closed allowlist | Minting a QR for `SUPPLIER_ONLY` without a pre-payment capacity hold can accept money for unavailable goods; hiding it is temporary while T143 and the future capacity contract remain open. | 2026-07-17 |
-| `FOR SHARE OF v,p,c` for checkout revalidation | Buyer `FOR UPDATE` locks on shared product/category rows serialize unrelated variants. Shared row locks keep buyers compatible while still blocking concurrent admin update/deactivate until checkout commits. | 2026-07-17 |
-| Transaction-level contention retry | Sleeping repeatedly inside a transaction holds catalog and pool resources. A single `SKIP LOCKED` probe per transaction plus bounded retry of the whole transaction preserves rollback recovery with bounded occupancy. | 2026-07-17 |
-| Separate active-hold and delivered-history queries | One unordered query over `RESERVED|READY|DELIVERED` can re-deliver an old credential or attach a replacement case to the new asset. State-specific deterministic queries preserve both fulfillment and history. | 2026-07-17 |
+| Decision                                                    | Why simpler alternative rejected                                                                                                                                                                                        | Date       |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| Pre-payment asset reservation in the Order transaction      | Creating Payment Intent first and claiming after payment lets multiple customers pay for one final unit (P0 money-loss). Click-time arbitration is unfair under Telegram latency.                                       | 2026-07-16 |
+| Outbox fencing token on every ack/fail                      | Lease-only claim without owner/generation predicates lets a stale worker overwrite a reclaimer after lease expiry.                                                                                                      | 2026-07-16 |
+| Durable AdminConfirmation in PostgreSQL                     | In-memory confirmation Map loses high-risk actions across restart and creates a consume-before-apply crash window.                                                                                                      | 2026-07-16 |
+| Branded `VerifiedSePayEvidence` boundary                    | Accepting forgeable raw `PaymentEvidence` into settlement and writing `SIGNATURE_STATUS='VERIFIED'` fail-opens payment.                                                                                                 | 2026-07-16 |
+| Split SePay merchant identity vs VietQR beneficiary account | Collapsing both into one config value can render a QR that settles against a different matched account.                                                                                                                 | 2026-07-16 |
+| Feature 001 supplier fail-closed allowlist                  | Minting a QR for `SUPPLIER_ONLY` without a pre-payment capacity hold can accept money for unavailable goods; hiding it is temporary while T143 and the future capacity contract remain open.                            | 2026-07-17 |
+| `FOR SHARE OF v,p,c` for checkout revalidation              | Buyer `FOR UPDATE` locks on shared product/category rows serialize unrelated variants. Shared row locks keep buyers compatible while still blocking concurrent admin update/deactivate until checkout commits.          | 2026-07-17 |
+| Transaction-level contention retry                          | Sleeping repeatedly inside a transaction holds catalog and pool resources. A single `SKIP LOCKED` probe per transaction plus bounded retry of the whole transaction preserves rollback recovery with bounded occupancy. | 2026-07-17 |
+| Separate active-hold and delivered-history queries          | One unordered query over `RESERVED                                                                                                                                                                                      | READY      | DELIVERED` can re-deliver an old credential or attach a replacement case to the new asset. State-specific deterministic queries preserve both fulfillment and history. | 2026-07-17 |
 
 ## Follow-up review remediation (2026-07-16)
 
@@ -240,7 +240,10 @@ Phase 8 or partial Phase 9 checkmarks as pilot-ready. Required sequencing:
   `011_ai_support.sql`; no future feature may reuse an earlier prefix.
 - PostgreSQL is authoritative for receipt, mutation detection, retry, leases, dead-letter state, and
   retention. The durable envelope is the allowlisted projection defined in `data-model.md`; raw
-  Telegram JSON and free text are not stored.
+  Telegram JSON and unredacted free text are not stored. The sole customer-text exception is a bounded,
+  redacted description admitted for a private Telegram identity with exactly one `WAITING_CUSTOMER`
+  ticket; its internal ticket ID is retained through retry and dispatch, which cannot retarget it to
+  another ticket. All other unapproved free text is dropped.
 - HTTP commits the envelope then acknowledges; bounded workers perform rate limiting and business
   dispatch. PostgreSQL provides the required atomic multi-instance rate-limit implementation and is
   the production fallback if Redis is unavailable; in-memory buckets remain explicit test/dev only.
@@ -297,8 +300,8 @@ Phase 8 or partial Phase 9 checkmarks as pilot-ready. Required sequencing:
   -> supplier fulfillment -> delivery invariants -> VietQR image/scan -> Telegram runtime -> compiled
   staging -> release evidence. T153 remains last.
 
-6. External vault, HTTP supplier, signed delivery session, real Telegram notifier, QR image.
-7. Production `migrate:prod` from `dist`, honest Docker skip/CI, SHA-bound evidence, independent
+1. External vault, HTTP supplier, signed delivery session, real Telegram notifier, QR image.
+2. Production `migrate:prod` from `dist`, honest Docker skip/CI, SHA-bound evidence, independent
    review with zero Critical/High.
 
 ### Runtime evidence contract

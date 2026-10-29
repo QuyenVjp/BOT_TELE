@@ -90,7 +90,7 @@ describe("supplier mapping first-attempt claim", () => {
         (id, name, adapter_type, credential_vault_ref, status, provider_capabilities)
       values
         (${supplierId}, 'Race supplier', 'sandbox', 'vault:race', 'ACTIVE',
-         '["CATALOG_LIST","ORDER_CREATE"]'::jsonb)
+         '["CATALOG_LIST","ORDER_CREATE","DELIVERY_PAYLOAD"]'::jsonb)
     `.execute(ctx.db);
     await sql`
       insert into supplier_sku
@@ -125,10 +125,12 @@ describe("supplier mapping first-attempt claim", () => {
          'race-fingerprint', 'SUBMITTED', 120000, 199000, 79000, null, 0)
     `.execute(ctx.db);
 
-    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill" });
+    const vault = createInMemoryVault();
+    const sandbox = createSandboxSupplierAdapter({ mode: "fulfill", vault });
     let createCalls = 0;
     const port = {
       ...sandbox,
+      providerKey: supplierId,
       async createOrder(input: Parameters<typeof sandbox.createOrder>[0]) {
         createCalls += 1;
         return sandbox.createOrder(input);
@@ -171,7 +173,7 @@ describe("supplier mapping first-attempt claim", () => {
         correlationId: "supplier-mapping-claim-race",
         idempotencyKey,
         port,
-        vault: createInMemoryVault(),
+        vault,
         purchaseEnabled: true,
       });
 

@@ -6,7 +6,6 @@ import {
   type DispatchDecision,
 } from "../../infrastructure/outbox/dispatch-policy.js";
 import type { Vault } from "../../infrastructure/vault/port.js";
-import type { SupplierPort } from "../supplier/port.js";
 import { fulfillPaidOrder, type FulfillmentDeps } from "./fulfillment.js";
 import type { FulfillmentTelemetry } from "./telemetry.js";
 import { createDeliveryNotificationHandoff } from "./delivery-notification.js";
@@ -18,6 +17,7 @@ import {
 import {
   processFileDelivery,
   queueFileDelivery,
+  type ProcessFileDeliveryResult,
   type TelegramDocumentSender,
 } from "./file-delivery.js";
 
@@ -50,7 +50,7 @@ export interface DeliveryNotifier {
 export interface FulfillmentHandlerDeps {
   db: Db;
   vault: Vault;
-  supplier: SupplierPort | null;
+  resolveSupplier: FulfillmentDeps["resolveSupplier"];
   deliveryBaseUrl: string;
   bundleTtlSeconds: number;
   notifier?: DeliveryNotifier;
@@ -69,6 +69,135 @@ function payloadOf(event: OutboxEvent): Record<string, unknown> {
   return event.payloadRedacted ?? {};
 }
 
+function classifyFileDeliveryRetryResult(result: ProcessFileDeliveryResult): DispatchDecision {
+  if (result.ok) return { kind: "PUBLISHED" };
+  if (
+    result.code === "JOB_NOT_FOUND" ||
+    result.code === "ORDER_NOT_PAID" ||
+    result.code === "SEND_UNCERTAIN"
+  ) {
+    return { kind: "TERMINAL_REVIEW", errorCode: result.code };
+  }
+  return { kind: "RETRY", errorCode: result.code };
+}
+
+async function handleFileDeliveryRetry(
+  deps: FulfillmentHandlerDeps,
+  event: OutboxEvent,
+): Promise<DispatchDecision> {
+  if (!deps.fileDelivery) return { kind: "RETRY", errorCode: "FILE_DELIVERY_NOT_CONFIGURED" };
+  const payload = payloadOf(event);
+  const orderId = typeof payload.orderId === "string" ? payload.orderId : null;
+  const jobId = typeof payload.jobId === "string" ? payload.jobId : null;
+  const artifactId = typeof payload.artifactId === "string" ? payload.artifactId : null;
+  const artifactVersion =
+    typeof payload.artifactVersion === "number" ? payload.artifactVersion : null;
+  const artifactSha256 = typeof payload.artifactSha256 === "string" ? payload.artifactSha256 : null;
+  const claimGeneration =
+    typeof payload.claimGeneration === "number" ? payload.claimGeneration : null;
+  // Older durable retry events predate the chat snapshot; the job row remains authoritative.
+  let telegramChatId: string | null | undefined = null;
+  if (payload.telegramChatId !== undefined) {
+    if (
+      typeof payload.telegramChatId === "string" &&
+      /^[1-9][0-9]{0,19}$/u.test(payload.telegramChatId)
+    ) {
+      telegramChatId = payload.telegramChatId;
+    } else {
+      telegramChatId = undefined;
+    }
+  }
+  if (
+    typeof orderId !== "string" ||
+    orderId.length === 0 ||
+    typeof jobId !== "string" ||
+    jobId.length === 0 ||
+    typeof artifactId !== "string" ||
+    artifactId.length === 0 ||
+    typeof artifactVersion !== "number" ||
+    !Number.isInteger(artifactVersion) ||
+    artifactVersion < 1 ||
+    typeof artifactSha256 !== "string" ||
+    !/^[a-f0-9]{64}$/u.test(artifactSha256) ||
+    typeof claimGeneration !== "number" ||
+    !Number.isInteger(claimGeneration) ||
+    claimGeneration < 0 ||
+    telegramChatId === undefined
+  ) {
+    return { kind: "TERMINAL_REVIEW", errorCode: "INVALID_FILE_DELIVERY_RETRY" };
+  }
+  if (event.aggregateType !== "FileDeliveryJob" || event.aggregateId !== orderId) {
+    return { kind: "TERMINAL_REVIEW", errorCode: "STALE_JOB" };
+  }
+
+  const queued = await queueFileDelivery({
+    db: deps.db,
+    orderId,
+    createIfMissing: false,
+  });
+  if (!queued.ok) {
+    if (
+      queued.code === "JOB_NOT_FOUND" ||
+      queued.code === "ORDER_NOT_FOUND" ||
+      queued.code === "ORDER_NOT_PAID" ||
+      queued.code === "NOT_DIGITAL_FILE"
+    ) {
+      return { kind: "TERMINAL_REVIEW", errorCode: queued.code };
+    }
+    return { kind: "RETRY", errorCode: queued.code };
+  }
+  if (
+    queued.inserted ||
+    queued.job.orderId !== orderId ||
+    queued.job.orderId !== jobId ||
+    queued.job.artifactId !== artifactId ||
+    queued.job.artifactVersion !== artifactVersion ||
+    queued.job.artifactSha256 !== artifactSha256 ||
+    (telegramChatId !== null && queued.job.telegramChatId !== telegramChatId)
+  ) {
+    return { kind: "TERMINAL_REVIEW", errorCode: "STALE_JOB" };
+  }
+  if (queued.job.status === "SENT") return { kind: "PUBLISHED" };
+  if (queued.job.status === "FAILED" && queued.job.lastError === "SEND_UNCERTAIN") {
+    return { kind: "TERMINAL_REVIEW", errorCode: "SEND_UNCERTAIN" };
+  }
+  if (queued.job.status === "PROCESSING") {
+    const probed = await processFileDelivery({
+      db: deps.db,
+      job: queued.job,
+      storageRoots: deps.fileDelivery.storageRoots,
+      sender: deps.fileDelivery.sender,
+    });
+    if (!probed.ok && probed.code === "STALE_JOB") {
+      return { kind: "RETRY", errorCode: "FILE_DELIVERY_PROCESSING" };
+    }
+    return classifyFileDeliveryRetryResult(probed);
+  }
+  // A proven Telegram rejection is safe to retry; the job claim generation
+  // advances for every send while the durable event payload stays unchanged.
+  const provenFailureReplay =
+    queued.job.status === "FAILED" &&
+    queued.job.lastError === "SEND_FAILED" &&
+    queued.job.claimGeneration > claimGeneration;
+  if (queued.job.claimGeneration !== claimGeneration && !provenFailureReplay) {
+    return { kind: "TERMINAL_REVIEW", errorCode: "STALE_JOB" };
+  }
+  if (queued.job.status === "FAILED" && !provenFailureReplay) {
+    return { kind: "TERMINAL_REVIEW", errorCode: "SEND_UNCERTAIN" };
+  }
+  if (queued.job.status !== "QUEUED" && !provenFailureReplay) {
+    return { kind: "TERMINAL_REVIEW", errorCode: "FILE_DELIVERY_NOT_QUEUED" };
+  }
+
+  const delivered = await processFileDelivery({
+    db: deps.db,
+    job: queued.job,
+    storageRoots: deps.fileDelivery.storageRoots,
+    sender: deps.fileDelivery.sender,
+  });
+  return classifyFileDeliveryRetryResult(delivered);
+}
+
 /**
  * Build the outbox handler that the worker drains. Returns a typed
  * {@link DispatchDecision} so the drainer never silently acks a recoverable
@@ -79,7 +208,7 @@ export function createFulfillmentOutboxHandler(
 ): (event: OutboxEvent) => Promise<DispatchDecision> {
   const fulfillmentDeps: FulfillmentDeps = {
     vault: deps.vault,
-    supplier: deps.supplier,
+    resolveSupplier: deps.resolveSupplier,
     deliveryBaseUrl: deps.deliveryBaseUrl,
     bundleTtlSeconds: deps.bundleTtlSeconds,
     ...(deps.deliverySession
@@ -119,9 +248,14 @@ export function createFulfillmentOutboxHandler(
       event.eventType === "PreorderStockAllocated" ||
       event.eventType === "PreorderHoldForfeited" ||
       event.eventType === "PreorderShopCancelled" ||
-      event.eventType === "TicketOpened"
+      event.eventType === "TicketOpened" ||
+      event.eventType === "TicketStatusChanged"
     ) {
       return handleNotificationOutboxEvent(deps.db, event);
+    }
+
+    if (event.eventType === "FileDeliveryRetryRequested") {
+      return handleFileDeliveryRetry(deps, event);
     }
 
     if (event.eventType === "OrderPaid") {

@@ -144,7 +144,8 @@ There is exactly **one** place a sensitive admin action is authorised:
 The policy table covers `wallet.refund`, `manual_fulfillment.complete`,
 `support.replacement.approve`, `warranty.refund.approve`,
 `warranty.refund.adjust` (→ `REFUND`), `warranty.replacement.approve`
-(→ `DELIVERY_REISSUE`), `discrepancy.resolve`
+(→ `DELIVERY_REISSUE`), `file_delivery.recover` (→ `DELIVERY_REISSUE`),
+`discrepancy.resolve`
 (→ `PAYMENT_OVERRIDE`), `store.open`, `store.close`, `catalog.activate`,
 `catalog.deactivate` (→ `PERMISSION_CHANGE`), the price/deposit/commercial
 variant changes (→ `BULK_PRICE_CHANGE`), inventory stock adjustment

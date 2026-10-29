@@ -5,7 +5,7 @@
  * tsc only emits .ts → .js; plain .sql files would otherwise vanish from dist
  * and `npm run migrate` (or a boot-time migration) would apply nothing.
  */
-import { cpSync, mkdirSync, readdirSync, existsSync } from "node:fs";
+import { cpSync, mkdirSync, readdirSync, existsSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -20,7 +20,13 @@ if (!existsSync(srcDir)) {
 
 mkdirSync(destDir, { recursive: true });
 const files = readdirSync(srcDir).filter((f) => f.endsWith(".sql"));
+const sourceFiles = new Set(files);
+for (const filename of readdirSync(destDir)) {
+  if (filename.endsWith(".sql") && !sourceFiles.has(filename)) {
+    unlinkSync(join(destDir, filename));
+  }
+}
 for (const f of files) {
   cpSync(join(srcDir, f), join(destDir, f));
 }
-process.stdout.write(`copy-migrations: copied ${files.length} file(s) → ${destDir}\n`);
+process.stdout.write(`copy-migrations: synchronized ${files.length} file(s) → ${destDir}\n`);

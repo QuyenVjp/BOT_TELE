@@ -1,5 +1,12 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { sql } from "kysely";
+import {
+  sql,
+  type CompiledQuery,
+  type QueryExecutor,
+  type Transaction,
+  type TransactionBuilder,
+} from "kysely";
+import type { Database } from "../../src/infrastructure/db/client.js";
 import { enqueueOutboxEvent } from "../../src/infrastructure/outbox/repository.js";
 import { drainOutboxOnce } from "../../src/infrastructure/outbox/worker.js";
 import { createCallbackTokenCodec } from "../../src/bot/callback-codec.js";
@@ -58,6 +65,61 @@ beforeEach(async () => {
       variant_quantity_stock, outbox_event, product_variant, product, category, customer cascade
   `.execute(ctx.db);
 });
+
+function withQueryFailure(
+  db: PgTestContext["db"],
+  sqlFragment: string,
+  errorMessage: string,
+): PgTestContext["db"] {
+  const makeFailingExecutor = (target: QueryExecutor): QueryExecutor =>
+    new Proxy(target, {
+      get(targetExecutor, property) {
+        if (property === "executeQuery") {
+          return <R>(
+            query: CompiledQuery<R>,
+            options?: Parameters<QueryExecutor["executeQuery"]>[1],
+          ) => {
+            if (query.sql.includes(sqlFragment)) throw new Error(errorMessage);
+            return targetExecutor.executeQuery(query, options);
+          };
+        }
+        const value = Reflect.get(targetExecutor, property, targetExecutor);
+        return typeof value === "function" ? value.bind(targetExecutor) : value;
+      },
+    });
+
+  const failingExecutor = makeFailingExecutor(db.getExecutor());
+  const proxyTransaction = (trx: Transaction<Database>): Transaction<Database> => {
+    const transactionExecutor = makeFailingExecutor(trx.getExecutor());
+    return new Proxy(trx, {
+      get(targetTrx, property) {
+        if (property === "getExecutor") return () => transactionExecutor;
+        const value = Reflect.get(targetTrx, property, targetTrx);
+        return typeof value === "function" ? value.bind(targetTrx) : value;
+      },
+    });
+  };
+  return new Proxy(db, {
+    get(target, property) {
+      if (property === "getExecutor") return () => failingExecutor;
+      if (property === "transaction") {
+        return () =>
+          new Proxy(target.transaction(), {
+            get(builder: TransactionBuilder<Database>, builderProperty) {
+              if (builderProperty === "execute") {
+                return <T>(callback: (trx: Transaction<Database>) => Promise<T>) =>
+                  builder.execute((trx) => callback(proxyTransaction(trx)));
+              }
+              const value = Reflect.get(builder, builderProperty, builder);
+              return typeof value === "function" ? value.bind(builder) : value;
+            },
+          });
+      }
+      const value = Reflect.get(target, property, target);
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  }) as PgTestContext["db"];
+}
 
 async function seedCustomer(chatId: string): Promise<string> {
   const customerId = newId();
@@ -217,6 +279,86 @@ describe("notification service", () => {
     const ids = [...a, ...b].map((row) => row.id).sort();
     expect(ids).toHaveLength(2);
     expect(ids[0]).not.toBe(ids[1]);
+  });
+  it("reclaims expired notification claims and dead-letters them at max attempts", async () => {
+    const customerId = await seedCustomer("claim-expiry");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "claim expiry",
+      createdBy: "admin",
+      idempotencyKey: "claim-expiry",
+    });
+    const deliveryId = newId();
+    await sql`
+      insert into notification_delivery
+        (id, campaign_id, customer_id, chat_id, status, attempts, next_attempt_at,
+         claimed_by, claim_generation, claim_expires_at)
+      values
+        (${deliveryId}, ${campaignId}, ${customerId}, 'claim-expiry', 'RETRY', 1,
+         now() - interval '1 second', 'expired-worker', 7,
+         now() - interval '1 second')
+    `.execute(ctx.db);
+
+    const [reclaimed] = await claimNotificationDeliveries(ctx.db, 1, 3);
+    expect(reclaimed).toMatchObject({
+      id: deliveryId,
+      campaignId,
+      generation: 8,
+    });
+
+    const reclaimedRow = await sql<{
+      status: string;
+      attempts: number;
+      claim_generation: string;
+      claimed_by: string | null;
+      claim_expires_at: Date | null;
+    }>`
+      select status, attempts, claim_generation, claimed_by, claim_expires_at
+      from notification_delivery
+      where id = ${deliveryId}
+    `.execute(ctx.db);
+    expect(reclaimedRow.rows[0]).toMatchObject({
+      status: "RETRY",
+      attempts: 2,
+      claim_generation: "8",
+      claimed_by: "notification-worker",
+    });
+    expect(reclaimedRow.rows[0]?.claim_expires_at).toBeInstanceOf(Date);
+    expect(reclaimedRow.rows[0]!.claim_expires_at!.getTime()).toBeGreaterThan(Date.now());
+
+    await sql`
+      update notification_delivery
+      set status = 'RETRY',
+          attempts = 3,
+          next_attempt_at = now() - interval '1 second',
+          claimed_by = 'notification-worker',
+          claim_expires_at = now() - interval '1 second'
+      where id = ${deliveryId}
+    `.execute(ctx.db);
+
+    expect(await claimNotificationDeliveries(ctx.db, 1, 3)).toEqual([]);
+    const deadRow = await sql<{
+      status: string;
+      attempts: number;
+      last_error: string | null;
+      claimed_by: string | null;
+      claim_expires_at: Date | null;
+      claim_generation: string;
+    }>`
+      select status, attempts, last_error, claimed_by, claim_expires_at, claim_generation
+      from notification_delivery
+      where id = ${deliveryId}
+    `.execute(ctx.db);
+    expect(deadRow.rows[0]).toEqual({
+      status: "DEAD",
+      attempts: 3,
+      last_error: "claim_expired_max_attempts",
+      claimed_by: null,
+      claim_expires_at: null,
+      claim_generation: "8",
+    });
+    expect(await claimNotificationDeliveries(ctx.db, 1, 3)).toEqual([]);
   });
   it("claims critical service before older marketing work", async () => {
     const marketingCustomer = await seedCustomer("marketing");
@@ -646,6 +788,75 @@ describe("notification service", () => {
     expect(row.rows[0]).toMatchObject({ status: "SENT" });
     expect(row.rows[0]?.sent_at).toBeInstanceOf(Date);
   });
+  it("surfaces post-send state-write failures without recording a Telegram failure", async () => {
+    const customerId = await seedCustomer("111112");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "hello",
+      createdBy: "admin",
+      idempotencyKey: "send-state-write-failure",
+    });
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${newId()}, ${campaignId}, ${customerId}, '111112')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    const sent = { send: async () => undefined };
+    const failingDb = withQueryFailure(ctx.db, "status='SENT'", "state write failed");
+
+    await expect(processNotificationDeliveryClaim(failingDb, claim!, sent)).rejects.toMatchObject({
+      name: "NotificationDeliveryInfrastructureError",
+      operation: "mark-sent",
+      deliveryId: claim!.id,
+      campaignId,
+    });
+    expect(
+      await sql<{ status: string; last_error: string | null }>`
+        select status, last_error from notification_delivery where id=${claim!.id}
+      `.execute(ctx.db),
+    ).toMatchObject({ rows: [{ status: "RETRY", last_error: null }] });
+  });
+  it("surfaces pre-send preference lookup failures without invoking Telegram", async () => {
+    const customerId = await seedCustomer("111113");
+    const campaignId = await createBroadcast(ctx.db, {
+      class: "CRITICAL_SERVICE",
+      queued: true,
+      content: "hello",
+      createdBy: "admin",
+      idempotencyKey: "preference-read-failure",
+    });
+    await sql`
+      insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+      values (${newId()}, ${campaignId}, ${customerId}, '111113')
+    `.execute(ctx.db);
+    const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    let sends = 0;
+    const failingDb = withQueryFailure(
+      ctx.db,
+      "notification_preference",
+      "preference lookup failed",
+    );
+
+    await expect(
+      processNotificationDeliveryClaim(failingDb, claim!, {
+        send: async () => {
+          sends += 1;
+        },
+      }),
+    ).rejects.toMatchObject({
+      name: "NotificationDeliveryInfrastructureError",
+      operation: "preference-read",
+      deliveryId: claim!.id,
+      campaignId,
+    });
+    expect(sends).toBe(0);
+    expect(
+      await sql<{ status: string; last_error: string | null }>`
+        select status, last_error from notification_delivery where id=${claim!.id}
+      `.execute(ctx.db),
+    ).toMatchObject({ rows: [{ status: "RETRY", last_error: null }] });
+  });
 
   it("suppresses shop update delivery at send time after customer opts out", async () => {
     const customerId = await seedCustomer("111111");
@@ -849,6 +1060,7 @@ describe("notification service", () => {
       ctx.db,
     );
     const [claim] = await claimNotificationDeliveries(ctx.db, 1);
+    let retryChecks = 0;
     const error = new Error("rate limited");
     const before = Date.now();
 
@@ -860,7 +1072,13 @@ describe("notification service", () => {
           throw error;
         },
       },
-      { maxAttempts: 5, retryAfterSeconds: () => 2 },
+      {
+        maxAttempts: 5,
+        retryAfterSeconds: () => {
+          retryChecks += 1;
+          return 2;
+        },
+      },
     );
     const row = await sql<{
       status: string;
@@ -873,6 +1091,8 @@ describe("notification service", () => {
 
     expect(result).toBe("RETRY");
     expect(row.rows[0]?.status).toBe("RETRY");
+    expect(row.rows[0]?.last_error).toBe("TELEGRAM_RATE_LIMITED");
+    expect(retryChecks).toBe(1);
     expect(delayMs).toBeGreaterThanOrEqual(1_500);
     expect(delayMs).toBeLessThan(30_000);
   });
@@ -1342,5 +1562,456 @@ describe("notification service", () => {
     expect(replacementCampaign.rows[0]!.content).toContain("đang chuẩn bị");
     expect(replacementCampaign.rows[0]!.content).not.toContain("đã gửi thông tin");
     expect(replacementCampaign.rows[0]!.content).not.toContain("đã giao");
+  });
+  it("terminally rejects malformed TicketOpened payloads without publishing", async () => {
+    const malformedPayloads: Array<(aggregateId: string) => Record<string, unknown>> = [
+      (_aggregateId) => ({ customerId: newId(), reasonCode: "GENERAL_QUESTION" }),
+      (_aggregateId) => ({ ticketId: newId(), reasonCode: "GENERAL_QUESTION" }),
+      (_aggregateId) => ({ ticketId: "", customerId: newId(), reasonCode: "GENERAL_QUESTION" }),
+      (aggregateId) => ({
+        ticketId: `${aggregateId}-different`,
+        customerId: newId(),
+        reasonCode: "GENERAL_QUESTION",
+      }),
+      (aggregateId) => ({
+        ticketId: aggregateId,
+        customerId: "   ",
+        reasonCode: "GENERAL_QUESTION",
+      }),
+      (aggregateId) => ({ ticketId: aggregateId, customerId: newId() }),
+      (aggregateId) => ({
+        ticketId: aggregateId,
+        customerId: newId(),
+        reasonCode: "UNKNOWN_REASON",
+      }),
+    ];
+
+    for (const makePayload of malformedPayloads) {
+      const aggregateId = newId();
+      const payloadRedacted = makePayload(aggregateId);
+      const event = {
+        id: newId(),
+        aggregateType: "SupportTicket",
+        aggregateId,
+        aggregateVersion: 1,
+        eventType: "TicketOpened",
+        payloadRedacted,
+        attemptCount: 0,
+        claimedBy: "test",
+        generation: 1,
+      } as const;
+      await enqueueOutboxEvent(ctx.db, event);
+
+      await expect(handleNotificationOutboxEvent(ctx.db, event)).resolves.toEqual({
+        kind: "TERMINAL_REVIEW",
+        errorCode: "TICKET_OPENED_NOTIFICATION_PAYLOAD_INVALID",
+      });
+
+      const drain = await drainOutboxOnce(ctx.db, {
+        batchSize: 1,
+        maxAttempts: 5,
+        handler: (claimedEvent) => handleNotificationOutboxEvent(ctx.db, claimedEvent),
+      });
+      expect(drain).toMatchObject({ claimed: 1, published: 0, failed: 1, terminal: 1 });
+
+      const state = await sql<{
+        published_at: Date | null;
+        dead_lettered_at: Date | null;
+        last_error_code: string | null;
+      }>`
+        select published_at, dead_lettered_at, last_error_code
+        from outbox_event
+        where id = ${event.id}
+      `.execute(ctx.db);
+      expect(state.rows[0]).toMatchObject({
+        published_at: null,
+        last_error_code: "TICKET_OPENED_NOTIFICATION_PAYLOAD_INVALID",
+      });
+      expect(state.rows[0]?.dead_lettered_at).toBeInstanceOf(Date);
+
+      const recipients = await sql<{ campaigns: string; deliveries: string }>`
+        select
+          (select count(*)::text from notification_campaign) as campaigns,
+          (select count(*)::text from notification_delivery) as deliveries
+      `.execute(ctx.db);
+      expect(recipients.rows[0]).toEqual({ campaigns: "0", deliveries: "0" });
+    }
+  });
+  it("terminally rejects malformed TicketStatusChanged payloads without publishing", async () => {
+    const customerId = await seedCustomer("ticket-status-invalid");
+    const malformedPayloads = [
+      { from: "OPEN", to: "OPEN", version: 1 },
+      { from: "NOT_A_STATUS", to: "WAITING_SHOP", version: 1 },
+      { from: "OPEN", to: "WAITING_SHOP", version: "1" },
+      { from: "OPEN", to: "WAITING_SHOP", version: 1, actorId: null },
+    ];
+
+    for (const payload of malformedPayloads) {
+      const aggregateId = newId();
+      const event = {
+        id: newId(),
+        aggregateType: "SupportTicket",
+        aggregateId,
+        aggregateVersion: 1,
+        eventType: "TicketStatusChanged",
+        payloadRedacted: {
+          ticketId: aggregateId,
+          customerId,
+          actorId: "admin",
+          ...payload,
+        },
+        attemptCount: 0,
+        claimedBy: "test",
+        generation: 1,
+      } as const;
+      await enqueueOutboxEvent(ctx.db, event);
+
+      await expect(handleNotificationOutboxEvent(ctx.db, event)).resolves.toEqual({
+        kind: "TERMINAL_REVIEW",
+        errorCode: "TICKET_STATUS_CHANGED_NOTIFICATION_PAYLOAD_INVALID",
+      });
+
+      const drain = await drainOutboxOnce(ctx.db, {
+        batchSize: 1,
+        maxAttempts: 5,
+        handler: (claimedEvent) => handleNotificationOutboxEvent(ctx.db, claimedEvent),
+      });
+      expect(drain).toMatchObject({ claimed: 1, published: 0, failed: 1, terminal: 1 });
+
+      const state = await sql<{
+        published_at: Date | null;
+        dead_lettered_at: Date | null;
+        last_error_code: string | null;
+      }>`
+        select published_at, dead_lettered_at, last_error_code
+        from outbox_event
+        where id = ${event.id}
+      `.execute(ctx.db);
+      expect(state.rows[0]).toMatchObject({
+        published_at: null,
+        last_error_code: "TICKET_STATUS_CHANGED_NOTIFICATION_PAYLOAD_INVALID",
+      });
+      expect(state.rows[0]?.dead_lettered_at).toBeInstanceOf(Date);
+
+      const recipients = await sql<{ campaigns: string; deliveries: string }>`
+        select
+          (select count(*)::text from notification_campaign) as campaigns,
+          (select count(*)::text from notification_delivery) as deliveries
+      `.execute(ctx.db);
+      expect(recipients.rows[0]).toEqual({ campaigns: "0", deliveries: "0" });
+    }
+  });
+  it("retries and rolls back support notification transaction failures", async () => {
+    const customerId = await seedCustomer("ticket-status-transaction");
+    const ticketId = newId();
+    const event = {
+      id: newId(),
+      aggregateType: "SupportTicket",
+      aggregateId: ticketId,
+      aggregateVersion: 2,
+      eventType: "TicketStatusChanged",
+      payloadRedacted: {
+        ticketId,
+        customerId,
+        from: "OPEN",
+        to: "WAITING_SHOP",
+        version: 2,
+        actorId: "admin",
+      },
+      attemptCount: 0,
+      claimedBy: "test",
+      generation: 1,
+    } as const;
+    await enqueueOutboxEvent(ctx.db, event);
+
+    const failingDb = withQueryFailure(
+      ctx.db,
+      "insert into notification_delivery",
+      "notification transaction failed",
+    );
+    await expect(handleNotificationOutboxEvent(failingDb, event)).rejects.toThrow(
+      "notification transaction failed",
+    );
+    const drain = await drainOutboxOnce(failingDb, {
+      batchSize: 1,
+      maxAttempts: 5,
+      handler: (claimedEvent) => handleNotificationOutboxEvent(failingDb, claimedEvent),
+    });
+    expect(drain).toMatchObject({ claimed: 1, published: 0, failed: 1, terminal: 0 });
+
+    const state = await sql<{
+      published_at: Date | null;
+      next_attempt_at: Date | null;
+      dead_lettered_at: Date | null;
+      attempt_count: number;
+      last_error_code: string | null;
+    }>`
+      select published_at, next_attempt_at, dead_lettered_at, attempt_count, last_error_code
+      from outbox_event
+      where id = ${event.id}
+    `.execute(ctx.db);
+    expect(state.rows[0]).toMatchObject({
+      published_at: null,
+      dead_lettered_at: null,
+      attempt_count: 1,
+      last_error_code: "Error",
+    });
+    expect(state.rows[0]?.next_attempt_at).toBeInstanceOf(Date);
+
+    const rows = await sql<{ campaigns: string; deliveries: string }>`
+      select
+        (select count(*)::text from notification_campaign) as campaigns,
+        (select count(*)::text from notification_delivery) as deliveries
+    `.execute(ctx.db);
+    expect(rows.rows[0]).toEqual({ campaigns: "0", deliveries: "0" });
+  });
+
+  it("retries a valid TicketOpened event when the root Telegram target is missing", async () => {
+    const customerId = await seedCustomer("ticket-opened-customer");
+    const ticketId = newId();
+    const event = {
+      id: newId(),
+      aggregateType: "SupportTicket",
+      aggregateId: ticketId,
+      aggregateVersion: 1,
+      eventType: "TicketOpened",
+      payloadRedacted: {
+        ticketId,
+        customerId,
+        reasonCode: "GENERAL_QUESTION",
+      },
+      attemptCount: 0,
+      claimedBy: "test",
+      generation: 1,
+    } as const;
+    await enqueueOutboxEvent(ctx.db, event);
+
+    await expect(handleNotificationOutboxEvent(ctx.db, event)).resolves.toEqual({
+      kind: "RETRY",
+      errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING",
+    });
+
+    const drain = await drainOutboxOnce(ctx.db, {
+      batchSize: 1,
+      maxAttempts: 5,
+      handler: (claimedEvent) => handleNotificationOutboxEvent(ctx.db, claimedEvent),
+    });
+    expect(drain).toMatchObject({ claimed: 1, published: 0, failed: 1, terminal: 0 });
+
+    const state = await sql<{
+      published_at: Date | null;
+      dead_lettered_at: Date | null;
+      last_error_code: string | null;
+    }>`
+      select published_at, dead_lettered_at, last_error_code
+      from outbox_event
+      where id = ${event.id}
+    `.execute(ctx.db);
+    expect(state.rows[0]).toMatchObject({
+      published_at: null,
+      dead_lettered_at: null,
+      last_error_code: "CRITICAL_NOTIFICATION_TARGET_MISSING",
+    });
+
+    const recipients = await sql<{ campaigns: string; deliveries: string }>`
+      select
+        (select count(*)::text from notification_campaign) as campaigns,
+        (select count(*)::text from notification_delivery) as deliveries
+    `.execute(ctx.db);
+    expect(recipients.rows[0]).toEqual({ campaigns: "0", deliveries: "0" });
+  });
+
+  it("uses the canonical channel identity when the customer snapshot is missing or unreachable", async () => {
+    const customerId = await seedCustomer("777002");
+    await sql`
+      insert into customer_profile_snapshot
+        (customer_id, telegram_user_id, chat_id, reachable)
+      values (${customerId}, '777002', '999002', false)
+    `.execute(ctx.db);
+    const ticketId = newId();
+
+    const result = await handleNotificationOutboxEvent(ctx.db, {
+      id: newId(),
+      aggregateType: "SupportTicket",
+      aggregateId: ticketId,
+      aggregateVersion: 2,
+      eventType: "TicketStatusChanged",
+      payloadRedacted: {
+        ticketId,
+        customerId,
+        from: "OPEN",
+        to: "WAITING_SHOP",
+        version: 2,
+        actorId: "admin",
+      },
+      attemptCount: 0,
+      claimedBy: "test",
+      generation: 1,
+    });
+    expect(result).toEqual({ kind: "PUBLISHED" });
+
+    const delivery = await sql<{ chat_id: string; customer_id: string }>`
+      select chat_id, customer_id
+      from notification_delivery
+      where campaign_id = ${`support-ticket-status:${ticketId}:2`}
+    `.execute(ctx.db);
+    expect(delivery.rows).toEqual([{ chat_id: "777002", customer_id: customerId }]);
+  });
+
+  it("retries and eventually dead-letters a status notice with no canonical target", async () => {
+    const customerId = newId();
+    await sql`
+      insert into customer (id, status, locale)
+      values (${customerId}, 'ACTIVE', 'vi')
+    `.execute(ctx.db);
+    const ticketId = newId();
+    await enqueueOutboxEvent(ctx.db, {
+      id: newId(),
+      aggregateType: "SupportTicket",
+      aggregateId: ticketId,
+      aggregateVersion: 2,
+      eventType: "TicketStatusChanged",
+      payloadRedacted: {
+        ticketId,
+        customerId,
+        from: "OPEN",
+        to: "WAITING_SHOP",
+        version: 2,
+        actorId: "admin",
+      },
+    });
+
+    const first = await drainOutboxOnce(ctx.db, {
+      batchSize: 1,
+      maxAttempts: 2,
+      handler: (event) => handleNotificationOutboxEvent(ctx.db, event),
+    });
+    expect(first).toMatchObject({ claimed: 1, published: 0, failed: 1 });
+    const afterFirst = await sql<{
+      published_at: Date | null;
+      dead_lettered_at: Date | null;
+      last_error_code: string | null;
+    }>`
+      select published_at, dead_lettered_at, last_error_code
+      from outbox_event
+      where aggregate_id = ${ticketId}
+    `.execute(ctx.db);
+    expect(afterFirst.rows[0]).toMatchObject({
+      published_at: null,
+      dead_lettered_at: null,
+      last_error_code: "CRITICAL_NOTIFICATION_TARGET_MISSING",
+    });
+
+    await sql`
+      update outbox_event
+      set next_attempt_at = now()
+      where aggregate_id = ${ticketId}
+    `.execute(ctx.db);
+    const terminal = await drainOutboxOnce(ctx.db, {
+      batchSize: 1,
+      maxAttempts: 2,
+      handler: (event) => handleNotificationOutboxEvent(ctx.db, event),
+    });
+    expect(terminal).toMatchObject({ claimed: 1, published: 0, failed: 1 });
+    const afterTerminal = await sql<{
+      published_at: Date | null;
+      dead_lettered_at: Date | null;
+      last_error_code: string | null;
+    }>`
+      select published_at, dead_lettered_at, last_error_code
+      from outbox_event
+      where aggregate_id = ${ticketId}
+    `.execute(ctx.db);
+    expect(afterTerminal.rows[0]).toMatchObject({
+      published_at: null,
+      last_error_code: "CRITICAL_NOTIFICATION_TARGET_MISSING",
+    });
+    expect(afterTerminal.rows[0]?.dead_lettered_at).toBeInstanceOf(Date);
+  });
+  it("acknowledges a replay when the queued status delivery already exists", async () => {
+    const customerId = await seedCustomer("777003");
+    const ticketId = newId();
+    const event = {
+      id: newId(),
+      aggregateType: "SupportTicket",
+      aggregateId: ticketId,
+      aggregateVersion: 2,
+      eventType: "TicketStatusChanged",
+      payloadRedacted: {
+        ticketId,
+        customerId,
+        from: "OPEN",
+        to: "WAITING_SHOP",
+        version: 2,
+        actorId: "admin",
+      },
+      attemptCount: 0,
+      claimedBy: "test",
+      generation: 1,
+    } as const;
+
+    await expect(handleNotificationOutboxEvent(ctx.db, event)).resolves.toEqual({
+      kind: "PUBLISHED",
+    });
+    await sql`
+      update customer set status='INACTIVE' where id=${customerId}
+    `.execute(ctx.db);
+
+    await expect(handleNotificationOutboxEvent(ctx.db, { ...event, id: newId() })).resolves.toEqual(
+      {
+        kind: "PUBLISHED",
+      },
+    );
+    const rows = await sql<{ campaigns: string; deliveries: string }>`
+      select
+        (select count(*)::text from notification_campaign
+         where idempotency_key=${`support-ticket-status:${ticketId}:2`}) as campaigns,
+        (select count(*)::text from notification_delivery
+         where campaign_id=${`support-ticket-status:${ticketId}:2`}) as deliveries
+    `.execute(ctx.db);
+    expect(rows.rows[0]).toEqual({ campaigns: "1", deliveries: "1" });
+  });
+
+  it("renders customer cancellation separately from shop resolution", async () => {
+    const customerId = await seedCustomer("777004");
+    const cancelledTicketId = newId();
+    const shopResolvedTicketId = newId();
+    const event = (ticketId: string, actorId: string) => ({
+      id: newId(),
+      aggregateType: "SupportTicket" as const,
+      aggregateId: ticketId,
+      aggregateVersion: 2,
+      eventType: "TicketStatusChanged" as const,
+      payloadRedacted: {
+        ticketId,
+        customerId,
+        from: "WAITING_CUSTOMER",
+        to: "RESOLVED",
+        version: 2,
+        actorId,
+      },
+      attemptCount: 0,
+      claimedBy: "test",
+      generation: 1,
+    });
+
+    await handleNotificationOutboxEvent(ctx.db, event(cancelledTicketId, customerId));
+    await handleNotificationOutboxEvent(ctx.db, event(shopResolvedTicketId, "admin"));
+    const rows = await sql<{ id: string; content: string }>`
+      select id, content
+      from notification_campaign
+      where id in (
+        ${`support-ticket-status:${cancelledTicketId}:2`},
+        ${`support-ticket-status:${shopResolvedTicketId}:2`}
+      )
+      order by id
+    `.execute(ctx.db);
+
+    expect(rows.rows.find((row) => row.id.includes(cancelledTicketId))?.content).toBe(
+      "Yêu cầu hỗ trợ đã được bạn huỷ.",
+    );
+    expect(rows.rows.find((row) => row.id.includes(shopResolvedTicketId))?.content).toBe(
+      "Yêu cầu hỗ trợ của bạn đã được xử lý.",
+    );
   });
 });

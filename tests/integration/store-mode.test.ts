@@ -331,7 +331,6 @@ describe("store OPEN readiness gate", () => {
     await expect(openStore("gate-open-manual-service")).resolves.toMatchObject({ ok: true });
   });
 
-
   it("keeps the store CLOSED while an unresolved discrepancy exists", async () => {
     await seedReadyStore();
     const discrepancyId = newId();

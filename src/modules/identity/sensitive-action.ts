@@ -40,6 +40,7 @@ export type SensitiveActionKey =
   | "support.replacement.approve"
   | "inventory.ready.release"
   | "fulfillment.reconcile"
+  | "file_delivery.recover"
   | "discrepancy.resolve"
   | "outbox.orphan.dispose"
   | "store.open"
@@ -70,6 +71,7 @@ export const SENSITIVE_ACTION_POLICY: Record<SensitiveActionKey, StepUpActionCat
   "support.replacement.approve": "REFUND",
   "inventory.ready.release": "STOCK_ADJUSTMENT",
   "fulfillment.reconcile": "DELIVERY_REISSUE",
+  "file_delivery.recover": "DELIVERY_REISSUE",
   "warranty.refund.approve": "REFUND",
   "warranty.refund.adjust": "REFUND",
   "warranty.replacement.approve": "DELIVERY_REISSUE",

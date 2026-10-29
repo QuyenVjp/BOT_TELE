@@ -102,6 +102,7 @@ describe("checkout callback tokens", () => {
 
   it("peeks EVERY action back to itself, including the extended (>=16) forms", () => {
     const variantId = newId();
+    const publicOrderNumber = "ORD-20260717-ABCD1234";
     for (const action of Object.keys(CALLBACK_ACTION_CODES) as Array<
       keyof typeof CALLBACK_ACTION_CODES
     >) {
@@ -118,10 +119,11 @@ describe("checkout callback tokens", () => {
         "CUSTOMER_NOTIFICATIONS",
         "CUSTOMER_WARRANTY",
       ].includes(action);
+      const resourceId = action === "BUY_AGAIN" ? publicOrderNumber : variantId;
       const token = unified().issue({
         action,
         telegramUserId: TELEGRAM_USER_ID,
-        ...(needsResource ? { resourceId: variantId } : {}),
+        ...(needsResource ? { resourceId } : {}),
         ...(action === "SUPPORT_REASON" || action === "ADMIN_COMMAND" ? { option: 1 } : {}),
         ...(action === "CHECKOUT_WALLET" ? { amountVnd: 199_000 } : {}),
       });

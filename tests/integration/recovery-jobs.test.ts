@@ -791,7 +791,7 @@ describe("bounded recovery jobs (T167/T168)", () => {
       batchSize: 2,
       now: new Date(),
       retryDelaySeconds: 60,
-      resolvePort: () => port,
+      resolvePort: async (resolvedSupplierId) => (resolvedSupplierId === supplierId ? port : null),
       vault: createInMemoryVault(),
     });
 
@@ -851,7 +851,7 @@ describe("bounded recovery jobs (T167/T168)", () => {
       batchSize: 2,
       now: new Date(),
       retryDelaySeconds: 60,
-      resolvePort: () => port,
+      resolvePort: async (resolvedSupplierId) => (resolvedSupplierId === supplierId ? port : null),
       vault: createInMemoryVault(),
     });
 

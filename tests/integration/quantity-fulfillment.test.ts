@@ -112,7 +112,7 @@ describe("quantity-stock fulfillment", () => {
     const f = await seedQuantityOrder();
     const deps = {
       vault: createInMemoryVault(),
-      supplier: null,
+      resolveSupplier: async (_supplierId: string) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
     };
@@ -208,7 +208,7 @@ describe("quantity-stock fulfillment", () => {
       correlationId: "qty-delayed-paid",
       deps: {
         vault: createInMemoryVault(),
-        supplier: null,
+        resolveSupplier: async (_supplierId: string) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       },
@@ -235,7 +235,7 @@ describe("quantity-stock fulfillment", () => {
       correlationId: "qty-release-before-complete",
       deps: {
         vault: createInMemoryVault(),
-        supplier: null,
+        resolveSupplier: async (_supplierId: string) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
       },
@@ -251,7 +251,11 @@ describe("quantity-stock fulfillment", () => {
       correlationId: "qty-complete-released",
     });
 
-    expect(complete).toEqual({ ok: false, code: "ORDER_NOT_PROCESSING" });
+    expect(complete).toEqual({
+      ok: false,
+      code: "ORDER_NOT_PROCESSING",
+      message: "Không còn giữ chỗ tồn kho hợp lệ.",
+    });
     const state = await sql<{ task_status: string; order_status: string; delivered: number }>`
       select m.status as task_status, o.status as order_status,
         (select count(*)::int from quantity_stock_ledger where order_id = ${f.orderId} and entry_type = 'DELIVER') as delivered

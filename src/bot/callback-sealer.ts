@@ -1,4 +1,5 @@
 import { isId } from "../shared/ids/index.js";
+import { isPublicOrderNumber } from "../shared/order-number/index.js";
 import { SUPPORT_REASON_CODES } from "../modules/support/domain.js";
 import type { PresentedMessage } from "./presenters/catalog.js";
 import type {
@@ -61,6 +62,19 @@ export async function sealPresentedMessageCallbacks(
         sealedRow.push(button);
         continue;
       }
+      if (button.callbackData.startsWith("buyagain:")) {
+        const orderNumber = button.callbackData.slice("buyagain:".length);
+        if (!isPublicOrderNumber(orderNumber)) continue;
+        sealedRow.push({
+          ...button,
+          callbackData: deps.codec.issue({
+            action: "BUY_AGAIN",
+            resourceId: orderNumber,
+            telegramUserId: deps.telegramUserId,
+          }),
+        });
+        continue;
+      }
       if (button.callbackData.startsWith("buy:") || button.callbackData.startsWith("cb:")) {
         sealedRow.push(button);
         continue;
@@ -109,6 +123,10 @@ async function parseLegacyCallback(
     "cust:preorders": "PREORDER_LIST",
   };
   if (noResource[value]) return { action: noResource[value] };
+  if (value.startsWith("sup:description:cancel:")) {
+    const ticketId = value.slice("sup:description:cancel:".length);
+    return isId(ticketId) ? { action: "SUPPORT_DESCRIPTION_CANCEL", resourceId: ticketId } : null;
+  }
 
   if (value.startsWith("cat:view:")) {
     const rest = value.slice("cat:view:".length);

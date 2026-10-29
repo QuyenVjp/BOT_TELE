@@ -29,6 +29,10 @@ import {
   reconcilePaidDeliveryInTransaction,
 } from "../../modules/digital-goods/recovery.js";
 import {
+  resolveUncertainFileDeliveryInTransaction,
+  type FileDeliveryRecoveryDecision,
+} from "../../modules/digital-goods/file-delivery.js";
+import {
   clearVariantSupplierMapping,
   markSupplierSkuManuallyVerified,
   selectVariantSupplierMapping,
@@ -88,6 +92,7 @@ export const OWNER_COMMANDS = [
   "supplier.mapping.verify",
   "support.replacement.approve",
   "inventory.ready.release",
+  "file_delivery.recover",
   "fulfillment.reconcile",
   "store.open",
   "store.close",
@@ -130,6 +135,15 @@ export interface AdminCallbackDeps {
   stepUpOptions?: { ttlSeconds: number; lockoutMinutes: number; maxAttempts: number };
 }
 
+export interface FileDeliveryRecoveryBinding {
+  jobId: string;
+  artifactId: string;
+  artifactVersion: number;
+  artifactSha256: string;
+  claimGeneration: number;
+  telegramChatId: string;
+}
+
 export interface HandleInput {
   command: string;
   actor: RootActor;
@@ -140,6 +154,8 @@ export interface HandleInput {
   input?: string;
   /** Snapshot version supplied by the operator; publication uses its composite string. */
   expectedVersion?: number | string;
+  /** Server-read identity fence for a file-delivery recovery action. */
+  fileDelivery?: FileDeliveryRecoveryBinding;
 }
 export type HandleResult =
   | {
@@ -198,6 +214,7 @@ interface PendingAction {
   actorId: string;
   input?: string;
   expectedVersion?: number | string;
+  fileDelivery?: FileDeliveryRecoveryBinding;
 }
 
 class InvalidDurableAdminActionError extends Error {}
@@ -243,6 +260,20 @@ function durableResultOrThrow(
   );
 }
 
+function fileDeliveryRecoveryErrorMessage(code: string): string {
+  switch (code) {
+    case "STALE_ORDER":
+    case "STALE_JOB":
+      return "Trạng thái đơn hoặc tệp đã thay đổi; mở lại đơn để kiểm tra.";
+    case "NOT_UNCERTAIN":
+      return "Tệp không còn ở trạng thái gửi chưa xác định.";
+    case "STORE_MODE_POLICY":
+      return "Trong chế độ CLOSED/TEST chỉ được khôi phục đơn test đã được duyệt.";
+    default:
+      return "Không thể khôi phục gửi tệp.";
+  }
+}
+
 function storeOpenRefusalMessage(
   readiness: Awaited<ReturnType<typeof getStoreOpenReadiness>>,
 ): string {
@@ -271,10 +302,21 @@ function fingerprintFor(
   resolutionCode?: string,
   expectedVersion?: number | string,
   input?: string,
+  fileDelivery?: FileDeliveryRecoveryBinding,
 ): string {
   const inputHash =
     input === undefined ? "" : createHash("sha256").update(input, "utf8").digest("hex");
-  return `${command}:${targetId}:${resolutionCode ?? ""}:${expectedVersion ?? ""}:${inputHash}`;
+  const deliveryBinding = fileDelivery
+    ? [
+        fileDelivery.jobId,
+        fileDelivery.artifactId,
+        fileDelivery.artifactVersion,
+        fileDelivery.artifactSha256,
+        fileDelivery.claimGeneration,
+        fileDelivery.telegramChatId,
+      ].join(":")
+    : "";
+  return `${command}:${targetId}:${resolutionCode ?? ""}:${expectedVersion ?? ""}:${inputHash}:${deliveryBinding}`;
 }
 
 function targetTypeFor(
@@ -316,6 +358,7 @@ function sensitiveRequestedData(input: {
   value: string | undefined;
   resolutionCode: string | undefined;
   expectedVersion: number | string | undefined;
+  fileDelivery: FileDeliveryRecoveryBinding | undefined;
 }): AuthorizationJsonValue {
   if (input.command === "supplier.mapping.select" || input.command === "supplier.mapping.verify") {
     return {
@@ -337,7 +380,50 @@ function sensitiveRequestedData(input: {
     ...(input.command === "catalog.evidence.revoke" && input.value !== undefined
       ? { evidenceId: input.value }
       : {}),
+    ...(input.command === "file_delivery.recover" && input.fileDelivery
+      ? {
+          fileDelivery: {
+            jobId: input.fileDelivery.jobId,
+            artifactId: input.fileDelivery.artifactId,
+            artifactVersion: input.fileDelivery.artifactVersion,
+            artifactSha256: input.fileDelivery.artifactSha256,
+            claimGeneration: input.fileDelivery.claimGeneration,
+            telegramChatId: input.fileDelivery.telegramChatId,
+          },
+        }
+      : {}),
   };
+}
+
+function parseFileDeliveryBinding(
+  value: unknown,
+  targetId: string,
+): FileDeliveryRecoveryBinding | null {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return null;
+  const candidate = value as Record<string, unknown>;
+  return typeof candidate.jobId === "string" &&
+    candidate.jobId === targetId &&
+    typeof candidate.artifactId === "string" &&
+    isId(candidate.artifactId) &&
+    typeof candidate.artifactVersion === "number" &&
+    Number.isInteger(candidate.artifactVersion) &&
+    candidate.artifactVersion > 0 &&
+    typeof candidate.artifactSha256 === "string" &&
+    /^[a-f0-9]{64}$/u.test(candidate.artifactSha256) &&
+    typeof candidate.claimGeneration === "number" &&
+    Number.isInteger(candidate.claimGeneration) &&
+    candidate.claimGeneration >= 0 &&
+    typeof candidate.telegramChatId === "string" &&
+    /^[1-9][0-9]{0,19}$/u.test(candidate.telegramChatId)
+    ? {
+        jobId: candidate.jobId,
+        artifactId: candidate.artifactId,
+        artifactVersion: candidate.artifactVersion,
+        artifactSha256: candidate.artifactSha256,
+        claimGeneration: candidate.claimGeneration,
+        telegramChatId: candidate.telegramChatId,
+      }
+    : null;
 }
 
 function pendingActionFrom(action: DurableAdminAction): PendingAction {
@@ -348,6 +434,8 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
   const resolutionCode = payload.resolutionCode;
   const input = payload.input;
   const expectedVersion = payload.expectedVersion;
+  const fileDelivery =
+    typeof targetId === "string" ? parseFileDeliveryBinding(payload.fileDelivery, targetId) : null;
   if (
     !isDurableAdminCommandRef(action.commandRef) ||
     typeof targetId !== "string" ||
@@ -366,7 +454,14 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
       ((typeof expectedVersion !== "number" && typeof expectedVersion !== "string") ||
         (typeof expectedVersion === "number" && !Number.isInteger(expectedVersion)) ||
         (typeof expectedVersion === "string" &&
-          (expectedVersion.length === 0 || expectedVersion.length > 300))))
+          (expectedVersion.length === 0 || expectedVersion.length > 300)))) ||
+    (action.commandRef === "file_delivery.recover" &&
+      (!isId(targetId) ||
+        fileDelivery === null ||
+        typeof expectedVersion !== "number" ||
+        !Number.isInteger(expectedVersion) ||
+        expectedVersion <= 0 ||
+        (resolutionCode !== "KEEP_UNCERTAIN" && resolutionCode !== "REQUEUE")))
   ) {
     throw new InvalidDurableAdminActionError("durable admin action payload is invalid");
   }
@@ -381,6 +476,7 @@ function pendingActionFrom(action: DurableAdminAction): PendingAction {
   if (typeof expectedVersion === "number" || typeof expectedVersion === "string") {
     result.expectedVersion = expectedVersion;
   }
+  if (fileDelivery) result.fileDelivery = fileDelivery;
   return result;
 }
 
@@ -568,10 +664,18 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         return true;
       }
       case "manual_fulfillment.complete": {
+        if (typeof action.expectedVersion !== "string") {
+          return durableResultOrThrow(action, {
+            ok: false,
+            code: "STALE",
+            message: "Tác vụ đã thay đổi. Vui lòng mở lại danh sách.",
+          });
+        }
         const completed = await completeManualFulfillmentTaskInTransaction(exec, {
           taskId: action.targetId,
           actorId: action.actorId,
           correlationId,
+          expectedVersion: action.expectedVersion,
         });
         return durableResultOrThrow(action, completed);
       }
@@ -586,6 +690,38 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           requestId,
         });
         return durableResultOrThrow(action, result);
+      }
+      case "file_delivery.recover": {
+        if (
+          typeof action.expectedVersion !== "number" ||
+          !Number.isInteger(action.expectedVersion) ||
+          action.expectedVersion <= 0 ||
+          action.fileDelivery === undefined ||
+          (action.resolutionCode !== "KEEP_UNCERTAIN" && action.resolutionCode !== "REQUEUE")
+        ) {
+          return false;
+        }
+        const decision = action.resolutionCode as FileDeliveryRecoveryDecision;
+        const result = await resolveUncertainFileDeliveryInTransaction(exec, {
+          orderId: action.targetId,
+          jobId: action.fileDelivery.jobId,
+          expectedOrderVersion: action.expectedVersion,
+          expectedClaimGeneration: action.fileDelivery.claimGeneration,
+          artifactId: action.fileDelivery.artifactId,
+          artifactVersion: action.fileDelivery.artifactVersion,
+          artifactSha256: action.fileDelivery.artifactSha256,
+          operatorId: action.actorId,
+          reason: action.reason,
+          decision,
+          telegramChatId: action.fileDelivery.telegramChatId,
+          correlationId,
+        });
+        if (result.ok) return true;
+        return durableResultOrThrow(action, {
+          ok: false,
+          code: result.code,
+          message: fileDeliveryRecoveryErrorMessage(result.code),
+        });
       }
       case "fulfillment.reconcile": {
         if (typeof action.expectedVersion !== "number") return false;
@@ -787,6 +923,14 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           !["PARK_REVIEW", "RECONCILE_DELIVERED", "KEEP_UNCERTAIN"].includes(
             input.resolutionCode ?? "PARK_REVIEW",
           ));
+      const fileDeliveryRecoveryInputInvalid =
+        input.command === "file_delivery.recover" &&
+        (!isId(input.targetId) ||
+          typeof input.expectedVersion !== "number" ||
+          !Number.isInteger(input.expectedVersion) ||
+          input.expectedVersion <= 0 ||
+          (input.resolutionCode !== "KEEP_UNCERTAIN" && input.resolutionCode !== "REQUEUE") ||
+          parseFileDeliveryBinding(input.fileDelivery, input.targetId) === null);
       if (
         SENSITIVE_OPERATOR_TEXT.test(input.reason) ||
         (input.command !== "inventory.import" &&
@@ -795,7 +939,8 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         (input.command === "catalog.evidence.register" &&
           (input.input === undefined || !isSafeResaleEvidenceInput(input.input))) ||
         revokeInputInvalid ||
-        reconciliationInputInvalid
+        reconciliationInputInvalid ||
+        fileDeliveryRecoveryInputInvalid
       ) {
         return {
           ok: false,
@@ -804,9 +949,12 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             ? "Thiếu bằng chứng hoặc phiên bản biến thể cần thu hồi."
             : reconciliationInputInvalid
               ? "Thiếu phiên bản đơn hàng cần rà soát."
-              : "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
+              : fileDeliveryRecoveryInputInvalid
+                ? "Thiếu hoặc đã cũ thông tin tệp cần khôi phục."
+                : "Không lưu dữ liệu nhạy cảm trong xác nhận quản trị.",
         };
       }
+      const fileDelivery = parseFileDeliveryBinding(input.fileDelivery, input.targetId);
 
       const actionKey: SensitiveActionKey | null = isDurableAdminCommandRef(input.command)
         ? input.command
@@ -830,6 +978,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
             value: input.input,
             resolutionCode: input.resolutionCode,
             expectedVersion: input.expectedVersion,
+            fileDelivery: fileDelivery ?? undefined,
           }),
           consumeGrant: !isDurableAdminCommandRef(input.command),
         });
@@ -849,6 +998,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
           input.resolutionCode,
           input.expectedVersion,
           input.input,
+          fileDelivery ?? undefined,
         );
         const payloadRedacted: Record<string, unknown> = {
           targetId: input.targetId,
@@ -863,6 +1013,9 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
         }
         if (input.expectedVersion !== undefined) {
           payloadRedacted.expectedVersion = input.expectedVersion;
+        }
+        if (fileDelivery !== null) {
+          payloadRedacted.fileDelivery = fileDelivery;
         }
         const issued = await confirmation.issue({
           rootChannelIdentityId,
@@ -919,6 +1072,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
                 action.resolutionCode,
                 action.expectedVersion,
                 action.input,
+                action.fileDelivery,
               ) !== durableAction.actionFingerprint
             ) {
               throw new InvalidDurableAdminActionError("durable admin action binding is invalid");
@@ -945,6 +1099,7 @@ export function createAdminCallbacks(deps: AdminCallbackDeps): AdminCallbacks {
                 value: action.input,
                 resolutionCode: action.resolutionCode,
                 expectedVersion: action.expectedVersion,
+                fileDelivery: action.fileDelivery,
               }),
               consumeGrant: true,
             });

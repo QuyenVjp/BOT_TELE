@@ -10,7 +10,6 @@ import { nowUtc } from "../time/index.js";
  * key, claimed asset, active delivery bundle).
  */
 
-/** Closed set of event types this MVP emits. */
 export const EVENT_TYPES = [
   "OrderCreated",
   "PaymentIntentPresented",
@@ -24,6 +23,7 @@ export const EVENT_TYPES = [
   "DeliveryBundleCreated",
   "DigitalAssetDelivered",
   "TicketOpened",
+  "TicketStatusChanged",
   "ReplacementRequested",
   "RefundRequested",
 ] as const;

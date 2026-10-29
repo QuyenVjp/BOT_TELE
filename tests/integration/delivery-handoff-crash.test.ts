@@ -271,7 +271,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
       correlationId: "crash-before-handoff",
       deps: {
         vault: f.assetVault,
-        supplier: null,
+        resolveSupplier: async (_supplierId) => null,
         deliveryBaseUrl: "https://shop.example/d",
         bundleTtlSeconds: 900,
         deliveryTokenKeys: [SESSION_CONFIG.key],
@@ -297,7 +297,7 @@ describe("recoverable delivery handoff protocol (T179-T181 RED)", () => {
     const handler = createFulfillmentOutboxHandler({
       db: ctx.db,
       vault: notificationVault,
-      supplier: null,
+      resolveSupplier: async (_supplierId) => null,
       deliveryBaseUrl: "https://shop.example/d",
       bundleTtlSeconds: 900,
       deliverySession: { config: SESSION_CONFIG, ttlSeconds: 300 },

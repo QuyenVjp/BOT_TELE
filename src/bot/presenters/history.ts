@@ -16,9 +16,9 @@ import type { OrderStatus } from "../../modules/commerce/order.js";
  *
  * History shows only the customer's own orders as paginated summaries with a
  * stable friendly status and the exact amount. Detail surfaces the authoritative
- * snapshot (payment state, created time, delivery/warranty policy) and offers the
- * two context actions: support and back to the list. No internal enum, id, secret
- * or payment-control is ever rendered here.
+ * snapshot (payment state, created time, delivery/warranty policy) and offers
+ * ownership-checked context actions. No internal enum, id, secret or payment-control
+ * is ever rendered here.
  */
 
 export const HISTORY_COPY = {
@@ -28,6 +28,8 @@ export const HISTORY_COPY = {
   back: CUSTOMER_BUTTONS.back,
   mainMenu: CUSTOMER_BUTTONS.home,
   support: CUSTOMER_BUTTONS.support,
+  buyAgain: "🔁 Mua lại",
+  viewAlternatives: "🔎 Xem sản phẩm khác",
   detailTitle: "🧾 Chi tiết đơn hàng",
   priceLabel: "Giá",
   paymentLabel: "Thanh toán",
@@ -35,6 +37,21 @@ export const HISTORY_COPY = {
   createdLabel: "Ngày tạo",
   deliveryLabel: "Giao hàng / Bảo hành",
 } as const;
+
+export function presentBuyAgainUnavailable(): PresentedMessage {
+  return {
+    text: [
+      "⚠️ Không thể mua lại sản phẩm này lúc này.",
+      "",
+      "Sản phẩm có thể đã ngừng bán, đổi giá hoặc hết hàng.",
+    ].join("\n"),
+    buttons: [
+      [{ text: HISTORY_COPY.viewAlternatives, callbackData: "shop:home" }],
+      [{ text: HISTORY_COPY.support, callbackData: "supp:open" }],
+      [{ text: HISTORY_COPY.mainMenu, callbackData: "menu:main" }],
+    ],
+  };
+}
 
 /**
  * Owner-facing status wording (goal §52). A status outside this map — a review or
@@ -224,6 +241,16 @@ export function presentOrderDetail(
             {
               text: PAYMENT_COPY.reopen,
               callbackData: `pay:reopen:${order.orderNumber}`,
+            },
+          ],
+        ]
+      : []),
+    ...(order.status === "COMPLETED"
+      ? [
+          [
+            {
+              text: HISTORY_COPY.buyAgain,
+              callbackData: `buyagain:${order.orderNumber}`,
             },
           ],
         ]

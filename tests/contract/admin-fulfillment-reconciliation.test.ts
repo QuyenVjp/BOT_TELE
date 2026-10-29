@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { presentAdminOrderDetail } from "../../src/bot/presenters/admin.js";
+import {
+  presentAdminOrderDetail,
+  presentHighRiskChallenge,
+} from "../../src/bot/presenters/admin.js";
 import { isOwnerCommand } from "../../src/bot/callbacks/admin.js";
 import { DURABLE_ADMIN_COMMAND_REFS } from "../../src/modules/identity/admin-confirmation.js";
 import type { AdminOrderDetail } from "../../src/modules/admin/order-operations.js";
@@ -36,11 +39,71 @@ function detail(overrides: Partial<AdminOrderDetail> = {}): AdminOrderDetail {
     ...overrides,
   };
 }
+function uncertainFileDelivery(): NonNullable<AdminOrderDetail["fileDelivery"]> {
+  return {
+    jobId: "order-1",
+    status: "FAILED",
+    outcome: "UNKNOWN",
+    lastError: "SEND_UNCERTAIN",
+    artifactId: "artifact-1",
+    artifactVersion: 2,
+    artifactSha256: "a".repeat(64),
+    attemptCount: 3,
+    claimGeneration: 4,
+    telegramMessageId: "telegram-message-secret",
+    sentAt: "2026-09-20T00:00:04.000Z",
+  };
+}
 
 describe("paid delivery reconciliation owner action", () => {
   it("is allowlisted as a durable owner command", () => {
     expect(isOwnerCommand("fulfillment.reconcile")).toBe(true);
     expect(DURABLE_ADMIN_COMMAND_REFS).toContain("fulfillment.reconcile");
+  });
+
+  it("allowlists file delivery recovery as a distinct durable owner command", () => {
+    expect(isOwnerCommand("file_delivery.recover")).toBe(true);
+    expect(DURABLE_ADMIN_COMMAND_REFS).toContain("file_delivery.recover");
+  });
+
+  it("shows safe SEND_UNCERTAIN identity, attempts, generation, receipt, and recovery actions", () => {
+    const uncertain = presentAdminOrderDetail(detail({ fileDelivery: uncertainFileDelivery() }));
+    expect(uncertain.text).toContain("SEND_UNCERTAIN");
+    expect(uncertain.text).toContain("Lần thử: 3 · claim generation: 4");
+    expect(uncertain.text).toContain(`SHA-256: ${"a".repeat(64)}`);
+    expect(uncertain.text).toContain("Telegram message receipt: đã ghi nhận");
+    expect(uncertain.text).not.toContain("telegram-message-secret");
+    expect(uncertain.buttons.flat()).toEqual(
+      expect.arrayContaining([
+        {
+          text: "🛑 Giữ chưa xác định",
+          callbackData: "admin:orders:file_delivery:keep:state-1",
+        },
+        {
+          text: "⚠️ Xác nhận gửi lại",
+          callbackData: "admin:orders:file_delivery:requeue:state-1",
+        },
+      ]),
+    );
+
+    const completed = presentAdminOrderDetail(
+      detail({ orderStatus: "COMPLETED", fileDelivery: uncertainFileDelivery() }),
+    );
+    expect(
+      completed.buttons.flat().some((button) => button.callbackData.includes("file_delivery")),
+    ).toBe(false);
+  });
+
+  it("warns that Telegram may already have the prior file before requeue confirmation", () => {
+    const challenge = presentHighRiskChallenge({
+      confirmationId: "confirmation-1",
+      challenge: "challenge-1",
+      expiresAt: "2026-09-20T00:02:00.000Z",
+      action: "file_delivery.recover",
+      warning: "⚠️ Telegram có thể đã nhận tệp trước đó; xác nhận sẽ xếp hàng một lần gửi lại.",
+    });
+    expect(challenge.text).toContain("Telegram có thể đã nhận tệp trước đó");
+    expect(challenge.text).toContain("file_delivery.recover");
   });
 
   it("shows the review action only for PROCESSING plus EXPIRED", () => {

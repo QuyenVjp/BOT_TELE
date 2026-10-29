@@ -8,7 +8,46 @@ import {
   getVariantById,
   type CatalogVariantRow,
 } from "../../src/modules/catalog/repository.js";
+import { syncSupplierCatalog } from "../../src/modules/supplier/catalog.js";
+import type { NormalizedSupplierProduct } from "../../src/modules/supplier/port.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
+
+it("rejects duplicate supplier catalog identities before opening a transaction", async () => {
+  const product = {
+    providerKey: "supplier-1",
+    externalProductId: "product-1",
+    externalVariantId: null,
+    nameVi: "Product",
+    nameEn: null,
+    descriptionVi: null,
+    descriptionEn: null,
+    warrantyVi: null,
+    warrantyEn: null,
+    customerInputType: null,
+    requiresCustomerInput: false,
+    customerInputsPerItem: 0,
+    customerPromptVi: null,
+    customerPromptEn: null,
+    fulfillmentMode: null,
+    availability: "AVAILABLE",
+    stockType: null,
+    stockQuantity: null,
+    minQuantity: 1,
+    maxQuantity: null,
+    fixedQuantity: null,
+    costVnd: 100_000,
+    currency: "VND",
+    pricingSource: null,
+    upstreamUpdatedAt: null,
+    supportStatus: "SUPPORTED",
+    unsupportedReason: null,
+    metadataSafe: {},
+  } satisfies NormalizedSupplierProduct;
+
+  await expect(
+    syncSupplierCatalog(ctx.db, product.providerKey, [product, product], "duplicate-test"),
+  ).rejects.toThrow("SUPPLIER_DUPLICATE_EXTERNAL_PRODUCT");
+});
 
 /**
  * T025 — Catalog repository (FR-002): list only ACTIVE categories and SELLABLE

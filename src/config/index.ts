@@ -174,7 +174,6 @@ function productionHardeningIssues(config: AppConfig, source: NodeJS.ProcessEnv)
     "SEPAY_WEBHOOK_HMAC_SECRET",
     "SEPAY_API_TOKEN",
     "VAULT_TOKEN",
-    "SUPPLIER_API_TOKEN",
   ] as const satisfies readonly (keyof AppConfig)[];
   for (const key of reusedDeliveryKey) {
     if (config.DELIVERY_SESSION_HMAC_KEY === config[key]) {

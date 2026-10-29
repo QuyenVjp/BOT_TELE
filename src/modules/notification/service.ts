@@ -53,6 +53,42 @@ export interface NotificationResponder {
     message: { text: string; buttons: Array<Array<{ text: string; callbackData: string }>> };
   }): Promise<unknown>;
 }
+const DEFAULT_NOTIFICATION_MAX_ATTEMPTS = 5;
+
+type NotificationDeliveryContext = Pick<
+  NotificationDeliveryClaim,
+  "id" | "campaignId" | "customerId"
+>;
+
+export class NotificationDeliveryInfrastructureError extends Error {
+  readonly operation: string;
+  readonly deliveryId: string;
+  readonly campaignId: string;
+  readonly customerId: string;
+
+  constructor(operation: string, delivery: NotificationDeliveryContext) {
+    super(
+      `notification delivery ${operation} failed for delivery ${delivery.id} campaign ${delivery.campaignId}`,
+    );
+    this.name = "NotificationDeliveryInfrastructureError";
+    this.operation = operation;
+    this.deliveryId = delivery.id;
+    this.campaignId = delivery.campaignId;
+    this.customerId = delivery.customerId;
+  }
+}
+
+async function withNotificationDeliveryContext<T>(
+  operation: string,
+  delivery: NotificationDeliveryContext,
+  fn: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await fn();
+  } catch {
+    throw new NotificationDeliveryInfrastructureError(operation, delivery);
+  }
+}
 
 type NotificationPreferenceRow = {
   customer_id: string;
@@ -711,12 +747,26 @@ export async function getBroadcastStatus(
 export async function claimNotificationDeliveries(
   exec: Executor,
   limit: number,
+  maxAttempts = DEFAULT_NOTIFICATION_MAX_ATTEMPTS,
 ): Promise<NotificationDeliveryClaim[]> {
   if (!Number.isInteger(limit) || limit < 1 || limit > 100)
     throw new RangeError("limit must be 1..100");
+  if (!Number.isInteger(maxAttempts) || maxAttempts < 1 || maxAttempts > 10_000)
+    throw new RangeError("maxAttempts must be an integer between 1 and 10000");
+  await sql`
+    update notification_delivery
+       set status='DEAD',
+           last_error='claim_expired_max_attempts',
+           claimed_by=null,
+           claim_expires_at=null
+     where status='RETRY'
+       and claim_expires_at<=now()
+       and attempts>=${maxAttempts}
+  `.execute(exec);
   const r = await sql<NotificationDeliveryClaimRow>`with picked as (
     select d.id from notification_delivery d join notification_campaign c on c.id=d.campaign_id
     where d.status in ('PENDING','RETRY') and d.next_attempt_at<=now() and c.status='QUEUED'
+      and d.attempts<${maxAttempts}
       and (d.claim_expires_at is null or d.claim_expires_at<=now())
     order by case when c.class='CRITICAL_SERVICE' then 0 else 1 end,d.next_attempt_at,d.id
     for update of d skip locked limit ${limit}
@@ -763,7 +813,7 @@ export async function markNotificationFailure(
   id: string,
   generation: number,
   error: string,
-  maxAttempts = 5,
+  maxAttempts = DEFAULT_NOTIFICATION_MAX_ATTEMPTS,
   retryAfterSeconds = 30,
 ): Promise<boolean> {
   const delay = Number.isFinite(retryAfterSeconds)
@@ -777,6 +827,38 @@ export async function markNotificationFailure(
   return r.rows.length === 1;
 }
 
+function notificationProviderErrorCode(error: unknown): string {
+  if (typeof error === "object" && error !== null) {
+    if ("error_code" in error) {
+      const errorCode = error.error_code;
+      if (typeof errorCode === "number" && Number.isInteger(errorCode) && errorCode >= 100) {
+        return `TELEGRAM_ERROR_${errorCode}`;
+      }
+    }
+    if ("code" in error) {
+      const providerCode = error.code;
+      if (typeof providerCode === "string" && /^[A-Z][A-Z0-9_]{0,31}$/.test(providerCode)) {
+        return `TELEGRAM_${providerCode}`;
+      }
+    }
+  }
+  if (error instanceof Error) {
+    if (error.name === "TelegramAmbiguousSendError") return "TELEGRAM_AMBIGUOUS_SEND";
+    if (error.name === "TelegramRetryableError") return "TELEGRAM_RETRYABLE";
+  }
+  return "TELEGRAM_SEND_FAILED";
+}
+
+function isUnreachableTelegramError(error: unknown): boolean {
+  if (typeof error !== "object" || error === null || !("error_code" in error)) return false;
+  const errorCode = error.error_code;
+  const description = "description" in error ? error.description : null;
+  return (
+    errorCode === 403 ||
+    (errorCode === 400 && typeof description === "string" && /chat not found/i.test(description))
+  );
+}
+
 export async function processNotificationDeliveryClaim(
   exec: Executor,
   delivery: NotificationDeliveryClaim,
@@ -787,43 +869,47 @@ export async function processNotificationDeliveryClaim(
     onRateLimit?: (seconds: number) => Promise<void>;
   },
 ): Promise<"SENT" | "SUPPRESSED" | "RETRY" | "STALE"> {
-  try {
-    const active = await sql<{
+  const active = await withNotificationDeliveryContext("claim-check", delivery, () =>
+    sql<{
       id: string;
     }>`select d.id from notification_delivery d join notification_campaign c on c.id=d.campaign_id where d.id=${delivery.id} and d.status='RETRY' and d.claim_generation=${delivery.generation} and d.claim_expires_at>now() and c.status='QUEUED'`.execute(
       exec,
+    ),
+  );
+  if (!active.rows.length) return "STALE";
+  const pref = await withNotificationDeliveryContext("preference-read", delivery, () =>
+    getNotificationPreferences(exec, delivery.customerId),
+  );
+  const restockConsent =
+    delivery.class === "SHOP_UPDATE"
+      ? await withNotificationDeliveryContext("restock-consent-read", delivery, () =>
+          hasActiveRestockSubscriptionForDelivery(exec, delivery),
+        )
+      : false;
+  if (
+    (delivery.class === "SHOP_UPDATE" && !pref.shopUpdates && !restockConsent) ||
+    (delivery.class === "PURCHASE_ACTIVITY" && !pref.purchaseActivity)
+  ) {
+    return (await withNotificationDeliveryContext("mark-suppressed", delivery, () =>
+      markNotificationSuppressed(exec, delivery.id, delivery.generation, "preference_opt_out"),
+    ))
+      ? "SUPPRESSED"
+      : "STALE";
+  }
+  if (delivery.class === "SHOP_UPDATE" && delivery.productVariantId != null) {
+    const variant = await withNotificationDeliveryContext("product-read", delivery, () =>
+      getVariantById(exec, delivery.productVariantId!, "public"),
     );
-    if (!active.rows.length) return "STALE";
-    const pref = await getNotificationPreferences(exec, delivery.customerId);
-    const restockConsent =
-      delivery.class === "SHOP_UPDATE" &&
-      (await hasActiveRestockSubscriptionForDelivery(exec, delivery));
-    if (
-      (delivery.class === "SHOP_UPDATE" && !pref.shopUpdates && !restockConsent) ||
-      (delivery.class === "PURCHASE_ACTIVITY" && !pref.purchaseActivity)
-    ) {
-      return (await markNotificationSuppressed(
-        exec,
-        delivery.id,
-        delivery.generation,
-        "preference_opt_out",
+    if (!variant?.is_ready) {
+      return (await withNotificationDeliveryContext("mark-suppressed", delivery, () =>
+        markNotificationSuppressed(exec, delivery.id, delivery.generation, "product_not_sellable"),
       ))
         ? "SUPPRESSED"
         : "STALE";
     }
-    if (delivery.class === "SHOP_UPDATE" && delivery.productVariantId != null) {
-      const variant = await getVariantById(exec, delivery.productVariantId, "public");
-      if (!variant?.is_ready) {
-        return (await markNotificationSuppressed(
-          exec,
-          delivery.id,
-          delivery.generation,
-          "product_not_sellable",
-        ))
-          ? "SUPPRESSED"
-          : "STALE";
-      }
-    }
+  }
+
+  try {
     await responder.send({
       telegramUserId: delivery.telegramUserId ?? delivery.chatId,
       chatId: delivery.chatId,
@@ -835,42 +921,50 @@ export async function processNotificationDeliveryClaim(
           : [],
       },
     });
-    return (await markNotificationSent(exec, delivery.id, delivery.generation)) ? "SENT" : "STALE";
   } catch (error) {
-    const retryAfter = input?.retryAfterSeconds?.(error) ?? 30;
-    if (retryAfter > 0 && input?.retryAfterSeconds?.(error)) await input.onRateLimit?.(retryAfter);
-    if (
-      typeof error === "object" &&
-      error !== null &&
-      "error_code" in error &&
-      (error.error_code === 403 ||
-        (error.error_code === 400 &&
-          "description" in error &&
-          /chat not found/i.test(String(error.description))))
-    ) {
-      const changed = await markNotificationSuppressed(
+    const retryAfter = input?.retryAfterSeconds?.(error) ?? null;
+    const retryDelay = retryAfter ?? 30;
+    const providerErrorCode =
+      retryAfter !== null && retryAfter > 0
+        ? "TELEGRAM_RATE_LIMITED"
+        : notificationProviderErrorCode(error);
+    if (retryAfter !== null && retryAfter > 0) {
+      await withNotificationDeliveryContext("rate-limit-pause", delivery, () =>
+        input?.onRateLimit ? input.onRateLimit(retryAfter) : Promise.resolve(),
+      );
+    }
+    if (isUnreachableTelegramError(error)) {
+      const changed = await withNotificationDeliveryContext("mark-suppressed", delivery, () =>
+        markNotificationSuppressed(exec, delivery.id, delivery.generation, "chat_unreachable"),
+      );
+      if (changed) {
+        await withNotificationDeliveryContext("mark-unreachable", delivery, () =>
+          sql`update customer_profile_snapshot set reachable=false where customer_id=${delivery.customerId} and chat_id=${delivery.chatId}`.execute(
+            exec,
+          ),
+        );
+      }
+      return changed ? "SUPPRESSED" : "STALE";
+    }
+    return (await withNotificationDeliveryContext("mark-failure", delivery, () =>
+      markNotificationFailure(
         exec,
         delivery.id,
         delivery.generation,
-        "chat_unreachable",
-      );
-      if (changed)
-        await sql`update customer_profile_snapshot set reachable=false where customer_id=${delivery.customerId} and chat_id=${delivery.chatId}`.execute(
-          exec,
-        );
-      return changed ? "SUPPRESSED" : "STALE";
-    }
-    return (await markNotificationFailure(
-      exec,
-      delivery.id,
-      delivery.generation,
-      error instanceof Error ? error.name : "TELEGRAM_ERROR",
-      input?.maxAttempts,
-      retryAfter,
+        providerErrorCode,
+        input?.maxAttempts,
+        retryDelay,
+      ),
     ))
       ? "RETRY"
       : "STALE";
   }
+
+  return (await withNotificationDeliveryContext("mark-sent", delivery, () =>
+    markNotificationSent(exec, delivery.id, delivery.generation),
+  ))
+    ? "SENT"
+    : "STALE";
 }
 
 function positiveRestockDelta(
@@ -977,6 +1071,43 @@ async function queueCustomerCriticalNotification(
   trx: Executor,
   notice: { campaignId: string; customerId: string; content: string },
 ): Promise<boolean> {
+  const target = await sql<{ chat_id: string }>`
+    select coalesce(cps.chat_id, ci.channel_user_id) as chat_id
+    from customer c
+    left join customer_profile_snapshot cps on cps.customer_id = c.id and cps.reachable
+    left join channel_identity ci on ci.customer_id = c.id and ci.channel = 'TELEGRAM'
+    where c.id = ${notice.customerId} and c.status = 'ACTIVE'
+    limit 1
+  `.execute(trx);
+  const chatId = target.rows[0]?.chat_id;
+  if (!chatId) return false;
+  await sql`
+    insert into notification_campaign(id, class, content, status, created_by, idempotency_key)
+    values (${notice.campaignId}, 'CRITICAL_SERVICE', ${notice.content}, 'QUEUED', 'system', ${notice.campaignId})
+    on conflict (idempotency_key) do nothing
+  `.execute(trx);
+  await sql`
+    insert into notification_delivery(id, campaign_id, customer_id, chat_id)
+    values (${newId()}, ${notice.campaignId}, ${notice.customerId}, ${chatId})
+    on conflict (campaign_id, customer_id) do nothing
+  `.execute(trx);
+  return true;
+}
+
+async function queueTicketStatusNotification(
+  trx: Executor,
+  notice: { campaignId: string; customerId: string; content: string },
+): Promise<boolean> {
+  const committed = await sql<{ id: string }>`
+    select d.id
+    from notification_campaign c
+    join notification_delivery d on d.campaign_id = c.id
+    where c.idempotency_key = ${notice.campaignId}
+      and d.customer_id = ${notice.customerId}
+    limit 1
+  `.execute(trx);
+  if (committed.rows.length > 0) return true;
+
   const target = await sql<{ chat_id: string }>`
     select coalesce(cps.chat_id, ci.channel_user_id) as chat_id
     from customer c
@@ -1138,6 +1269,65 @@ const SUPPORT_REASON_ADMIN_LABELS: Record<string, string> = {
   OTHER: "Khác",
 };
 
+const SUPPORT_TICKET_CUSTOMER_MESSAGE: Record<string, string> = {
+  WAITING_SHOP: "Shop đang xử lý yêu cầu hỗ trợ của bạn.",
+  WAITING_CUSTOMER: "Shop cần bạn bổ sung thông tin cho yêu cầu hỗ trợ.",
+  RESOLVED: "Yêu cầu hỗ trợ của bạn đã được xử lý.",
+  CLOSED: "Yêu cầu hỗ trợ đã đóng.",
+  MANUAL_REVIEW: "Shop đang xem xét thêm yêu cầu của bạn.",
+};
+const SUPPORT_TICKET_CUSTOMER_CANCELLED_MESSAGE = "Yêu cầu hỗ trợ đã được bạn huỷ.";
+const SUPPORT_TICKET_STATUS_VALUES = new Set([
+  "OPEN",
+  ...Object.keys(SUPPORT_TICKET_CUSTOMER_MESSAGE),
+]);
+
+function ticketStatusChangedNotification(
+  event: OutboxEvent,
+): { campaignId: string; customerId: string; content: string } | null {
+  if (event.eventType !== "TicketStatusChanged") return null;
+  const p = event.payloadRedacted;
+  const ticketId = typeof p.ticketId === "string" ? p.ticketId : null;
+  const customerId = typeof p.customerId === "string" ? p.customerId : null;
+  const from = typeof p.from === "string" ? p.from : null;
+  const to = typeof p.to === "string" ? p.to : null;
+  const actorId = typeof p.actorId === "string" ? p.actorId : null;
+  const version = typeof p.version === "number" ? p.version : null;
+  const fromIsValid = from !== null && SUPPORT_TICKET_STATUS_VALUES.has(from);
+  const toIsValid = to !== null && Object.hasOwn(SUPPORT_TICKET_CUSTOMER_MESSAGE, to);
+  let content: string | null = null;
+  if (to === "RESOLVED" && from === "WAITING_CUSTOMER" && actorId === customerId) {
+    content = SUPPORT_TICKET_CUSTOMER_CANCELLED_MESSAGE;
+  } else if (to !== null) {
+    content = SUPPORT_TICKET_CUSTOMER_MESSAGE[to] ?? null;
+  }
+  if (
+    event.aggregateType !== "SupportTicket" ||
+    ticketId === null ||
+    ticketId.trim().length === 0 ||
+    ticketId !== event.aggregateId ||
+    customerId === null ||
+    customerId.trim().length === 0 ||
+    actorId === null ||
+    actorId.trim().length === 0 ||
+    !fromIsValid ||
+    !toIsValid ||
+    content === null ||
+    from === to ||
+    version === null ||
+    !Number.isSafeInteger(version) ||
+    version < 1 ||
+    version !== event.aggregateVersion
+  ) {
+    return null;
+  }
+  return {
+    campaignId: `support-ticket-status:${ticketId}:${version}`,
+    customerId,
+    content,
+  };
+}
+
 /**
  * A customer opening a ticket is work the owner must see: the ticket exists in the queue either
  * way, but nothing pushed it to the owner's chat. Same shape as the warranty alert, delivered to
@@ -1148,15 +1338,25 @@ function ticketOpenedAdminAlert(
 ): { campaignId: string; content: string } | null {
   if (event.eventType !== "TicketOpened") return null;
   const p = event.payloadRedacted;
-  if (typeof p.ticketId !== "string" || typeof p.customerId !== "string") return null;
-  const reason = typeof p.reasonCode === "string" ? p.reasonCode : "";
+  if (
+    event.aggregateType !== "SupportTicket" ||
+    typeof p.ticketId !== "string" ||
+    p.ticketId.trim().length === 0 ||
+    p.ticketId !== event.aggregateId ||
+    typeof p.customerId !== "string" ||
+    p.customerId.trim().length === 0
+  ) {
+    return null;
+  }
+  const reason = typeof p.reasonCode === "string" ? p.reasonCode : null;
+  if (reason === null || !Object.hasOwn(SUPPORT_REASON_ADMIN_LABELS, reason)) return null;
   return {
     campaignId: `ticket-opened:${event.aggregateId}`,
     content: [
       "🛡 Yêu cầu hỗ trợ mới",
       "",
       `Khách: ${p.customerId.slice(-4).padStart(8, "•")}`,
-      `Loại: ${SUPPORT_REASON_ADMIN_LABELS[reason] ?? "Khác"}`,
+      `Loại: ${SUPPORT_REASON_ADMIN_LABELS[reason]}`,
       "Mở mục Hỗ trợ để xử lý.",
     ].join("\n"),
   };
@@ -1394,9 +1594,17 @@ export async function handleNotificationOutboxEvent(
   const shopCancel = shopCancelNotification(event);
   const warrantyAdmin = warrantyAdminAlert(event);
   const ticketAdmin = ticketOpenedAdminAlert(event);
+  const ticketStatusNotice = ticketStatusChangedNotification(event);
   const warrantyCustomer = warrantyCustomerNotice(event);
   if (walletEvent && !wallet)
     return { kind: "TERMINAL_REVIEW", errorCode: "WALLET_NOTIFICATION_PAYLOAD_INVALID" };
+  if (event.eventType === "TicketOpened" && !ticketAdmin)
+    return { kind: "TERMINAL_REVIEW", errorCode: "TICKET_OPENED_NOTIFICATION_PAYLOAD_INVALID" };
+  if (event.eventType === "TicketStatusChanged" && !ticketStatusNotice)
+    return {
+      kind: "TERMINAL_REVIEW",
+      errorCode: "TICKET_STATUS_CHANGED_NOTIFICATION_PAYLOAD_INVALID",
+    };
   if (
     !stock &&
     !lowStock &&
@@ -1404,6 +1612,7 @@ export async function handleNotificationOutboxEvent(
     !shopCancel &&
     !warrantyAdmin &&
     !ticketAdmin &&
+    !ticketStatusNotice &&
     !warrantyCustomer
   )
     return { kind: "PUBLISHED" };
@@ -1411,6 +1620,7 @@ export async function handleNotificationOutboxEvent(
   let missingWarrantyTarget = false;
   let missingLowStockTarget = false;
   let missingShopCancelTarget = false;
+  let missingTicketStatusTarget = false;
   await withTransaction(db, async (trx) => {
     if (stock) {
       const snapshot = await restockCampaignSnapshot(trx, stock);
@@ -1428,6 +1638,9 @@ export async function handleNotificationOutboxEvent(
         where rs.variant_id=${stock.variantId} and rs.active
           and coalesce(cps.chat_id,ci.channel_user_id) is not null
         on conflict (campaign_id,customer_id) do nothing returning 1 as n`.execute(trx);
+    }
+    if (ticketStatusNotice && !(await queueTicketStatusNotification(trx, ticketStatusNotice))) {
+      missingTicketStatusTarget = true;
     }
     if (wallet && !(await queueCustomerCriticalNotification(trx, wallet))) {
       missingWalletTarget = true;
@@ -1465,6 +1678,8 @@ export async function handleNotificationOutboxEvent(
   if (missingLowStockTarget)
     return { kind: "RETRY", errorCode: "LOW_STOCK_ROOT_NOTIFICATION_TARGET_MISSING" };
   if (missingShopCancelTarget)
+    return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
+  if (missingTicketStatusTarget)
     return { kind: "RETRY", errorCode: "CRITICAL_NOTIFICATION_TARGET_MISSING" };
   return { kind: "PUBLISHED" };
 }

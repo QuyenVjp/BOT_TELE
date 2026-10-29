@@ -186,6 +186,36 @@ describe.skipIf(!hasDocker)("Google Sheets inventory intake", () => {
       await app.close();
     }
   });
+  it("rejects inventory input beyond 500 rows without staging or committing a partial batch", async () => {
+    const variantId = await seedVariant();
+    const app = await createIntakeApp();
+    try {
+      const input = Array.from(
+        { length: 501 },
+        (_, index) => `row-${index}@example.invalid:fixture-${index}-${variantId}`,
+      ).join("\n");
+      const response = await app.inject({
+        method: "POST",
+        url: "/ops/google-sheets/inventory-intake/preview",
+        headers: {
+          authorization: "Bearer owner-token",
+          "content-type": "application/json",
+        },
+        payload: JSON.stringify({ spreadsheetId: SPREADSHEET_ID, variantId, input }),
+      });
+
+      expect(response.statusCode).toBe(422);
+      expect(response.json()).toEqual({ ok: false, code: "IMPORT_LIMIT_EXCEEDED" });
+      const persisted = await sql<{ challenges: string; assets: string }>`
+        select
+          (select count(*)::text from google_sheets_inventory_intake_challenge) as challenges,
+          (select count(*)::text from digital_asset where variant_id = ${variantId}) as assets
+      `.execute(ctx.db);
+      expect(persisted.rows[0]).toEqual({ challenges: "0", assets: "0" });
+    } finally {
+      await app.close();
+    }
+  });
   it("previews, commits once, and replays confirm without a second asset", async () => {
     const variantId = await seedVariant();
     const app = await createIntakeApp();

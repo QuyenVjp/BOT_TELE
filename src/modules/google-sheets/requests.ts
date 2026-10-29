@@ -17,9 +17,9 @@ import {
   type SheetsProjectionConfig,
 } from "./projection.js";
 
-export interface SheetsRequestProcessorConfig extends SheetsProjectionConfig {
-  maxRows?: number;
-}
+export type SheetsRequestProcessorConfig = SheetsProjectionConfig;
+
+const REQUEST_PROCESS_BATCH_SIZE = 500;
 
 type OutcomeStatus = "SUCCEEDED" | "REJECTED" | "STALE" | "FAILED";
 type PersistedRequestStatus = OutcomeStatus | "PENDING" | "PROCESSING";
@@ -603,11 +603,11 @@ interface ParsedSheetRow {
   rejectionCode?: RejectionCode;
 }
 
-function parseRows(values: readonly (readonly SheetValue[])[], maxRows: number): ParsedSheetRow[] {
+function parseRows(values: readonly (readonly SheetValue[])[]): ParsedSheetRow[] {
   const headers = values[0]?.map((value) => String(value ?? "")) ?? [];
   const index = (name: string) => headers.indexOf(name);
   const rows: ParsedSheetRow[] = [];
-  for (const [offset, row] of values.slice(1, maxRows + 1).entries()) {
+  for (const [offset, row] of values.slice(1).entries()) {
     const requestId = valueAt(row, index("request_id"));
     if (!requestId) continue;
     const sourceRowRef = `Requests!A${offset + 2}`;
@@ -652,35 +652,44 @@ export async function processGoogleSheetsRequestsOnce(input: {
     spreadsheetId: input.config.spreadsheetId,
     ranges: ["Requests!A:Z"],
   });
-  const rows = parseRows(result[0]?.values ?? [], input.config.maxRows ?? 500);
+  const rows = parseRows(result[0]?.values ?? []);
   const stats = { processed: 0, rejected: 0, stale: 0, failed: 0 };
-  for (const row of rows) {
-    if (row.input === null) {
-      await persistRejectedSheetRow({
-        db: input.db,
-        requestId: row.requestId,
-        sourceRowRef: row.sourceRowRef,
-        resultCode: row.rejectionCode ?? "INVALID_SHEET_REQUEST",
-      });
-      stats.rejected += 1;
-      continue;
-    }
-    try {
-      const request = parseSheetRequest(row.input);
-      const outcome = await processParsedRequest(input.db, request, input.config, row.sourceRowRef);
-      stats.processed += 1;
-      if (outcome.status === "REJECTED") stats.rejected += 1;
-      if (outcome.status === "STALE") stats.stale += 1;
-      if (outcome.status === "FAILED") stats.failed += 1;
-    } catch (error) {
-      await persistRejectedSheetRow({
-        db: input.db,
-        requestId: row.requestId,
-        sourceRowRef: row.sourceRowRef,
-        resultCode:
-          error instanceof GoogleSheetsContractError ? error.code : "INVALID_SHEET_REQUEST",
-      });
-      stats.rejected += 1;
+  for (let batchStart = 0; batchStart < rows.length; batchStart += REQUEST_PROCESS_BATCH_SIZE) {
+    const batchEnd = Math.min(rows.length, batchStart + REQUEST_PROCESS_BATCH_SIZE);
+    for (let rowIndex = batchStart; rowIndex < batchEnd; rowIndex += 1) {
+      const row = rows[rowIndex]!;
+      if (row.input === null) {
+        await persistRejectedSheetRow({
+          db: input.db,
+          requestId: row.requestId,
+          sourceRowRef: row.sourceRowRef,
+          resultCode: row.rejectionCode ?? "INVALID_SHEET_REQUEST",
+        });
+        stats.rejected += 1;
+        continue;
+      }
+      try {
+        const request = parseSheetRequest(row.input);
+        const outcome = await processParsedRequest(
+          input.db,
+          request,
+          input.config,
+          row.sourceRowRef,
+        );
+        stats.processed += 1;
+        if (outcome.status === "REJECTED") stats.rejected += 1;
+        if (outcome.status === "STALE") stats.stale += 1;
+        if (outcome.status === "FAILED") stats.failed += 1;
+      } catch (error) {
+        await persistRejectedSheetRow({
+          db: input.db,
+          requestId: row.requestId,
+          sourceRowRef: row.sourceRowRef,
+          resultCode:
+            error instanceof GoogleSheetsContractError ? error.code : "INVALID_SHEET_REQUEST",
+        });
+        stats.rejected += 1;
+      }
     }
   }
   if (rows.length > 0) {

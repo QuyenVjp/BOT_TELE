@@ -228,7 +228,15 @@ describe("restock subscription eligibility", () => {
       expect.objectContaining({ customerId, variantId: validId, active: true }),
     ]);
 
-    for (const variantId of [hiddenId, testId, archivedId, unpublishedId, supplierId, readyId]) {
+    for (const variantId of [
+      hiddenId,
+      testId,
+      archivedId,
+      unpublishedId,
+      supplierId,
+      readyId,
+      nonLocalReadyId,
+    ]) {
       await sql`
         insert into restock_subscription (id, customer_id, variant_id)
         values (${newId()}, ${customerId}, ${variantId})

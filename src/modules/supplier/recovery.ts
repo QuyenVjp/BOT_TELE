@@ -7,13 +7,14 @@ import {
   validateRecoveryBatchSize,
   type RecoveryTelemetry,
 } from "../recovery-result.js";
-import type { SupplierPort } from "./port.js";
+import type { SupplierPort, SupplierProvider } from "./port.js";
 import { recoverUnknownSupplierOrder } from "./service.js";
 
 interface SupplierRecoveryRow {
   id: string;
   supplier_id: string;
   idempotency_key: string;
+  query_key: string | null;
   external_order_id: string | null;
   external_sku: string;
   delivery_type: string;
@@ -27,7 +28,7 @@ export async function recoverSupplierOrdersBatch(
     batchSize: number;
     now?: Date;
     retryDelaySeconds?: number;
-    resolvePort: (supplierId: string) => SupplierPort | null;
+    resolvePort: (supplierId: string) => Promise<SupplierPort | SupplierProvider | null>;
     vault: Vault;
   },
 ): Promise<RecoveryTelemetry> {
@@ -44,13 +45,14 @@ export async function recoverSupplierOrdersBatch(
   for (let index = 0; index < options.batchSize; index += 1) {
     const candidate = await withTransaction(db, async (trx) => {
       const selected = await sql<SupplierRecoveryRow>`
-        select so.id, so.supplier_id, so.idempotency_key, so.external_order_id,
+        select so.id, so.supplier_id, so.idempotency_key, so.query_key, so.external_order_id,
                ss.external_sku, o.delivery_type, o.duration_code, ss.region
         from supplier_order so
         join supplier_sku ss on ss.id = so.supplier_sku_id
         join "order" o on o.id = so.order_id
         where (so.status in ('UNKNOWN','PENDING')
             or (so.status = 'SUBMITTED' and so.submitted_at <= ${new Date(now.getTime() - retryDelaySeconds * 1000).toISOString()}))
+          and so.needs_review_at is null
           and coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at, now())
               <= ${now.toISOString()}
         order by coalesce(so.next_reconcile_at, so.last_queried_at, so.submitted_at) asc nulls first,
@@ -71,11 +73,11 @@ export async function recoverSupplierOrdersBatch(
     claimed += 1;
 
     try {
-      const port = options.resolvePort(candidate.supplier_id);
+      const port = await options.resolvePort(candidate.supplier_id);
       if (!port) throw new Error("supplier recovery port unavailable");
       const result = await recoverUnknownSupplierOrder(db, {
         supplierOrderId: candidate.id,
-        queryKey: candidate.external_order_id ?? candidate.idempotency_key,
+        queryKey: candidate.query_key ?? candidate.external_order_id ?? candidate.idempotency_key,
         expectedSku: candidate.external_sku,
         deliveryType: candidate.delivery_type,
         durationCode: candidate.duration_code,

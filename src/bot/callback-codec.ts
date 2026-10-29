@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { isId } from "../shared/ids/index.js";
+import { isPublicOrderNumber } from "../shared/order-number/index.js";
 
 const CALLBACK_PREFIX = "buy:";
 const FORMAT_VERSION = 1;
@@ -258,6 +259,7 @@ export const CALLBACK_ACTION_CODES = {
   SUPPORT_TICKET_VIEW: 15,
   SUPPORT_TICKET_LIST: 32,
   SUPPORT_TICKET_CLOSE: 33,
+  SUPPORT_DESCRIPTION_CANCEL: 36,
   RESTOCK_SUBSCRIBE: 16,
   RESTOCK_UNSUBSCRIBE: 17,
   RESTOCK_LIST: 18,
@@ -275,6 +277,7 @@ export const CALLBACK_ACTION_CODES = {
   PREORDER_LIST: 30,
   PREORDER_PAY: 31,
   WARRANTY_REPORT: 34,
+  BUY_AGAIN: 35,
 } as const;
 
 export type CallbackAction = keyof typeof CALLBACK_ACTION_CODES;
@@ -451,6 +454,7 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "PAYMENT_REOPEN":
     case "SUPPORT_TICKET_VIEW":
     case "SUPPORT_TICKET_CLOSE":
+    case "SUPPORT_DESCRIPTION_CANCEL":
     case "RESTOCK_SUBSCRIBE":
     case "RESTOCK_UNSUBSCRIBE":
     case "SHOP_PRODUCT":
@@ -462,6 +466,15 @@ function encodeActionPayload(input: IssueCallbackTokenInput): Buffer {
     case "CHECKOUT_PREVIEW":
       assertOnlyResource(input);
       return encodeResourceId(input.resourceId!);
+    case "BUY_AGAIN":
+      if (
+        !input.resourceId ||
+        input.secondaryResourceId !== undefined ||
+        input.option !== undefined
+      ) {
+        throw new Error("Invalid buy-again callback payload");
+      }
+      return encodePublicOrderNumber(input.resourceId);
     case "SUPPORT_TICKET_LIST":
       if (input.secondaryResourceId !== undefined || input.option !== undefined) {
         throw new Error("Invalid support ticket list callback payload");
@@ -552,6 +565,11 @@ function decodeActionPayload(
   ) {
     return payload.byteLength === 0 ? {} : null;
   }
+  if (action === "BUY_AGAIN") {
+    if (payload.some((byte) => byte > 0x7f)) return null;
+    const orderNumber = payload.toString("ascii");
+    return isPublicOrderNumber(orderNumber) ? { resourceId: orderNumber } : null;
+  }
   if (action === "SUPPORT_TICKET_LIST") {
     if (payload.byteLength === 0) return {};
     return payload.byteLength === 16 ? { resourceId: decodeUlid(payload) } : null;
@@ -566,6 +584,7 @@ function decodeActionPayload(
       "PAYMENT_REOPEN",
       "SUPPORT_TICKET_VIEW",
       "SUPPORT_TICKET_CLOSE",
+      "SUPPORT_DESCRIPTION_CANCEL",
       "RESTOCK_SUBSCRIBE",
       "RESTOCK_UNSUBSCRIBE",
       "SHOP_PRODUCT",
@@ -654,6 +673,11 @@ function encodeResourceId(resourceId: string): Buffer {
   if (isId(resourceId)) return encodeUlid(resourceId);
   if (/^[0-9A-Z]{26}$/.test(resourceId)) return Buffer.from(resourceId, "ascii");
   throw new Error("Invalid callback resource id");
+}
+
+function encodePublicOrderNumber(orderNumber: string): Buffer {
+  if (!isPublicOrderNumber(orderNumber)) throw new Error("Invalid public order number");
+  return Buffer.from(orderNumber, "ascii");
 }
 
 function signUnified(key: Buffer, telegramUserId: string, payload: Buffer): Buffer {

@@ -172,6 +172,11 @@ export interface TelegramDomainDispatcherDeps {
   history: {
     list(customerId: string, cursor?: string | null): Promise<PresentedMessage>;
     detail(orderNumber: string, customerId: string): Promise<PresentedMessage>;
+    buyAgain?(
+      orderNumber: string,
+      customerId: string,
+      telegramUserId: string,
+    ): Promise<PresentedMessage>;
   };
   support: {
     reasonMenu(orderNumber?: string): PresentedMessage;
@@ -179,6 +184,23 @@ export interface TelegramDomainDispatcherDeps {
       customerId: string;
       reasonCode: string;
       orderNumber?: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    beginDescription?(input: {
+      customerId: string;
+      reasonCode: string;
+      orderNumber?: string;
+      correlationId: string;
+    }): Promise<PresentedMessage>;
+    submitDescription?(input: {
+      customerId: string;
+      ticketId: string;
+      description: string;
+      correlationId: string;
+    }): Promise<PresentedMessage | null>;
+    cancelDescription?(input: {
+      ticketId: string;
+      customerId: string;
       correlationId: string;
     }): Promise<PresentedMessage>;
     list(customerId: string): Promise<PresentedMessage>;
@@ -647,6 +669,13 @@ export interface TelegramDomainDispatcherDeps {
       stateId: string;
       correlationId: string;
       resolutionCode?: "PARK_REVIEW" | "RECONCILE_DELIVERED" | "KEEP_UNCERTAIN";
+    }): Promise<PresentedMessage>;
+    orderFileDeliveryRecover?(input: {
+      telegramUserId: string;
+      chatType: string;
+      stateId: string;
+      correlationId: string;
+      decision: "KEEP_UNCERTAIN" | "REQUEUE";
     }): Promise<PresentedMessage>;
     orderSearch?(input: {
       telegramUserId: string;
@@ -2344,6 +2373,20 @@ export function createTelegramDomainDispatcher(
                 correlationId,
               })
             : safeError("Phiên đơn hàng không khả dụng.");
+        } else if (route.startsWith("orders:file_delivery:")) {
+          const [, , decision, stateId] = route.split(":");
+          const recoveryDecision =
+            decision === "keep" ? "KEEP_UNCERTAIN" : decision === "requeue" ? "REQUEUE" : null;
+          message =
+            recoveryDecision !== null && admin.orderFileDeliveryRecover
+              ? await admin.orderFileDeliveryRecover({
+                  telegramUserId: envelope.actorUserId,
+                  chatType: envelope.chatType,
+                  stateId: stateId ?? "",
+                  decision: recoveryDecision,
+                  correlationId,
+                })
+              : safeError("Khôi phục gửi tệp không khả dụng.");
         } else if (
           route.startsWith("orders:reconcile_delivered:") ||
           route.startsWith("orders:keep_uncertain:")
@@ -2772,6 +2815,12 @@ export function createTelegramDomainDispatcher(
         envelope.messageText === "🛟 Hỗ trợ"
       ) {
         message = deps.support.reasonMenu();
+      } else if (envelope.supportDescriptionText) {
+        // The ingress state may become stale before the worker claims this row. Keep the explicit
+        // marker on the support path so a failed submission cannot fall through to catalog search.
+        message =
+          (await submitPendingSupportDescription(deps, envelope, correlationId)) ??
+          safeError("Không tìm thấy yêu cầu hỗ trợ đang chờ.");
       } else if (envelope.contactPhoneNumber) {
         message = presentCustomerAccountPrompt();
       } else if (envelope.inventoryImportText && envelope.messageText) {
@@ -2831,7 +2880,8 @@ export function createTelegramDomainDispatcher(
           deps.admin?.importText ||
           deps.admin?.quantityAdjustText ||
           deps.admin?.workflow?.variantText ||
-          deps.admin?.workflow)
+          deps.admin?.workflow ||
+          deps.support.submitDescription)
       ) {
         message = envelope.rootProductDraftText
           ? ((deps.admin?.workflow?.variantText
@@ -2926,11 +2976,8 @@ export function createTelegramDomainDispatcher(
                   correlationId,
                 })
               : null) ??
-            // Nothing above claimed this text, so it is a customer query. `catalogHomeOrSearch`
-            // runs the catalog search for a 2-64 character term and otherwise falls back to the
-            // home screen - exactly the previous fallback. Without this, free-text search was
-            // unreachable whenever the admin/wallet text handlers were wired (they always are in
-            // production), so typing a product name returned the home screen instead of results.
+            // A pending support draft claims ordinary free text before catalog search.
+            (await submitPendingSupportDescription(deps, envelope, correlationId)) ??
             (await catalogHomeOrSearch(deps, envelope)));
       } else if (envelope.callbackData) {
         const verified = deps.codec.verify(envelope.callbackData, {
@@ -3099,6 +3146,10 @@ async function dispatchVerified(
       return token.resourceId
         ? deps.history.detail(token.resourceId, customerId)
         : safeError("Không tìm thấy đơn hàng.");
+    case "BUY_AGAIN":
+      return token.resourceId && deps.history.buyAgain
+        ? deps.history.buyAgain(token.resourceId, customerId, envelope.actorUserId)
+        : safeError("Không tìm thấy đơn hàng.");
     case "PAYMENT_REFRESH": {
       if (!token.resourceId) return safeError("Không tìm thấy đơn hàng.");
       const order = await ownedOrder(deps, token.resourceId, customerId);
@@ -3132,13 +3183,23 @@ async function dispatchVerified(
       if (!reasonCode) return safeError("Lý do hỗ trợ không hợp lệ.");
       const order = token.resourceId ? await ownedOrder(deps, token.resourceId, customerId) : null;
       if (token.resourceId && !order) return safeError("Không tìm thấy đơn hàng.");
-      return deps.support.open({
-        customerId,
-        reasonCode,
-        ...(order ? { orderNumber: order.orderNumber } : {}),
-        correlationId,
-      });
+      return deps.support.beginDescription
+        ? deps.support.beginDescription({
+            customerId,
+            reasonCode,
+            ...(order ? { orderNumber: order.orderNumber } : {}),
+            correlationId,
+          })
+        : safeError("Luồng mô tả ticket không khả dụng.");
     }
+    case "SUPPORT_DESCRIPTION_CANCEL":
+      return token.resourceId && deps.support.cancelDescription
+        ? deps.support.cancelDescription({
+            ticketId: token.resourceId,
+            customerId,
+            correlationId,
+          })
+        : safeError("Không tìm thấy ticket.");
     case "SUPPORT_TICKET_LIST":
       return deps.support.list(customerId);
     case "SUPPORT_TICKET_VIEW":
@@ -3386,6 +3447,29 @@ async function routeAdminWarranty(
     default:
       return missing;
   }
+}
+
+async function submitPendingSupportDescription(
+  deps: TelegramDomainDispatcherDeps,
+  envelope: TelegramCommandEnvelope,
+  correlationId: string,
+): Promise<PresentedMessage | null> {
+  if (
+    !deps.support.submitDescription ||
+    !envelope.messageText ||
+    !envelope.supportDescriptionTicketId ||
+    !isId(envelope.supportDescriptionTicketId)
+  ) {
+    return null;
+  }
+  const customerId = await deps.resolveCustomerId(envelope.actorUserId);
+  if (!customerId) return null;
+  return deps.support.submitDescription({
+    customerId,
+    ticketId: envelope.supportDescriptionTicketId,
+    description: envelope.messageText,
+    correlationId,
+  });
 }
 
 async function catalogHomeOrSearch(

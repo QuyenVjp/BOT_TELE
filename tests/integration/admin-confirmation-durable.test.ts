@@ -84,15 +84,41 @@ async function seedEvidence(): Promise<{
 }
 
 /** The per-verb fixture a durable command needs before it can issue a challenge. */
-function durableCommandFixture(command: string): {
+function durableCommandFixture(
+  command: string,
+  targetId: string,
+): {
   input?: string;
   expectedVersion?: number;
+  resolutionCode?: string;
+  fileDelivery?: {
+    jobId: string;
+    artifactId: string;
+    artifactVersion: number;
+    artifactSha256: string;
+    claimGeneration: number;
+    telegramChatId: string;
+  };
 } {
   if (command === "catalog.evidence.register") {
     return { input: "OWNER_ATTESTATION|owner-reference-probe|Synthetic evidence probe" };
   }
   if (command === "catalog.evidence.revoke") return { input: newId(), expectedVersion: 1 };
   if (command === "fulfillment.reconcile") return { expectedVersion: 1 };
+  if (command === "file_delivery.recover") {
+    return {
+      expectedVersion: 1,
+      resolutionCode: "KEEP_UNCERTAIN",
+      fileDelivery: {
+        jobId: targetId,
+        artifactId: newId(),
+        artifactVersion: 2,
+        artifactSha256: "a".repeat(64),
+        claimGeneration: 3,
+        telegramChatId: String(ROOT_ID),
+      },
+    };
+  }
   return {};
 }
 
@@ -320,23 +346,43 @@ describe("durable AdminConfirmation (T163/T164)", () => {
     const admin = callbacks(seeded.rootChannelIdentityId);
 
     for (const command of DURABLE_ADMIN_COMMAND_REFS) {
+      const targetId = newId();
       const issued = await admin.handle({
         command,
         actor,
-        targetId: newId(),
+        targetId,
         reason: `Synthetic vocabulary probe for ${command}`,
         correlationId: `vocabulary-${command}`,
-        ...durableCommandFixture(command),
+        ...durableCommandFixture(command, targetId),
       });
       expect(issued, command).toMatchObject({ ok: true, needsConfirmation: true });
       if (!issued.ok || !issued.needsConfirmation) return;
 
-      const persisted = await sql<{ allowlisted_command_ref: string | null }>`
-        select allowlisted_command_ref from admin_confirmation where id = ${issued.confirmationId}
+      const persisted = await sql<{
+        allowlisted_command_ref: string | null;
+        payload_redacted: Record<string, unknown>;
+      }>`
+        select allowlisted_command_ref, payload_redacted
+        from admin_confirmation where id = ${issued.confirmationId}
       `.execute(ctx.db);
       expect(persisted.rows[0]?.allowlisted_command_ref, command).toBe(command);
+      if (command === "file_delivery.recover") {
+        expect(persisted.rows[0]?.payload_redacted).toMatchObject({
+          targetId,
+          expectedVersion: 1,
+          resolutionCode: "KEEP_UNCERTAIN",
+          fileDelivery: {
+            jobId: targetId,
+            artifactVersion: 2,
+            artifactSha256: "a".repeat(64),
+            claimGeneration: 3,
+            telegramChatId: String(ROOT_ID),
+          },
+        });
+      }
     }
   });
+
   it("uses a fresh confirmation id for each transition from one edited screen", async () => {
     const seeded = await seed();
     await sql`delete from store_mode_transition`.execute(ctx.db);

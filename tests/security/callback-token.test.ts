@@ -29,6 +29,7 @@ describe("unified signed callback token (T125/T129)", () => {
     { action: "CATEGORY_LIST" },
     { action: "CATEGORY_VIEW", resourceId: newId() },
     { action: "VARIANT_VIEW", resourceId: newId() },
+    { action: "BUY_AGAIN", resourceId: "ORD-20260717-ABCD1234" },
     { action: "CATALOG_PAGE", resourceId: newId(), secondaryResourceId: newId() },
     { action: "ORDER_LIST" },
     { action: "ORDER_LIST_PAGE", resourceId: newId() },

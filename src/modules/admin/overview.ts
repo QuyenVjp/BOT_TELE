@@ -1,5 +1,6 @@
 import { sql } from "kysely";
 import type { Executor } from "../../infrastructure/db/transaction.js";
+import { manualServicePaymentEvidence } from "../digital-goods/manual-fulfillment.js";
 
 /**
  * Admin overview aggregate (goal §71 summary block, §136 business overview).
@@ -27,41 +28,59 @@ export interface AdminOverview {
 }
 
 const VIETNAM_OFFSET_MS = 7 * 60 * 60 * 1000;
+const VIETNAM_DAY_MS = 86_400_000;
 
 /** Start of the Vietnam calendar day containing `now`, as a UTC instant. */
 export function vietnamDayStart(now: Date): Date {
   const shifted = now.getTime() + VIETNAM_OFFSET_MS;
-  return new Date(Math.floor(shifted / 86_400_000) * 86_400_000 - VIETNAM_OFFSET_MS);
+  return new Date(Math.floor(shifted / VIETNAM_DAY_MS) * VIETNAM_DAY_MS - VIETNAM_OFFSET_MS);
 }
 
-/** Real (non-test, non-archived) orders only. */
+/** Real (non-test, non-archived, non-canary) orders only. */
 const REAL_ORDER_SQL = sql`
   join product_variant v on v.id = o.variant_id
   join product p on p.id = v.product_id
-  where not p.is_test and not p.is_archived
+  where not p.is_test
+    and not p.is_archived
+    and p.name_vi not ilike '%canary%'
 `;
 
 export async function getAdminOverview(
   exec: Executor,
   now: Date = new Date(),
 ): Promise<AdminOverview> {
-  const dayStart = vietnamDayStart(now).toISOString();
-
+  const dayStartDate = vietnamDayStart(now);
+  const dayStart = dayStartDate.toISOString();
+  const dayEnd = new Date(dayStartDate.getTime() + VIETNAM_DAY_MS).toISOString();
   const result = await sql<{
     revenue_today_vnd: string | null;
     orders_today: number;
     awaiting_action: number;
+    archived_manual_action: number;
     payments_needing_review: number;
   }>`
     select
       (select coalesce(sum(o.price_vnd), 0)::text from "order" o
-         ${REAL_ORDER_SQL} and o.status = 'COMPLETED' and o.completed_at >= ${dayStart}) as revenue_today_vnd,
+         ${REAL_ORDER_SQL} and o.status = 'COMPLETED' and o.completed_at >= ${dayStart} and o.completed_at < ${dayEnd}) as revenue_today_vnd,
       (select count(*)::int from "order" o
-         ${REAL_ORDER_SQL} and o.created_at >= ${dayStart}) as orders_today,
+         ${REAL_ORDER_SQL} and o.created_at >= ${dayStart} and o.created_at < ${dayEnd}) as orders_today,
       (select count(*)::int from "order" o
          ${REAL_ORDER_SQL} and o.status in (
            'PENDING_PAYMENT', 'PAID', 'PROCESSING', 'PAYMENT_NEEDS_REVIEW', 'FULFILLMENT_NEEDS_REVIEW'
          )) as awaiting_action,
+      (
+        select count(*)::int
+        from manual_fulfillment_task m
+        join "order" o on o.id = m.order_id
+        join product_variant v on v.id = o.variant_id
+        join product p on p.id = v.product_id
+        where m.status = 'OPEN'
+          and o.status = 'PROCESSING'
+          and p.is_archived
+          and not p.is_test
+          and p.name_vi not ilike '%canary%'
+          and ${manualServicePaymentEvidence}
+      ) as archived_manual_action,
       (select count(*)::int from "order" o
          ${REAL_ORDER_SQL} and o.status = 'PAYMENT_NEEDS_REVIEW') as payments_needing_review
   `.execute(exec);
@@ -89,7 +108,8 @@ export async function getAdminOverview(
       from product_variant v
       join product p on p.id = v.product_id
       join category c on c.id = p.category_id
-      where v.is_active and p.is_active and not p.is_test and not p.is_archived and c.is_active
+      where v.is_active and p.is_active and not p.is_test and not p.is_archived
+        and p.name_vi not ilike '%canary%' and c.is_active
         and v.price_vnd > 0
     )
     select count(*)::int as low_stock_variants
@@ -114,7 +134,7 @@ export async function getAdminOverview(
   return {
     revenueTodayVnd: BigInt(head?.revenue_today_vnd ?? "0"),
     ordersToday: head?.orders_today ?? 0,
-    awaitingAction: head?.awaiting_action ?? 0,
+    awaitingAction: (head?.awaiting_action ?? 0) + (head?.archived_manual_action ?? 0),
     lowStockVariants: stock.rows[0]?.low_stock_variants ?? 0,
     paymentsNeedingReview: head?.payments_needing_review ?? 0,
     newTickets: tickets.rows[0]?.new_tickets ?? 0,

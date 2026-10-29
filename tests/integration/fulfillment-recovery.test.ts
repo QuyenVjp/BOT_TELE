@@ -6,7 +6,6 @@ import {
   fulfillPaidOrder,
   type FulfillmentDeps,
 } from "../../src/modules/digital-goods/fulfillment.js";
-import { createSandboxSupplierAdapter } from "../../src/modules/supplier/adapters/primary.js";
 import { startPostgresContainer, type PgTestContext } from "../helpers/pg-container.js";
 
 /**
@@ -79,7 +78,9 @@ async function seedPaidOrderWithLocalAsset(): Promise<Fixture> {
 function deps(): FulfillmentDeps {
   return {
     vault,
-    supplier: createSandboxSupplierAdapter({ mode: "fulfill" }),
+    resolveSupplier: async (_supplierId) => {
+      throw new Error("local-stock fulfillment must not resolve a supplier");
+    },
     deliveryBaseUrl: "https://shop.example/d",
     bundleTtlSeconds: 900,
   };
@@ -176,8 +177,8 @@ describe("fulfillment crash/replay recovery (FR-010 / SR-006)", () => {
     if (!res.ok) expect(res.code).toBe("NOT_PAID");
   });
 
-  it("returns OUT_OF_STOCK when no local asset and no supplier is wired", async () => {
-    // Paid order, no asset, no supplier.
+  it("returns OUT_OF_STOCK when local stock is depleted even if supplier resolution is unavailable", async () => {
+    // Paid order, no asset, and a resolver that must never be consulted.
     const categoryId = newId();
     const productId = newId();
     const variantId = newId();
@@ -206,9 +207,14 @@ describe("fulfillment crash/replay recovery (FR-010 / SR-006)", () => {
     const res = await fulfillPaidOrder(ctx.db, {
       orderId,
       correlationId: "ful-empty",
-      deps: { ...deps(), supplier: null },
+      deps: {
+        ...deps(),
+        resolveSupplier: async (_supplierId: string) => {
+          throw new Error("local stock must not resolve a supplier");
+        },
+      },
     });
     expect(res.ok).toBe(false);
-    if (!res.ok) expect(["OUT_OF_STOCK", "NEEDS_REVIEW"]).toContain(res.code);
+    if (!res.ok) expect(res.code).toBe("OUT_OF_STOCK");
   });
 });

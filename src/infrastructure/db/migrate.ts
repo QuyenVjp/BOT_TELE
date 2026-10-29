@@ -28,7 +28,6 @@ const MIGRATIONS_DIR = join(dirname(fileURLToPath(import.meta.url)), "migrations
 // Arbitrary but stable key so concurrent booters serialize on the same lock.
 const MIGRATION_LOCK_KEY = 776_1234;
 
-
 export interface MigrationResult {
   applied: string[];
   alreadyApplied: string[];
@@ -157,7 +156,6 @@ async function applyPending(
 
   return { applied, alreadyApplied };
 }
-
 
 function isPgQueryable(db: Kysely<Database> | PgQueryable): db is PgQueryable {
   return typeof (db as PgQueryable).query === "function" && !("transaction" in (db as object));

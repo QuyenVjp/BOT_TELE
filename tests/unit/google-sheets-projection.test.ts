@@ -66,6 +66,7 @@ describe("Google Sheets projection invariants", () => {
     expect(rows[1]?.[0]).toBe("asset-b");
     expect(rows[2]?.[0]).toBe("asset-a");
     expect(rows[3]).toEqual(new Array(SHEET_HEADERS.Inventory.length).fill(null));
+    expect(rows.flat()).not.toContain("vault:asset-a");
   });
   it("preserves human Requests inputs while restoring system columns", () => {
     const desired = [
@@ -169,6 +170,7 @@ describe("Google Sheets projection invariants", () => {
       "sku-1",
       "sku-2",
     ]);
+    expect(plan.writes.flatMap((write) => write.values.flat())).not.toContain("vault:supplier");
     expect(plan.orphanCount).toBe(0);
   });
 
@@ -200,7 +202,7 @@ describe("Google Sheets projection invariants", () => {
     expect(plan.writes[0]?.values).toHaveLength(1_002);
   });
 
-  it("inserts the Suppliers v4 column at the former managed boundary", () => {
+  it("keeps the v3 supplier SKU insertion boundary after Vault column removal", () => {
     const requests = buildWorkbookStructureRequests(
       [{ sheetId: 42, title: "Suppliers" }],
       [],
@@ -221,7 +223,7 @@ describe("Google Sheets projection invariants", () => {
       [{ supplier_id: "supplier-1", supplier_sku_id: null }],
       [SHEET_HEADERS.Suppliers, ["supplier-1", "", "", "", "", "", "", "", "", "", "", "=A2"]],
     );
-    expect(plan.writes[0]?.range).toBe("Suppliers!A1:K2");
+    expect(plan.writes[0]?.range).toBe("Suppliers!A1:J2");
     expect(plan.writes.map((write) => write.range).join(",")).not.toContain("L");
   });
 

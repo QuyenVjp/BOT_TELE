@@ -97,6 +97,50 @@ describe("callback sealing", () => {
     });
   });
 
+  it("seals buy-again references as actor-bound public-order tokens", async () => {
+    const tokenCodec = codec();
+    const orderNumber = "ORD-20260717-ABCD1234";
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "history",
+        buttons: [[{ text: "Buy again", callbackData: `buyagain:${orderNumber}` }]],
+      },
+      {
+        codec: tokenCodec,
+        telegramUserId: "123456789",
+        resolveOrderId: async () => null,
+      },
+    );
+
+    const callbackData = sealed.buttons[0]![0]!.callbackData;
+    expect(callbackData).toMatch(/^cb:/);
+    expect(callbackData).not.toContain(orderNumber);
+    expect(tokenCodec.verify(callbackData, { telegramUserId: "123456789" })).toMatchObject({
+      ok: true,
+      value: { action: "BUY_AGAIN", resourceId: orderNumber },
+    });
+    expect(tokenCodec.verify(callbackData, { telegramUserId: "987654321" })).toEqual({
+      ok: false,
+      code: "INVALID_SIGNATURE",
+    });
+  });
+
+  it("drops buy-again callbacks that carry an internal id", async () => {
+    const sealed = await sealPresentedMessageCallbacks(
+      {
+        text: "history",
+        buttons: [[{ text: "Buy again", callbackData: `buyagain:${COMMAND_ID}` }]],
+      },
+      {
+        codec: codec(),
+        telegramUserId: "123456789",
+        resolveOrderId: async () => null,
+      },
+    );
+
+    expect(sealed.buttons).toEqual([]);
+  });
+
   it("drops oversized numeric admin options instead of leaving them executable", async () => {
     const sealed = await sealPresentedMessageCallbacks(
       {

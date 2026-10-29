@@ -126,6 +126,9 @@ function setup() {
   const adminOrderState = vi.fn().mockResolvedValue({ text: "order state", buttons: [] });
   const adminOrderSearch = vi.fn().mockResolvedValue({ text: "order search", buttons: [] });
   const adminOrderMessagePrompt = vi.fn().mockResolvedValue({ text: "order message", buttons: [] });
+  const adminOrderFileDeliveryRecover = vi
+    .fn()
+    .mockResolvedValue({ text: "recovery challenge", buttons: [] });
   const adminOrderText = vi.fn().mockResolvedValue(null);
   const adminManualTasks = vi.fn().mockResolvedValue({ text: "manual tasks", buttons: [] });
   const adminManualTask = vi.fn().mockResolvedValue({
@@ -258,6 +261,7 @@ function setup() {
       orderState: adminOrderState,
       orderSearch: adminOrderSearch,
       orderMessagePrompt: adminOrderMessagePrompt,
+      orderFileDeliveryRecover: adminOrderFileDeliveryRecover,
       orderText: adminOrderText,
       presentAdminCustomerDetail,
       sendAdminCustomerMessage,
@@ -358,6 +362,7 @@ function setup() {
     adminOrderState,
     adminOrderSearch,
     adminOrderMessagePrompt,
+    adminOrderFileDeliveryRecover,
     adminOrderText,
     importTemplate,
     adminCustomerText,
@@ -1935,6 +1940,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       adminOrderState,
       adminOrderSearch,
       adminOrderMessagePrompt,
+      adminOrderFileDeliveryRecover,
       adminOrderText,
       adminCustomerText,
       send,
@@ -1994,6 +2000,22 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
       actorUserId: USER,
       chatId: USER,
       chatType: "private",
+      messageId: "order-file-keep",
+      action: "ADMIN",
+      callbackData: `admin:orders:file_delivery:keep:${stateId}`,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
+      messageId: "order-file-requeue",
+      action: "ADMIN",
+      callbackData: `admin:orders:file_delivery:requeue:${stateId}`,
+    });
+    await dispatcher.handle({
+      actorUserId: USER,
+      chatId: USER,
+      chatType: "private",
       messageId: "order-text",
       action: "UNKNOWN",
       messageText: "Xin chào theo đơn",
@@ -2004,6 +2026,14 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(adminOrderSearch).toHaveBeenCalledTimes(1);
     expect(adminOrderState).toHaveBeenCalledWith(expect.objectContaining({ stateId }));
     expect(adminOrderState).toHaveBeenCalledTimes(2);
+    expect(adminOrderFileDeliveryRecover).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ stateId, decision: "KEEP_UNCERTAIN" }),
+    );
+    expect(adminOrderFileDeliveryRecover).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ stateId, decision: "REQUEUE" }),
+    );
     expect(adminOrderMessagePrompt).toHaveBeenCalledWith(expect.objectContaining({ stateId }));
     expect(adminOrderText).toHaveBeenCalledWith(
       expect.objectContaining({ text: "Xin chào theo đơn" }),
@@ -2011,7 +2041,7 @@ describe("durable Telegram envelope to domain dispatcher (T129)", () => {
     expect(adminCustomerText).not.toHaveBeenCalledWith(
       expect.objectContaining({ text: "Xin chào theo đơn" }),
     );
-    expect(send).toHaveBeenCalledTimes(7);
+    expect(send).toHaveBeenCalledTimes(9);
   });
 
   it("blocks wallet commands while leaving support routed to support", async () => {

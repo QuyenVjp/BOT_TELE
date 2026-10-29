@@ -36,6 +36,7 @@ export const DURABLE_ADMIN_COMMAND_REFS = [
   "support.replacement.approve",
   "inventory.ready.release",
   "fulfillment.reconcile",
+  "file_delivery.recover",
   "store.open",
   "store.close",
   "store.test",

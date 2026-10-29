@@ -9,10 +9,26 @@ import type { LatencyMetrics } from "../infrastructure/observability/tracing.js"
 import { verifyTelegramSecret } from "./middleware/security.js";
 import { peekCallbackAction } from "./callback-codec.js";
 import { CUSTOMER_COPY } from "./presenters/customer.js";
+import { toSafeSummary } from "../modules/support/domain.js";
 
 /** Telegram webhook ingress (telegram-ux.md Ingress; SR-004, FR-010, FR-024). */
 
 const SECRET_HEADER = "x-telegram-bot-api-secret-token";
+
+class TelegramNormalizationDependencyError extends Error {
+  constructor() {
+    super("Telegram normalization dependency unavailable");
+    this.name = "TelegramNormalizationDependencyError";
+  }
+}
+
+async function awaitNormalizationDependency<T>(operation: () => Promise<T>): Promise<T> {
+  try {
+    return await operation();
+  } catch {
+    throw new TelegramNormalizationDependencyError();
+  }
+}
 
 export interface TelegramUpdate {
   update_id: number;
@@ -204,6 +220,14 @@ export interface AdminOwnerPromptTextIngress {
   isActive(telegramUserId: string): Promise<boolean>;
 }
 
+/**
+ * A customer description is admitted only while exactly one durable support ticket is waiting
+ * for that Telegram identity.
+ */
+export interface SupportDescriptionTextIngress {
+  resolveTicketId(telegramUserId: string): Promise<string | null>;
+}
+
 export interface TelegramWebhookOptions {
   path: string;
   secretToken: string;
@@ -215,6 +239,8 @@ export interface TelegramWebhookOptions {
   warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress;
   /** Publication evidence / disposition notes; admitted only while one of those prompts is pending. */
   ownerPromptText?: AdminOwnerPromptTextIngress;
+  /** Customer support description, admitted only for one active pending ticket. */
+  supportDescriptionText?: SupportDescriptionTextIngress;
   /** Goal §28: the search prompt's one-shot permission for a typed query. */
   customerSearchQuery?: CustomerSearchQueryIngress;
   metrics?: LatencyMetrics;
@@ -235,17 +261,28 @@ export async function registerTelegramWebhook(
 
     const rawBody = typeof request.body === "string" ? request.body : JSON.stringify(request.body);
     const update = coerceUpdate(rawBody);
-    const normalized = update
-      ? await normalizeTelegramUpdate(
-          update,
-          options.rootProductDraftText,
-          options.inventoryImportText,
-          options.productContentEditText,
-          options.warrantyRefundAdjustText,
-          options.ownerPromptText,
-          options.customerSearchQuery,
-        )
-      : null;
+    let normalized: TelegramCommandEnvelope | null = null;
+    try {
+      normalized = update
+        ? await normalizeTelegramUpdate(
+            update,
+            options.rootProductDraftText,
+            options.inventoryImportText,
+            options.productContentEditText,
+            options.warrantyRefundAdjustText,
+            options.ownerPromptText,
+            options.supportDescriptionText,
+            options.customerSearchQuery,
+          )
+        : null;
+    } catch {
+      request.log.error(
+        { event: "telegram_webhook_normalization_failed" },
+        "telegram webhook normalization failed",
+      );
+      reply.header("retry-after", "1");
+      return reply.code(503).send({ ok: false, retryable: true });
+    }
     if (!update || !normalized) {
       return reply.code(200).send({ ok: true });
     }
@@ -311,6 +348,7 @@ async function normalizeTelegramUpdate(
   productContentEditText?: AdminProductContentEditIngress,
   warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress,
   ownerPromptText?: AdminOwnerPromptTextIngress,
+  supportDescriptionText?: SupportDescriptionTextIngress,
   customerSearchQuery?: CustomerSearchQueryIngress,
 ): Promise<TelegramCommandEnvelope | null> {
   if (
@@ -410,6 +448,8 @@ async function normalizeTelegramUpdate(
     productContentEditText?: true;
     warrantyRefundAdjustText?: true;
     ownerPromptText?: true;
+    supportDescriptionText?: true;
+    supportDescriptionTicketId?: string;
   } | null = null;
   const isGroup = chatType === "group" || chatType === "supergroup";
   const isMentioned = Boolean(
@@ -454,28 +494,32 @@ async function normalizeTelegramUpdate(
         update.message?.chat?.id ?? update.callback_query?.message?.chat?.id ?? actorId,
       ),
       chatType,
+      isPrivateChat: update.message?.chat?.type === "private",
       ...(customerSearchQuery ? { customerSearchQuery } : {}),
       ...(rootProductDraftText ? { rootProductDraftText } : {}),
       ...(inventoryImportText ? { inventoryImportText } : {}),
       ...(productContentEditText ? { productContentEditText } : {}),
       ...(warrantyRefundAdjustText ? { warrantyRefundAdjustText } : {}),
       ...(ownerPromptText ? { ownerPromptText } : {}),
+      ...(supportDescriptionText ? { supportDescriptionText } : {}),
     });
   }
-  const action =
-    isGroup && (isMentioned || isReplyToBot) && !command
-      ? ("CATALOG" as const)
-      : normalizedMessageText?.inventoryImportText
-        ? ("ADMIN" as const)
-        : normalizedMessageText?.warrantyRefundAdjustText
-          ? ("ADMIN" as const)
-          : normalizedMessageText?.productContentEditText
-            ? ("ADMIN" as const)
-            : normalizedMessageText?.ownerPromptText
-              ? ("ADMIN" as const)
-              : normalizedMessageText?.rootProductDraftText
-                ? ("ADMIN" as const)
-                : classifyAction(callbackData, command);
+  let action: TelegramCommandEnvelope["action"];
+  if (isGroup && (isMentioned || isReplyToBot) && !command) {
+    action = "CATALOG";
+  } else if (
+    normalizedMessageText?.inventoryImportText ||
+    normalizedMessageText?.warrantyRefundAdjustText ||
+    normalizedMessageText?.productContentEditText ||
+    normalizedMessageText?.ownerPromptText ||
+    normalizedMessageText?.rootProductDraftText
+  ) {
+    action = "ADMIN";
+  } else if (normalizedMessageText?.supportDescriptionText) {
+    action = "SUPPORT";
+  } else {
+    action = classifyAction(callbackData, command);
+  }
   const actorUsername = normalizeUsernameMetadata(actor.username);
   const contact = update.message?.contact;
   const contactPhoneNumber =
@@ -499,6 +543,15 @@ async function normalizeTelegramUpdate(
           ...(typeof document.file_size === "number" ? { fileSize: document.file_size } : {}),
         }
       : null;
+  if (
+    text.length > 0 &&
+    !command &&
+    !normalizedMessageText &&
+    !contactPhoneNumber &&
+    !normalizedDocument
+  ) {
+    return null;
+  }
   return {
     actorUserId: String(actorId),
     ...(actorUsername ? { actorUsername } : {}),
@@ -510,7 +563,9 @@ async function normalizeTelegramUpdate(
     ...(update.message?.reply_to_message
       ? {
           replyToMessageId: String(update.message.reply_to_message.message_id),
-          replyToText: update.message.reply_to_message.text ?? null,
+          ...(normalizedMessageText?.supportDescriptionText
+            ? {}
+            : { replyToText: update.message.reply_to_message.text ?? null }),
           replyToBot: Boolean(update.message.reply_to_message.from?.is_bot),
         }
       : {}),
@@ -534,6 +589,14 @@ async function normalizeTelegramUpdate(
       ? { warrantyRefundAdjustText: true as const }
       : {}),
     ...(normalizedMessageText?.ownerPromptText ? { ownerPromptText: true as const } : {}),
+    ...(normalizedMessageText?.supportDescriptionText
+      ? {
+          supportDescriptionText: true as const,
+          ...(normalizedMessageText.supportDescriptionTicketId
+            ? { supportDescriptionTicketId: normalizedMessageText.supportDescriptionTicketId }
+            : {}),
+        }
+      : {}),
     ...(actor.first_name ? { firstName: actor.first_name } : {}),
     ...(actor.last_name ? { lastName: actor.last_name } : {}),
     ...(actor.language_code ? { languageCode: actor.language_code } : {}),
@@ -582,7 +645,8 @@ function classifyAction(
       action === "SUPPORT_REASON" ||
       action === "SUPPORT_TICKET_VIEW" ||
       action === "SUPPORT_TICKET_LIST" ||
-      action === "SUPPORT_TICKET_CLOSE"
+      action === "SUPPORT_TICKET_CLOSE" ||
+      action === "SUPPORT_DESCRIPTION_CANCEL"
     )
       return "SUPPORT";
     if (action === "ADMIN_COMMAND") return "ADMIN";
@@ -670,12 +734,14 @@ async function normalizeSafeMessageText(
     actorId: number;
     chatId: string;
     chatType: string;
+    isPrivateChat: boolean;
     customerSearchQuery?: CustomerSearchQueryIngress;
     rootProductDraftText?: RootProductDraftTextIngress;
     inventoryImportText?: AdminInventoryImportTextIngress;
     productContentEditText?: AdminProductContentEditIngress;
     warrantyRefundAdjustText?: AdminWarrantyAdjustTextIngress;
     ownerPromptText?: AdminOwnerPromptTextIngress;
+    supportDescriptionText?: SupportDescriptionTextIngress;
   },
 ): Promise<{
   text: string;
@@ -684,29 +750,29 @@ async function normalizeSafeMessageText(
   productContentEditText?: true;
   warrantyRefundAdjustText?: true;
   ownerPromptText?: true;
+  supportDescriptionText?: true;
+  supportDescriptionTicketId?: string;
 } | null> {
   if (!text || command) return null;
+  const rawTrimmed = text.trim();
+  if (SAFE_MESSAGE_TEXT[rawTrimmed]) return { text: rawTrimmed };
+
   const normalized = text.normalize("NFC").trim();
   if (SAFE_MESSAGE_TEXT[normalized]) return { text: normalized };
-  // Only while the customer is actually looking at the search prompt, and only once: any other
-  // raw text stays dropped, exactly as the ingress contract has always required.
-  if (context.customerSearchQuery && context.chatType === "private") {
-    const candidate = normalizeCustomerSearchQuery(normalized);
-    if (candidate && (await context.customerSearchQuery.consume(context.chatId))) {
-      return { text: candidate };
-    }
-  }
+
   if (
     context.inventoryImportText &&
     context.chatType === "private" &&
     context.actorId === context.inventoryImportText.adminTelegramUserId
   ) {
-    const active = await context.inventoryImportText.isActive(String(context.actorId));
+    const active = await awaitNormalizationDependency(() =>
+      context.inventoryImportText!.isActive(String(context.actorId)),
+    );
     if (active) {
       const sanitized = sanitizeInventoryImportText(normalized);
-      if (sanitized && isSafeInventoryImportText(sanitized)) {
-        return { text: sanitized, inventoryImportText: true };
-      }
+      return sanitized && isSafeInventoryImportText(sanitized)
+        ? { text: sanitized, inventoryImportText: true }
+        : null;
     }
   }
   if (
@@ -714,10 +780,12 @@ async function normalizeSafeMessageText(
     context.chatType === "private" &&
     context.actorId === context.productContentEditText.adminTelegramUserId
   ) {
-    const active = await context.productContentEditText.isActive(String(context.actorId));
+    const active = await awaitNormalizationDependency(() =>
+      context.productContentEditText!.isActive(String(context.actorId)),
+    );
     if (active) {
       const sanitized = sanitizeProductContentText(normalized);
-      if (sanitized) return { text: sanitized, productContentEditText: true };
+      return sanitized ? { text: sanitized, productContentEditText: true } : null;
     }
   }
   if (
@@ -725,32 +793,68 @@ async function normalizeSafeMessageText(
     context.chatType === "private" &&
     context.actorId === context.warrantyRefundAdjustText.adminTelegramUserId
   ) {
-    const active = await context.warrantyRefundAdjustText.isActive(String(context.actorId));
+    const active = await awaitNormalizationDependency(() =>
+      context.warrantyRefundAdjustText!.isActive(String(context.actorId)),
+    );
     if (active) {
       const sanitized = sanitizeProductContentText(normalized);
-      if (sanitized) return { text: sanitized, warrantyRefundAdjustText: true };
+      return sanitized ? { text: sanitized, warrantyRefundAdjustText: true } : null;
     }
   }
-  // A pending remediation prompt owns the next private text; otherwise keep the draft branch
-  // first so a valid wizard answer cannot become an operator note.
   if (
     context.rootProductDraftText &&
     context.chatType === "private" &&
     context.actorId === context.rootProductDraftText.adminTelegramUserId
   ) {
-    const step = await context.rootProductDraftText.activeStep(String(context.actorId));
-    const productText = step ? normalizeRootProductDraftText(normalized, step) : null;
-    if (productText) return { text: productText, rootProductDraftText: true };
+    const step = await awaitNormalizationDependency(() =>
+      context.rootProductDraftText!.activeStep(String(context.actorId)),
+    );
+    if (step) {
+      const productText = normalizeRootProductDraftText(normalized, step);
+      return productText ? { text: productText, rootProductDraftText: true } : null;
+    }
   }
   if (
     context.ownerPromptText &&
     context.chatType === "private" &&
     context.actorId === context.ownerPromptText.adminTelegramUserId
   ) {
-    const active = await context.ownerPromptText.isActive(String(context.actorId));
+    const active = await awaitNormalizationDependency(() =>
+      context.ownerPromptText!.isActive(String(context.actorId)),
+    );
     if (active) {
       const sanitized = sanitizeProductContentText(normalized);
-      if (sanitized) return { text: sanitized, ownerPromptText: true };
+      return sanitized ? { text: sanitized, ownerPromptText: true } : null;
+    }
+  }
+
+  if (context.supportDescriptionText && context.isPrivateChat) {
+    const ticketId = await awaitNormalizationDependency(() =>
+      context.supportDescriptionText!.resolveTicketId(String(context.actorId)),
+    );
+    if (ticketId) {
+      const sanitized = sanitizeSupportDescriptionText(normalized);
+      return sanitized
+        ? {
+            text: sanitized,
+            supportDescriptionText: true,
+            supportDescriptionTicketId: ticketId,
+          }
+        : null;
+    }
+  }
+
+  // Only while the customer is actually looking at the search prompt, and only once: any other
+  // raw text stays dropped, exactly as the ingress contract has always required.
+  if (context.customerSearchQuery && context.chatType === "private") {
+    const candidate = normalizeCustomerSearchQuery(normalized);
+    if (
+      candidate &&
+      (await awaitNormalizationDependency(() =>
+        context.customerSearchQuery!.consume(context.chatId),
+      ))
+    ) {
+      return { text: candidate };
     }
   }
   return /^(?:0|[1-9][0-9]*|[1-9][0-9]{0,2}([.,])[0-9]{3}(?:\1[0-9]{3})*)$/u.test(normalized)
@@ -772,6 +876,13 @@ function sanitizeProductContentText(normalized: string): string | null {
   return trimmed.length <= MAX_DRAFT_PROSE_CHARS
     ? trimmed
     : trimmed.slice(0, MAX_DRAFT_PROSE_CHARS);
+}
+
+/** Strip controls, cap the inbound draft, then apply the support safe-summary policy. */
+function sanitizeSupportDescriptionText(normalized: string): string | null {
+  if (normalized.length === 0 || normalized.length > MAX_DRAFT_PROSE_CHARS) return null;
+  const sanitized = sanitizeProductContentText(normalized);
+  return sanitized ? toSafeSummary(sanitized) || null : null;
 }
 
 function isSafeDraftProse(normalized: string, maxBytes: number): boolean {

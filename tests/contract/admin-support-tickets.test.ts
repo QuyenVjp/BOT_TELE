@@ -62,7 +62,6 @@ const STATUS_CODES: Record<SupportTicketStatus, string> = {
   MANUAL_REVIEW: "m",
 };
 
-
 describe("admin support ticket list", () => {
   it("hangs the ticket queue off the existing support screen", () => {
     for (const rows of [

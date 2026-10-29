@@ -239,6 +239,129 @@ describe.skipIf(!hasDocker)("wallet refund service", () => {
     `.execute(ctx.db);
     expect(replay.rows[0]).toEqual({ status: "AVAILABLE", version: 2 });
   });
+  it("does not mutate a PAID order when the refund ledger key conflicts", async () => {
+    const { orderId, customerId, assetId } = await seedRefundCandidate("PAID", {
+      reserveLocal: true,
+    });
+    if (!assetId) throw new Error("reserved asset was not seeded");
+
+    const conflicting = await createWalletLedgerService(ctx.db).credit({
+      customerId,
+      amountVnd: 50_000n,
+      idempotencyKey: `refund:${orderId}`,
+      correlationId: "conflicting-refund",
+      reason: "conflicting seeded refund",
+    });
+    expect(conflicting).toMatchObject({ ok: true, inserted: true });
+
+    const before = await sql<{
+      order_status: string;
+      order_version: number;
+      asset_status: string;
+      reserved_order_id: string | null;
+      asset_version: number;
+      balance_vnd: string;
+      refund_ledger_rows: string;
+      refunded_events: string;
+    }>`
+      select
+        (select status from "order" where id = ${orderId}) as order_status,
+        (select version from "order" where id = ${orderId}) as order_version,
+        (select status from digital_asset where id = ${assetId}) as asset_status,
+        (select reserved_order_id from digital_asset where id = ${assetId}) as reserved_order_id,
+        (select version from digital_asset where id = ${assetId}) as asset_version,
+        (select balance_vnd::text from wallet_account where customer_id = ${customerId}) as balance_vnd,
+        coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'id', l.id,
+            'entry_type', l.entry_type,
+            'amount_vnd', l.amount_vnd::text,
+            'balance_before_vnd', l.balance_before_vnd::text,
+            'balance_after_vnd', l.balance_after_vnd::text,
+            'idempotency_key', l.idempotency_key,
+            'correlation_id', l.correlation_id,
+            'reason', l.reason
+          ) order by l.id)::text
+          from wallet_ledger l
+          join wallet_account a on a.id = l.wallet_account_id
+          where a.customer_id = ${customerId}
+            and l.idempotency_key = ${`refund:${orderId}`}
+        ), '[]') as refund_ledger_rows,
+        coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'id', e.id,
+            'aggregate_version', e.aggregate_version,
+            'event_type', e.event_type,
+            'payload_redacted', e.payload_redacted
+          ) order by e.id)::text
+          from outbox_event e
+          where e.aggregate_id = ${orderId}
+            and e.event_type = 'WalletRefunded'
+        ), '[]') as refunded_events
+    `.execute(ctx.db);
+    expect(before.rows[0]).toMatchObject({
+      order_status: "PAID",
+      order_version: 1,
+      asset_status: "RESERVED",
+      reserved_order_id: orderId,
+      asset_version: 1,
+      balance_vnd: "50000",
+    });
+
+    const result = await createWalletRefundService(ctx.db).refund({
+      orderId,
+      correlationId: "conflicting-refund-attempt",
+      approvedBy: "12345",
+    });
+    expect(result).toMatchObject({ ok: false, code: "IDEMPOTENCY_CONFLICT" });
+
+    const after = await sql<{
+      order_status: string;
+      order_version: number;
+      asset_status: string;
+      reserved_order_id: string | null;
+      asset_version: number;
+      balance_vnd: string;
+      refund_ledger_rows: string;
+      refunded_events: string;
+    }>`
+      select
+        (select status from "order" where id = ${orderId}) as order_status,
+        (select version from "order" where id = ${orderId}) as order_version,
+        (select status from digital_asset where id = ${assetId}) as asset_status,
+        (select reserved_order_id from digital_asset where id = ${assetId}) as reserved_order_id,
+        (select version from digital_asset where id = ${assetId}) as asset_version,
+        (select balance_vnd::text from wallet_account where customer_id = ${customerId}) as balance_vnd,
+        coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'id', l.id,
+            'entry_type', l.entry_type,
+            'amount_vnd', l.amount_vnd::text,
+            'balance_before_vnd', l.balance_before_vnd::text,
+            'balance_after_vnd', l.balance_after_vnd::text,
+            'idempotency_key', l.idempotency_key,
+            'correlation_id', l.correlation_id,
+            'reason', l.reason
+          ) order by l.id)::text
+          from wallet_ledger l
+          join wallet_account a on a.id = l.wallet_account_id
+          where a.customer_id = ${customerId}
+            and l.idempotency_key = ${`refund:${orderId}`}
+        ), '[]') as refund_ledger_rows,
+        coalesce((
+          select jsonb_agg(jsonb_build_object(
+            'id', e.id,
+            'aggregate_version', e.aggregate_version,
+            'event_type', e.event_type,
+            'payload_redacted', e.payload_redacted
+          ) order by e.id)::text
+          from outbox_event e
+          where e.aggregate_id = ${orderId}
+            and e.event_type = 'WalletRefunded'
+        ), '[]') as refunded_events
+    `.execute(ctx.db);
+    expect(after.rows[0]).toEqual(before.rows[0]);
+  });
 
   it.each(["PROCESSING", "COMPLETED"] as const)(
     "refuses %s before wallet credit",

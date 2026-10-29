@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  presentBuyAgainUnavailable,
   presentOrderDetail,
   presentOrderHistory,
   ORDER_STATUS_FALLBACK,
@@ -136,13 +137,26 @@ describe("customer order screens", () => {
     expect(message).toContain("Trạng thái: 🎉 Hoàn tất");
     expect(message).toContain("Ngày tạo: 16/07/2026");
     expect(message).toContain("Giao hàng / Bảo hành: ✅ Đã giao · Bảo hành 30 ngày");
-
     expect(presentOrderDetail(makeOrder()).buttons).toEqual([
+      [{ text: "🔁 Mua lại", callbackData: "buyagain:ORD-2026-0001" }],
       [
         { text: "💬 Hỗ trợ", callbackData: "sup:open:ORD-2026-0001" },
         { text: "⬅️ Quay lại", callbackData: "ord:list" },
       ],
     ]);
+    expect(JSON.stringify(presentOrderDetail(makeOrder()))).not.toContain(makeOrder().id);
+  });
+
+  it("renders a safe unavailable recovery without historical identifiers", () => {
+    const message = presentBuyAgainUnavailable();
+    expect(message.text).toContain("Không thể mua lại");
+    expect(message.buttons.flat().map((button) => button.text)).toEqual([
+      "🔎 Xem sản phẩm khác",
+      "💬 Hỗ trợ",
+      "🏠 Trang chủ",
+    ]);
+    expect(JSON.stringify(message)).not.toContain("var-1");
+    expect(JSON.stringify(message)).not.toContain("01HZZZZZZZZZZZZZZZZZZZZZZZ");
   });
   it("fails closed for a PAID detail without settled payment evidence", () => {
     const message = plain(
@@ -203,6 +217,7 @@ describe("customer order screens", () => {
     const reopenBtn = flatButtons.find((b) => b.callbackData === "pay:reopen:ORD-2026-0001");
     expect(reopenBtn).toBeDefined();
     expect(reopenBtn?.text).toBe("🛒 Tạo lại thanh toán");
+    expect(flatButtons.some((button) => button.callbackData.startsWith("buyagain:"))).toBe(false);
   });
 
   it("shows the retail account screen without wallet surfaces or numeric Telegram id", () => {
